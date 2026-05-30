@@ -24,6 +24,9 @@ def _reset_full_runtime_state(monkeypatch):
     main._load_profile_events.clear()
     main._hot_endpoint_cache.clear()
     main._hot_endpoint_refreshing.clear()
+    main._refinement_receipts.clear()
+    main._run_receipts.clear()
+    main._run_receipt_order.clear()
 
 
 async def _call_lazy_app(path: str, method: str = "GET"):
@@ -181,6 +184,7 @@ def test_agent_run_fallback_receipt_is_upgraded_by_background_refinement(monkeyp
     monkeypatch.setattr(main, "_load_full_module", fake_load_full_module)
     monkeypatch.setenv("PARKPULSE_AGENT_RUN_FULL_LOAD_TIMEOUT_SECONDS", "0.001")
     monkeypatch.setenv("PARKPULSE_AGENT_RUN_REFINEMENT_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("PARKPULSE_MAX_BACKGROUND_REFINEMENTS", "1")
 
     payload = asyncio.run(
         main._build_agent_run_payload_with_runtime(

@@ -1,5 +1,6 @@
 "use client";
 
+import { getApiUrls } from "@/lib/api";
 import type { ParkState } from "@/types/park";
 import { compactNumber, percent } from "./style";
 
@@ -8,24 +9,35 @@ export function ParkStateStrip({
   isConnected,
   isRefreshing,
   lastUpdatedAt,
+  livePollMs,
+  connectionError,
   onRefresh,
 }: {
   parkState: ParkState;
   isConnected: boolean;
   isRefreshing: boolean;
   lastUpdatedAt: number | null;
+  livePollMs: number;
+  connectionError: string | null;
   onRefresh: () => void;
 }) {
   const simTime = `${String(parkState.simTime.hour).padStart(2, "0")}:${String(parkState.simTime.minute).padStart(2, "0")}`;
   const updated = lastUpdatedAt ? new Date(lastUpdatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--";
   const checkedInPct = parkState.staffing.scheduled ? (parkState.staffing.checkedIn / parkState.staffing.scheduled) * 100 : undefined;
+  const apiTargets = getApiUrls().join(", ");
+  const chaos = parkState.chaosEngine;
+  const latestChaos = chaos?.activeUnexpectedEvents?.[0];
 
   const metrics = [
     { label: "Guests", value: compactNumber(parkState.guestFlow.representedGuests), detail: `${parkState.guestFlow.activeGroups} active groups` },
     { label: "Satisfaction", value: percent(parkState.guestFlow.avgSatisfaction), detail: "guest experience" },
     { label: "Staff checked in", value: percent(checkedInPct), detail: `${parkState.staffing.openCallouts} callouts` },
     { label: "Storm risk", value: percent(parkState.weather.stormRisk), detail: `${parkState.weather.condition}` },
-    { label: "Grid load", value: percent(parkState.energy.gridLoadPercent), detail: parkState.energy.demandChargeRisk },
+    {
+      label: "Random incidents",
+      value: `${chaos?.activeCount ?? 0} active`,
+      detail: latestChaos?.kind ? `${latestChaos.kind} ${latestChaos.intensity ?? ""}%; ${chaos?.ruleCount ?? 0} rules` : `${chaos?.ruleCount ?? 0} rules armed`,
+    },
   ];
 
   return (
@@ -33,7 +45,7 @@ export function ParkStateStrip({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-wrap items-center gap-2 text-xs font-black uppercase tracking-widest">
           <span className={`h-2.5 w-2.5 rounded-full ${isConnected ? "bg-emerald-300" : "bg-amber-300"}`} />
-          <span className={isConnected ? "text-emerald-200" : "text-amber-200"}>{isConnected ? "Live simulation" : "Local fallback"}</span>
+          <span className={isConnected ? "text-emerald-200" : "text-amber-200"}>{isConnected ? "Live runtime" : "Runtime disconnected"}</span>
           <span className="rounded bg-slate-900 px-2.5 py-1 text-slate-200">Park time {simTime}</span>
           <span className="rounded bg-slate-900 px-2.5 py-1 text-slate-400">Updated {updated}</span>
         </div>
@@ -56,7 +68,17 @@ export function ParkStateStrip({
           </div>
         ))}
       </div>
+
+      {(!isConnected || connectionError) && (
+        <div className="mt-3 rounded border border-amber-400/30 bg-amber-950/15 p-3">
+          <div className="text-[10px] font-black uppercase tracking-widest text-amber-200">Runtime debug</div>
+          <div className="mt-2 grid gap-2 text-xs text-amber-100 md:grid-cols-3">
+            <div className="rounded bg-slate-950/40 px-3 py-2">API target: {apiTargets || "not configured"}</div>
+            <div className="rounded bg-slate-950/40 px-3 py-2">Retry: {Math.round(livePollMs / 1000)}s</div>
+            <div className="rounded bg-slate-950/40 px-3 py-2">{connectionError ?? "Waiting for runtime state"}</div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
-

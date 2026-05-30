@@ -8,11 +8,7 @@ from typing import Any
 class Policy:
     id: str
     label: str
-    notification_minute: int | None = None
-    backup_food_minute: int | None = None
-    staff_move_minute: int | None = None
-    staff_arrival_delay: int = 15
-    delay_parade_minute: int | None = None
+    decision_mode: str
 
 
 @dataclass
@@ -26,6 +22,8 @@ class TwinState:
     satisfaction: float
     notifications_sent: bool = False
     backup_food_open: bool = False
+    staff_transfer_started: bool = False
+    staff_arrival_minute: int | None = None
     parade_delayed: bool = False
 
 
@@ -38,17 +36,9 @@ SHOW_ABSORPTION_PER_TICK = 420
 
 
 POLICIES = [
-    Policy("do_nothing", "Policy A: Do nothing"),
-    Policy("notify", "Policy B: Send guest rerouting notification", notification_minute=30),
-    Policy(
-        "full_intervention",
-        "Policy C: Reroute + backup food + move staff + delay parade",
-        notification_minute=20,
-        backup_food_minute=55,
-        staff_move_minute=35,
-        staff_arrival_delay=15,
-        delay_parade_minute=45,
-    ),
+    Policy("do_nothing", "Policy A: No decision rules", "none"),
+    Policy("notify", "Policy B: Weather-risk guest nudge rule", "guest_nudge_rules"),
+    Policy("full_intervention", "Policy C: Operations rule stack", "operations_rules"),
 ]
 
 
@@ -82,14 +72,19 @@ def run_thunderstorm_mvp(tick_minutes: int = TICK_MINUTES, horizon_minutes: int 
             "capacity",
             "staff_constraint",
             "weather",
-            "decision_intervention",
+            "rule_derived_decision_intervention",
         ],
+        "decisionModel": {
+            "mode": "simple_rules_derived",
+            "llmRole": "The LLM should explain the rule trace and tradeoffs. It is not the physics engine.",
+            "rules": _decision_rules_catalog(),
+        },
         "policies": runs,
         "comparison": {
             "lowestIndoorPressurePolicy": best["policyId"],
             "highestSatisfactionPolicy": satisfaction_best["policyId"],
             "headline": (
-                "The full intervention branch absorbs the storm displacement earlier: "
+                "The rule-derived operations branch absorbs storm displacement earlier: "
                 f"peak indoor pressure {best['summary']['peakIndoorQueuePressure']}% "
                 f"and final satisfaction {satisfaction_best['summary']['finalGuestSatisfaction']}."
             ),
@@ -109,11 +104,6 @@ def _simulate_policy(policy: Policy, tick_minutes: int, horizon_minutes: int) ->
     )
     points: list[dict[str, Any]] = []
     interventions: list[dict[str, Any]] = []
-    staff_arrival_minute = (
-        policy.staff_move_minute + policy.staff_arrival_delay
-        if policy.staff_move_minute is not None
-        else None
-    )
 
     for minute in range(0, horizon_minutes + tick_minutes, tick_minutes):
         state.minute = minute
@@ -121,18 +111,7 @@ def _simulate_policy(policy: Policy, tick_minutes: int, horizon_minutes: int) ->
         closure_risk = _closure_risk(weather)
         lightning_closed = weather["lightning"] or closure_risk >= 92
 
-        if policy.notification_minute is not None and minute >= policy.notification_minute and not state.notifications_sent:
-            state.notifications_sent = True
-            interventions.append({"minute": minute, "label": "Targeted guest rerouting notification sent", "effect": "More displaced guests choose shows, retail, and lower-pressure food paths."})
-        if policy.backup_food_minute is not None and minute >= policy.backup_food_minute and not state.backup_food_open:
-            state.backup_food_open = True
-            interventions.append({"minute": minute, "label": "Backup food stand opened", "effect": "Food service capacity increases after storm migration begins."})
-        if policy.delay_parade_minute is not None and minute >= policy.delay_parade_minute and not state.parade_delayed:
-            state.parade_delayed = True
-            interventions.append({"minute": minute, "label": "Parade delayed and indoor show window extended", "effect": "Show venue absorbs guest overflow instead of pushing demand into rides."})
-        if staff_arrival_minute is not None and minute == policy.staff_move_minute:
-            interventions.append({"minute": minute, "label": "Staff transfer started", "effect": f"Transferred staff become available at +{policy.staff_arrival_delay} minutes."})
-        if staff_arrival_minute is not None and minute >= staff_arrival_minute:
+        if state.staff_arrival_minute is not None and minute >= state.staff_arrival_minute:
             state.staff_available = 132.0
 
         if minute > 0:
@@ -141,6 +120,21 @@ def _simulate_policy(policy: Policy, tick_minutes: int, horizon_minutes: int) ->
         indoor_pressure = _pressure_pct(state.indoor_queue, INDOOR_CAPACITY_PER_HOUR)
         food_wait = _wait_minutes(state.food_queue, _food_capacity_per_hour(state))
         staff_stress = _staff_stress(state, indoor_pressure, food_wait, weather)
+        rule_firings = _apply_policy_rules(
+            policy=policy,
+            state=state,
+            weather=weather,
+            closure_risk=closure_risk,
+            indoor_pressure=indoor_pressure,
+            food_wait=food_wait,
+            staff_stress=staff_stress,
+        )
+        interventions.extend(rule_firings)
+
+        if rule_firings:
+            indoor_pressure = _pressure_pct(state.indoor_queue, INDOOR_CAPACITY_PER_HOUR)
+            food_wait = _wait_minutes(state.food_queue, _food_capacity_per_hour(state))
+            staff_stress = _staff_stress(state, indoor_pressure, food_wait, weather)
 
         points.append(
             {
@@ -156,6 +150,7 @@ def _simulate_policy(policy: Policy, tick_minutes: int, horizon_minutes: int) ->
                 "indoorQueueGuests": round(state.indoor_queue),
                 "foodQueueGuests": round(state.food_queue),
                 "showBufferGuests": round(state.show_buffer),
+                "activeRuleIds": [rule["ruleId"] for rule in rule_firings],
             }
         )
 
@@ -163,6 +158,7 @@ def _simulate_policy(policy: Policy, tick_minutes: int, horizon_minutes: int) ->
     return {
         "policyId": policy.id,
         "policyLabel": policy.label,
+        "decisionMode": policy.decision_mode,
         "interventions": interventions,
         "series": points,
         "summary": summary,
@@ -177,9 +173,9 @@ def _advance_tick(state: TwinState, policy: Policy, weather: dict[str, Any], clo
     state.outdoor_guest_pool = max(0.0, state.outdoor_guest_pool - displaced)
 
     notification = 1.0 if state.notifications_sent else 0.0
-    full_policy = 1.0 if policy.id == "full_intervention" else 0.0
-    show_share = 0.13 + 0.19 * notification + 0.14 * full_policy + (0.08 if state.parade_delayed else 0.0)
-    food_share = 0.22 + 0.05 * risk_factor - 0.05 * full_policy
+    backup_food = 1.0 if state.backup_food_open else 0.0
+    show_share = 0.13 + 0.19 * notification + 0.08 * backup_food + (0.08 if state.parade_delayed else 0.0)
+    food_share = 0.22 + 0.05 * risk_factor - 0.05 * backup_food
     indoor_share = max(0.18, 1.0 - show_share - food_share - 0.14)
 
     show_arrivals = displaced * show_share
@@ -230,6 +226,116 @@ def _weather_state(minute: int) -> dict[str, Any]:
         "stormRisk": risk,
         "rain": minute >= 75,
         "lightning": 90 <= minute <= 150,
+    }
+
+
+def _decision_rules_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "weather_guest_nudge",
+            "policyIds": ["notify", "full_intervention"],
+            "condition": "stormRisk >= 45 and no guest notification has been sent",
+            "action": "send targeted guest rerouting notification",
+        },
+        {
+            "id": "closure_show_absorber",
+            "policyIds": ["full_intervention"],
+            "condition": "outdoorClosureRisk >= 58 and parade/show absorber is not active",
+            "action": "delay parade and extend indoor show capacity",
+        },
+        {
+            "id": "food_capacity_trigger",
+            "policyIds": ["full_intervention"],
+            "condition": "foodWaitMinutes >= 22 and backup food stand is closed",
+            "action": "open backup food stand",
+        },
+        {
+            "id": "staff_stress_transfer",
+            "policyIds": ["full_intervention"],
+            "condition": "staffStress >= 1.08 and transferred staff are not already moving",
+            "action": "start staff transfer with a 15-minute delayed effect",
+        },
+    ]
+
+
+def _apply_policy_rules(
+    *,
+    policy: Policy,
+    state: TwinState,
+    weather: dict[str, Any],
+    closure_risk: float,
+    indoor_pressure: int,
+    food_wait: float,
+    staff_stress: float,
+) -> list[dict[str, Any]]:
+    if policy.decision_mode == "none":
+        return []
+
+    fired: list[dict[str, Any]] = []
+
+    if policy.decision_mode in {"guest_nudge_rules", "operations_rules"} and weather["stormRisk"] >= 45 and not state.notifications_sent:
+        state.notifications_sent = True
+        fired.append(
+            _rule_firing(
+                state.minute,
+                "weather_guest_nudge",
+                "Targeted guest rerouting notification sent",
+                f"stormRisk={round(weather['stormRisk'])} crossed 45; indoorQueuePressure={indoor_pressure}%.",
+                "More displaced guests choose shows, retail, and lower-pressure food paths on later ticks.",
+            )
+        )
+
+    if policy.decision_mode != "operations_rules":
+        return fired
+
+    if closure_risk >= 58 and not state.parade_delayed:
+        state.parade_delayed = True
+        fired.append(
+            _rule_firing(
+                state.minute,
+                "closure_show_absorber",
+                "Parade delayed and indoor show window extended",
+                f"outdoorClosureRisk={round(closure_risk)} crossed 58.",
+                "Show venue absorbs guest overflow instead of pushing demand into rides.",
+            )
+        )
+
+    if food_wait >= 22 and not state.backup_food_open:
+        state.backup_food_open = True
+        fired.append(
+            _rule_firing(
+                state.minute,
+                "food_capacity_trigger",
+                "Backup food stand opened",
+                f"foodWaitMinutes={round(food_wait, 1)} crossed 22.",
+                "Food service capacity increases before storm migration peaks.",
+            )
+        )
+
+    if staff_stress >= 1.08 and not state.staff_transfer_started:
+        state.staff_transfer_started = True
+        state.staff_arrival_minute = state.minute + 15
+        fired.append(
+            _rule_firing(
+                state.minute,
+                "staff_stress_transfer",
+                "Staff transfer started",
+                f"staffStress={round(staff_stress, 2)} crossed 1.08; staff become available at +15 minutes.",
+                "Transferred staff do not help immediately, preserving the delayed-action behavior.",
+            )
+        )
+
+    return fired
+
+
+def _rule_firing(minute: int, rule_id: str, label: str, evidence: str, effect: str) -> dict[str, Any]:
+    return {
+        "minute": minute,
+        "ruleId": rule_id,
+        "label": label,
+        "evidence": evidence,
+        "effect": effect,
+        "source": "simple_rules_derived_decision_engine",
     }
 
 
@@ -289,10 +395,10 @@ def _analyst_readout(policy: Policy, summary: dict[str, Any]) -> str:
     if policy.id == "do_nothing":
         return "No action lets outdoor displacement land directly on indoor rides and food, so queues stay elevated after lightning closure."
     if policy.id == "notify":
-        return "Guest messaging helps, but without delayed capacity and staff effects, food and staff stress remain the binding constraints."
+        return "A single weather-risk rule helps, but without capacity and staff rules, food and staff stress remain the binding constraints."
     return (
-        "Combined rerouting, delayed staff arrival, backup food capacity, and parade timing produce the lowest peak pressure "
-        "while keeping satisfaction from sliding late in the storm."
+        "The rule stack fires from thresholds in the simulated state, then delayed staff arrival, backup food capacity, and show absorption "
+        "produce the lowest pressure while keeping satisfaction from sliding late in the storm."
     )
 
 

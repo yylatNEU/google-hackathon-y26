@@ -20,8 +20,9 @@ def test_thunderstorm_mvp_returns_three_policy_branches():
         "capacity",
         "staff_constraint",
         "weather",
-        "decision_intervention",
+        "rule_derived_decision_intervention",
     }
+    assert payload["decisionModel"]["mode"] == "simple_rules_derived"
 
 
 def test_full_intervention_outperforms_no_action_on_pressure_and_satisfaction():
@@ -42,10 +43,15 @@ def test_dynamic_series_captures_weather_closure_and_delayed_staff_effect():
     full = next(policy for policy in payload["policies"] if policy["policyId"] == "full_intervention")
     series_by_minute = {point["minute"]: point for point in full["series"]}
     intervention_labels = [item["label"] for item in full["interventions"]]
+    intervention_rule_ids = [item["ruleId"] for item in full["interventions"]]
 
     assert series_by_minute[90]["outdoorRidesClosed"] is True
     assert series_by_minute[150]["outdoorRidesClosed"] is True
     assert series_by_minute[180]["outdoorRidesClosed"] is False
     assert "Staff transfer started" in intervention_labels
     assert "Backup food stand opened" in intervention_labels
-    assert series_by_minute[60]["staffStress"] <= series_by_minute[45]["staffStress"]
+    assert "staff_stress_transfer" in intervention_rule_ids
+    assert all(item["source"] == "simple_rules_derived_decision_engine" for item in full["interventions"])
+    no_action = next(policy for policy in payload["policies"] if policy["policyId"] == "do_nothing")
+    no_action_by_minute = {point["minute"]: point for point in no_action["series"]}
+    assert series_by_minute[60]["staffStress"] < no_action_by_minute[60]["staffStress"]

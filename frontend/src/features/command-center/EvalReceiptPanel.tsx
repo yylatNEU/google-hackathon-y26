@@ -24,8 +24,8 @@ export function EvalReceiptPanel({
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Eval and memory receipt</div>
-          <h2 className="mt-1 text-xl font-black text-slate-100">Decision proof</h2>
+          <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Outcome, eval, and training receipt</div>
+          <h2 className="mt-1 text-xl font-black text-slate-100">Proof and learning record</h2>
         </div>
         <div className="rounded border border-slate-800 bg-slate-900 px-4 py-3 text-right">
           <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Overall</div>

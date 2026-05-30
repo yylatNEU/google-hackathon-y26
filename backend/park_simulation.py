@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import random
 import threading
+import time
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +17,7 @@ from park_replay_store import append_replay_event, create_replay_run, list_repla
 
 
 BASE_DIR = Path(__file__).resolve().parent
+RUNTIME_RNG = random.SystemRandom()
 
 
 class AsyncThreadLock:
@@ -34,6 +37,13 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 class ParkSimulation:
     def __init__(self) -> None:
         self.lock = AsyncThreadLock()
@@ -48,9 +58,13 @@ class ParkSimulation:
         self.replay_seed = "demo"
         self.replay_run = create_replay_run(self.replay_seed, self.scenario_key)
         self.replay_run_id = str(self.replay_run["run_id"])
+        self.tick_index = 0
+        self.last_random_incident_tick = -999
+        self.episode_fitness: list[dict[str, Any]] = []
 
     async def step(self) -> None:
         async with self.lock:
+            self.tick_index += 1
             self.minute += 1
             if self.minute >= 60:
                 self.minute = 0
@@ -63,9 +77,11 @@ class ParkSimulation:
                 base_state,
                 {"target": "none", "action": "natural"},
                 minutes=1,
-                seed=f"{self.replay_seed}:{self.hour}:{self.minute}:tick",
+                seed=f"runtime:{time.time_ns()}:{RUNTIME_RNG.random()}",
                 stochastic=True,
             )
+            self._maybe_inject_random_unexpected_event_locked("live_tick")
+            self.interventions = _drop_expired_runtime_interventions(self.interventions, self.tick_index)
 
     async def get_state(self) -> dict[str, Any]:
         async with self.lock:
@@ -97,6 +113,10 @@ class ParkSimulation:
                 "recent_runs": list_replay_runs(8),
             }
 
+    async def get_episode_fitness(self, limit: int = 20) -> dict[str, Any]:
+        async with self.lock:
+            return self._episode_fitness_payload_locked(limit)
+
     async def start_replay_run(self, seed: str | None = None, scenario_key: str = "ride_down") -> dict[str, Any]:
         async with self.lock:
             selected_scenario = scenario_key if scenario_key in {"ride_down", "staff_shortage", "food_spike", "storm_response"} else "ride_down"
@@ -111,6 +131,9 @@ class ParkSimulation:
             self.last_actions = []
             self.replay_events = []
             self.dynamic_state = None
+            self.tick_index = 0
+            self.last_random_incident_tick = -999
+            self.episode_fitness = []
             state = self._state()
             self._record_replay_event(
                 "run_started",
@@ -138,6 +161,17 @@ class ParkSimulation:
         async with self.lock:
             before = self._state()
             created_at = _utc_now()
+            requested_target = target
+            requested_action = action
+            action_aliases = {
+                ("ride", "reroute_down_ride"): ("ride", "reroute"),
+                ("food", "redirect_food_demand"): ("traffic", "redirect_food"),
+                ("staff", "redeploy_staff"): ("staff", "redeploy"),
+                ("crowd_safety", "calm_reroute"): ("ride", "reroute"),
+                ("guest_care", "family_care_reroute"): ("ride", "reroute"),
+                ("equipment", "hold_equipment_changes"): ("energy", "protect_hvac"),
+            }
+            target, action = action_aliases.get((target, action), (target, action))
             accepted = {
                 ("traffic", "redirect_food"): "Guest app routing shifted demand toward Food Court B and Arcade Zone.",
                 ("ride", "reroute"): "Dragon Coaster queue intake paused; guests are split across Sky Drop, Theater B, Arcade Zone, and Food Court B.",
@@ -171,13 +205,13 @@ class ParkSimulation:
 
             message = accepted.get((target, action))
             if not message:
-                result = {"status": "noop", "message": f"No ParkPulse action registered for {target}/{action}."}
+                result = {"status": "noop", "message": f"No ParkPulse action registered for {requested_target}/{requested_action}."}
                 self._record_replay_event(
                     "operator_action_noop",
-                    f"No registered action for {target}/{action}",
+                    f"No registered action for {requested_target}/{requested_action}",
                     before,
                     self._state(),
-                    {"target": target, "action": action, "status": result["status"]},
+                    {"target": requested_target, "action": requested_action, "status": result["status"]},
                     created_at,
                 )
                 return result
@@ -198,6 +232,15 @@ class ParkSimulation:
                 "outcomeScore": score_outcome(before, projected, {"target": target, "action": action})["overall"],
             }
             self.dynamic_state = projected
+            fitness_episode = self._record_episode_fitness_locked(
+                before=before,
+                after=projected,
+                action_plan={"target": target, "action": action, "label": message},
+                source="operator_action",
+                created_at=created_at,
+                horizon_minutes=8,
+                requested_action={"target": requested_target, "action": requested_action},
+            )
             self.last_actions.insert(
                 0,
                 {
@@ -208,13 +251,20 @@ class ParkSimulation:
                 },
             )
             self.last_actions = self.last_actions[:8]
-            result = {"status": "success", "message": message}
+            result = {"status": "success", "message": message, "episode_fitness": fitness_episode}
             self._record_replay_event(
                 "operator_action",
                 f"{target}/{action}",
                 before,
                 self._state(),
-                {"target": target, "action": action, "status": result["status"], "message": message},
+                {
+                    "target": target,
+                    "action": action,
+                    "requestedTarget": requested_target,
+                    "requestedAction": requested_action,
+                    "status": result["status"],
+                    "message": message,
+                },
                 created_at,
             )
             return result
@@ -604,6 +654,20 @@ class ParkSimulation:
                 "stateImpact": state_impact,
                 "appliedAt": created_at,
             }
+            fitness_episode = self._record_episode_fitness_locked(
+                before=before,
+                after=projected,
+                action_plan={"target": "traffic", "action": "reroute", "label": reason},
+                source="closed_loop_dispatch_outcome",
+                created_at=created_at,
+                horizon_minutes=10,
+                observed_response={
+                    "channels": channels,
+                    "movedGuests": moved_guests,
+                    "workerAcknowledgments": worker_acks,
+                    "equipmentCommandsApplied": equipment_applied,
+                },
+            )
             message = (
                 f"Closed-loop outcome applied: {moved_guests} guests followed proactive routing, "
                 f"{worker_acks} staff acknowledgments, {equipment_applied} equipment commands active."
@@ -628,6 +692,7 @@ class ParkSimulation:
                 "stateImpact": state_impact,
                 "before": before_snapshot,
                 "after": after_snapshot,
+                "episode_fitness": fitness_episode,
             }
             self._record_replay_event(
                 "outcome_applied",
@@ -764,63 +829,95 @@ class ParkSimulation:
 
     async def inject_random_unexpected_event(self, source: str = "operation_start") -> dict[str, Any]:
         async with self.lock:
-            before = self._state()
-            event_spec = _random_unexpected_event(self.scenario_key, before)
-            kind = str(event_spec["kind"])
-            target_id = str(event_spec["target_id"])
-            intensity = int(event_spec["intensity"])
-            created_at = _utc_now()
-            event = {
+            return self._inject_random_unexpected_event_locked(source)
+
+    def _maybe_inject_random_unexpected_event_locked(self, source: str) -> dict[str, Any] | None:
+        probability = max(0.0, min(1.0, _env_float("PARKPULSE_CHAOS_PROBABILITY", 0.28)))
+        cooldown_ticks = max(1, int(_env_float("PARKPULSE_CHAOS_COOLDOWN_TICKS", 3)))
+        if self.tick_index - self.last_random_incident_tick < cooldown_ticks:
+            return None
+        if RUNTIME_RNG.random() > probability:
+            return None
+        self.last_random_incident_tick = self.tick_index
+        return self._inject_random_unexpected_event_locked(source)
+
+    def _inject_random_unexpected_event_locked(self, source: str) -> dict[str, Any]:
+        before = self._state()
+        event_spec = _random_unexpected_event(self.scenario_key, before)
+        kind = str(event_spec["kind"])
+        target_id = str(event_spec["target_id"])
+        intensity = int(event_spec["intensity"])
+        created_at = _utc_now()
+        event = {
+            "kind": kind,
+            "targetId": target_id,
+            "intensity": intensity,
+            "createdAt": created_at,
+            "unexpected": True,
+            "source": source,
+            "reason": event_spec["reason"],
+            "tickIndex": self.tick_index,
+            "durationTicks": event_spec.get("duration_ticks", RUNTIME_RNG.randint(8, 18)),
+            "signalReliabilityPct": event_spec.get("signal_reliability_pct", RUNTIME_RNG.randint(58, 94)),
+            "visibility": event_spec.get("visibility", RUNTIME_RNG.choice(["clear", "partial", "noisy", "delayed"])),
+            "couplings": event_spec.get("couplings", []),
+        }
+        scenario_for_kind = {
+            "ride_failure": "ride_down",
+            "demand_spike": "ride_down",
+            "show_dump": "ride_down",
+            "sensor_anomaly": "ride_down",
+            "parade_route_conflict": "ride_down",
+            "ticketing_gate_surge": "ride_down",
+            "parking_arrival_wave": "ride_down",
+            "food_spike": "food_spike",
+            "mobile_order_outage": "food_spike",
+            "payment_outage": "food_spike",
+            "inventory_stockout": "food_spike",
+            "restroom_closure": "food_spike",
+            "staff_callout": "staff_shortage",
+            "access_lane_block": "staff_shortage",
+            "radio_dead_zone": "staff_shortage",
+            "security_perimeter": "staff_shortage",
+            "energy_spike": "storm_response",
+            "storm_risk": "storm_response",
+            "water_leak": "storm_response",
+            "heat_index_spike": "storm_response",
+            "lightning_delay": "storm_response",
+        }
+        if kind in scenario_for_kind:
+            self.scenario_key = scenario_for_kind[kind]
+        self.interventions.insert(0, event)
+        self.interventions = self.interventions[:6]
+        self.dynamic_state = apply_stress_event(before, event)
+        message = f"Unexpected operation event: {_intervention_message(kind, target_id, intensity)} {event_spec['reason']}"
+        self.last_actions.insert(
+            0,
+            {
+                "target": "simulation",
+                "action": "unexpected_event",
+                "message": message,
+                "createdAt": created_at,
+            },
+        )
+        self.last_actions = self.last_actions[:8]
+        result = {"status": "success", "message": message, "event": deepcopy(event)}
+        self._record_replay_event(
+            "unexpected_event",
+            str(kind).replace("_", " "),
+            before,
+            self._state(),
+            {
                 "kind": kind,
                 "targetId": target_id,
                 "intensity": intensity,
-                "createdAt": created_at,
-                "unexpected": True,
                 "source": source,
-                "reason": event_spec["reason"],
-            }
-            scenario_for_kind = {
-                "ride_failure": "ride_down",
-                "demand_spike": "ride_down",
-                "food_spike": "food_spike",
-                "staff_callout": "staff_shortage",
-                "energy_spike": "storm_response",
-                "storm_risk": "storm_response",
-            }
-            if kind in scenario_for_kind:
-                self.scenario_key = scenario_for_kind[kind]
-            self.active_policy = "normal"
-            self.interventions.insert(0, event)
-            self.interventions = self.interventions[:6]
-            self.dynamic_state = apply_stress_event(before, event)
-            message = f"Unexpected operation event: {_intervention_message(kind, target_id, intensity)} {event_spec['reason']}"
-            self.last_actions.insert(
-                0,
-                {
-                    "target": "simulation",
-                    "action": "unexpected_event",
-                    "message": message,
-                    "createdAt": created_at,
-                },
-            )
-            self.last_actions = self.last_actions[:8]
-            result = {"status": "success", "message": message, "event": deepcopy(event)}
-            self._record_replay_event(
-                "unexpected_event",
-                str(kind).replace("_", " "),
-                before,
-                self._state(),
-                {
-                    "kind": kind,
-                    "targetId": target_id,
-                    "intensity": intensity,
-                    "source": source,
-                    "unexpected": True,
-                    "status": result["status"],
-                },
-                created_at,
-            )
-            return result
+                "unexpected": True,
+                "status": result["status"],
+            },
+            created_at,
+        )
+        return result
 
     async def reset_demo(self) -> dict[str, Any]:
         async with self.lock:
@@ -832,6 +929,7 @@ class ParkSimulation:
             self.dynamic_state = None
             self.replay_run = create_replay_run(self.replay_seed, self.scenario_key)
             self.replay_run_id = str(self.replay_run["run_id"])
+            self.episode_fitness = []
             self.last_actions = [
                 {
                     "target": "simulation",
@@ -851,6 +949,122 @@ class ParkSimulation:
                 created_at,
             )
             return result
+
+    def _record_episode_fitness_locked(
+        self,
+        *,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        action_plan: dict[str, Any],
+        source: str,
+        created_at: str,
+        horizon_minutes: int,
+        requested_action: dict[str, Any] | None = None,
+        observed_response: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        safe_horizon = max(1, min(30, int(horizon_minutes or 8)))
+        baseline_action = {"target": "none", "action": "natural", "label": "No action counterfactual"}
+        baseline_after = transition_state(
+            before,
+            baseline_action,
+            minutes=safe_horizon,
+            seed=f"counterfactual:{self.tick_index}:{len(self.episode_fitness)}",
+            stochastic=False,
+        )
+        actual_score = score_outcome(before, after, action_plan)
+        baseline_score = score_outcome(before, baseline_after, baseline_action)
+        actual_pressure = _episode_pressure_delta(actual_score.get("metrics", {}))
+        baseline_pressure = _episode_pressure_delta(baseline_score.get("metrics", {}))
+        reward_delta = round(float(actual_score.get("overall", 0) or 0) - float(baseline_score.get("overall", 0) or 0), 2)
+        pressure_reduction = round(baseline_pressure - actual_pressure, 2)
+        fitness = _clamp(round(50 + reward_delta * 0.65 + pressure_reduction * 0.35), 0, 100)
+        active_incidents = [
+            {
+                "kind": event.get("kind"),
+                "targetId": event.get("targetId"),
+                "intensity": event.get("intensity"),
+                "source": event.get("source"),
+                "createdAt": event.get("createdAt"),
+                "couplings": event.get("couplings", []),
+                "signalReliabilityPct": event.get("signalReliabilityPct"),
+                "visibility": event.get("visibility"),
+                "ageTicks": event.get("ageTicks"),
+                "phase": event.get("phase"),
+            }
+            for event in _runtime_intervention_view(self.interventions, self.tick_index)
+            if isinstance(event, dict) and event.get("unexpected")
+        ]
+        difficulty = _chaos_difficulty_score(active_incidents)
+        episode_key = f"{created_at}:{source}:{action_plan.get('target')}:{action_plan.get('action')}:{len(self.episode_fitness)}"
+        episode = {
+            "id": f"live_episode_{hashlib.sha1(episode_key.encode('utf-8')).hexdigest()[:14]}",
+            "created_at": created_at,
+            "mode": "live_episode_fitness_counterfactual",
+            "source": source,
+            "uses_generated_data": False,
+            "baseline_type": "no_action_counterfactual",
+            "horizon_minutes": safe_horizon,
+            "scenario_key": self.scenario_key,
+            "action": deepcopy(action_plan),
+            "requested_action": deepcopy(requested_action) if requested_action else None,
+            "observed_response": deepcopy(observed_response) if observed_response else None,
+            "active_random_incidents": active_incidents,
+            "difficulty": {
+                "score": difficulty,
+                "active_random_incident_count": len(active_incidents),
+                "partial_observability": any(
+                    str(event.get("visibility") or "") in {"partial", "noisy", "delayed"} or int(event.get("signalReliabilityPct", 100) or 100) < 70
+                    for event in active_incidents
+                ),
+                "coupled_system_count": len({coupling for event in active_incidents for coupling in event.get("couplings", []) if coupling}),
+            },
+            "scores": {
+                "actual": actual_score.get("overall"),
+                "baseline": baseline_score.get("overall"),
+                "reward_delta": reward_delta,
+                "fitness": fitness,
+                "difficulty_adjusted_fitness": _clamp(round(fitness + max(0, difficulty - 50) * 0.2), 0, 100),
+            },
+            "pressure": {
+                "actual_delta": actual_pressure,
+                "baseline_delta": baseline_pressure,
+                "reduction_vs_baseline": pressure_reduction,
+                "reduced_pressure": pressure_reduction > 0 or reward_delta > 0,
+            },
+            "metrics": {
+                "actual": actual_score.get("metrics", {}),
+                "baseline": baseline_score.get("metrics", {}),
+            },
+            "digests": {
+                "before": _state_digest(before),
+                "actual_after": _state_digest(after),
+                "baseline_after": _state_digest(baseline_after),
+            },
+            "authority": "Recorded from live runtime state after an action; the baseline is a counterfactual comparison, not training seed data.",
+        }
+        self.episode_fitness.insert(0, episode)
+        self.episode_fitness = self.episode_fitness[:80]
+        return deepcopy(episode)
+
+    def _episode_fitness_payload_locked(self, limit: int = 20) -> dict[str, Any]:
+        safe_limit = max(1, min(80, int(limit or 20)))
+        episodes = deepcopy(self.episode_fitness[:safe_limit])
+        reward_deltas = [float(item.get("scores", {}).get("reward_delta", 0) or 0) for item in self.episode_fitness]
+        pressure_reductions = [float(item.get("pressure", {}).get("reduction_vs_baseline", 0) or 0) for item in self.episode_fitness]
+        improved = [bool(item.get("pressure", {}).get("reduced_pressure")) for item in self.episode_fitness]
+        return {
+            "status": "ready" if self.episode_fitness else "waiting_for_live_actions",
+            "mode": "live_episode_fitness_counterfactual",
+            "uses_generated_data": False,
+            "source": "runtime_actions_and_random_incidents",
+            "sample_count": len(self.episode_fitness),
+            "average_reward_delta": round(sum(reward_deltas) / max(1, len(reward_deltas)), 2),
+            "average_pressure_reduction": round(sum(pressure_reductions) / max(1, len(pressure_reductions)), 2),
+            "improvement_rate": round(sum(1 for item in improved if item) / max(1, len(improved)), 3),
+            "latest_episode": deepcopy(self.episode_fitness[0]) if self.episode_fitness else None,
+            "episodes": episodes,
+            "authority": "Only live runtime actions create fitness rows. Random chaos is generated by the running park engine; no scripted seed rows are added.",
+        }
 
     def _record_replay_event(
         self,
@@ -1246,6 +1460,7 @@ class ParkSimulation:
             return {"status": "ok", "mode": "evaluator_ground_truth", "state": deepcopy(self._state())}
 
     def _state(self, ignore_dynamic: bool = False, include_industrial: bool = True) -> dict[str, Any]:
+        runtime_interventions = _runtime_intervention_view(self.interventions, self.tick_index)
         if self.dynamic_state is not None and not ignore_dynamic:
             state = deepcopy(self.dynamic_state)
             state["simTime"] = {"hour": self.hour, "minute": self.minute, "day": 1, "seasonIndex": 0}
@@ -1253,12 +1468,12 @@ class ParkSimulation:
             flow = state.get("guestFlow", {}) if isinstance(state.get("guestFlow"), dict) else {}
             flow["activePolicy"] = self.active_policy
             flow["activeScenario"] = _scenario(self.scenario_key)
-            flow["interventions"] = deepcopy(self.interventions)
+            flow["interventions"] = deepcopy(runtime_interventions)
             dynamic_zones = flow.get("zones", []) if isinstance(flow.get("zones"), list) else []
             dynamic_rides = flow.get("rides", []) if isinstance(flow.get("rides"), list) else []
             phase = state["operatingClock"].get("phase", {}) if isinstance(state["operatingClock"].get("phase"), dict) else {}
             if str(phase.get("id", "")) in {"overnight_maintenance", "pre_open_staffing", "post_close_drain"} and dynamic_rides and dynamic_zones:
-                dynamic_rides, dynamic_zones = _apply_operating_clock(dynamic_rides, dynamic_zones, state["operatingClock"])
+                dynamic_rides, dynamic_zones = _apply_operating_clock(dynamic_rides, dynamic_zones, state["operatingClock"], self.active_policy)
                 flow["rides"] = dynamic_rides
                 flow["zones"] = dynamic_zones
                 flow["representedGuests"] = sum(int(zone.get("currentGuests", 0) or 0) for zone in dynamic_zones)
@@ -1275,7 +1490,8 @@ class ParkSimulation:
             state["guestFlow"] = flow
             if dynamic_rides and dynamic_zones:
                 state["physicalMap"] = _physical_map(self.scenario_key, self.active_policy, dynamic_rides, dynamic_zones, state["operatingClock"])
-            state = _apply_synthetic_incident_overlays(state, self.interventions)
+            state = _apply_live_chaos_overlays(state, runtime_interventions)
+            state = _apply_synthetic_incident_overlays(state, runtime_interventions)
             state["showtimeLearningLoop"] = _showtime_learning_loop(
                 state["operatingClock"],
                 flow.get("paths", []) if isinstance(flow.get("paths"), list) else [],
@@ -1308,21 +1524,22 @@ class ParkSimulation:
                 "supports": ["tick", "simulate_action", "apply_action", "inject_event", "score_outcome", "noisy_observation"],
                 "hiddenGroundTruth": "available only through get_ground_truth_state",
             }
-            return _enrich_realistic_operating_state(state, self.interventions, self.active_policy, include_industrial=include_industrial)
+            state["chaosEngine"] = _chaos_engine_state(runtime_interventions)
+            return _enrich_realistic_operating_state(state, runtime_interventions, self.active_policy, include_industrial=include_industrial)
 
         scenario = _scenario(self.scenario_key)
         rides = _rides(self.scenario_key, self.active_policy)
         zones = _zones(self.scenario_key, self.active_policy)
-        rides, zones = _apply_interventions(rides, zones, self.interventions, self.active_policy)
+        rides, zones = _apply_interventions(rides, zones, runtime_interventions, self.active_policy)
         operating_clock = _operating_clock(self.hour, self.minute, self.scenario_key, self.active_policy)
-        rides, zones = _apply_operating_clock(rides, zones, operating_clock)
+        rides, zones = _apply_operating_clock(rides, zones, operating_clock, self.active_policy)
         paths = _paths(self.active_policy, zones, operating_clock)
         represented_guests = sum(zone["currentGuests"] for zone in zones)
         avg_satisfaction = round(sum(zone["comfortScore"] for zone in zones) / len(zones))
         staff_pressure = operating_clock["staffLifecycle"]["fatiguePressurePct"]
-        open_callouts = (22 if self.scenario_key == "staff_shortage" else 18) + _staff_callout_boost(self.interventions) + round(staff_pressure / 18)
-        grid_load = min(99, (93 if self.scenario_key in {"ride_down", "storm_response"} else 86) + _energy_boost(self.interventions) + operating_clock["foodRetailLifecycle"]["prepPressurePct"] // 12)
-        storm_risk = min(98, (72 if self.scenario_key == "storm_response" else 42) + _storm_boost(self.interventions) + operating_clock["phase"]["weatherVolatilityPct"] // 14)
+        open_callouts = (22 if self.scenario_key == "staff_shortage" else 18) + _staff_callout_boost(runtime_interventions) + round(staff_pressure / 18)
+        grid_load = min(99, (93 if self.scenario_key in {"ride_down", "storm_response"} else 86) + _energy_boost(runtime_interventions) + operating_clock["foodRetailLifecycle"]["prepPressurePct"] // 12)
+        storm_risk = min(98, (72 if self.scenario_key == "storm_response" else 42) + _storm_boost(runtime_interventions) + operating_clock["phase"]["weatherVolatilityPct"] // 14)
         food_inventory = _apply_food_clock(_food_inventory(self.scenario_key, self.active_policy), operating_clock)
         guest_care = _apply_guest_care_clock(_guest_care_state(self.scenario_key, self.active_policy, avg_satisfaction), operating_clock)
         showtime_learning_loop = _showtime_learning_loop(operating_clock, paths, zones, self.active_policy)
@@ -1389,7 +1606,7 @@ class ParkSimulation:
         "guestFlow": {
                 "activePolicy": self.active_policy,
                 "activeScenario": scenario,
-                "interventions": deepcopy(self.interventions),
+                "interventions": deepcopy(runtime_interventions),
                 "representedGuests": represented_guests,
                 "avgSatisfaction": avg_satisfaction,
                 "activeGroups": round(represented_guests / 8),
@@ -1405,14 +1622,16 @@ class ParkSimulation:
                 rides,
                 zones,
                 paths,
-                self.interventions,
+                runtime_interventions,
                 storm_risk,
             ),
-            "alerts": _alerts(self.scenario_key) + _intervention_alerts(self.interventions, rides, zones),
+            "alerts": _alerts(self.scenario_key) + _intervention_alerts(runtime_interventions, rides, zones),
             "lastActions": deepcopy(self.last_actions),
+            "chaosEngine": _chaos_engine_state(runtime_interventions),
         }
-        state = _apply_synthetic_incident_overlays(state, self.interventions)
-        return _enrich_realistic_operating_state(state, self.interventions, self.active_policy, include_industrial=include_industrial)
+        state = _apply_live_chaos_overlays(state, runtime_interventions)
+        state = _apply_synthetic_incident_overlays(state, runtime_interventions)
+        return _enrich_realistic_operating_state(state, runtime_interventions, self.active_policy, include_industrial=include_industrial)
 
 
 def _scenario(key: str) -> dict[str, str]:
@@ -1443,6 +1662,37 @@ def _scenario(key: str) -> dict[str, str]:
         },
     }
     return deepcopy(scenarios.get(key, scenarios["ride_down"]))
+
+
+def _runtime_intervention_view(interventions: list[dict[str, Any]], current_tick: int) -> list[dict[str, Any]]:
+    rows = []
+    for event in interventions:
+        if not isinstance(event, dict):
+            continue
+        row = deepcopy(event)
+        if row.get("unexpected"):
+            created_tick = int(row.get("tickIndex", current_tick) or current_tick)
+            duration = max(1, int(row.get("durationTicks", 12) or 12))
+            age = max(0, int(current_tick) - created_tick)
+            row["ageTicks"] = age
+            row["remainingTicks"] = max(0, duration - age)
+            row["phase"] = "decaying" if age > duration else "late" if age >= round(duration * 0.7) else "building" if age >= round(duration * 0.35) else "initial"
+        rows.append(row)
+    return rows
+
+
+def _drop_expired_runtime_interventions(interventions: list[dict[str, Any]], current_tick: int) -> list[dict[str, Any]]:
+    kept = []
+    for event in interventions:
+        if not isinstance(event, dict) or not event.get("unexpected"):
+            kept.append(event)
+            continue
+        created_tick = int(event.get("tickIndex", current_tick) or current_tick)
+        duration = max(1, int(event.get("durationTicks", 12) or 12))
+        age = max(0, int(current_tick) - created_tick)
+        if age <= duration + 6:
+            kept.append(event)
+    return kept[:6]
 
 
 def _enrich_realistic_operating_state(
@@ -18107,6 +18357,7 @@ def _apply_operating_clock(
     rides: list[dict[str, Any]],
     zones: list[dict[str, Any]],
     operating_clock: dict[str, Any],
+    active_policy: str = "normal",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rides = deepcopy(rides)
     zones = deepcopy(zones)
@@ -18437,6 +18688,28 @@ def _digest_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, An
         "scenarioChanged": before_scenario.get("key") != after_scenario.get("key"),
         "policyChanged": before_scenario.get("activePolicy") != after_scenario.get("activePolicy"),
     }
+
+
+def _episode_pressure_delta(metrics: dict[str, Any]) -> float:
+    def num(key: str) -> float:
+        try:
+            return float(metrics.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return round(
+        num("busiest_zone_density_delta") * 0.35
+        + num("slowest_ride_wait_delta") * 0.25
+        + num("food_backlog_delta") * 0.03
+        + num("path_congestion_delta") * 0.35
+        + num("staff_callout_delta") * 0.45
+        + num("guest_care_case_delta") * 0.6
+        + num("grid_load_delta") * 0.18
+        + num("storm_risk_delta") * 0.1
+        + num("safety_violations") * 18
+        - num("avg_satisfaction_delta") * 0.8,
+        2,
+    )
 
 
 def _replay_narrative(kind: str, before: dict[str, Any], after: dict[str, Any]) -> str:
@@ -19816,6 +20089,21 @@ def _intervention_message(kind: str, target_id: str, intensity: int) -> str:
         "staff_callout": "Staff callout shock",
         "energy_spike": "Energy/HVAC shock",
         "storm_risk": "Storm risk shock",
+        "show_dump": "Show-exit guest wave",
+        "mobile_order_outage": "Mobile-order outage",
+        "payment_outage": "Payment terminal outage",
+        "access_lane_block": "Access-lane blockage",
+        "water_leak": "Facilities water leak",
+        "sensor_anomaly": "Ride sensor anomaly",
+        "parade_route_conflict": "Parade route conflict",
+        "ticketing_gate_surge": "Ticketing gate surge",
+        "parking_arrival_wave": "Parking arrival wave",
+        "inventory_stockout": "Inventory stockout",
+        "restroom_closure": "Restroom closure",
+        "radio_dead_zone": "Worker radio dead zone",
+        "security_perimeter": "Security perimeter",
+        "heat_index_spike": "Heat index spike",
+        "lightning_delay": "Lightning delay",
         "lost_child": "Synthetic lost-child incident",
         "medical_response": "Synthetic medical access incident",
         "unattended_bag": "Synthetic unattended-bag security incident",
@@ -19830,52 +20118,59 @@ def _random_unexpected_event(scenario_key: str, state: dict[str, Any]) -> dict[s
     ride_ids = [str(ride.get("id")) for ride in rides if ride.get("id") and ride.get("status") != "down"] or ["dragonCoaster"]
     food_zone = next((str(zone.get("id")) for zone in zones if zone.get("processType") == "food"), "foodCourt1")
     busiest_zone = max(zones, key=lambda zone: int(zone.get("density", 0) or 0), default={"id": "coasterPlaza"})
+    rng = RUNTIME_RNG
+    def event(
+        kind: str,
+        target_id: str,
+        intensity_low: int,
+        intensity_high: int,
+        reason: str,
+        couplings: list[str],
+        reliability_low: int = 58,
+        reliability_high: int = 94,
+    ) -> dict[str, Any]:
+        return {
+            "kind": kind,
+            "target_id": target_id,
+            "intensity": rng.randint(intensity_low, intensity_high),
+            "duration_ticks": rng.randint(8, 22),
+            "signal_reliability_pct": rng.randint(reliability_low, reliability_high),
+            "visibility": rng.choice(["clear", "partial", "noisy", "delayed"]),
+            "couplings": couplings,
+            "reason": reason,
+        }
+
     choices = [
-        {
-            "kind": "ride_failure",
-            "target_id": random.SystemRandom().choice(ride_ids),
-            "intensity": random.SystemRandom().randint(72, 96),
-            "reason": "A telemetry anomaly appeared after opening checks.",
-        },
-        {
-            "kind": "demand_spike",
-            "target_id": str(busiest_zone.get("id") or "coasterPlaza"),
-            "intensity": random.SystemRandom().randint(68, 92),
-            "reason": "A guest wave arrived earlier than forecast.",
-        },
-        {
-            "kind": "food_spike",
-            "target_id": food_zone,
-            "intensity": random.SystemRandom().randint(70, 94),
-            "reason": "Mobile orders jumped after a nearby queue release.",
-        },
-        {
-            "kind": "staff_callout",
-            "target_id": str(busiest_zone.get("id") or "coasterPlaza"),
-            "intensity": random.SystemRandom().randint(62, 88),
-            "reason": "A labor gap opened during the first operating block.",
-        },
-        {
-            "kind": "storm_risk",
-            "target_id": "outdoor_park",
-            "intensity": random.SystemRandom().randint(66, 91),
-            "reason": "Weather risk changed faster than the morning forecast.",
-        },
-        {
-            "kind": "energy_spike",
-            "target_id": "indoorHub",
-            "intensity": random.SystemRandom().randint(64, 90),
-            "reason": "Facilities saw a peak-load warning during guest shelter buildup.",
-        },
+        event("ride_failure", rng.choice(ride_ids), 72, 96, "A telemetry anomaly appeared after opening checks.", ["queue_spillback", "staff_gap", "guest_care"]),
+        event("demand_spike", str(busiest_zone.get("id") or "coasterPlaza"), 68, 92, "A guest wave arrived earlier than forecast.", ["path_congestion", "food_backlog", "satisfaction"]),
+        event("food_spike", food_zone, 70, 94, "Mobile orders jumped after a nearby queue release.", ["food_backlog", "guest_care", "staff_gap"]),
+        event("staff_callout", str(busiest_zone.get("id") or "coasterPlaza"), 62, 88, "A labor gap opened during the first operating block.", ["staff_gap", "queue_spillback", "receiver_delay"]),
+        event("storm_risk", "outdoor_park", 66, 91, "Weather risk changed faster than the morning forecast.", ["shelter_shift", "energy_load", "path_congestion"]),
+        event("energy_spike", "indoorHub", 64, 90, "Facilities saw a peak-load warning during guest shelter buildup.", ["energy_load", "comfort_loss", "guest_care"]),
+        event("show_dump", str(busiest_zone.get("id") or "coasterPlaza"), 62, 93, "A show let out early and pushed a guest wave into nearby paths.", ["path_congestion", "food_backlog", "queue_spillback"]),
+        event("mobile_order_outage", food_zone, 58, 88, "Mobile ordering degraded while pickup demand was already rising.", ["food_backlog", "guest_care", "receiver_delay"], 45, 76),
+        event("payment_outage", food_zone, 55, 84, "Payment terminals slowed at a high-volume food location.", ["food_backlog", "satisfaction", "receiver_delay"], 50, 82),
+        event("access_lane_block", str(busiest_zone.get("id") or "coasterPlaza"), 60, 92, "A service or accessibility lane became partially blocked.", ["access_risk", "human_review", "path_congestion"]),
+        event("water_leak", "coveredPlaza", 50, 82, "Facilities reported a leak near covered guest routing.", ["path_congestion", "comfort_loss", "maintenance"]),
+        event("sensor_anomaly", rng.choice(ride_ids), 54, 86, "Ride telemetry drifted outside its normal band.", ["hidden_ride_risk", "sensor_noise", "maintenance"], 38, 72),
+        event("parade_route_conflict", "coveredPlaza", 60, 90, "A parade route overlapped a high-pressure guest corridor.", ["path_congestion", "access_risk", "staff_gap"]),
+        event("ticketing_gate_surge", "mainGate", 58, 88, "A delayed arrival wave hit entry gates after parking backup cleared.", ["arrival_wave", "path_congestion", "satisfaction"]),
+        event("parking_arrival_wave", "mainGate", 56, 86, "Parking release sent a late-arrival wave toward front-gate paths.", ["arrival_wave", "food_backlog", "queue_spillback"]),
+        event("inventory_stockout", food_zone, 52, 82, "A promoted item stocked out while mobile demand kept routing to it.", ["food_backlog", "guest_care", "satisfaction"]),
+        event("restroom_closure", str(busiest_zone.get("id") or "coasterPlaza"), 48, 78, "A restroom closure redirected guests into nearby food and path queues.", ["path_congestion", "guest_care", "comfort_loss"]),
+        event("radio_dead_zone", str(busiest_zone.get("id") or "coasterPlaza"), 50, 82, "Worker radio coverage degraded in a dense operating zone.", ["receiver_delay", "staff_gap", "human_review"], 35, 70),
+        event("security_perimeter", str(busiest_zone.get("id") or "coasterPlaza"), 60, 90, "A security perimeter narrowed a guest corridor without closing the zone.", ["path_congestion", "human_review", "guest_care"]),
+        event("heat_index_spike", "outdoor_park", 62, 92, "Heat index rose faster than comfort planning assumed.", ["comfort_loss", "energy_load", "guest_care"]),
+        event("lightning_delay", "outdoor_park", 70, 96, "Lightning proximity delayed outdoor attraction throughput and pushed shelter demand.", ["shelter_shift", "queue_spillback", "energy_load"]),
     ]
     scenario_bias = {
-        "ride_down": {"ride_failure", "demand_spike", "staff_callout"},
-        "staff_shortage": {"staff_callout", "demand_spike", "food_spike"},
-        "food_spike": {"food_spike", "staff_callout", "energy_spike"},
-        "storm_response": {"storm_risk", "energy_spike", "demand_spike"},
+        "ride_down": {"ride_failure", "demand_spike", "staff_callout", "sensor_anomaly", "show_dump", "parade_route_conflict", "parking_arrival_wave"},
+        "staff_shortage": {"staff_callout", "demand_spike", "food_spike", "access_lane_block", "radio_dead_zone", "security_perimeter"},
+        "food_spike": {"food_spike", "staff_callout", "energy_spike", "mobile_order_outage", "payment_outage", "inventory_stockout", "restroom_closure"},
+        "storm_response": {"storm_risk", "energy_spike", "demand_spike", "water_leak", "access_lane_block", "heat_index_spike", "lightning_delay"},
     }.get(scenario_key, set())
     weighted = choices + [item for item in choices if item["kind"] in scenario_bias]
-    return deepcopy(random.SystemRandom().choice(weighted))
+    return deepcopy(rng.choice(weighted))
 
 
 def _staff_callout_boost(interventions: list[dict[str, Any]]) -> int:
@@ -19949,6 +20244,63 @@ def _apply_interventions(
             if target_zone:
                 _apply_zone_pressure(target_zone, intensity, food=True)
 
+        if kind in {"mobile_order_outage", "payment_outage"}:
+            target_zone = zone_by_id.get(target_id) or zone_by_id.get("foodCourt1")
+            if target_zone:
+                _apply_zone_pressure(target_zone, round(intensity * 0.8), food=True)
+                target_zone["waitMins"] += round(intensity / 4)
+                target_zone["comfortScore"] = _clamp(target_zone["comfortScore"] - round(intensity / 7), 25, 96)
+
+        if kind in {"show_dump", "access_lane_block"} and zone_id in zone_by_id:
+            _apply_zone_pressure(zone_by_id[zone_id], intensity)
+            if kind == "access_lane_block":
+                zone_by_id[zone_id]["comfortScore"] = _clamp(zone_by_id[zone_id]["comfortScore"] - round(intensity / 5), 25, 96)
+
+        if kind in {"parade_route_conflict", "ticketing_gate_surge", "parking_arrival_wave", "security_perimeter", "restroom_closure"}:
+            impacted_zone_id = zone_id if zone_id in zone_by_id else "coveredPlaza" if kind in {"parade_route_conflict", "security_perimeter"} else "foodCourt1"
+            if impacted_zone_id in zone_by_id:
+                _apply_zone_pressure(zone_by_id[impacted_zone_id], intensity)
+                zone_by_id[impacted_zone_id]["comfortScore"] = _clamp(zone_by_id[impacted_zone_id]["comfortScore"] - round(intensity / 8), 18, 96)
+            if kind in {"ticketing_gate_surge", "parking_arrival_wave"}:
+                for front_zone_id in ("mainStreet", "foodCourt1", "coasterPlaza"):
+                    if front_zone_id in zone_by_id:
+                        _apply_zone_pressure(zone_by_id[front_zone_id], round(intensity * 0.35))
+
+        if kind in {"inventory_stockout", "radio_dead_zone"}:
+            impacted_zone = zone_by_id.get(zone_id or "foodCourt1") or zone_by_id.get("foodCourt1")
+            if impacted_zone:
+                impacted_zone["comfortScore"] = _clamp(impacted_zone["comfortScore"] - round(intensity / 6), 18, 96)
+                impacted_zone["waitMins"] += round(intensity / 5)
+
+        if kind in {"heat_index_spike", "lightning_delay"}:
+            for outdoor_zone_id in ("coasterPlaza", "foodCourt1", "mainStreet", "coveredPlaza"):
+                if outdoor_zone_id in zone_by_id:
+                    _apply_zone_pressure(zone_by_id[outdoor_zone_id], round(intensity * (0.45 if kind == "heat_index_spike" else 0.62)))
+                    zone_by_id[outdoor_zone_id]["comfortScore"] = _clamp(zone_by_id[outdoor_zone_id]["comfortScore"] - round(intensity / 5), 15, 96)
+            if kind == "lightning_delay":
+                for ride in rides:
+                    if ride.get("zone") in {"coasterPlaza", "mainStreet"} or ride.get("outdoor"):
+                        ride["status"] = "constrained" if ride.get("status") != "down" else ride.get("status")
+                        ride["throughputGap"] = max(int(ride.get("throughputGap", 0) or 0), round(intensity * 6))
+                        ride["waitMins"] += round(intensity / 4)
+
+        if kind == "water_leak":
+            for indoor_zone_id in ("coveredPlaza", "indoorHub"):
+                if indoor_zone_id in zone_by_id:
+                    _apply_zone_pressure(zone_by_id[indoor_zone_id], round(intensity * 0.55))
+
+        if kind == "sensor_anomaly":
+            for ride in rides:
+                if ride.get("id") == target_id:
+                    ride["status"] = "constrained" if ride.get("status") == "normal" else ride.get("status")
+                    ride["downtimeRisk"] = max(int(ride.get("downtimeRisk", 0) or 0), min(100, intensity + 8))
+                    ride["throughputGap"] = max(int(ride.get("throughputGap", 0) or 0), round(intensity * 5))
+                    ride["waitMins"] += round(intensity / 5)
+                    zone_id = str(ride.get("zone") or zone_id)
+                    break
+            if zone_id in zone_by_id:
+                _apply_zone_pressure(zone_by_id[zone_id], round(intensity * 0.55))
+
         if kind == "staff_callout":
             impacted_zone = zone_by_id.get(zone_id or "coasterPlaza")
             if impacted_zone:
@@ -19997,14 +20349,289 @@ def _intervention_alerts(
         intensity = int(event.get("intensity", 75) or 75)
         target_name = ride_names.get(target_id) or zone_names.get(target_id) or target_id
         severity = "critical" if intensity >= 75 or kind == "ride_failure" else "warning"
+        if event.get("unexpected"):
+            source_detail = f"{target_name} was raised by live random incident rules at {intensity}% intensity."
+        elif event.get("synthetic"):
+            source_detail = f"{target_name} is a marked synthetic validation incident at {intensity}% intensity."
+        else:
+            source_detail = f"{target_name} was applied through an explicit operator/debug action at {intensity}% intensity."
         alerts.append(
             {
                 "severity": severity,
-                "title": _intervention_message(kind, target_name, intensity).split(" injected", 1)[0],
-                "detail": f"{target_name} is user-injected at {intensity}% intensity; agent should respond from live park state.",
+                "title": _intervention_message(kind, target_name, intensity),
+                "detail": f"{source_detail} Agent should respond from current park state.",
             }
         )
     return alerts
+
+
+def _chaos_engine_state(interventions: list[dict[str, Any]]) -> dict[str, Any]:
+    active = [event for event in interventions if isinstance(event, dict) and event.get("unexpected")]
+    rule_catalog = [
+        {
+            "id": "ride_sensor_to_hold",
+            "if": "sensor anomaly or ride failure raises downtime risk",
+            "then": "reduce throughput, block automated reopen, route guests away from affected queue",
+        },
+        {
+            "id": "food_system_to_demand_shape",
+            "if": "mobile order or payment friction increases pickup ETA",
+            "then": "throttle constrained item demand and push nearby alternate capacity",
+        },
+        {
+            "id": "access_lane_to_human_review",
+            "if": "service or accessibility lane is blocked",
+            "then": "mark emergency access risk and require human review for crowd-moving actions",
+        },
+        {
+            "id": "show_wave_to_path_split",
+            "if": "show exit wave hits a dense zone",
+            "then": "split routes across at least two lower-pressure destinations",
+        },
+        {
+            "id": "facility_leak_to_shelter_rebalance",
+            "if": "covered routing degrades during weather or crowd pressure",
+            "then": "protect indoor shelter capacity and avoid unsafe comfort-control automation",
+        },
+        {
+            "id": "delayed_cascade_pressure",
+            "if": "an incident stays active for multiple ticks",
+            "then": "increase coupled pressure in food, staffing, paths, care, and energy instead of resolving instantly",
+        },
+        {
+            "id": "partial_observation_noise",
+            "if": "signal reliability is low or visibility is delayed",
+            "then": "hide some risk behind noisy sensors and require action under uncertainty",
+        },
+        {
+            "id": "weather_arrival_coupling",
+            "if": "heat, lightning, parking, or gate waves change guest movement",
+            "then": "shift guests across shelter, front gate, food, queue, and path systems",
+        },
+    ]
+    reliability_values = [int(event.get("signalReliabilityPct", 80) or 80) for event in active]
+    hidden_count = sum(1 for event in active if str(event.get("visibility") or "") in {"noisy", "delayed", "partial"} or int(event.get("signalReliabilityPct", 100) or 100) < 70)
+    return {
+        "mode": "live_random_incident_rules",
+        "usesSeedData": False,
+        "activeUnexpectedEvents": active[:6],
+        "activeCount": len(active),
+        "ruleCount": len(rule_catalog),
+        "rules": rule_catalog,
+        "complexity": {
+            "coupledSystems": ["ride", "queue", "path", "food", "staff", "weather", "energy", "guest_care", "safety_access"],
+            "delayedEffects": True,
+            "partialObservability": True,
+            "averageSignalReliabilityPct": round(sum(reliability_values) / max(1, len(reliability_values))),
+            "hiddenRiskCount": hidden_count,
+        },
+    }
+
+
+def _apply_live_chaos_overlays(state: dict[str, Any], interventions: list[dict[str, Any]]) -> dict[str, Any]:
+    active = [event for event in interventions if isinstance(event, dict) and event.get("unexpected")]
+    if not active:
+        state["chaosEngine"] = _chaos_engine_state(interventions)
+        return state
+    next_state = deepcopy(state)
+    flow = next_state.setdefault("guestFlow", {})
+    zones = flow.get("zones", []) if isinstance(flow.get("zones"), list) else []
+    rides = flow.get("rides", []) if isinstance(flow.get("rides"), list) else []
+    zone_by_id = {str(zone.get("id")): zone for zone in zones if isinstance(zone, dict)}
+    alerts = next_state.setdefault("alerts", [])
+    readiness = next_state.setdefault("incidentReadiness", {})
+    food = next_state.setdefault("foodInventory", {})
+    energy = next_state.setdefault("energy", {})
+    maintenance = next_state.setdefault("maintenance", {})
+
+    for event in active[:6]:
+        kind = str(event.get("kind") or "")
+        target_id = str(event.get("targetId") or "")
+        intensity = max(10, min(100, int(event.get("intensity", 75) or 75)))
+        if kind in {"mobile_order_outage", "payment_outage"}:
+            food["policy"] = "runtime demand shaping required"
+            food["suppressedItems"] = sorted(set(food.get("suppressedItems", []) + ["constrained mobile pickup windows"]))
+            for location in food.get("locations", []) if isinstance(food.get("locations"), list) else []:
+                if isinstance(location, dict) and location.get("id") in {target_id, "foodCourt1"}:
+                    location["mobileOrderBacklog"] = int(location.get("mobileOrderBacklog", 0) or 0) + round(intensity * 1.8)
+                    location["pickupEtaMinutes"] = int(location.get("pickupEtaMinutes", 0) or 0) + round(intensity / 8)
+        if kind == "access_lane_block":
+            readiness["emergencyAccessBlocked"] = True
+            readiness["operatorEscalation"] = "required"
+        if kind in {"energy_spike", "water_leak"}:
+            energy["demandChargeRisk"] = "critical"
+            energy["gridLoadPercent"] = max(int(energy.get("gridLoadPercent", 0) or 0), min(99, 78 + round(intensity / 3)))
+        if kind in {"ride_failure", "sensor_anomaly"}:
+            maintenance["sensorAnomalyCount"] = int(maintenance.get("sensorAnomalyCount", 0) or 0) + 1
+            maintenance["clearanceRequiredCount"] = max(1, int(maintenance.get("clearanceRequiredCount", 0) or 0))
+            for ride in rides:
+                if isinstance(ride, dict) and ride.get("id") == target_id:
+                    ride["status"] = "down" if kind == "ride_failure" else "constrained"
+                    ride["downtimeRisk"] = max(int(ride.get("downtimeRisk", 0) or 0), intensity)
+        if kind in {"show_dump", "access_lane_block", "water_leak"}:
+            zone = zone_by_id.get(target_id) or zone_by_id.get("coveredPlaza") or zone_by_id.get("coasterPlaza")
+            if zone:
+                zone["density"] = _clamp(int(zone.get("density", 0) or 0) + round(intensity / 6), 0, 118)
+                zone["waitMins"] = int(zone.get("waitMins", 0) or 0) + round(intensity / 8)
+                zone["comfortScore"] = _clamp(int(zone.get("comfortScore", 0) or 0) - round(intensity / 9), 18, 96)
+        if kind in {"parade_route_conflict", "security_perimeter", "restroom_closure"}:
+            zone = zone_by_id.get(target_id) or zone_by_id.get("coveredPlaza") or zone_by_id.get("coasterPlaza")
+            if zone:
+                zone["density"] = _clamp(int(zone.get("density", 0) or 0) + round(intensity / 7), 0, 122)
+                zone["waitMins"] = int(zone.get("waitMins", 0) or 0) + round(intensity / 9)
+                zone["comfortScore"] = _clamp(int(zone.get("comfortScore", 0) or 0) - round(intensity / 10), 15, 96)
+            if kind == "security_perimeter":
+                readiness["operatorEscalation"] = "required_human_review"
+        if kind in {"ticketing_gate_surge", "parking_arrival_wave"}:
+            for zone_id in ("mainStreet", "foodCourt1", "coasterPlaza"):
+                zone = zone_by_id.get(zone_id)
+                if zone:
+                    zone["density"] = _clamp(int(zone.get("density", 0) or 0) + round(intensity / 10), 0, 122)
+                    zone["waitMins"] = int(zone.get("waitMins", 0) or 0) + round(intensity / 12)
+        if kind == "inventory_stockout":
+            food["policy"] = "runtime demand shaping required"
+            food["suppressedItems"] = sorted(set(food.get("suppressedItems", []) + ["stockout replacement item"]))
+            for location in food.get("locations", []) if isinstance(food.get("locations"), list) else []:
+                if isinstance(location, dict) and location.get("id") in {target_id, "foodCourt1"}:
+                    location["mobileOrderBacklog"] = int(location.get("mobileOrderBacklog", 0) or 0) + round(intensity * 1.2)
+                    location["pickupEtaMinutes"] = int(location.get("pickupEtaMinutes", 0) or 0) + round(intensity / 10)
+                    location["status"] = "substitution_required"
+        if kind == "radio_dead_zone":
+            readiness["operatorEscalation"] = "required_human_review"
+            readiness["receiverSignalDegraded"] = True
+        if kind in {"heat_index_spike", "lightning_delay"}:
+            weather = next_state.setdefault("weather", {})
+            weather["heatIndexF"] = max(int(weather.get("heatIndexF", 0) or 0), 94 + round(intensity / 6))
+            if kind == "lightning_delay":
+                weather["stormRisk"] = max(int(weather.get("stormRisk", 0) or 0), min(98, 60 + round(intensity / 3)))
+                readiness["shelterMode"] = True
+            energy["gridLoadPercent"] = max(int(energy.get("gridLoadPercent", 0) or 0), min(99, 74 + round(intensity / 4)))
+        title = _intervention_message(kind, target_id, intensity).split(" injected", 1)[0]
+        if not any(isinstance(alert, dict) and alert.get("title") == title for alert in alerts):
+            alerts.insert(
+                0,
+                {
+                    "severity": "critical" if intensity >= 80 or kind in {"ride_failure", "access_lane_block"} else "warning",
+                    "title": title,
+                    "detail": f"{event.get('reason') or 'Live chaos rule fired.'} Source: {event.get('source', 'runtime')}.",
+                },
+            )
+
+    _apply_runtime_chaos_couplings(next_state, active[:6])
+    next_state["chaosEngine"] = _chaos_engine_state(interventions)
+    next_state.setdefault("digitalTwin", {})["chaosEngine"] = {
+        "active": True,
+        "activeCount": len(active),
+        "latestKind": str(active[0].get("kind") or "unknown"),
+        "ruleCount": next_state["chaosEngine"]["ruleCount"],
+    }
+    return next_state
+
+
+def _apply_runtime_chaos_couplings(state: dict[str, Any], active: list[dict[str, Any]]) -> None:
+    if not active:
+        return
+    flow = state.setdefault("guestFlow", {})
+    zones = flow.get("zones", []) if isinstance(flow.get("zones"), list) else []
+    rides = flow.get("rides", []) if isinstance(flow.get("rides"), list) else []
+    paths = flow.get("paths", []) if isinstance(flow.get("paths"), list) else []
+    food = state.setdefault("foodInventory", {})
+    staffing = state.setdefault("staffing", {})
+    care = state.setdefault("guestCare", {})
+    readiness = state.setdefault("incidentReadiness", {})
+    energy = state.setdefault("energy", {})
+    weather = state.setdefault("weather", {})
+    digital_twin = state.setdefault("digitalTwin", {})
+
+    coupling_counts: dict[str, int] = {}
+    hidden_risks: list[dict[str, Any]] = []
+    delayed_effects: list[dict[str, Any]] = []
+
+    for event in active:
+        intensity = max(10, min(100, int(event.get("intensity", 75) or 75)))
+        duration = max(1, int(event.get("durationTicks", 12) or 12))
+        age = max(0, int(event.get("ageTicks", 0) or 0))
+        phase = min(1.0, age / max(1, duration))
+        late_multiplier = 0.45 + phase
+        couplings = [str(item) for item in event.get("couplings", []) if item]
+        for coupling in couplings:
+            coupling_counts[coupling] = coupling_counts.get(coupling, 0) + 1
+
+        if "path_congestion" in couplings:
+            for path in paths:
+                if isinstance(path, dict):
+                    path["congestionLevel"] = _clamp(int(path.get("congestionLevel", 0) or 0) + round(intensity * 0.05 * late_multiplier), 0, 125)
+                    path["status"] = "congested" if int(path.get("congestionLevel", 0) or 0) >= 90 else path.get("status", "busy")
+        if "food_backlog" in couplings:
+            for location in food.get("locations", []) if isinstance(food.get("locations"), list) else []:
+                if isinstance(location, dict):
+                    location["mobileOrderBacklog"] = int(location.get("mobileOrderBacklog", 0) or 0) + round(intensity * 0.24 * late_multiplier)
+                    location["pickupEtaMinutes"] = int(location.get("pickupEtaMinutes", 0) or 0) + max(1, round(intensity * 0.025 * late_multiplier))
+        if "staff_gap" in couplings:
+            staffing["openCallouts"] = int(staffing.get("openCallouts", 0) or 0) + max(1, round(intensity * 0.025 * late_multiplier))
+            staffing["checkedIn"] = max(0, int(staffing.get("checkedIn", 0) or 0) - max(1, round(intensity * 0.018 * late_multiplier)))
+        if "guest_care" in couplings or "comfort_loss" in couplings or "satisfaction" in couplings:
+            care["openCases"] = int(care.get("openCases", 0) or 0) + max(1, round(intensity * 0.03 * late_multiplier))
+            care["complaintRatePct"] = _clamp(int(care.get("complaintRatePct", 0) or 0) + max(1, round(intensity * 0.018 * late_multiplier)), 0, 100)
+        if "energy_load" in couplings or "shelter_shift" in couplings:
+            energy["gridLoadPercent"] = _clamp(int(energy.get("gridLoadPercent", 0) or 0) + max(1, round(intensity * 0.04 * late_multiplier)), 0, 99)
+            if "shelter_shift" in couplings:
+                readiness["shelterMode"] = True
+                weather["stormRisk"] = _clamp(int(weather.get("stormRisk", 0) or 0) + round(intensity * 0.025 * late_multiplier), 0, 98)
+        if "access_risk" in couplings:
+            readiness["emergencyAccessBlocked"] = True
+            readiness["operatorEscalation"] = "required"
+        if "receiver_delay" in couplings or "human_review" in couplings:
+            readiness["operatorEscalation"] = "required_human_review"
+            readiness["receiverDelayRiskPct"] = max(int(readiness.get("receiverDelayRiskPct", 0) or 0), min(99, round(intensity * late_multiplier)))
+        if "queue_spillback" in couplings:
+            for ride in rides:
+                if isinstance(ride, dict) and ride.get("status") in {"down", "constrained"}:
+                    ride["queueGuests"] = int(ride.get("queueGuests", 0) or 0) + round(intensity * 1.8 * late_multiplier)
+                    ride["waitMins"] = int(ride.get("waitMins", 0) or 0) + max(1, round(intensity * 0.04 * late_multiplier))
+        if "hidden_ride_risk" in couplings or "sensor_noise" in couplings:
+            reliability = int(event.get("signalReliabilityPct", 70) or 70)
+            hidden_risks.append(
+                {
+                    "kind": event.get("kind"),
+                    "targetId": event.get("targetId"),
+                    "signalReliabilityPct": reliability,
+                    "visibility": event.get("visibility"),
+                    "risk": "ride risk is partially observed; policy should not assume perfect truth",
+                }
+            )
+        if age >= max(2, round(duration * 0.35)):
+            delayed_effects.append(
+                {
+                    "kind": event.get("kind"),
+                    "ageTicks": age,
+                    "durationTicks": duration,
+                    "couplings": couplings,
+                    "phase": "late" if phase >= 0.7 else "building",
+                }
+            )
+
+    if zones:
+        comfort_values = [int(zone.get("comfortScore", 70) or 70) for zone in zones if isinstance(zone, dict)]
+        if comfort_values:
+            flow["avgSatisfaction"] = _clamp(int(flow.get("avgSatisfaction", 70) or 70) - max(0, round((72 - min(comfort_values)) / 5)), 0, 100)
+    digital_twin["runtimeComplexity"] = {
+        "mode": "coupled_random_chaos",
+        "usesSeedData": False,
+        "couplingCounts": coupling_counts,
+        "hiddenRisks": hidden_risks,
+        "delayedEffects": delayed_effects,
+        "episodeDifficulty": _chaos_difficulty_score(active),
+    }
+
+
+def _chaos_difficulty_score(active: list[dict[str, Any]]) -> int:
+    if not active:
+        return 0
+    intensity = sum(int(event.get("intensity", 0) or 0) for event in active)
+    coupling_count = sum(len(event.get("couplings", []) if isinstance(event.get("couplings"), list) else []) for event in active)
+    hidden_count = sum(1 for event in active if str(event.get("visibility") or "") in {"partial", "noisy", "delayed"} or int(event.get("signalReliabilityPct", 100) or 100) < 70)
+    return _clamp(round(intensity / max(1, len(active)) * 0.55 + coupling_count * 4 + hidden_count * 8), 0, 100)
 
 
 def _apply_synthetic_incident_overlays(state: dict[str, Any], interventions: list[dict[str, Any]]) -> dict[str, Any]:

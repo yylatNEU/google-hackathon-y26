@@ -1,11 +1,14 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["vite/client", "react", "react-dom"]
+  },
   "files": [
     "./src/vite-env.d.ts",
     "./src/hooks/useParkPulseState.ts",
     "./src/lib/api.ts",
     "./src/lib/parkPulseAgents.ts",
-    "./src/lib/parkPulseDemoContent.ts",
+    "./src/lib/productOperatingModel.ts",
     "./src/types/park.ts",
     "./src/types/platform.ts",
     "./src/vite-main.tsx",
@@ -14,19 +17,15 @@
     "./src/app/executive/page.tsx",
     "./src/app/monitor/page.tsx",
     "./src/app/human/page.tsx",
-    "./src/features/command-center/AgentFindingsPanel.tsx",
+    "./src/features/command-center/ActualTrainingPanel.tsx",
     "./src/features/command-center/CommandCenter.tsx",
-    "./src/features/command-center/DecisionPlanPanel.tsx",
     "./src/features/command-center/DispatchApprovalPanel.tsx",
-    "./src/features/command-center/DynamicTwinMvpPanel.tsx",
     "./src/features/command-center/EvalReceiptPanel.tsx",
     "./src/features/command-center/ParkStateStrip.tsx",
-    "./src/features/command-center/PolicyGatePanel.tsx",
-    "./src/features/command-center/ScenarioRail.tsx",
-    "./src/features/command-center/SignalPanel.tsx",
+    "./src/features/command-center/ProductLoopPanel.tsx",
     "./src/features/command-center/style.ts",
     "./src/features/command-center/useCommandCenter.ts",
-    "./src/features/labs/LabsPage.tsx",
-    "./vite.config.ts"
-  ]
+    "./src/features/labs/LabsPage.tsx"
+  ],
+  "include": []
 }

@@ -57,8 +57,8 @@ function asArray<T = AnyRecord>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
-function humanize(value: unknown, fallback = "--") {
-  return String(value ?? fallback).replaceAll("_", " ");
+function humanize(value: unknown, emptyValue = "--") {
+  return String(value ?? emptyValue).replaceAll("_", " ");
 }
 
 function getRunDelivery(telemetry?: AnyRecord | null): AnyRecord | undefined {

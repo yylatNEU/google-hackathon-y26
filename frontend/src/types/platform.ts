@@ -1028,8 +1028,6 @@ export type DigitalTwinBenchmarkEpisode = {
 
 export type DigitalTwinLearnedRerun = {
   mode?: string;
-  baseline_seed?: string;
-  learned_seed?: string;
   remediations_generated?: number;
   memory_write?: {
     status?: string;
@@ -1060,7 +1058,6 @@ export type DigitalTwinBenchmarkResult = {
   status?: string;
   mode?: string;
   policy_under_test?: string;
-  seed?: string;
   horizon_minutes?: number;
   summary?: {
     episodes?: number;
@@ -1092,7 +1089,6 @@ export type DigitalTwinBenchmarkHistoryRun = {
   created_at?: string;
   mode?: string;
   policy_under_test?: string;
-  seed?: string;
   horizon_minutes?: number;
   scenario_ids?: string[];
   episodes?: number;
@@ -1112,7 +1108,6 @@ export type DigitalTwinBenchmarkReport = {
   created_at?: string;
   source_mode?: string;
   policy_under_test?: string;
-  seed?: string;
   horizon_minutes?: number;
   summary?: {
     episodes?: number;
@@ -1423,10 +1418,8 @@ export type ReviewSnapshot = {
   replay?: {
     mode?: string;
     run_id?: string;
-    seed?: string;
     run?: {
       run_id?: string;
-      seed?: string;
       scenario_key?: string;
       created_at?: string;
       updated_at?: string;
@@ -1615,7 +1608,6 @@ export type RunTelemetry = {
     upgrade_detail?: Record<string, unknown>;
   };
   runtime_proof?: {
-    fallback_reason?: string;
     receipt_upgrade_status?: string;
     full_runtime?: {
       status?: string;
@@ -2019,7 +2011,6 @@ export type ProactiveRunTelemetry = {
     platform?: string;
     model?: string;
     gemini_ready?: boolean;
-    fallback_reason?: string | null;
     elapsed_ms?: number;
   };
   trace_contract?: RunTraceContract;
@@ -2155,79 +2146,4 @@ export type UnifiedOperatingReceipt = {
   learning_update?: Record<string, unknown>;
   memory?: Record<string, unknown>;
   analytics?: Record<string, unknown>;
-};
-
-export type DemoScenario = {
-  key: ScenarioKey;
-  label: string;
-  title: string;
-  situation: string;
-  riskLevel: "HIGH" | "MEDIUM";
-  confidence: number;
-  humanApproval: boolean;
-  metrics: Array<{
-    label: string;
-    value: string;
-    detail: string;
-    tone: "risk" | "watch" | "ok";
-  }>;
-  actions: Array<{
-    action: string;
-    owner: string;
-    deadline: string;
-    expectedImpact: string;
-  }>;
-  tradeoffs: Array<{
-    label: string;
-    value: string;
-  }>;
-  policies: Array<{
-    area: PolicyArea;
-    rule: string;
-    enforcement: string;
-  }>;
-  evals: EvalScore[];
-  eyEvals?: EvalScore[];
-  agentBriefs: AgentBrief[];
-  mongoFocus: Array<[string, string]>;
-  experienceModel?: {
-    connectedData: Array<{
-      source: string;
-      signal: string;
-      status: "live" | "watch" | "stale";
-    }>;
-    digitalTwin: {
-      horizon: string;
-      prediction: string;
-      confidence: number;
-      assumptions: string[];
-      projectedMetrics: Array<{
-        label: string;
-        before: string;
-        after: string;
-        tone: "risk" | "watch" | "ok";
-      }>;
-    };
-    smartActions: Array<{
-      channel: "guest_app" | "worker_device" | "digital_signage" | "equipment_controller";
-      target: string;
-      payload: string;
-      guardrail: string;
-    }>;
-    guestSegments: Array<{
-      segment: string;
-      trigger: string;
-      message: string;
-      incentive?: string;
-      privacy: string;
-    }>;
-    dataReadiness: Array<{
-      source: string;
-      status: "ready" | "watch" | "gap";
-      latency: string;
-      coverage: string;
-      impact: string;
-    }>;
-  };
-  runMessage: string;
 };

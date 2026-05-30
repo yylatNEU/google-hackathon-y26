@@ -1,6 +1,6 @@
 # ParkPulse AI: Product Roadmap
 
-ParkPulse AI demonstrates a multi-agent operations copilot for amusement parks. It does not replace ride safety systems, maintenance sign-off, security command, labor policy, POS, inventory, or human operators. It coordinates their signals into grounded recommendations for ride downtime, crowd redistribution, staff stress, food demand spikes, weather disruption, energy pressure, and incident response.
+ParkPulse AI demonstrates an ML-first operations copilot for amusement parks. It does not replace ride safety systems, maintenance sign-off, security command, labor policy, POS, inventory, or human operators. Prediction, simulation, optimization, and deterministic policy gates operate the loop; LLMs interpret messy context, explain choices, draft receiver payloads, and convert outcomes into training signals.
 
 ## MVP Spine
 

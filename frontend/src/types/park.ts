@@ -71,6 +71,28 @@ export type ParkIncidentReadiness = {
   operatorEscalation: string;
 };
 
+export type ParkChaosEngine = {
+  mode: string;
+  usesSeedData: boolean;
+  activeUnexpectedEvents: Array<{
+    kind?: string;
+    targetId?: string;
+    intensity?: number;
+    createdAt?: string;
+    source?: string;
+    reason?: string;
+  }>;
+  activeCount: number;
+  ruleCount: number;
+  rules: Array<{
+    id: string;
+    if?: string;
+    then?: string;
+    condition?: string;
+    effect?: string;
+  }>;
+};
+
 export type ParkGuestCare = {
   openCases: number;
   complaintRatePct: number;
@@ -1045,6 +1067,7 @@ export type ParkState = {
   maintenance?: ParkMaintenance;
   foodInventory?: ParkFoodInventory;
   incidentReadiness?: ParkIncidentReadiness;
+  chaosEngine?: ParkChaosEngine;
   guestCare?: ParkGuestCare;
   operatingClock?: ParkOperatingClock;
   showtimeLearningLoop?: ParkShowtimeLearningLoop;

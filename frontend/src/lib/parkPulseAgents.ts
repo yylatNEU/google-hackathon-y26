@@ -1,6 +1,10 @@
 import type { ParkState } from "@/types/park";
 import type { AgentBrief, RuntimeAgentFinding } from "@/types/platform";
-import { pct } from "@/lib/parkPulseDemoContent";
+
+function pct(value?: number) {
+  if (typeof value !== "number") return "--";
+  return `${Math.round(value)}%`;
+}
 
 export function sortedByRisk<T>(items: T[], score: (item: T) => number, limit: number) {
   return [...items].sort((a, b) => score(b) - score(a)).slice(0, limit);

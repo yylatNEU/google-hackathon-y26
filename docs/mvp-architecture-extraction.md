@@ -2,36 +2,37 @@
 
 ## Essence
 
-ParkPulse is an operations decision copilot for a live amusement park.
+ParkPulse is an ML-first operations copilot for a live amusement park.
 
 The product should answer one question better than a dashboard or chatbot:
 
 > Something changed in the park. What should operations do now, and can we prove the recommendation is grounded, safe, and balanced?
 
-Everything that does not help this loop is secondary.
+The product should not claim that an LLM operates the park. The operating layer is prediction, simulation, optimization, and deterministic policy. The LLM layer interprets messy human context, explains the decision, drafts receiver payloads, and helps turn outcomes into training labels. See [`docs/ml-first-product-architecture.md`](ml-first-product-architecture.md) for the clean product contract.
 
 ## MVP Promise
 
-An operator selects or receives an operational disruption. ParkPulse reads the current park state, explains the risk, proposes a bounded action plan, checks policy constraints, prepares dispatch payloads, and shows an evaluation/proof receipt.
+An operator selects or receives an operational disruption. ParkPulse reads current park state, turns raw signals and notes into structured features, predicts pressure, scores candidate actions, selects a bounded intervention, checks deterministic policy constraints, prepares receiver payloads, and shows an evaluation/proof/training receipt.
 
 The first MVP should prove four things:
 
 1. The app understands a believable park state.
-2. The agent chooses between tradeoffs instead of giving generic advice.
+2. The prediction and optimization layer chooses between tradeoffs instead of giving generic advice.
 3. Safety, staffing, inventory, and guest-experience constraints can block or reshape the plan.
-4. The final action is auditable: source signals, policy gate, dispatch payloads, and eval scores are visible.
+4. The final action is auditable: source signals, structured features, prediction scores, policy gate, dispatch payloads, eval scores, and outcome memory are visible.
 
 ## MVP User Journey
 
 1. Operator opens the command center.
 2. Operator chooses one of three scenarios: ride down, staff shortage, or food demand spike.
 3. The app shows live park state and the immediate operational risk.
-4. The agent run produces:
-   - specialist findings
-   - selected action plan
+4. The operating loop produces:
+   - structured operational features
+   - prediction and scoring results
+   - selected action plan and rejected options
    - policy gate result
-   - guest, worker, signage, or equipment payloads
-   - eval scorecard
+   - LLM-generated explanation and guest, worker, signage, or equipment payloads
+   - eval scorecard and training-label receipt
 5. Operator approves or rejects the proposed dispatch.
 6. The app records a decision receipt and shows what changed after the action.
 
@@ -39,16 +40,19 @@ The first MVP should prove four things:
 
 ```mermaid
 flowchart LR
-    A[Park State] --> B[Incident or Scenario]
-    B --> C[Signal Triage]
-    C --> D[Specialist Findings]
-    D --> E[Decision Bridge]
-    E --> F[Policy Gate]
-    F --> G[Dispatch Drafts]
-    G --> H[Operator Approval]
-    H --> I[Action Receipt]
-    I --> J[Eval + Memory]
-    J --> A
+    A[Raw Signals] --> B[Feature Pipeline]
+    B --> C[Prediction + Simulation]
+    C --> D[Optimizer]
+    E[Operator Notes + Policybooks] --> F[LLM Interpreter]
+    F --> G[Structured Constraints]
+    G --> D
+    H[Deterministic Policy Gate] --> D
+    D --> I[Selected Action + Scores]
+    I --> J[LLM Explanation + Payload Drafts]
+    J --> K[Operator Approval]
+    K --> L[Policy-Gated Dispatch]
+    L --> M[Outcome + Eval + Memory]
+    M --> B
 ```
 
 This loop should be the primary architecture, primary demo, and primary UI.
@@ -60,11 +64,13 @@ Backend modules that belong in the core path:
 - `park_simulation.py`: live state and scenario effects
 - `park_scenarios.py`: canonical scenario definitions
 - `park_signal_intake.py`: unstructured signal classification and fusion
-- `park_multi_agent.py`: specialist findings and orchestration
+- `park_multi_agent.py`: LLM-readable findings, explanations, and orchestration metadata
 - `park_action_bridge.py`: action-plan shaping
+- `dynamic_operational_twin.py`, `park_twin_engine.py`, `park_optimizer.py`: prediction, simulation, scoring, and optimization
 - `policy_engine.py` and `policy_loader.py`: hard operational constraints
 - `park_delivery.py`: dispatch payloads, approval, outbox
 - `park_eval.py`: scorecard for the final recommendation
+- `park_episode_learning.py`: outcome rows and training labels
 - `mongo_memory.py`: operational memory when configured, graceful local fallback otherwise
 - `gcp_trace_eval.py`: trace/eval status and proof when configured
 
@@ -164,7 +170,9 @@ frontend/src/
       CommandCenter.tsx
       ScenarioRail.tsx
       ParkStateStrip.tsx
+      ProductLoopPanel.tsx
       SignalPanel.tsx
+      DynamicTwinMvpPanel.tsx
       AgentFindingsPanel.tsx
       DecisionPlanPanel.tsx
       PolicyGatePanel.tsx
@@ -187,12 +195,13 @@ The first screen should contain only:
 
 - scenario selector
 - current park state strip
-- incident/risk summary
-- agent findings
-- recommended action plan
-- policy gate
+- raw signals and structured features
+- prediction and scoring
+- optimizer recommendation
+- deterministic policy gate
+- LLM explanation and receiver payloads
 - approval/dispatch payloads
-- eval/proof receipt
+- outcome/eval/training receipt
 
 ## Product Cut
 
@@ -200,11 +209,11 @@ The first screen should contain only:
 
 - Three scenario buttons
 - One command center page
-- One agent run flow
+- One operating-loop run flow
 - Human approval
 - Delivery outbox
 - Eval scorecard
-- Memory/proof receipt
+- Memory/proof/training receipt
 - Integration status
 
 ### Demo Plus
@@ -231,12 +240,12 @@ The MVP is done when a judge can run one scenario and understand the whole syste
 
 1. What changed?
 2. Why is it risky?
-3. What does the agent recommend?
+3. What does the optimizer recommend?
 4. What constraints shaped or blocked the action?
-5. What exactly will be sent to guests/workers/signage/equipment?
+5. What exactly did the LLM draft for guests/workers/signage/equipment?
 6. Did a human approve it?
 7. How was the decision scored?
-8. Where is the receipt/memory?
+8. Where is the outcome, receipt, memory, and training label?
 
 If a panel does not answer one of those questions, remove it from the MVP route.
 

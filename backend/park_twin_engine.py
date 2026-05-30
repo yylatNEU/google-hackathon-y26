@@ -571,6 +571,12 @@ def score_outcome(before: dict[str, Any], after: dict[str, Any], action_plan: di
     satisfaction_delta = _as_int(after_digest.get("avg_satisfaction")) - _as_int(before_digest.get("avg_satisfaction"))
     food_delta = _as_int(after_digest.get("food_backlog")) - _as_int(before_digest.get("food_backlog"))
     path_delta = _as_int(after_digest.get("most_congested_path", {}).get("congestionLevel")) - _as_int(before_digest.get("most_congested_path", {}).get("congestionLevel"))
+    callout_delta = _as_int(after_digest.get("open_callouts")) - _as_int(before_digest.get("open_callouts"))
+    grid_delta = _as_int(after_digest.get("grid_load")) - _as_int(before_digest.get("grid_load"))
+    storm_delta = _as_int(after_digest.get("storm_risk")) - _as_int(before_digest.get("storm_risk"))
+    before_care = before.get("guestCare", {}) if isinstance(before.get("guestCare"), dict) else {}
+    after_care = after.get("guestCare", {}) if isinstance(after.get("guestCare"), dict) else {}
+    care_delta = _as_int(after_care.get("openCases")) - _as_int(before_care.get("openCases"))
     safety_violations = 0
     if any(_as_int(zone.get("density")) >= 102 for zone in _zones(after)):
         safety_violations += 1
@@ -585,6 +591,10 @@ def score_outcome(before: dict[str, Any], after: dict[str, Any], action_plan: di
         + satisfaction_delta * 1.5
         + max(0, -food_delta) * 0.08
         - max(0, path_delta) * 0.45
+        - max(0, callout_delta) * 0.9
+        - max(0, care_delta) * 1.1
+        - max(0, grid_delta) * 0.35
+        - max(0, storm_delta) * 0.18
         - safety_violations * 18
     )
     return {
@@ -595,6 +605,10 @@ def score_outcome(before: dict[str, Any], after: dict[str, Any], action_plan: di
             "avg_satisfaction_delta": satisfaction_delta,
             "food_backlog_delta": food_delta,
             "path_congestion_delta": path_delta,
+            "staff_callout_delta": callout_delta,
+            "guest_care_case_delta": care_delta,
+            "grid_load_delta": grid_delta,
+            "storm_risk_delta": storm_delta,
             "safety_violations": safety_violations,
         },
         "before": before_digest,

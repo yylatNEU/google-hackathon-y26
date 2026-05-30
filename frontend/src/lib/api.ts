@@ -1,5 +1,5 @@
 const localApiUrls = ["http://127.0.0.1:8000"];
-const defaultRequestTimeoutMs = 3000;
+const defaultRequestTimeoutMs = 12000;
 export const longRunningRequestTimeoutMs = 30000;
 
 type ParkPulseRequestInit = RequestInit & {
@@ -17,8 +17,7 @@ export function getApiUrls() {
   const sameOrigin = typeof globalThis.location !== "undefined" ? globalThis.location.origin : undefined;
   const configuredUrls = [viteEnv?.VITE_API_URL, configured].filter(Boolean) as string[];
   if (configuredUrls.length) return Array.from(new Set(configuredUrls));
-  if (sameOrigin) return [sameOrigin];
-  return localApiUrls;
+  return Array.from(new Set([...localApiUrls, sameOrigin].filter(Boolean) as string[]));
 }
 
 function headersToEntries(headers?: HeadersInit): Array<[string, string]> {
@@ -90,7 +89,7 @@ function normalizeParkPulseApiError(error: unknown, path: string) {
   if (error instanceof Error) {
     if (isTransportError(error)) {
       const urls = getApiUrls().join(", ") || "the configured API URL";
-      return new Error(`ParkPulse API is unreachable for ${path}. Check backend connectivity at ${urls}.`);
+      return new Error(`ParkPulse API did not respond for ${path} within the request budget. Checked ${urls}.`);
     }
     return error;
   }

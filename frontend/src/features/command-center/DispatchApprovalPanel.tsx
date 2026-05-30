@@ -22,7 +22,7 @@ export function DispatchApprovalPanel({
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Receiver payloads</div>
+          <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">LLM-drafted receiver payloads</div>
           <h2 className="mt-1 text-xl font-black text-slate-100">{humanApproval ? "Human approval required" : "Bounded dispatch ready"}</h2>
         </div>
         <button
@@ -31,7 +31,7 @@ export function DispatchApprovalPanel({
           disabled={isDispatching}
           className="w-fit rounded border border-cyan-300 bg-cyan-300 px-4 py-2 text-xs font-black text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isDispatching ? "Sending" : "Send selected action"}
+          {isDispatching ? "Sending" : "Send through gate"}
         </button>
       </div>
 
@@ -74,4 +74,3 @@ export function DispatchApprovalPanel({
     </section>
   );
 }
-

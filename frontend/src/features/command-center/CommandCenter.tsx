@@ -1,14 +1,10 @@
 "use client";
 
-import { AgentFindingsPanel } from "./AgentFindingsPanel";
-import { DecisionPlanPanel } from "./DecisionPlanPanel";
+import { ActualTrainingPanel } from "./ActualTrainingPanel";
 import { DispatchApprovalPanel } from "./DispatchApprovalPanel";
-import { DynamicTwinMvpPanel } from "./DynamicTwinMvpPanel";
 import { EvalReceiptPanel } from "./EvalReceiptPanel";
 import { ParkStateStrip } from "./ParkStateStrip";
-import { PolicyGatePanel } from "./PolicyGatePanel";
-import { ScenarioRail } from "./ScenarioRail";
-import { SignalPanel } from "./SignalPanel";
+import { ProductLoopPanel } from "./ProductLoopPanel";
 import { useCommandCenter } from "./useCommandCenter";
 
 export function CommandCenter() {
@@ -21,9 +17,9 @@ export function CommandCenter() {
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div>
               <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">ParkPulse AI</div>
-              <h1 className="mt-2 max-w-5xl text-3xl font-black tracking-normal text-slate-100 lg:text-5xl">Operations command center</h1>
+              <h1 className="mt-2 max-w-5xl text-3xl font-black tracking-normal text-slate-100 lg:text-5xl">Park operating loop</h1>
               <p className="mt-3 max-w-3xl text-sm leading-relaxed text-slate-400">
-                Something changed in the park. Decide what operations should do now, prove the recommendation is grounded, and keep dispatch behind a policy gate.
+                Watch live runtime signals become features, let ML predictors and an optimizer propose actions, then route the result through policy, eval, dispatch, review, and outcome learning.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -48,6 +44,8 @@ export function CommandCenter() {
           isConnected={command.isConnected}
           isRefreshing={command.isRefreshing}
           lastUpdatedAt={command.lastUpdatedAt}
+          livePollMs={command.livePollMs}
+          connectionError={command.connectionError}
           onRefresh={() => void command.refreshParkState()}
         />
 
@@ -58,48 +56,55 @@ export function CommandCenter() {
           </section>
         )}
 
-        <div className="grid gap-5 xl:grid-cols-[340px_1fr]">
-          <ScenarioRail scenarios={command.scenarios} selectedScenarioKey={command.selectedScenarioKey} onSelect={command.selectScenario} />
-
-          <div className="space-y-5">
-            <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                  <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">MVP loop</div>
-                  <h2 className="mt-1 text-xl font-black text-slate-100">State -> findings -> action -> gate -> dispatch -> receipt</h2>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void command.runAgent()}
-                  disabled={command.isRunning}
-                  className="w-fit rounded border border-cyan-300 bg-cyan-300 px-5 py-3 text-sm font-black text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {command.isRunning ? "Running agent" : "Run agent"}
-                </button>
+        <div className="space-y-5">
+          <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Operating loop</div>
+                <h2 className="mt-1 text-xl font-black text-slate-100">Signals, features, predictors, optimizer, gate, execute or review, learn</h2>
               </div>
-            </section>
+              <button
+                type="button"
+                onClick={() => void command.runAgent()}
+                disabled={command.isRunning}
+                className="w-fit rounded border border-cyan-300 bg-cyan-300 px-5 py-3 text-sm font-black text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {command.isRunning ? "Running loop" : "Run operating loop"}
+              </button>
+            </div>
+          </section>
 
-            <DynamicTwinMvpPanel />
-            <SignalPanel scenario={command.scenario} parkState={command.parkState} />
-            <AgentFindingsPanel agentBriefs={command.agentBriefs} />
-            <DecisionPlanPanel scenario={command.scenario} selectedAction={command.selectedAction} />
-            <PolicyGatePanel scenario={command.scenario} gate={command.policyGate} governance={command.runTelemetry?.governance} />
-            <DispatchApprovalPanel
-              dispatches={command.dispatches}
-              humanApproval={command.scenario.humanApproval}
-              isDispatching={command.isDispatching}
-              isApproving={command.isApproving}
-              onExecute={() => void command.executeSelectedAction()}
-              onAcknowledge={(dispatch, choice) => void command.acknowledgeDispatch(dispatch, choice)}
-            />
-            <EvalReceiptPanel
-              evals={command.activeEvalScores}
-              telemetry={command.runTelemetry}
-              integrationStatus={command.integrationStatus}
-              evalScore={command.evalScore}
-              memoryMode={command.memoryMode}
-            />
-          </div>
+          <ProductLoopPanel
+            parkState={command.parkState}
+            runTelemetry={command.runTelemetry}
+            dispatches={command.dispatches}
+            evals={command.activeEvalScores}
+            selectedAction={command.selectedAction}
+            policyGate={command.policyGate}
+            memoryMode={command.memoryMode}
+          />
+          <ActualTrainingPanel
+            training={command.actualTraining}
+            isLoading={command.isTrainingLoading}
+            isStartingGcpTraining={command.isStartingGcpTraining}
+            onRefresh={() => void command.refreshActualTraining()}
+            onStartGcpTraining={() => void command.refreshActualTraining({ runGcpTraining: true })}
+          />
+          <DispatchApprovalPanel
+            dispatches={command.dispatches}
+            humanApproval={command.policyGate?.toLowerCase().includes("review") ?? false}
+            isDispatching={command.isDispatching}
+            isApproving={command.isApproving}
+            onExecute={() => void command.executeSelectedAction()}
+            onAcknowledge={(dispatch, choice) => void command.acknowledgeDispatch(dispatch, choice)}
+          />
+          <EvalReceiptPanel
+            evals={command.activeEvalScores}
+            telemetry={command.runTelemetry}
+            integrationStatus={command.integrationStatus}
+            evalScore={command.evalScore}
+            memoryMode={command.memoryMode}
+          />
         </div>
       </div>
     </main>
