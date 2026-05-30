@@ -77,7 +77,6 @@ Frontend pieces that belong in the core path:
 - `src/components/ParkPulseSignals.tsx`: live signal and command-stage display
 - `src/components/ParkPulseActionBus.tsx`: dispatch and approval surface
 - `src/components/ParkPulseMap.tsx`: spatial grounding
-- `src/components/OperationalMemoryPanel.tsx`: proof/memory panel
 
 ## Move Out Of The MVP Path
 
@@ -250,4 +249,3 @@ If a panel does not answer one of those questions, remove it from the MVP route.
 5. Make `src/app/page.tsx` render only the MVP command center.
 6. Keep `/monitor`, `/human`, and `/executive` as secondary views that reuse the same run receipt.
 7. Update docs and README so the repo describes the MVP loop first, integrations second.
-

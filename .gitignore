@@ -12,6 +12,7 @@ __pycache__/
 .env.*
 !.env.*.example
 backend/.env
+backend/venv/
 backend/*.db
 backend/db_backups/
 backend/digital_twin_reports/
