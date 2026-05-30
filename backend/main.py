@@ -581,7 +581,320 @@ async def _fast_park_state_lite() -> dict[str, Any]:
             "policy_refs": ["PARK-SAFE-001", "PARK-OPS-001", "PARK-CARE-001"],
         },
     )
+    state["heartbeatController"] = _heartbeat_controller_status(include_logs=False)
     return state
+
+
+def _model_context_value(snapshot: dict[str, Any] | None, scenario_key: str, policy_id: str = "live_complex_park_episode") -> dict[str, Any]:
+    if not snapshot:
+        return {"q_value": None, "sample_count": 0, "source": "no_snapshot"}
+    model = snapshot.get("model", {}) if isinstance(snapshot.get("model"), dict) else {}
+    for context in model.get("context_values", []) if isinstance(model.get("context_values"), list) else []:
+        if not isinstance(context, dict) or str(context.get("context")) != scenario_key:
+            continue
+        for policy in context.get("ranked_policies", []) if isinstance(context.get("ranked_policies"), list) else []:
+            if isinstance(policy, dict) and str(policy.get("policy_id")) == policy_id:
+                return {"q_value": _safe_float(policy.get("q_value")), "sample_count": int(policy.get("sample_count") or 0), "source": "context_policy"}
+    for policy in model.get("ranked_policies", []) if isinstance(model.get("ranked_policies"), list) else []:
+        if isinstance(policy, dict) and str(policy.get("policy_id")) == policy_id:
+            return {"q_value": _safe_float(policy.get("average_reward")), "sample_count": int(policy.get("sample_count") or 0), "source": "global_policy"}
+    return {"q_value": None, "sample_count": 0, "source": "missing_policy"}
+
+
+def _load_heartbeat_policy_snapshot(force: bool = False) -> dict[str, Any]:
+    global _heartbeat_policy_snapshot, _heartbeat_policy_snapshot_loaded_at
+    max_age = max(10.0, _float_env("PARKPULSE_HEARTBEAT_POLICY_REFRESH_SECONDS", 180.0))
+    now = time.monotonic()
+    if not force and _heartbeat_policy_snapshot is not None and now - _heartbeat_policy_snapshot_loaded_at < max_age:
+        return _heartbeat_policy_snapshot
+    from park_actual_training import actual_training_status
+
+    payload = actual_training_status(min_rows=_int_env("PARKPULSE_HEARTBEAT_MIN_TRAINING_ROWS", 3), run_gcp_training=False)
+    snapshot = {
+        "status": payload.get("status"),
+        "mode": "cached_post_trained_policy_snapshot",
+        "loaded_at": _now_iso(),
+        "loaded_monotonic": now,
+        "source": payload.get("source"),
+        "sample_count": payload.get("sample_count"),
+        "model": payload.get("model", {}),
+        "gcp_ml": {
+            "bigquery": payload.get("gcp_ml", {}).get("bigquery", {}) if isinstance(payload.get("gcp_ml"), dict) else {},
+            "bigquery_ml_training": payload.get("gcp_ml", {}).get("bigquery_ml_training", {}) if isinstance(payload.get("gcp_ml"), dict) else {},
+        },
+        "debug": payload.get("debug", {}),
+    }
+    _heartbeat_policy_snapshot = snapshot
+    _heartbeat_policy_snapshot_loaded_at = now
+    return snapshot
+
+
+def _schedule_heartbeat_policy_refresh(force: bool = False) -> None:
+    global _heartbeat_policy_refreshing
+    if _heartbeat_policy_refreshing:
+        return
+    _heartbeat_policy_refreshing = True
+
+    async def refresh() -> None:
+        global _heartbeat_policy_refreshing
+        try:
+            await asyncio.to_thread(_load_heartbeat_policy_snapshot, force)
+        except Exception as error:
+            _record_heartbeat_action_log(
+                {
+                    "status": "policy_refresh_error",
+                    "mode": "heartbeat_controller",
+                    "created_at": _now_iso(),
+                    "error": str(error)[:300],
+                }
+            )
+        finally:
+            _heartbeat_policy_refreshing = False
+
+    asyncio.create_task(refresh())
+
+
+def _heartbeat_policy_snapshot_for_tick() -> dict[str, Any] | None:
+    max_age = max(10.0, _float_env("PARKPULSE_HEARTBEAT_POLICY_REFRESH_SECONDS", 180.0))
+    if _heartbeat_policy_snapshot is None:
+        try:
+            return _load_heartbeat_policy_snapshot(force=True)
+        except Exception as error:
+            _record_heartbeat_action_log(
+                {
+                    "status": "policy_load_error",
+                    "mode": "heartbeat_controller",
+                    "created_at": _now_iso(),
+                    "error": str(error)[:300],
+                }
+            )
+            return None
+    if time.monotonic() - _heartbeat_policy_snapshot_loaded_at >= max_age:
+        _schedule_heartbeat_policy_refresh(force=True)
+    return _heartbeat_policy_snapshot
+
+
+def _active_heartbeat_events(state: dict[str, Any]) -> list[dict[str, Any]]:
+    chaos = state.get("chaosEngine", {}) if isinstance(state.get("chaosEngine"), dict) else {}
+    events = chaos.get("activeUnexpectedEvents", []) if isinstance(chaos.get("activeUnexpectedEvents"), list) else []
+    if not events:
+        flow = state.get("guestFlow", {}) if isinstance(state.get("guestFlow"), dict) else {}
+        events = flow.get("interventions", []) if isinstance(flow.get("interventions"), list) else []
+    return [event for event in events if isinstance(event, dict)]
+
+
+def _heartbeat_candidate_actions(state: dict[str, Any], snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    flow = state.get("guestFlow", {}) if isinstance(state.get("guestFlow"), dict) else {}
+    scenario = flow.get("activeScenario", {}) if isinstance(flow.get("activeScenario"), dict) else {}
+    scenario_key = str(scenario.get("key") or "unknown")
+    events = _active_heartbeat_events(state)
+    kind_text = " ".join(str(event.get("kind") or "") for event in events[:8]).lower()
+    context_value = _model_context_value(snapshot, scenario_key)
+    learned_q = context_value.get("q_value")
+    candidates = [
+        {
+            "id": "food_redirect",
+            "target": "food",
+            "action": "redirect_food_demand",
+            "domains": ("payment", "inventory", "food", "mobile_order", "demand"),
+            "label": "Redirect food demand to available capacity.",
+        },
+        {
+            "id": "equipment_hold",
+            "target": "equipment",
+            "action": "hold_equipment_changes",
+            "domains": ("energy", "heat", "storm", "lightning", "weather"),
+            "label": "Hold risky equipment/HVAC changes while load is unstable.",
+        },
+        {
+            "id": "staff_redeploy",
+            "target": "staff",
+            "action": "redeploy_staff",
+            "domains": ("staff", "radio", "security", "access"),
+            "label": "Redeploy staff toward the highest operating pressure.",
+        },
+        {
+            "id": "crowd_reroute",
+            "target": "crowd_safety",
+            "action": "calm_reroute",
+            "domains": ("parade", "demand", "parking", "ticketing", "restroom", "show", "crowd"),
+            "label": "Calmly reroute crowd flow away from pressure points.",
+        },
+        {
+            "id": "ride_reroute",
+            "target": "ride",
+            "action": "reroute_down_ride",
+            "domains": ("ride", "sensor", "queue"),
+            "label": "Reroute guests around ride or queue risk.",
+        },
+    ]
+    scenario_boosts = {
+        "food_spike": "food_redirect",
+        "staff_shortage": "staff_redeploy",
+        "storm_response": "equipment_hold",
+        "ride_down": "ride_reroute",
+    }
+    scored: list[dict[str, Any]] = []
+    for candidate in candidates:
+        match_score = sum(1 for token in candidate["domains"] if token in kind_text) * 16
+        if scenario_boosts.get(scenario_key) == candidate["id"]:
+            match_score += 11
+        intensity = max((_safe_float(event.get("intensity")) for event in events), default=0.0)
+        learned_component = (_safe_float(learned_q, 0.0) - 50) * 0.6 if learned_q is not None else 0.0
+        score = round(match_score + min(24.0, intensity / 4) + learned_component, 2)
+        scored.append(
+            {
+                **candidate,
+                "score": score,
+                "learned_q": learned_q,
+                "learned_sample_count": context_value.get("sample_count", 0),
+                "learned_source": context_value.get("source"),
+                "scenario_key": scenario_key,
+            }
+        )
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    return scored
+
+
+def _heartbeat_policy_gate(candidate: dict[str, Any] | None, state: dict[str, Any], snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    if not candidate:
+        return {"allowed": False, "gate_status": "no_action", "findings": ["No bounded candidate action scored above the action threshold."]}
+    if not snapshot or snapshot.get("status") != "ready":
+        return {"allowed": False, "gate_status": "review", "findings": ["No ready post-trained policy snapshot is loaded."]}
+    allowed_targets = {"food", "equipment", "staff", "crowd_safety", "ride"}
+    if candidate.get("target") not in allowed_targets:
+        return {"allowed": False, "gate_status": "blocked", "findings": ["Candidate target is outside heartbeat controller authority."]}
+    if _safe_float(candidate.get("learned_q"), 0.0) < _float_env("PARKPULSE_HEARTBEAT_MIN_MODEL_Q", 45.0):
+        return {"allowed": False, "gate_status": "review", "findings": ["Learned policy value is below heartbeat auto-execute threshold."]}
+    if candidate.get("learned_sample_count", 0) < _int_env("PARKPULSE_HEARTBEAT_MIN_CONTEXT_SAMPLES", 2):
+        return {"allowed": False, "gate_status": "review", "findings": ["Context has too few observed training samples for autonomous heartbeat action."]}
+    return {
+        "allowed": True,
+        "gate_status": "allowed",
+        "findings": ["Bounded reversible action selected from cached post-trained policy snapshot."],
+    }
+
+
+def _record_heartbeat_action_log(entry: dict[str, Any]) -> None:
+    with _heartbeat_action_log_lock:
+        _heartbeat_action_logs.insert(0, entry)
+        del _heartbeat_action_logs[_int_env("PARKPULSE_HEARTBEAT_ACTION_LOG_LIMIT", 160):]
+
+
+def _heartbeat_controller_status(include_logs: bool = True, limit: int = 20) -> dict[str, Any]:
+    now = time.monotonic()
+    snapshot_age = round(now - _heartbeat_policy_snapshot_loaded_at, 1) if _heartbeat_policy_snapshot_loaded_at else None
+    snapshot = _heartbeat_policy_snapshot or {}
+    model = snapshot.get("model", {}) if isinstance(snapshot.get("model"), dict) else {}
+    payload = {
+        "status": "enabled" if _heartbeat_controller_enabled() else "disabled",
+        "mode": "cached_post_trained_model_heartbeat_controller",
+        "uses_bigquery_every_tick": False,
+        "policy_snapshot": {
+            "loaded": bool(_heartbeat_policy_snapshot),
+            "loaded_at": snapshot.get("loaded_at"),
+            "age_seconds": snapshot_age,
+            "refresh_seconds": _float_env("PARKPULSE_HEARTBEAT_POLICY_REFRESH_SECONDS", 180.0),
+            "sample_count": snapshot.get("sample_count"),
+            "source": snapshot.get("source"),
+            "best_policy_id": model.get("best_policy_id"),
+            "bqml_model_id": (snapshot.get("gcp_ml", {}).get("bigquery_ml_training", {}) if isinstance(snapshot.get("gcp_ml"), dict) else {}).get("model_id"),
+        },
+        "controller": {
+            "action_cooldown_seconds": _float_env("PARKPULSE_HEARTBEAT_ACTION_COOLDOWN_SECONDS", 30.0),
+            "last_action_age_seconds": round(now - _heartbeat_controller_last_action_at, 1) if _heartbeat_controller_last_action_at else None,
+            "running": _heartbeat_controller_running,
+            "refreshing_policy": _heartbeat_policy_refreshing,
+        },
+        "log_count": len(_heartbeat_action_logs),
+    }
+    if include_logs:
+        with _heartbeat_action_log_lock:
+            payload["logs"] = list(_heartbeat_action_logs[: max(1, min(160, int(limit or 20)))])
+    return payload
+
+
+async def _maybe_run_heartbeat_controller(advanced_steps: int) -> dict[str, Any] | None:
+    global _heartbeat_controller_running, _heartbeat_controller_last_action_at
+    if not _heartbeat_controller_enabled() or _fast_park_simulation is None or advanced_steps <= 0:
+        return None
+    if _heartbeat_controller_running:
+        return None
+    cooldown = max(1.0, _float_env("PARKPULSE_HEARTBEAT_ACTION_COOLDOWN_SECONDS", 30.0))
+    if _heartbeat_controller_last_action_at and time.monotonic() - _heartbeat_controller_last_action_at < cooldown:
+        return None
+    _heartbeat_controller_running = True
+    try:
+        snapshot = _heartbeat_policy_snapshot_for_tick()
+        get_state_lite = getattr(_fast_park_simulation, "get_state_lite", None)
+        state = await get_state_lite() if callable(get_state_lite) else await _fast_park_simulation.get_state()
+        events = _active_heartbeat_events(state)
+        min_events = _int_env("PARKPULSE_HEARTBEAT_MIN_ACTIVE_CHAOS", 1)
+        if len(events) < min_events:
+            return None
+        candidates = _heartbeat_candidate_actions(state, snapshot)
+        selected = candidates[0] if candidates else None
+        gate = _heartbeat_policy_gate(selected, state, snapshot)
+        sim_time = state.get("simTime", {}) if isinstance(state.get("simTime"), dict) else {}
+        event_digest = [
+            {
+                "kind": event.get("kind"),
+                "targetId": event.get("targetId"),
+                "intensity": event.get("intensity"),
+                "visibility": event.get("visibility"),
+                "signalReliabilityPct": event.get("signalReliabilityPct"),
+            }
+            for event in events[:6]
+        ]
+        entry: dict[str, Any] = {
+            "id": f"heartbeat_action_{int(time.time() * 1000)}",
+            "created_at": _now_iso(),
+            "mode": "cached_post_trained_model_heartbeat_controller",
+            "status": "review" if not gate.get("allowed") else "selected",
+            "sim_time": sim_time,
+            "scenario_key": selected.get("scenario_key") if selected else None,
+            "active_incident_count": len(events),
+            "active_incidents": event_digest,
+            "policy_snapshot": {
+                "loaded_at": snapshot.get("loaded_at") if snapshot else None,
+                "sample_count": snapshot.get("sample_count") if snapshot else None,
+                "source": snapshot.get("source") if snapshot else None,
+                "age_seconds": round(time.monotonic() - _heartbeat_policy_snapshot_loaded_at, 1) if _heartbeat_policy_snapshot_loaded_at else None,
+            },
+            "candidate": {k: selected.get(k) for k in ("id", "target", "action", "score", "learned_q", "learned_sample_count", "learned_source")} if selected else None,
+            "candidate_scores": [
+                {k: candidate.get(k) for k in ("id", "target", "action", "score", "learned_q", "learned_sample_count")}
+                for candidate in candidates[:5]
+            ],
+            "policy_gate": gate,
+            "executed": False,
+        }
+        if not gate.get("allowed") or not selected:
+            _record_heartbeat_action_log(entry)
+            return entry
+        from park_simulation import park_simulation
+
+        result = await park_simulation.execute_action(str(selected["target"]), str(selected["action"]))
+        _heartbeat_controller_last_action_at = time.monotonic()
+        entry["status"] = result.get("status")
+        entry["executed"] = result.get("status") == "success"
+        entry["result"] = {
+            "status": result.get("status"),
+            "message": result.get("message"),
+        }
+        episode = result.get("episode_fitness", {}) if isinstance(result.get("episode_fitness"), dict) else {}
+        entry["episode_fitness"] = {
+            "id": episode.get("id"),
+            "scores": episode.get("scores"),
+            "pressure": episode.get("pressure"),
+            "difficulty": episode.get("difficulty"),
+        }
+        _record_heartbeat_action_log(entry)
+        _hot_endpoint_cache.pop("park_state", None)
+        _hot_endpoint_cache.pop("park_state_lite", None)
+        return entry
+    finally:
+        _heartbeat_controller_running = False
 
 
 def _safe_float(value: Any, fallback: float = 0.0) -> float:
@@ -810,6 +1123,7 @@ async def _advance_fast_park_from_wall_clock() -> int:
     for _ in range(steps):
         await _fast_park_simulation.step()
     _last_fast_park_step_at += steps * _fast_park_step_interval_seconds
+    await _maybe_run_heartbeat_controller(steps)
     return steps
 
 
