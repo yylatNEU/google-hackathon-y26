@@ -1,0 +1,3 @@
+display_name: ParkPulse Proact Agent
+short_description: Detect weak signals early, act preventively, observe take rate, and update memory.
+default_prompt: Run the proactive loop: detect weak signals, forecast impact, generate a Gemini brief, emit bounded actions, observe response, and learn.

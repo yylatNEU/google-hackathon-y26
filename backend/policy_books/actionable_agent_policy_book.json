@@ -1,0 +1,262 @@
+{
+  "policy_book_id": "actionable_agent_policy_book",
+  "version": "1.0.0",
+  "owner": "ParkPulse Agent Operations",
+  "purpose": "Give ParkPulse agents a broad operating doctrine of policy-gated, executable amusement-park cases instead of narrow scripted responses.",
+  "decision_rules": [
+    {
+      "id": "PARK-ACT-001",
+      "name": "Case-First Action Selection",
+      "condition": "An operator asks for a solution, plan, mitigation, optimization, or action.",
+      "applies_to": {
+        "targets": ["ride", "traffic", "staff", "food", "energy", "event", "medical", "accessibility", "security", "guest_services", "signage", "queue_gate", "entertainment"],
+        "actions": ["reroute", "redirect_food", "redeploy", "dispatch", "message", "hold_intake", "activate", "protect_hvac", "inspect"]
+      },
+      "allowed_action": "Retrieve the closest actionable case, compare candidate actions, cite policy refs, and prepare receiver-specific payloads.",
+      "blocked_action": "Jump directly from text intent to a generic reroute or staffing action without a matching case and policy basis.",
+      "required_evidence": [
+        "matched case id",
+        "triggering live signal",
+        "candidate actions considered",
+        "policy refs",
+        "receiver payloads",
+        "rollback condition"
+      ],
+      "human_review_if": [
+        "case affects safety, medical, security, accessibility, emergency access, labor protection, or broad guest movement",
+        "selected case confidence is below 70"
+      ]
+    },
+    {
+      "id": "PARK-ACT-002",
+      "name": "Receiver-Specific Execution",
+      "condition": "A plan produces worker, guest, equipment, queue, route, food, or management instructions.",
+      "applies_to": {
+        "targets": ["traffic", "staff", "food", "energy", "guest", "guest_services", "signage", "queue_gate", "maintenance"],
+        "actions": ["reroute", "redirect_food", "redeploy", "dispatch", "message", "update", "hold_intake", "activate", "protect_hvac", "inspect"]
+      },
+      "allowed_action": "Split the plan into receiver payloads with owner, target, instruction, deadline, evidence, and acknowledgement requirement.",
+      "blocked_action": "Produce a single vague instruction such as 'fix the queue' or 'send staff' without receiver routing.",
+      "required_evidence": [
+        "receiver channel",
+        "target object",
+        "owner role",
+        "deadline",
+        "acknowledgement or observation signal"
+      ],
+      "human_review_if": [
+        "receiver instruction changes safety-critical procedure",
+        "manager approval is required by another policy"
+      ]
+    },
+    {
+      "id": "PARK-ACT-003",
+      "name": "Rollback and Evaluation Required",
+      "condition": "Any agent action changes routing, staffing, queue gates, guest messaging, or equipment settings.",
+      "applies_to": {
+        "targets": ["ride", "traffic", "staff", "food", "energy", "event", "guest_services", "queue_gate"],
+        "actions": ["reroute", "redirect_food", "redeploy", "message", "hold_intake", "activate", "protect_hvac"]
+      },
+      "allowed_action": "Define expected impact, observation window, success metric, rollback trigger, and audit trace before execution.",
+      "blocked_action": "Dispatch without a measurable evaluation window or rollback trigger.",
+      "required_evidence": [
+        "expected impact",
+        "observation window",
+        "success metric",
+        "rollback condition",
+        "audit fields"
+      ],
+      "human_review_if": [
+        "expected impact is uncertain",
+        "rollback requires manual operations authority"
+      ]
+    }
+  ],
+  "action_primitives": [
+    {
+      "id": "split_queue_flow",
+      "label": "Split queue flow",
+      "targets": ["queue_gate", "traffic", "ride"],
+      "receiver_channels": ["worker_task", "guest_message", "map_overlay"],
+      "requires_approval": false
+    },
+    {
+      "id": "redeploy_certified_staff",
+      "label": "Redeploy certified staff",
+      "targets": ["staff", "ride", "food"],
+      "receiver_channels": ["worker_task", "manager_review"],
+      "requires_approval": true
+    },
+    {
+      "id": "protect_emergency_access",
+      "label": "Protect emergency access",
+      "targets": ["path", "medical", "security", "accessibility"],
+      "receiver_channels": ["worker_task", "manager_review", "map_overlay"],
+      "requires_approval": true
+    },
+    {
+      "id": "draft_guest_message",
+      "label": "Draft guest message",
+      "targets": ["guest", "signage", "traffic"],
+      "receiver_channels": ["guest_message", "signage_update"],
+      "requires_approval": false
+    },
+    {
+      "id": "throttle_fast_lane_merge",
+      "label": "Throttle Fast Lane merge",
+      "targets": ["queue_gate", "ride", "guest_services"],
+      "receiver_channels": ["worker_task", "guest_message", "manager_review"],
+      "requires_approval": true
+    }
+  ],
+  "action_cases": [
+    {
+      "id": "CASE-RIDE-DOWN-PARADE-001",
+      "title": "Ride down while parade releases nearby",
+      "triggers": ["ride down", "coaster", "queue", "parade", "families stuck", "spillback"],
+      "state_signals": ["ride.status=down", "zone.density>=85", "path.congestion>=70"],
+      "policy_refs": ["PARK-SAFE-001", "PARK-OPS-002", "PARK-ACT-001", "PARK-ACT-003"],
+      "recommended_primitives": ["split_queue_flow", "draft_guest_message"],
+      "action_plan": [
+        "Hold new intake at the affected ride queue gate.",
+        "Split affected guests across two or more compatible destinations with caps.",
+        "Keep parade and emergency crossings clear.",
+        "Draft guest-facing guidance with honest wait context and nearby alternatives."
+      ],
+      "blocked_actions": ["reopen ride", "route all guests to one attraction", "expand queue into parade path"],
+      "receiver_payloads": [
+        {"channel": "worker_task", "target": "queue_gate", "instruction": "Hold intake and split exiting guests by destination cap."},
+        {"channel": "guest_message", "target": "affected_guests", "instruction": "Explain ride downtime and offer capped alternatives."},
+        {"channel": "map_overlay", "target": "parade_crossing", "instruction": "Highlight protected crossing and spillback boundary."}
+      ],
+      "success_metric": "Affected queue guests and path congestion fall within 15 minutes without raising destination density above 90%.",
+      "rollback_condition": "Any destination exceeds 90% density or parade crossing congestion increases."
+    },
+    {
+      "id": "CASE-FOOD-HEAT-BACKLOG-001",
+      "title": "Food court backlog during heat pressure",
+      "triggers": ["food", "mobile order", "pickup backlog", "heat", "low stock", "restaurant"],
+      "state_signals": ["food.risk=high", "weather.heatIndexF>=95", "zone.density>=80"],
+      "policy_refs": ["PARK-OPS-001", "PARK-EXP-001", "PARK-LABOR-002", "PARK-ACT-002"],
+      "recommended_primitives": ["draft_guest_message", "redeploy_certified_staff"],
+      "action_plan": [
+        "Throttle promotions that increase the overloaded food location.",
+        "Redirect demand to lower-wait food points and water refill locations.",
+        "Redeploy only trained food runners without violating protected breaks.",
+        "Message affected guests with pickup ETA and alternatives."
+      ],
+      "blocked_actions": ["promise compensation", "send all guests to one alternate food point", "cancel protected breaks"],
+      "receiver_payloads": [
+        {"channel": "guest_message", "target": "mobile_order_guests", "instruction": "Show ETA and lower-wait alternatives."},
+        {"channel": "worker_task", "target": "food_ops_lead", "instruction": "Add runner support if certification and break rules allow."}
+      ],
+      "success_metric": "Pickup ETA and complaint rate improve inside 20 minutes.",
+      "rollback_condition": "Alternate location density or pickup ETA worsens."
+    },
+    {
+      "id": "CASE-FIREWORKS-EGRESS-001",
+      "title": "Front gate exit pressure before fireworks release",
+      "triggers": ["fireworks", "exit", "front gate", "egress", "closing", "transit"],
+      "state_signals": ["event.kind=fireworks_release", "path.congestion>=75", "zone.id=entrancePlaza"],
+      "policy_refs": ["PARK-EVENT-001", "PARK-EVENT-002", "PARK-SAFE-003", "PARK-ACT-003"],
+      "recommended_primitives": ["split_queue_flow", "draft_guest_message", "protect_emergency_access"],
+      "action_plan": [
+        "Pre-stage crowd leads before the finale release.",
+        "Meter front-gate egress while keeping emergency and accessibility routes open.",
+        "Send transit, locker, and alternate-exit guidance before the crowd moves.",
+        "Hold last-ride promotions away from exit-pressure paths."
+      ],
+      "blocked_actions": ["block emergency route", "push promotions toward the exit path", "move barriers without approval"],
+      "receiver_payloads": [
+        {"channel": "worker_task", "target": "front_gate_crowd_leads", "instruction": "Meter outbound flow and keep access lane open."},
+        {"channel": "guest_message", "target": "evening_guests", "instruction": "Send transit and alternate route guidance before release."}
+      ],
+      "success_metric": "Exit path density peaks below critical threshold during release.",
+      "rollback_condition": "Access lane becomes blocked or exit density rises above threshold."
+    },
+    {
+      "id": "CASE-STAFF-BREAK-COVERAGE-001",
+      "title": "Staff break wave creates unsafe coverage",
+      "triggers": ["staff", "break", "callout", "understaffed", "fatigue", "coverage"],
+      "state_signals": ["staff.openCallouts>0", "staffReadyPct<90", "ride.staffAvailable<staffRequired"],
+      "policy_refs": ["PARK-LABOR-001", "PARK-LABOR-002", "PARK-SAFE-001", "PARK-ACT-002"],
+      "recommended_primitives": ["redeploy_certified_staff", "draft_guest_message"],
+      "action_plan": [
+        "Identify certified backup staff before changing any ride operation.",
+        "Protect legally or policy-protected breaks.",
+        "Temporarily taper intake where coverage is below requirement.",
+        "Notify affected operators and managers with acknowledgement required."
+      ],
+      "blocked_actions": ["cancel protected breaks", "operate a ride below certification coverage", "discipline staff through the agent"],
+      "receiver_payloads": [
+        {"channel": "manager_review", "target": "labor_ops", "instruction": "Approve certified redeploy or intake taper."},
+        {"channel": "worker_task", "target": "ride_lead", "instruction": "Confirm coverage before continuing normal intake."}
+      ],
+      "success_metric": "Coverage gap closes without protected break violation.",
+      "rollback_condition": "No certified coverage acknowledges the redeploy."
+    },
+    {
+      "id": "CASE-FAST-LANE-FAIRNESS-001",
+      "title": "Fast Lane fairness complaint rising",
+      "triggers": ["fast lane", "vip", "fairness", "standby", "merge", "complaint"],
+      "state_signals": ["standbyDelayDeltaMins>=15", "publicComplaintRiskPct>=70"],
+      "policy_refs": ["PARK-EXP-001", "PARK-CARE-001", "PARK-OPS-002", "PARK-ACT-002"],
+      "recommended_primitives": ["throttle_fast_lane_merge", "draft_guest_message"],
+      "action_plan": [
+        "Cap merge ratio until standby delay returns within fairness threshold.",
+        "Publish honest standby delay reason without blaming guests.",
+        "Offer lower-wait alternatives without individualized compensation promises.",
+        "Send guest-care lead to the merge point for explanation."
+      ],
+      "blocked_actions": ["promise compensation", "profile individual guests", "hide the delay reason"],
+      "receiver_payloads": [
+        {"channel": "worker_task", "target": "merge_point_lead", "instruction": "Apply approved merge cap and explain lane split."},
+        {"channel": "guest_message", "target": "standby_queue", "instruction": "Give honest delay reason and alternatives."}
+      ],
+      "success_metric": "Standby delay delta and complaint risk decline inside the observation window.",
+      "rollback_condition": "Fast Lane conflict escalates or standby density remains critical."
+    },
+    {
+      "id": "CASE-LOST-CHILD-FOODCOURT-001",
+      "title": "Missing child reported near food court",
+      "triggers": ["missing kid", "missing child", "lost child", "separated kid", "separated child", "foodcourt", "food court"],
+      "state_signals": ["guest_care=lost_child", "zone.id=foodCourt1", "zone.density>=70"],
+      "policy_refs": ["PARK-SAFE-003", "PARK-CARE-001", "PARK-EXP-001", "PARK-ACT-001"],
+      "recommended_primitives": ["protect_emergency_access", "draft_guest_message"],
+      "action_plan": [
+        "Escalate to trained security and guest-care leads without broadcasting child-identifying details.",
+        "Create a controlled search perimeter around the reported food court zone.",
+        "Route crowd leads to keep exits, service lanes, and family reunification points clear.",
+        "Send only privacy-safe staff instructions through approved worker channels."
+      ],
+      "blocked_actions": ["broadcast child identity", "publish family details", "send public guest alert with identifying details", "delay security escalation"],
+      "receiver_payloads": [
+        {"channel": "manager_review", "target": "security_guest_care", "instruction": "Approve lost-child protocol and controlled search perimeter."},
+        {"channel": "worker_task", "target": "food_court_crowd_leads", "instruction": "Hold exits/service lane clear and route guests around the search perimeter."}
+      ],
+      "success_metric": "Security/guest-care acknowledgement received and food court search perimeter established without exposing child identity.",
+      "rollback_condition": "No security acknowledgement, exit path blocked, or identifying details appear in guest-facing channels."
+    },
+    {
+      "id": "CASE-MEDICAL-ACCESS-BLOCKED-001",
+      "title": "Medical or accessibility access path is blocked",
+      "triggers": ["medical", "first aid", "faint", "passed out", "injury", "accessibility", "wheelchair", "blocked path"],
+      "state_signals": ["emergencyAccess=blocked", "zone.density>=80"],
+      "policy_refs": ["PARK-SAFE-003", "PARK-CARE-001", "PARK-EXP-001", "PARK-ACT-001"],
+      "recommended_primitives": ["protect_emergency_access", "draft_guest_message"],
+      "action_plan": [
+        "Escalate to trained medical/security operations without diagnosis.",
+        "Clear and protect the access path.",
+        "Route nearby guests around the service lane.",
+        "Keep guest details private and only visible to the approved response team."
+      ],
+      "blocked_actions": ["diagnose guest", "publish sensitive details", "block access lane", "delay emergency response for throughput"],
+      "receiver_payloads": [
+        {"channel": "manager_review", "target": "incident_command", "instruction": "Approve care/support routing and access protection."},
+        {"channel": "worker_task", "target": "crowd_leads", "instruction": "Open and hold the access lane."}
+      ],
+      "success_metric": "Access route is clear and response team acknowledges inside target time.",
+      "rollback_condition": "Access path remains blocked or crowd density increases near the incident."
+    }
+  ]
+}

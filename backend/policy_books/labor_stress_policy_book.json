@@ -1,0 +1,106 @@
+{
+  "policy_book_id": "labor_stress_policy_book",
+  "version": "1.0.0",
+  "owner": "Park Staffing and Labor Operations",
+  "purpose": "Ensure ParkPulse recommendations respect worker breaks, training, safety-critical coverage, and stress limits while solving guest-flow problems.",
+  "decision_rules": [
+    {
+      "id": "PARK-LABOR-001",
+      "name": "Role-Compatible Redeployment",
+      "condition": "ParkPulse recommends moving staff between zones or tasks.",
+      "applies_to": {
+        "targets": ["staff", "medical", "accessibility", "security", "maintenance", "entertainment"],
+        "actions": ["redeploy", "dispatch", "assist", "respond", "inspect", "activate"]
+      },
+      "allowed_action": "Move only staff whose training and role compatibility match the destination task.",
+      "blocked_action": "Move uncertified staff into ride operation, safety, medical, security, or technical roles.",
+      "required_evidence": [
+        "role",
+        "source location",
+        "destination location",
+        "training compatibility",
+        "deadline"
+      ],
+      "human_review_if": [
+        "training status is unknown",
+        "staff move affects safety-critical coverage",
+        "more than six workers are moved in one recommendation"
+      ]
+    },
+    {
+      "id": "PARK-LABOR-002",
+      "name": "Protected Breaks and Fatigue",
+      "condition": "Staff shortage, queue pressure, food spike, event overlay, or weather response creates labor pressure.",
+      "applies_to": {
+        "targets": ["staff", "ride", "food", "medical", "accessibility", "security", "maintenance"],
+        "scenarios": ["staff_shortage", "food_spike"]
+      },
+      "block_conditions": [
+        {
+          "targets": ["staff"],
+          "actions": ["delay_breaks", "skip_breaks", "understaff_ride"],
+          "message": "Action would delay protected breaks or reduce safety-critical staffing."
+        }
+      ],
+      "allowed_action": "Protect break windows and reduce lower-priority service load before extending safety-critical workers.",
+      "blocked_action": "Delay legally or policy-protected breaks to improve guest wait times.",
+      "required_evidence": [
+        "staffing level",
+        "open callouts",
+        "break-window risk",
+        "stress score"
+      ],
+      "human_review_if": [
+        "break-window risk is high",
+        "staff stress score exceeds threshold",
+        "overtime or labor exception is proposed"
+      ]
+    },
+    {
+      "id": "PARK-LABOR-003",
+      "name": "Worker Message Clarity",
+      "condition": "ParkPulse sends a worker-device notification.",
+      "applies_to": {
+        "targets": ["staff", "medical", "accessibility", "security", "maintenance", "entertainment"],
+        "actions": ["redeploy", "dispatch", "assist", "respond", "inspect", "activate"]
+      },
+      "allowed_action": "Send specific task, role, destination, deadline, and constraints.",
+      "blocked_action": "Send vague or open-ended commands that increase worker confusion or stress.",
+      "required_evidence": [
+        "role",
+        "target zone",
+        "task",
+        "deadline",
+        "priority"
+      ],
+      "human_review_if": [
+        "task conflicts with break protection",
+        "task requires supervisor authorization"
+      ]
+    },
+    {
+      "id": "PARK-LABOR-004",
+      "name": "Qualified Incident Dispatch",
+      "condition": "ParkPulse recommends dispatching workers for medical, accessibility, security, maintenance, or entertainment operations.",
+      "applies_to": {
+        "targets": ["medical", "accessibility", "security", "maintenance", "entertainment"],
+        "actions": ["dispatch", "assist", "respond", "inspect", "activate"]
+      },
+      "allowed_action": "Dispatch only role-qualified workers with clear location, task, urgency, supervisor path, and stress/break impact.",
+      "blocked_action": "Send unqualified workers to medical, security, technical, or ride-safety tasks, or overload already stressed teams.",
+      "required_evidence": [
+        "qualified role",
+        "target location",
+        "urgency",
+        "current workload or stress",
+        "backup or supervisor path"
+      ],
+      "human_review_if": [
+        "qualified coverage is below minimum",
+        "staff stress is high",
+        "incident requires medical, security, or safety-critical authority",
+        "dispatch conflicts with protected break windows"
+      ]
+    }
+  ]
+}

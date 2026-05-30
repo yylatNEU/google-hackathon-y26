@@ -1,0 +1,3 @@
+display_name: ParkPulse React Agent
+short_description: Respond to confirmed park incidents with policy-gated receiver payloads.
+default_prompt: React to the confirmed park incident, compare bounded actions, pass policy gates, and return receiver payloads.

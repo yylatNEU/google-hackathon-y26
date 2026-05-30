@@ -1,0 +1,3 @@
+display_name: ParkPulse Role Orchestrator
+short_description: Route amusement-park work to scan, react, or proact roles.
+default_prompt: Choose the correct ParkPulse role, list required tools, policy gates, and expected receipt artifacts.

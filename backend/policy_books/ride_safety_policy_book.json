@@ -1,0 +1,89 @@
+{
+  "policy_book_id": "ride_safety_policy_book",
+  "version": "1.0.0",
+  "owner": "Ride Safety and Maintenance",
+  "purpose": "Keep ParkPulse as decision support for ride and queue operations without replacing maintenance clearance, safety procedures, or emergency response.",
+  "decision_rules": [
+    {
+      "id": "PARK-SAFE-001",
+      "name": "Maintenance Clearance Is Non-Negotiable",
+      "condition": "A ride is down, constrained, faulted, weather-affected, or under inspection.",
+      "applies_to": {
+        "targets": ["ride", "traffic", "scenario"],
+        "actions": ["reroute", "reopen", "test_dispatch", "expand_queue", "reduce_inspection"]
+      },
+      "block_conditions": [
+        {
+          "targets": ["ride"],
+          "actions": ["reopen", "test_dispatch", "expand_queue", "reduce_inspection"],
+          "message": "Ride action requires certified maintenance clearance before execution."
+        },
+        {
+          "text_contains": ["reopen"],
+          "state": {"any_ride_status": "down"},
+          "message": "Action text suggests reopening while a ride is down."
+        }
+      ],
+      "allowed_action": "Pause intake, reroute guests, notify staff, and request maintenance review.",
+      "blocked_action": "Recommend reopening, test dispatch, queue expansion, or reduced inspection before certified maintenance clearance.",
+      "required_evidence": [
+        "ride status",
+        "downtime or fault signal",
+        "maintenance clearance state",
+        "queue action"
+      ],
+      "human_review_if": [
+        "ride status is ambiguous",
+        "sensor anomaly or repeated minor fault is present",
+        "guest crowding creates a safety hazard"
+      ]
+    },
+    {
+      "id": "PARK-SAFE-002",
+      "name": "Weather Exposure Override",
+      "condition": "Storm, heat, wind, lightning, or outdoor exposure risk is elevated.",
+      "applies_to": {
+        "targets": ["ride", "traffic", "energy"],
+        "scenarios": ["storm_response"]
+      },
+      "allowed_action": "Taper outdoor queues, route guests to covered areas, preserve shelter comfort, and escalate closure recommendations.",
+      "blocked_action": "Keep exposed queues open to protect throughput or revenue.",
+      "required_evidence": [
+        "weather risk",
+        "affected outdoor rides or paths",
+        "shelter capacity",
+        "guest message"
+      ],
+      "human_review_if": [
+        "storm risk crosses closure threshold",
+        "shelter areas exceed safe density",
+        "emergency route access is threatened"
+      ]
+    },
+    {
+      "id": "PARK-SAFE-003",
+      "name": "Emergency Access and Accessibility",
+      "condition": "A plan changes paths, queues, barriers, event zones, staffing, or guest routing.",
+      "applies_to": {
+        "targets": ["staff", "event", "traffic", "ride"]
+      },
+      "allowed_action": "Recommend changes only when emergency access, accessibility paths, and medical/security access remain available.",
+      "blocked_action": "Block emergency exits, accessibility routes, medical posts, or security access to improve throughput.",
+      "required_evidence": [
+        "affected path or zone",
+        "crowd density",
+        "accessibility route impact",
+        "emergency access check"
+      ],
+      "human_review_if": [
+        "barriers or temporary event equipment are moved",
+        "lost child, medical, security, or evacuation scenario appears"
+      ]
+    }
+  ],
+  "absolute_prohibitions": [
+    "Do not recommend reopening a ride without maintenance clearance.",
+    "Do not optimize throughput over ride safety.",
+    "Do not block emergency, medical, security, or accessibility routes."
+  ]
+}

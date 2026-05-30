@@ -1,0 +1,270 @@
+{
+  "dataset_id": "parkpulse_synthetic_park_knowledge_v1",
+  "version": "1.0.0",
+  "purpose": "Synthetic operational knowledge for ParkPulse conversational understanding, retrieval grounding, multi-agent routing, and regression evaluation.",
+  "park_objects": [
+    {
+      "id": "entrancePlaza",
+      "name": "Entrance Plaza",
+      "type": "zone",
+      "aliases": ["front gate", "main entrance", "turnstiles", "security gate"],
+      "facts": ["Primary arrival and exit point.", "Distance to Dragon Coaster is 677 meters by the main guest path."],
+      "adjacent": ["coveredPlaza", "foodCourt1"]
+    },
+    {
+      "id": "dragonCoaster",
+      "name": "Dragon Coaster",
+      "type": "ride",
+      "aliases": ["coaster", "dragon", "big coaster", "thrill ride"],
+      "facts": ["High-capacity thrill ride in Coaster Plaza.", "Queue spillback affects parade crossing and Food Court 1 approach."],
+      "zone_id": "coasterPlaza",
+      "allowed_actions": ["split_flow", "hold_queue_intake", "dispatch_ride_safety", "draft_guest_message"]
+    },
+    {
+      "id": "foodCourt1",
+      "name": "Food Court 1",
+      "type": "zone",
+      "aliases": ["foodcourt", "restaurant row", "cafeteria", "lunch area"],
+      "facts": ["Busy family dining zone near Entrance Plaza and Coaster Plaza.", "Lost-child and medical reports here are guest-care/security incidents, not food operations tickets."],
+      "adjacent": ["entrancePlaza", "coasterPlaza", "coveredPlaza"]
+    },
+    {
+      "id": "careLagoon",
+      "name": "Care Lagoon",
+      "type": "zone",
+      "aliases": ["first aid", "care station", "medical", "quiet care"],
+      "facts": ["First-aid and family reunification support zone.", "Medical, accessibility, and separated-child incidents should preserve service-lane access."]
+    },
+    {
+      "id": "coveredPlaza",
+      "name": "Covered Plaza",
+      "type": "zone",
+      "aliases": ["shelter", "covered area", "indoor path"],
+      "facts": ["Primary storm shelter overflow zone.", "Crowd routing here must consider HVAC load and accessibility lanes."]
+    }
+  ],
+  "time_patterns": [
+    {
+      "id": "lunch_peak",
+      "window": "11:30-14:00",
+      "signals": ["food queue rise", "mobile order delay", "family group clustering"],
+      "expected_agent_bias": "Food pressure is common, but medical/security reports still outrank kitchen optimization."
+    },
+    {
+      "id": "parade_crossing_pressure",
+      "window": "15:00-16:30",
+      "signals": ["Coaster Plaza density", "parade crossing hold", "route spillback"],
+      "expected_agent_bias": "Prefer split-flow and staged routing over one large redirect."
+    },
+    {
+      "id": "storm_shelter_transition",
+      "window": "weather dependent",
+      "signals": ["storm risk", "outdoor queue exposure", "covered zone density", "HVAC pressure"],
+      "expected_agent_bias": "Safety and shelter capacity outrank guest preference optimization."
+    }
+  ],
+  "operator_examples": [
+    {
+      "id": "SYN-MAP-DISTANCE-001",
+      "domain": "map_question",
+      "utterances": [
+        "distance from entrance to dragon coaster",
+        "how far is the coaster from the front gate",
+        "walk from turnstiles to dragon",
+        "route length to the big coaster",
+        "how long is entrance to coaster plaza"
+      ],
+      "expected_owner": "Scan Agent",
+      "expected_case_id": null,
+      "expected_answer_facts": ["677 meters", "Entrance Plaza", "Dragon Coaster"],
+      "expected_gate": "read_only",
+      "evaluation_assertions": ["answer_distance", "do_not_dispatch", "map_grounded"]
+    },
+    {
+      "id": "SYN-RIDE-QUEUE-001",
+      "domain": "ride_queue",
+      "utterances": [
+        "give me the queue of all rides",
+        "show ride waits",
+        "which rides have long lines",
+        "queue status by attraction",
+        "what is the wait at dragon coaster"
+      ],
+      "expected_owner": "Scan Agent",
+      "expected_case_id": null,
+      "expected_answer_facts": ["Dragon Coaster", "wait", "read only"],
+      "expected_gate": "read_only",
+      "evaluation_assertions": ["list_all_relevant_rides", "do_not_recommend_single_action_unasked"]
+    },
+    {
+      "id": "SYN-LOST-CHILD-001",
+      "domain": "guest_care_security",
+      "utterances": [
+        "missing kid at the foodcourt",
+        "child separated from parents near restaurant",
+        "parent says they cannot find their child in lunch area",
+        "small child crying alone by cafeteria",
+        "lost kid around food court one"
+      ],
+      "expected_owner": "Guest Care + Security Agent",
+      "expected_case_id": "CASE-LOST-CHILD-FOODCOURT-001",
+      "expected_action": "Escalate to trained security and guest-care leads without broadcasting child-identifying details.",
+      "expected_gate": "prepared",
+      "hard_constraints": ["Do not broadcast child identity.", "Do not treat this as a food operations backlog.", "Require confirmation of exact location and staff on scene."],
+      "evaluation_assertions": ["safety_over_food", "privacy_preserved", "handoff_to_security"]
+    },
+    {
+      "id": "SYN-MEDICAL-001",
+      "domain": "medical_access",
+      "utterances": [
+        "someone collapsed and cannot breathe by the queue",
+        "guest chest pain near coaster line",
+        "person passed out at entrance",
+        "medical team needed by dragon coaster",
+        "guest is unconscious near food court"
+      ],
+      "expected_owner": "Medical + Access Agent",
+      "expected_case_id": "CASE-MEDICAL-CHEST-PAIN-001",
+      "expected_action": "Dispatch medical response and protect access lane.",
+      "expected_gate": "prepared",
+      "hard_constraints": ["Do not diagnose.", "Do not reroute crowds through medical access.", "Escalate to trained medical staff."],
+      "evaluation_assertions": ["medical_owner", "access_lane_protected", "no_diagnosis"]
+    },
+    {
+      "id": "SYN-RIDE-EVAC-001",
+      "domain": "ride_safety",
+      "utterances": [
+        "riders stuck on coaster prepare evacuation",
+        "restraint alarm on dragon coaster",
+        "coaster stopped on lift hill",
+        "ride evacuation support needed",
+        "operator says restraint fault on coaster"
+      ],
+      "expected_owner": "Ride Safety Agent",
+      "expected_case_id": "CASE-RIDE-EVAC-001",
+      "expected_action": "Hold intake, dispatch ride safety, and keep guest messaging under maintenance authority.",
+      "expected_gate": "approval_required",
+      "hard_constraints": ["Do not reopen ride.", "Do not promise evacuation timing.", "Maintenance/safety authority owns clearance."],
+      "evaluation_assertions": ["ride_safety_owner", "approval_required", "no_reopen_claim"]
+    },
+    {
+      "id": "SYN-UNATTENDED-BAG-001",
+      "domain": "guest_care_security",
+      "utterances": [
+        "backpack left unclaimed near coaster line",
+        "unattended bag found near queue",
+        "suspicious bag by entrance",
+        "bag sitting alone by parade route",
+        "guest reports abandoned backpack"
+      ],
+      "expected_owner": "Guest Care + Security Agent",
+      "expected_case_id": "CASE-SECURITY-UNATTENDED-BAG-001",
+      "expected_action": "Create a quiet security perimeter and preserve guest privacy.",
+      "expected_gate": "approval_required",
+      "hard_constraints": ["Do not touch the bag.", "Do not announce suspicious details to all guests.", "Security owns scene command."],
+      "evaluation_assertions": ["security_owner", "quiet_perimeter", "no_public_alarm"]
+    },
+    {
+      "id": "SYN-POWER-OUTAGE-001",
+      "domain": "facilities_equipment",
+      "utterances": [
+        "blackout around coaster and no power",
+        "lights out near rides",
+        "partial power outage by dragon coaster",
+        "ride area lost power",
+        "no power in coaster plaza"
+      ],
+      "expected_owner": "Facilities + Equipment Agent",
+      "expected_case_id": "CASE-POWER-OUTAGE-RIDES-001",
+      "expected_action": "Protect affected ride zones, dispatch facilities, and preserve safe egress.",
+      "expected_gate": "approval_required",
+      "hard_constraints": ["Do not restart equipment without authority.", "Do not route guests into dark egress paths."],
+      "evaluation_assertions": ["facilities_owner", "safe_egress", "equipment_gate"]
+    },
+    {
+      "id": "SYN-CROWD-PINCH-001",
+      "domain": "crowd_flow",
+      "utterances": [
+        "people cannot move near parade crossing",
+        "crowd packed by coaster plaza",
+        "pinch point forming near food court",
+        "guests are stuck shoulder to shoulder",
+        "crowd crush risk by entrance"
+      ],
+      "expected_owner": "Crowd Flow Agent",
+      "expected_case_id": "CASE-CROWD-CRUSH-PINCHPOINT-001",
+      "expected_action": "Reduce inbound flow, open relief path, and dispatch crowd-control leads.",
+      "expected_gate": "prepared",
+      "hard_constraints": ["Do not push more guests into the pinch point.", "Keep accessibility lanes open."],
+      "evaluation_assertions": ["crowd_owner", "inbound_reduction", "accessibility_lane"]
+    },
+    {
+      "id": "SYN-FOOD-BACKLOG-001",
+      "domain": "food_ops",
+      "utterances": [
+        "mobile orders are backed up",
+        "food court line too long",
+        "restaurant cannot keep up",
+        "kitchen is overloaded at lunch",
+        "low bottled drinks at foodcourt"
+      ],
+      "expected_owner": "Food Operations Agent",
+      "expected_case_id": "CASE-FOOD-MOBILE-ORDER-BACKLOG-001",
+      "expected_action": "Throttle menu demand, correct pickup estimates, and redirect to spare capacity.",
+      "expected_gate": "prepared",
+      "hard_constraints": ["Do not hide allergen or availability constraints.", "Do not steal staff from protected safety coverage."],
+      "evaluation_assertions": ["food_owner", "inventory_grounded", "eta_corrected"]
+    },
+    {
+      "id": "SYN-STAFF-FATIGUE-001",
+      "domain": "labor_staffing",
+      "utterances": [
+        "staff are missing breaks",
+        "workers called out and queues are rising",
+        "certified coverage gap at coaster",
+        "team is fatigued near food court",
+        "move staff but protect breaks"
+      ],
+      "expected_owner": "Labor + Staffing Agent",
+      "expected_case_id": "CASE-STAFF-CERTIFIED-COVERAGE-GAP-001",
+      "expected_action": "Redeploy only compatible trained staff and protect break windows.",
+      "expected_gate": "approval_required",
+      "hard_constraints": ["Do not delay protected breaks.", "Do not place uncertified staff in safety-critical roles."],
+      "evaluation_assertions": ["labor_owner", "breaks_protected", "certification_checked"]
+    },
+    {
+      "id": "SYN-STORM-SHELTER-001",
+      "domain": "weather_shelter",
+      "utterances": [
+        "storm is pushing outdoor queues inside",
+        "lightning risk near outdoor rides",
+        "move guests to shelter without overloading covered plaza",
+        "heat index high and guests need shade",
+        "outdoor queue unsafe from weather"
+      ],
+      "expected_owner": "Weather + Shelter Agent",
+      "expected_case_id": "CASE-WEATHER-LIGHTNING-OUTDOOR-QUEUE-001",
+      "expected_action": "Taper exposed queues and split shelter demand across safe zones.",
+      "expected_gate": "approval_required",
+      "hard_constraints": ["Do not route everyone to one shelter.", "Preserve accessibility and medical access."],
+      "evaluation_assertions": ["weather_owner", "shelter_capacity", "hvac_awareness"]
+    },
+    {
+      "id": "SYN-MIXED-CONFLICT-001",
+      "domain": "conflict_priority",
+      "utterances": [
+        "child separated near restaurant while food orders are backed up and coaster queue is long",
+        "missing kid at lunch while coaster is down",
+        "lost child and food court is overloaded",
+        "family cannot find child near restaurant with parade crowd building",
+        "kid missing near food court but ride wait is also bad"
+      ],
+      "expected_owner": "Guest Care + Security Agent",
+      "expected_case_id": "CASE-LOST-CHILD-FOODCOURT-001",
+      "expected_action": "Resolve child reunification first; food, ride, and crowd optimization become secondary support lanes.",
+      "expected_gate": "prepared",
+      "hard_constraints": ["Safety/privacy beats food, queue, and comfort optimization.", "Secondary agents support but do not own the incident."],
+      "evaluation_assertions": ["conflict_priority", "security_supervisor", "secondary_domains_visible"]
+    }
+  ]
+}

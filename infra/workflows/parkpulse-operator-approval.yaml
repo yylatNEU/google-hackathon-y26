@@ -1,0 +1,54 @@
+main:
+  params: [args]
+  steps:
+    - init:
+        assign:
+          - dispatch_id: ${map.get(args, "dispatchId")}
+          - channel: ${map.get(args, "channel")}
+          - target_system: ${map.get(args, "targetSystem")}
+          - callback_url: ${map.get(args, "callbackUrl")}
+          - auto_approve: ${default(map.get(args, "autoApprove"), false)}
+          - approval_choice: ${default(map.get(args, "approvalChoice"), "approved")}
+          - actor: ${default(map.get(args, "actor"), "gcp-workflows")}
+          - started_at: ${sys.now()}
+    - record_start:
+        call: sys.log
+        args:
+          severity: INFO
+          text: ${"ParkPulse operator approval started for " + string(dispatch_id) + " on " + string(channel)}
+    - maybe_auto_approve:
+        switch:
+          - condition: ${auto_approve == true and callback_url != null and dispatch_id != null}
+            next: callback_approval
+        next: return_pending
+    - callback_approval:
+        call: http.post
+        args:
+          url: ${callback_url}
+          auth:
+            type: OIDC
+          headers:
+            Content-Type: application/json
+          body:
+            dispatch_id: ${dispatch_id}
+            actor: ${actor}
+            choice: ${approval_choice}
+            channel: ${channel}
+        result: callback_response
+    - return_approved:
+        return:
+          status: approved
+          dispatchId: ${dispatch_id}
+          channel: ${channel}
+          targetSystem: ${target_system}
+          callbackStatus: ${callback_response.code}
+          startedAt: ${started_at}
+          completedAt: ${sys.now()}
+    - return_pending:
+        return:
+          status: pending_operator_review
+          dispatchId: ${dispatch_id}
+          channel: ${channel}
+          targetSystem: ${target_system}
+          note: Human review remains in ParkPulse; rerun with autoApprove and callbackUrl only for demo-safe approvals.
+          startedAt: ${started_at}

@@ -1,0 +1,133 @@
+{
+  "policy_book_id": "parkpulse_operations_policy_book",
+  "version": "1.0.0",
+  "owner": "ParkPulse Operations",
+  "purpose": "Define how ParkPulse may recommend ride, queue, crowd, food, staff, event, and energy operations actions using live park state and MongoDB memory.",
+  "scope": {
+    "included": [
+      "ride downtime response",
+      "guest-flow redistribution",
+      "queue-pressure management",
+      "food demand and inventory response",
+      "weather disruption routing",
+      "temporary event overlay planning",
+      "operational memory retrieval",
+      "human review escalation"
+    ],
+    "excluded": [
+      "ride safety clearance",
+      "security incident command",
+      "guest PII handling",
+      "individual compensation approval",
+      "labor discipline",
+      "emergency medical decisions"
+    ]
+  },
+  "decision_rules": [
+    {
+      "id": "PARK-OPS-001",
+      "name": "Source-Grounded Operations",
+      "condition": "Any recommendation changes ride, queue, staff, food, guest-flow, event, care-response, or equipment behavior.",
+      "applies_to": {
+        "targets": ["ride", "traffic", "scenario", "staff", "food", "energy", "event", "guest", "medical", "accessibility", "security", "guest_services", "signage", "queue_gate", "entertainment", "maintenance"]
+      },
+      "allowed_action": "Recommend only from current park_state, ride metadata, staff shifts, food inventory, weather, energy load, playbooks, incidents, and learned outcomes.",
+      "blocked_action": "Invent ride capacity, reopening time, menu inventory, staff availability, equipment state, or guest movement outcomes.",
+      "required_evidence": [
+        "active scenario",
+        "current ride status or zone density",
+        "capacity or staffing constraint",
+        "retrieved playbook, incident, or learned rule when available"
+      ],
+      "human_review_if": [
+        "source data is stale or missing",
+        "recommendation affects more than one major zone",
+        "plan confidence is below 75"
+      ]
+    },
+    {
+      "id": "PARK-OPS-002",
+      "name": "Capacity-Aware Rerouting",
+      "condition": "Guests are redirected from one ride, zone, restaurant, path, show, event area, or operator-created incident area to another.",
+      "applies_to": {
+        "targets": ["ride", "traffic", "scenario", "event", "guest_services", "signage", "queue_gate", "entertainment"],
+        "actions": ["reroute", "redirect_food", "route_all", "redirect_all", "plan_overlay", "message", "update", "hold_intake", "activate"]
+      },
+      "block_conditions": [
+        {
+          "targets": ["traffic", "ride"],
+          "actions": ["route_all", "redirect_all"],
+          "message": "Guest routing must split demand and cannot send all affected guests to one destination."
+        },
+        {
+          "targets": ["traffic", "ride"],
+          "text_contains": ["route all guests"],
+          "message": "Guest routing must split demand and cannot send all affected guests to one destination."
+        },
+        {
+          "targets": ["traffic", "ride"],
+          "state": {"any_zone_density_gte": 100},
+          "message": "One or more zones are at or above safe capacity; route changes require operator review."
+        }
+      ],
+      "allowed_action": "Split demand across multiple compatible destinations with caps, hold share, and clear messaging.",
+      "blocked_action": "Route all affected guests to one destination or to a destination already over capacity.",
+      "required_evidence": [
+        "origin crowd or queue size",
+        "destination wait time or density",
+        "target mix percentages",
+        "expected take rate"
+      ],
+      "human_review_if": [
+        "any destination density is projected above 90 percent",
+        "event overlay changes emergency or parade routes",
+        "take-rate telemetry is below 35 percent"
+      ]
+    },
+    {
+      "id": "PARK-OPS-003",
+      "name": "Closed-Loop Learning Use",
+      "condition": "Past outcomes are available in agent_learnings.",
+      "applies_to": {
+        "targets": ["food", "event", "scenario", "guest_services"],
+        "scenarios": ["food_spike"]
+      },
+      "allowed_action": "Use learned rules to adjust promotion strength, hold share, comfort protection, staff moves, or control requirements.",
+      "blocked_action": "Treat learned outcomes as hard truth when live conditions conflict.",
+      "required_evidence": [
+        "learning rule id",
+        "source outcome id",
+        "take rate or follow-through evidence",
+        "current-state compatibility"
+      ],
+      "human_review_if": [
+        "learned rule conflicts with safety, labor, privacy, or live capacity rules",
+        "learning confidence is below 60"
+      ]
+    },
+    {
+      "id": "PARK-OPS-004",
+      "name": "Operator-Defined Incident Model",
+      "condition": "Free-form operator text produces a custom incident, care request, service disruption, or event change.",
+      "applies_to": {
+        "targets": ["medical", "accessibility", "security", "guest_services", "signage", "queue_gate", "entertainment", "maintenance", "ride", "traffic", "staff", "energy"],
+        "actions": ["dispatch", "assist", "respond", "message", "update", "hold_intake", "activate", "inspect", "reroute", "redeploy", "protect_hvac"]
+      },
+      "allowed_action": "Convert vague operator language into an explicit intent summary, hard constraints, primary action, receiver payloads, and a rejected unsafe or weak option.",
+      "blocked_action": "Treat free-form text as a scripted scenario, ignore care/safety cues, or execute a generic reroute when the text requires a different operating response.",
+      "required_evidence": [
+        "operator_understanding or intent summary",
+        "incident type",
+        "hard constraints extracted from text",
+        "primary action and owner",
+        "rejected option with reason",
+        "receiver payloads for guests, workers, equipment, or controls"
+      ],
+      "human_review_if": [
+        "medical, security, lost-child, evacuation, or accessibility support is requested",
+        "operator text implies panic, crowd crush, injury, or unsafe equipment",
+        "recommended action changes emergency routes or safety-critical procedures"
+      ]
+    }
+  ]
+}

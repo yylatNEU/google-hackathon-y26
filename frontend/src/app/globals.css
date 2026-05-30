@@ -1,0 +1,129 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.park-grass-texture {
+  background-image:
+    radial-gradient(circle at 18px 22px, rgba(255, 255, 255, 0.16) 0 1px, transparent 2px),
+    radial-gradient(circle at 42px 38px, rgba(35, 86, 45, 0.22) 0 1.5px, transparent 2px),
+    linear-gradient(35deg, rgba(255, 255, 255, 0.08) 0 1px, transparent 1px 22px),
+    linear-gradient(120deg, rgba(37, 83, 43, 0.14) 0 1px, transparent 1px 26px);
+  background-size: 64px 64px, 78px 78px, 34px 34px, 42px 42px;
+}
+
+.park-flow-line {
+  stroke-dasharray: 10 18;
+  animation: none;
+}
+
+.park-node-pulse {
+  animation: none;
+}
+
+.park-command-pulse {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: none;
+}
+
+.park-node-pulse-svg {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: none;
+}
+
+.park-action-chip {
+  animation: none;
+}
+
+@keyframes park-flow {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -56;
+  }
+}
+
+@keyframes park-node-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.35);
+  }
+  50% {
+    transform: scale(1.035);
+    box-shadow: 0 0 0 12px rgba(248, 113, 113, 0);
+  }
+}
+
+@keyframes park-command-pulse {
+  0%,
+  100% {
+    opacity: 0.72;
+    transform: scale(0.96);
+    box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.24);
+  }
+  50% {
+    opacity: 0.95;
+    transform: scale(1.05);
+    box-shadow: 0 0 0 20px rgba(34, 211, 238, 0);
+  }
+}
+
+@keyframes park-node-pulse-svg {
+  0%,
+  100% {
+    opacity: 0.78;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.045);
+  }
+}
+
+@keyframes park-action-chip {
+  0%,
+  100% {
+    transform: translateY(0);
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+  }
+  50% {
+    transform: translateY(-3px);
+    box-shadow: 0 16px 32px rgba(15, 23, 42, 0.24);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .park-flow-line,
+  .park-node-pulse,
+  .park-command-pulse,
+  .park-node-pulse-svg,
+  .park-action-chip {
+    animation: none;
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "policy_book_id": "parkpulse_governance_index",
+  "version": "4.0.0",
+  "operation_name": "ParkPulse AI",
+  "product_thesis": "ParkPulse AI is a multi-agent operations copilot for amusement parks. It coordinates ride downtime response, guest-flow redistribution, staff stress, food inventory, weather disruption, energy pressure, incident playbooks, and GCP internal trace/evaluation without replacing safety, maintenance, security, labor, or human operations authority.",
+  "system_boundary": {
+    "parkpulse_owns": [
+      "ride capacity and queue-pressure interpretation",
+      "guest-flow and crowd redistribution recommendations",
+      "staff redeployment recommendations within training and break constraints",
+      "food demand, menu availability, inventory, and pickup-time recommendations",
+      "energy-load recommendations that preserve guest comfort and safety",
+      "incident playbook retrieval and escalation prompts",
+      "guest-message drafts for human review when required",
+      "audit traces, eval results, and escalation triggers"
+    ],
+    "human_operators_own": [
+      "ride safety clearance and maintenance sign-off",
+      "security incident command",
+      "labor-policy exceptions and discipline",
+      "final compensation approval",
+      "guest PII handling",
+      "emergency response decisions"
+    ],
+    "absolute_prohibitions_for_parkpulse": [
+      "Do not recommend reopening a ride without maintenance or safety clearance.",
+      "Do not expose guest PII or sensitive incident details outside the approved response team.",
+      "Do not make individualized compensation promises without human approval.",
+      "Do not delay legally or policy-protected worker breaks to optimize wait times.",
+      "Do not reduce safety-critical, accessibility-critical, medical, or security coverage during an incident.",
+      "Do not recommend menu items, ride capacity, or staff availability that are not grounded in current source data."
+    ]
+  },
+  "active_policy_books": [
+    "parkpulse_operations_policy_book",
+    "ride_safety_policy_book",
+    "labor_stress_policy_book",
+    "guest_privacy_policy_book",
+    "eventops_planning_policy_book",
+    "equipment_control_policy_book",
+    "actionable_agent_policy_book",
+    "researched_scenario_case_study_policy_book",
+    "finance_business_policy_book",
+    "gcp_internal_eval_policy_book"
+  ],
+  "default_action_policy_refs": [
+    "PARK-OPS-001",
+    "PARK-EXP-001",
+    "PARK-CARE-001"
+  ],
+  "monitoring_lanes": [
+    {
+      "area": "Safety",
+      "policy_book_id": "ride_safety_policy_book",
+      "primary_policy_ref": "PARK-SAFE-001",
+      "eval_threshold": {
+        "label": "Safety",
+        "minimum": 90,
+        "failure": "GCP internal safety score is below automatic-action threshold."
+      }
+    },
+    {
+      "area": "Operations",
+      "policy_book_id": "parkpulse_operations_policy_book",
+      "primary_policy_ref": "PARK-OPS-001",
+      "eval_threshold": {
+        "label": "Groundedness",
+        "minimum": 75,
+        "warning": "Grounding score is below preferred threshold."
+      }
+    },
+    {
+      "area": "Experience",
+      "policy_book_id": "guest_privacy_policy_book",
+      "primary_policy_ref": "PARK-EXP-001",
+      "eval_threshold": {
+        "label": "Capacity awareness",
+        "minimum": 75,
+        "warning": "Capacity awareness is weak; guest routing may create a new bottleneck."
+      }
+    },
+    {
+      "area": "Customer Care",
+      "policy_book_id": "guest_privacy_policy_book",
+      "primary_policy_ref": "PARK-CARE-001"
+    }
+  ],
+  "default_decision_order": [
+    "validate source signals",
+    "classify park operations scenario",
+    "retrieve relevant incident or operations playbook",
+    "check ride capacity, staff readiness, food inventory, and guest-flow feasibility",
+    "enforce safety, privacy, labor, and accessibility constraints",
+    "produce a balanced action plan with owners and deadlines",
+    "write agent_decisions and guest_messages records",
+    "run GCP internal evals for groundedness, safety, staff stress, guest impact, and actionability",
+    "trigger human review when thresholds are crossed"
+  ]
+}

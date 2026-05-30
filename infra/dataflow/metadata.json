@@ -1,0 +1,18 @@
+{
+  "name": "ParkPulse telemetry stream",
+  "description": "Streams ParkPulse Pub/Sub events through Dataflow into BigQuery telemetry rows.",
+  "parameters": [
+    {
+      "name": "input_subscription",
+      "label": "Input Pub/Sub subscription",
+      "helpText": "Full subscription path, for example projects/PROJECT/subscriptions/parkpulse-ops-events-subscription",
+      "isOptional": false
+    },
+    {
+      "name": "output_table",
+      "label": "Output BigQuery table",
+      "helpText": "BigQuery table in PROJECT:DATASET.TABLE format.",
+      "isOptional": false
+    }
+  ]
+}

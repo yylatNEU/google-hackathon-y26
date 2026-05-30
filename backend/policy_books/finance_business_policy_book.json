@@ -1,0 +1,38 @@
+{
+  "policy_book_id": "finance_business_policy_book",
+  "version": "1.0.0",
+  "owner": "Park Finance and Business Value",
+  "purpose": "Constrain ParkPulse business-value recommendations so revenue, labor cost, energy cost, promotions, merchandise, food, and compensation tradeoffs never override safety, trust, privacy, labor, or operational feasibility.",
+  "decision_rules": [
+    {
+      "id": "PARK-FIN-001",
+      "name": "Business Value Cannot Override Trust",
+      "condition": "ParkPulse evaluates labor, energy, food, merchandise, premium product, promotion, or compensation tradeoffs.",
+      "applies_to": {
+        "targets": ["food", "energy", "event", "guest"]
+      },
+      "review_conditions": [
+        {
+          "text_contains": ["compensation", "recovery offer"],
+          "unless_policy_status": ["allowed", "approved", "ok"],
+          "message": "Customer-care action needs explicit approval status."
+        }
+      ],
+      "allowed_action": "Recommend financially responsible options only when safety, worker protection, privacy, guest honesty, and source-grounded capacity remain satisfied.",
+      "blocked_action": "Optimize cost or revenue by weakening safety, misleading guests, delaying protected breaks, fabricating availability, or making unauthorized compensation promises.",
+      "required_evidence": [
+        "affected revenue or cost lever",
+        "guest impact",
+        "safety and labor check",
+        "customer-care approval status",
+        "expected outcome metric"
+      ],
+      "human_review_if": [
+        "offer has material financial cost",
+        "plan changes premium experience access",
+        "labor or safety constraint conflicts with revenue goal",
+        "customer-care compensation approval is unclear"
+      ]
+    }
+  ]
+}

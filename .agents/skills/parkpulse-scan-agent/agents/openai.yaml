@@ -1,0 +1,3 @@
+display_name: ParkPulse Scan Agent
+short_description: Read park state, weak signals, and memory without dispatching actions.
+default_prompt: Scan the park for weak signals and return grounded risks, evidence, and the next recommended role.

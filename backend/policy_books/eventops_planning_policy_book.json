@@ -1,0 +1,95 @@
+{
+  "policy_book_id": "eventops_planning_policy_book",
+  "version": "1.0.0",
+  "owner": "Temporary Event Operations",
+  "purpose": "Govern LLM-generated amusement park event plans across placement, timing, staffing, equipment, crowd flow, risk identification, deployment suggestions, and normal ride operations.",
+  "decision_rules": [
+    {
+      "id": "PARK-EVENT-001",
+      "name": "Temporary Placement Feasibility",
+      "condition": "A plan places scare zones, mazes, pop-up food, merch, barriers, lighting, fog, photo ops, or shows.",
+      "applies_to": {
+        "targets": ["event", "traffic"],
+        "actions": ["plan_overlay", "proactive_commit", "revise_overlay_after_outcome"]
+      },
+      "allowed_action": "Place experiences where capacity, access, utilities, staff, emergency routes, and normal ride operations can support them.",
+      "blocked_action": "Place queues, equipment, food lines, or scare zones where they block emergency access, accessibility routes, parade routes, or critical operations.",
+      "required_evidence": [
+        "location",
+        "capacity note",
+        "setup dependency",
+        "operational risk",
+        "mitigation"
+      ],
+      "human_review_if": [
+        "temporary equipment changes path geometry",
+        "event attendance exceeds baseline staffing plan",
+        "parade or emergency route could be affected"
+      ]
+    },
+    {
+      "id": "PARK-EVENT-002",
+      "name": "Temporal Flow Planning",
+      "condition": "A temporary event plan spans multiple time blocks.",
+      "applies_to": {
+        "targets": ["event", "traffic"],
+        "actions": ["plan_overlay"]
+      },
+      "allowed_action": "Plan arrival, family, peak, exit, food, and show waves with stage-by-stage staffing and routing.",
+      "blocked_action": "Treat event crowd movement as static or ignore peak-time transitions.",
+      "required_evidence": [
+        "time block",
+        "expected behavior",
+        "operational risk",
+        "actions"
+      ],
+      "human_review_if": [
+        "exit wave overlaps ride closure or weather risk",
+        "maze queue spills into normal ride operations"
+      ]
+    },
+    {
+      "id": "PARK-EVENT-003",
+      "name": "Plan Revision From Outcomes",
+      "condition": "Take rate, crowd movement, worker acknowledgement, equipment application, or GCP internal eval indicates weak assumptions.",
+      "applies_to": {
+        "targets": ["event", "scenario"],
+        "actions": ["revise_overlay_after_outcome", "proactive_commit"]
+      },
+      "allowed_action": "Create a revised event plan version that changes placement, staffing, equipment, or message strategy.",
+      "blocked_action": "Repeat a plan after evidence shows low take rate, bottleneck creation, staff overload, or equipment infeasibility.",
+      "required_evidence": [
+        "outcome id",
+        "take rate",
+        "state impact",
+        "revision summary"
+      ],
+      "human_review_if": [
+        "revision changes safety, route, or staffing constraints"
+      ]
+    },
+    {
+      "id": "PARK-EVENT-004",
+      "name": "Family-Safe Creative Fit",
+      "condition": "A creative event concept changes theme, scare intensity, guest segment targeting, show content, or promotional framing.",
+      "applies_to": {
+        "targets": ["event", "scenario"],
+        "actions": ["plan_overlay", "proactive_commit", "revise_overlay_after_outcome"]
+      },
+      "allowed_action": "Keep creative ideas compatible with audience windows, accessibility, staffing, capacity, and published park standards.",
+      "blocked_action": "Suggest creative concepts that ignore family-safe windows, accessibility needs, crowd capacity, brand restrictions, or operator approvals.",
+      "required_evidence": [
+        "target guest segment",
+        "time window",
+        "capacity note",
+        "accessibility consideration",
+        "operator approval status"
+      ],
+      "human_review_if": [
+        "content intensity changes by time block",
+        "theme may affect children or sensitive guests",
+        "creative plan adds staffing, security, or route controls"
+      ]
+    }
+  ]
+}

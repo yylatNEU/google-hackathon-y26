@@ -1,0 +1,94 @@
+{
+  "policy_book_id": "equipment_control_policy_book",
+  "version": "1.0.0",
+  "owner": "Facilities and Equipment Control",
+  "purpose": "Constrain ParkPulse equipment actions to non-safety-critical comfort, signage, lighting, and load-management controls with clear approval boundaries.",
+  "decision_rules": [
+    {
+      "id": "PARK-EQUIP-001",
+      "name": "Comfort and Load Controls Only",
+      "condition": "ParkPulse sends an equipment-controller command.",
+      "applies_to": {
+        "targets": ["energy", "event", "signage", "queue_gate", "maintenance"]
+      },
+      "allowed_action": "Adjust HVAC setpoints, noncritical lighting, signage, and comfort/load settings within approved bounds.",
+      "blocked_action": "Control ride safety systems, access control, emergency systems, medical systems, pyrotechnics, or security devices.",
+      "required_evidence": [
+        "equipment type",
+        "target zones",
+        "command",
+        "settings",
+        "approval requirement"
+      ],
+      "human_review_if": [
+        "command touches safety-critical equipment",
+        "setting exceeds approved comfort or load bounds",
+        "equipment state is unknown"
+      ]
+    },
+    {
+      "id": "PARK-EQUIP-002",
+      "name": "Shelter Comfort Protection",
+      "condition": "Weather, heat, indoor crowding, or event shelter demand is elevated.",
+      "applies_to": {
+        "targets": ["energy"],
+        "scenarios": ["storm_response"]
+      },
+      "block_conditions": [
+        {
+          "targets": ["energy"],
+          "actions": ["reduce_hvac", "shed_shelter_hvac"],
+          "state": {"weather_storm_risk_gte": 60},
+          "message": "Shelter comfort cannot be reduced during elevated weather risk."
+        }
+      ],
+      "allowed_action": "Protect HVAC in shelter zones while reducing only noncritical load.",
+      "blocked_action": "Shed HVAC in active shelter zones to optimize energy cost.",
+      "required_evidence": [
+        "weather or heat risk",
+        "indoor density",
+        "target setpoint",
+        "demand-charge risk"
+      ],
+      "human_review_if": [
+        "shelter density exceeds safe limit",
+        "grid emergency requires manual facilities decision"
+      ]
+    },
+    {
+      "id": "PARK-EQUIP-003",
+      "name": "Wayfinding and Intake Controls",
+      "condition": "ParkPulse updates digital signage, temporary queue gates, maintenance inspection commands, or noncritical event controls.",
+      "applies_to": {
+        "targets": ["signage", "queue_gate", "maintenance", "event"],
+        "actions": ["update", "hold_intake", "inspect", "activate"]
+      },
+      "block_conditions": [
+        {
+          "targets": ["queue_gate"],
+          "text_contains": ["block emergency", "close emergency", "disable egress"],
+          "message": "Queue gate commands cannot block emergency egress or evacuation paths."
+        },
+        {
+          "targets": ["maintenance"],
+          "actions": ["override_safety", "reopen_ride", "clear_fault"],
+          "message": "ParkPulse cannot override maintenance or safety-critical ride controls."
+        }
+      ],
+      "allowed_action": "Use signage and queue-intake holds for wayfinding, crowd smoothing, or noncritical routing while preserving emergency access.",
+      "blocked_action": "Operate ride safety systems, medical devices, security devices, access control, or emergency systems.",
+      "required_evidence": [
+        "control type",
+        "target zone or device",
+        "message or command payload",
+        "expected operational effect",
+        "safety-critical exclusion"
+      ],
+      "human_review_if": [
+        "queue gate affects an evacuation or emergency route",
+        "maintenance action involves ride safety or fault clearance",
+        "equipment state is stale or unknown"
+      ]
+    }
+  ]
+}

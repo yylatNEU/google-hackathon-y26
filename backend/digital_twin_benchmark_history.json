@@ -1,0 +1,1134 @@
+[
+  {
+    "average_regret_vs_benchmark_selector": 7.0,
+    "average_score": 73,
+    "created_at": "2026-05-26T05:45:53.755039+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T054553Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 69,
+    "created_at": "2026-05-26T05:47:18.765700+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260526T054718Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 7.0,
+    "average_score": 73,
+    "created_at": "2026-05-26T05:47:19.204065+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T054719Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 69,
+    "created_at": "2026-05-26T05:48:18.949376+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260526T054818Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 7.0,
+    "average_score": 73,
+    "created_at": "2026-05-26T05:48:18.968526+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T054818Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 69,
+    "created_at": "2026-05-26T05:49:41.979681+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260526T054941Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 7.0,
+    "average_score": 73,
+    "created_at": "2026-05-26T05:49:41.997373+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T054941Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0.0,
+    "average_score": 86,
+    "created_at": "2026-05-26T05:50:20.469766+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "ui-single-mpm7u860:20260526T055020Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "ui-single-mpm7u860"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-26T18:51:41.685547+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260526T185141Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-26T18:51:41.956991+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T185141Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-26T18:52:28.483252+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260526T185228Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-26T18:52:28.827073+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T185228Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-26T18:53:12.357321+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260526T185312Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-26T18:53:12.629260+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T185312Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-26T18:54:57.661079+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260526T185457Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-26T18:54:57.933114+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T185457Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-26T18:56:27.232910+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260526T185627Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-26T18:56:27.507089+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T185627Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-26T18:56:52.429171+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260526T185652Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-26T18:56:52.741784+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T185652Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-26T18:57:26.192101+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260526T185726Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-26T18:57:26.466958+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T185726Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-26T18:57:51.135691+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260526T185751Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-26T18:57:51.464903+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260526T185751Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-28T00:46:05.364101+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260528T004605Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-28T00:46:05.681291+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260528T004605Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-28T00:46:29.851867+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260528T004629Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-28T00:46:30.167745+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260528T004630Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-28T01:00:45.549728+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260528T010045Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-28T01:00:45.858375+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260528T010045Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-28T01:03:01.464104+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260528T010301Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-28T01:03:01.773939+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260528T010301Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-28T01:08:12.625017+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260528T010812Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-28T01:08:12.968817+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260528T010812Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-28T01:17:43.703014+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260528T011743Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-28T01:17:44.022392+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260528T011744Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-28T01:21:57.048228+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260528T012157Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-28T01:21:57.378490+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260528T012157Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 0,
+    "average_score": 78,
+    "created_at": "2026-05-28T22:09:06.750903+00:00",
+    "episodes": 1,
+    "failed": 1,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "score below success threshold"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "policy_gate_pressure",
+    "horizon_minutes": 30,
+    "mode": "digital_twin_adversarial_benchmark",
+    "pass_rate": 0.0,
+    "passed": 0,
+    "policy_under_test": "benchmark_selector",
+    "run_id": "api-test:20260528T220906Z",
+    "scenario_ids": [
+      "policy_gate_pressure"
+    ],
+    "seed": "api-test"
+  },
+  {
+    "average_regret_vs_benchmark_selector": 14.0,
+    "average_score": 88,
+    "created_at": "2026-05-28T22:09:06.774457+00:00",
+    "episodes": 1,
+    "failed": 0,
+    "failure_modes": [
+      {
+        "count": 1,
+        "mode": "regret versus benchmark selector"
+      },
+      {
+        "count": 1,
+        "mode": "secondary risk remains high"
+      }
+    ],
+    "hardest_episode": "sensor_lag_mislead",
+    "horizon_minutes": 30,
+    "mode": "parkpulse_agent_adversarial_benchmark",
+    "pass_rate": 1.0,
+    "passed": 1,
+    "policy_under_test": "ParkPulse planner + optimizer + digital twin policy gate",
+    "run_id": "api-agent-test:20260528T220906Z",
+    "scenario_ids": [
+      "sensor_lag_mislead"
+    ],
+    "seed": "api-agent-test"
+  }
+]

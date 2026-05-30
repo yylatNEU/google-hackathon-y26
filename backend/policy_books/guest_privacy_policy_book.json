@@ -1,0 +1,149 @@
+{
+  "policy_book_id": "guest_privacy_policy_book",
+  "version": "1.0.0",
+  "owner": "Guest Experience and Privacy",
+  "purpose": "Constrain ParkPulse guest messaging, promotions, incident handling, and customer-care recommendations to aggregate, honest, privacy-safe actions.",
+  "decision_rules": [
+    {
+      "id": "PARK-EXP-001",
+      "name": "Capacity-Aware Guest Experience",
+      "condition": "ParkPulse recommends guest routing, event nudges, food redirection, queue messaging, or recovery offers.",
+      "applies_to": {
+        "targets": ["ride", "traffic", "scenario", "food", "event", "guest", "guest_services", "medical", "accessibility", "security", "signage"]
+      },
+      "allowed_action": "Use honest, capacity-aware guidance that improves guest experience without creating a new bottleneck.",
+      "blocked_action": "Manipulate guests with misleading messages, route guests into overloaded zones, or imply unavailable services.",
+      "required_evidence": [
+        "guest segment",
+        "origin pressure",
+        "destination capacity",
+        "message text",
+        "expected or observed take rate"
+      ],
+      "human_review_if": [
+        "message references safety or compensation",
+        "destination capacity is uncertain",
+        "take rate is low and incentive strength changes"
+      ]
+    },
+    {
+      "id": "PARK-CARE-001",
+      "name": "Aggregate Guest Segments Only",
+      "condition": "ParkPulse generates a guest app message, promotion, or reroute audience.",
+      "applies_to": {
+        "targets": ["ride", "traffic", "scenario", "food", "event", "guest", "guest_services", "medical", "accessibility", "security", "signage"]
+      },
+      "block_conditions": [
+        {
+          "targets": ["guest"],
+          "actions": ["personal_compensation", "named_guest_message", "pii_message"],
+          "message": "Guest care actions cannot expose PII or promise individualized compensation without approval."
+        },
+        {
+          "text_contains": ["named guest", "guest pii"],
+          "message": "Guest care actions cannot expose named guests or guest PII."
+        }
+      ],
+      "review_conditions": [
+        {
+          "text_contains": ["compensation", "recovery offer"],
+          "unless_policy_status": ["allowed", "approved", "ok"],
+          "message": "Customer-care action needs explicit approval status."
+        }
+      ],
+      "allowed_action": "Use aggregate audiences such as guests near a zone, queue, show, or restaurant.",
+      "blocked_action": "Expose named guests, contact details, payment details, health information, child information, or individualized profiles.",
+      "required_evidence": [
+        "audience segment",
+        "radius or zone",
+        "message",
+        "privacy-safe payload"
+      ],
+      "human_review_if": [
+        "lost child, medical, security, or guest complaint details appear",
+        "message includes individualized compensation or entitlement language"
+      ]
+    },
+    {
+      "id": "PARK-MSG-001",
+      "name": "Honest Operational Messaging",
+      "condition": "ParkPulse drafts guest-facing operational text.",
+      "applies_to": {
+        "targets": ["ride", "traffic", "food", "guest", "scenario", "guest_services", "medical", "accessibility", "security", "signage"]
+      },
+      "allowed_action": "State what is known, avoid false precision, and offer nearby alternatives.",
+      "blocked_action": "Promise reopening time, guaranteed wait reduction, compensation, or item availability without confirmed source data.",
+      "required_evidence": [
+        "current ride or food status",
+        "target alternatives",
+        "uncertainty wording when needed"
+      ],
+      "human_review_if": [
+        "message references safety, security, lost child, medical, or compensation"
+      ]
+    },
+    {
+      "id": "PARK-MSG-003",
+      "name": "Promotion Fairness and Take Rate",
+      "condition": "ParkPulse recommends a promotion, voucher, bonus points, or offer.",
+      "applies_to": {
+        "targets": ["food", "guest", "ride", "traffic", "guest_services"],
+        "scenarios": ["food_spike"]
+      },
+      "review_conditions": [
+        {
+          "text_contains": ["compensation", "recovery offer"],
+          "unless_policy_status": ["allowed", "approved", "ok"],
+          "message": "Customer-care action needs explicit approval status."
+        }
+      ],
+      "allowed_action": "Use proportionate, targeted offers and measure take rate, sentiment, and follow-through.",
+      "blocked_action": "Make individualized compensation promises or broad offers disconnected from the operational problem.",
+      "required_evidence": [
+        "target audience",
+        "offer",
+        "expiration",
+        "expected take rate",
+        "observed take rate after delivery"
+      ],
+      "human_review_if": [
+        "offer has material financial cost",
+        "take rate is low and plan requires stronger incentives"
+      ]
+    },
+    {
+      "id": "PARK-CARE-002",
+      "name": "Sensitive Care Incident Privacy",
+      "condition": "ParkPulse responds to medical, accessibility, security, lost-child, panic, or guest-care language.",
+      "applies_to": {
+        "targets": ["medical", "accessibility", "security", "guest_services"],
+        "actions": ["dispatch", "assist", "respond", "message"]
+      },
+      "block_conditions": [
+        {
+          "text_contains": ["child name", "named child", "patient name", "guest medical details", "diagnosis"],
+          "message": "Sensitive care responses must not expose names, diagnoses, child details, or individual health information."
+        },
+        {
+          "targets": ["medical", "security"],
+          "actions": ["public_broadcast", "broad_guest_alert"],
+          "message": "Medical and security incident details cannot be broadcast broadly without human approval."
+        }
+      ],
+      "allowed_action": "Use aggregate, calm, need-to-know messages and route detailed response to qualified staff or supervisors.",
+      "blocked_action": "Expose named guests, health information, child details, camera details, or unverified incident claims.",
+      "required_evidence": [
+        "privacy-safe audience",
+        "qualified responder role",
+        "location or zone without identifying details",
+        "human-review flag when sensitive"
+      ],
+      "human_review_if": [
+        "medical response is requested",
+        "lost child or vulnerable guest language appears",
+        "security response is requested",
+        "message could reveal an individual's identity or condition"
+      ]
+    }
+  ]
+}
