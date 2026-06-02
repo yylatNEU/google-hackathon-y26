@@ -68,6 +68,7 @@ _heartbeat_action_logs: list[dict[str, Any]] = []
 _heartbeat_action_log_lock = threading.Lock()
 _hot_endpoint_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _hot_endpoint_refreshing: set[str] = set()
+_mongo_hot_status_cache: tuple[float, dict[str, Any]] | None = None
 _live_feed_health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _live_feed_weather_refresh_status: dict[str, Any] = {
     "status": "idle",
@@ -143,6 +144,13 @@ def _truthy(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _strip_env_secret(value: str | None) -> str:
+    raw = (value or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        return raw[1:-1].strip()
+    return raw
 
 
 def _heartbeat_controller_enabled() -> bool:
@@ -518,6 +526,56 @@ def _full_runtime_status() -> dict[str, Any]:
         "timeout_tiers": _timeout_tiers(),
         "metrics": dict(_runtime_metrics),
     }
+
+
+def _hot_mongo_status() -> dict[str, Any]:
+    global _mongo_hot_status_cache
+    uri = _strip_env_secret(os.getenv("MONGODB_DIRECT_URI") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI"))
+    database = os.getenv("MONGODB_DATABASE", "parkpulse_ops")
+    if not uri:
+        return {"mode": "not_configured", "connected": False, "configured": False}
+
+    ttl = max(0.0, _float_env("MONGODB_HOT_STATUS_CACHE_TTL_SECONDS", 15.0))
+    now = time.monotonic()
+    if _mongo_hot_status_cache and ttl > 0 and _mongo_hot_status_cache[0] > now:
+        return dict(_mongo_hot_status_cache[1])
+
+    started = time.monotonic()
+    timeout_ms = max(250, _int_env("MONGODB_OPERATION_TIMEOUT_MS", 1500))
+    try:
+        from pymongo import MongoClient
+        import certifi
+
+        client = MongoClient(
+            uri,
+            serverSelectionTimeoutMS=timeout_ms,
+            connectTimeoutMS=timeout_ms,
+            socketTimeoutMS=timeout_ms,
+            tlsCAFile=os.getenv("MONGODB_TLS_CA_FILE") or certifi.where(),
+        )
+        try:
+            client.admin.command("ping")
+        finally:
+            client.close()
+        payload = {
+            "mode": "mongodb",
+            "connected": True,
+            "configured": True,
+            "database": database,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+        }
+    except Exception as error:
+        payload = {
+            "mode": "configured_hot_path_failed",
+            "connected": False,
+            "configured": True,
+            "database": database,
+            "readiness_issues": [str(error)[:240]],
+        }
+
+    if ttl > 0:
+        _mongo_hot_status_cache = (now + ttl, payload)
+    return dict(payload)
 
 
 async def _resolve_hot_builder(builder) -> dict[str, Any]:
@@ -1435,17 +1493,8 @@ def _fast_integration_status() -> dict[str, Any]:
 
 def _lightweight_integration_status() -> dict[str, Any]:
     gemini_ready = bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_CLOUD_PROJECT"))
-    mongo_uri = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
     bigquery_enabled = str(os.getenv("ENABLE_BIGQUERY_ANALYTICS", "")).lower() in {"1", "true", "yes", "on"}
-    mongo_status = {"mode": "not_configured", "connected": False, "configured": False}
-    if mongo_uri:
-        mongo_status = {
-            "mode": "configured_hot_path_not_verified",
-            "connected": False,
-            "configured": True,
-            "database": os.getenv("MONGODB_DATABASE", "parkpulse_ops"),
-            "readiness_issues": ["MongoDB connection is verified by /api/park/memory; hot integration status does not open network clients."],
-        }
+    mongo_status = _hot_mongo_status()
     return {
         "domain": "amusement_park_operations",
         "agent": {"name": "ParkPulse AI", "role": "parkpulse_decision_bridge"},
@@ -1827,12 +1876,14 @@ def _fast_delivery_outbox_health() -> dict[str, Any]:
     try:
         if _fast_delivery_outbox_status is not None:
             return _fast_delivery_outbox_status()
+        from park_delivery import delivery_outbox_status
+
+        return delivery_outbox_status()
     except Exception as error:
         return {
             "ready": False,
             "error": str(error)[:300],
         }
-    return {"ready": False, "error": "delivery outbox module unavailable on lazy hot path"}
 
 
 def _fast_role_state_impact(scenario_key: str, dispatches: list[dict[str, Any]]) -> dict[str, Any]:
