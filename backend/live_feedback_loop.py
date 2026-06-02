@@ -236,13 +236,30 @@ def _read_mongo_documents(collection: str, limit: int = 500) -> list[dict[str, A
         if db is None:
             return []
         bounded_limit = max(1, min(5000, int(limit or 500)))
-        rows = list(db[collection].find({}, {"embedding": 0, "embeddingText": 0}).sort("createdAt", -1).limit(bounded_limit))
+        max_time_ms = max(250, _int_env("PARKPULSE_LIVE_FEED_MONGO_QUERY_TIMEOUT_MS", 1000))
+        rows = list(db[collection].find({}, {"embedding": 0, "embeddingText": 0}, max_time_ms=max_time_ms).sort("createdAt", -1).limit(bounded_limit))
         for row in rows:
             if "_id" in row:
                 row["_id"] = str(row["_id"])
         return rows
     except Exception:
         return []
+
+
+def warm_live_feed_storage() -> dict[str, Any]:
+    status = live_feed_storage_status()
+    if not status.get("shared_across_instances"):
+        return {**status, "warm": False}
+    started = time.perf_counter()
+    db = _live_feed_mongo_db()
+    if db is None:
+        return {**status, "warm": False, "readiness_issues": ["Mongo live-feed storage client is unavailable."]}
+    try:
+        db.live_feed_events.find_one({}, {"_id": 1}, max_time_ms=max(250, _int_env("PARKPULSE_LIVE_FEED_MONGO_QUERY_TIMEOUT_MS", 1000)))
+        db.live_review_ledger.find_one({}, {"_id": 1}, max_time_ms=max(250, _int_env("PARKPULSE_LIVE_FEED_MONGO_QUERY_TIMEOUT_MS", 1000)))
+    except Exception as error:
+        return {**status, "warm": False, "latency_ms": int((time.perf_counter() - started) * 1000), "readiness_issues": [str(error)[:240]]}
+    return {**status, "warm": True, "latency_ms": int((time.perf_counter() - started) * 1000)}
 
 
 def _append_jsonl(path: str, row: dict[str, Any]) -> None:

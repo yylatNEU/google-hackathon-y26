@@ -4771,6 +4771,11 @@ async def app(scope, receive, send):
                 if os.getenv("PARKPULSE_AUTO_WARMUP", "").strip().lower() in {"1", "true", "yes", "on"}:
                     with contextlib.suppress(Exception):
                         _warmup_policy_payload(force=False)
+                if os.getenv("PARKPULSE_LIVE_FEED_STORAGE", "").strip().lower() in {"mongodb", "mongo"}:
+                    with contextlib.suppress(Exception):
+                        from live_feedback_loop import warm_live_feed_storage
+
+                        await asyncio.to_thread(warm_live_feed_storage)
                 await send({"type": "lifespan.startup.complete"})
             elif message["type"] == "lifespan.shutdown":
                 await send({"type": "lifespan.shutdown.complete"})
