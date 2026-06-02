@@ -14,6 +14,11 @@ from urllib.parse import parse_qs, unquote
 
 from env_bootstrap import load_backend_env
 from agent_role_skills import list_agent_role_skills, route_agent_role
+from live_feedback_loop import ingest_live_feed_event, live_feed_health, record_review_decision, review_training_ledger
+from guest_flow_live_feed import ingest_live_guest_flow_feed, guest_flow_feed_config
+from ops_remaining_live_feeds import food_ops_feed_config, ingest_live_food_ops_feed, ingest_live_operator_signal_feed, ingest_live_staffing_feed, operator_signal_feed_config, staffing_feed_config
+from ride_ops_live_feed import ingest_live_ride_ops_feed, ride_ops_feed_config
+from weather_live_feed import ingest_live_weather_feed, weather_feed_config
 
 
 load_backend_env()
@@ -63,6 +68,12 @@ _heartbeat_action_logs: list[dict[str, Any]] = []
 _heartbeat_action_log_lock = threading.Lock()
 _hot_endpoint_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _hot_endpoint_refreshing: set[str] = set()
+_live_feed_health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_live_feed_weather_refresh_status: dict[str, Any] = {
+    "status": "idle",
+    "mode": "live_weather_feed_background_refresh",
+}
+_live_feed_weather_refresh_task: asyncio.Task[Any] | None = None
 _last_fast_park_step_at = 0.0
 _fast_park_step_interval_seconds = 1.5
 _runtime_metrics: dict[str, int] = {
@@ -123,6 +134,12 @@ def _timeout_tiers() -> dict[str, float]:
 
 def _truthy_env(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _truthy(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -583,6 +600,181 @@ async def _fast_park_state_lite() -> dict[str, Any]:
     )
     state["heartbeatController"] = _heartbeat_controller_status(include_logs=False)
     return state
+
+
+async def _raw_fast_park_state_for_feed_load() -> dict[str, Any]:
+    if _fast_park_simulation is None:
+        raise RuntimeError("Fast park simulation is not available for live feed loading.")
+    await _advance_fast_park_from_wall_clock()
+    get_state_lite = getattr(_fast_park_simulation, "get_state_lite", None)
+    raw_state = await get_state_lite() if callable(get_state_lite) else await _fast_park_simulation.get_state()
+    return raw_state if isinstance(raw_state, dict) else {}
+
+
+def _live_feed_health_cache_ttl_seconds() -> float:
+    return max(0.0, _float_env("PARKPULSE_LIVE_FEED_HEALTH_CACHE_TTL_SECONDS", 3.0))
+
+
+def _invalidate_live_feed_health_cache() -> None:
+    _live_feed_health_cache.clear()
+
+
+async def _live_feed_health_payload(limit: int = 500) -> dict[str, Any]:
+    bounded_limit = max(20, min(2000, int(limit or 500)))
+    cache_key = str(bounded_limit)
+    ttl = _live_feed_health_cache_ttl_seconds()
+    now = time.time()
+    cached = _live_feed_health_cache.get(cache_key)
+    if cached and ttl > 0 and now - cached[0] <= ttl:
+        payload = dict(cached[1])
+        payload["cache"] = {"status": "hit", "ttl_seconds": ttl}
+        return payload
+    state = await _fast_park_state_lite()
+    payload = live_feed_health(state, limit=bounded_limit)
+    if ttl > 0:
+        _live_feed_health_cache[cache_key] = (now, payload)
+    return {**payload, "cache": {"status": "miss", "ttl_seconds": ttl}}
+
+
+def _live_weather_refresh_queued_result(reason: str = "manual_refresh_supervisor") -> dict[str, Any]:
+    return {
+        "status": "queued",
+        "mode": "live_weather_feed_background_refresh",
+        "provider": weather_feed_config().get("provider", "open_meteo"),
+        "reason": reason,
+        "latest": _live_feed_weather_refresh_status,
+        "boundary": weather_feed_config().get("boundary"),
+    }
+
+
+async def _run_live_weather_refresh_background(reason: str) -> None:
+    global _live_feed_weather_refresh_status
+    _live_feed_weather_refresh_status = {
+        "status": "running",
+        "mode": "live_weather_feed_background_refresh",
+        "started_at": _now_iso(),
+        "reason": reason,
+    }
+    try:
+        result = await asyncio.to_thread(ingest_live_weather_feed)
+        _hot_endpoint_cache.pop("park_state", None)
+        _hot_endpoint_cache.pop("park_state_lite", None)
+        _invalidate_live_feed_health_cache()
+        _live_feed_weather_refresh_status = {
+            "status": result.get("status", "loaded") if isinstance(result, dict) else "loaded",
+            "mode": "live_weather_feed_background_refresh",
+            "completed_at": _now_iso(),
+            "reason": reason,
+            "result": result,
+        }
+    except asyncio.CancelledError:
+        _live_feed_weather_refresh_status = {
+            "status": "cancelled",
+            "mode": "live_weather_feed_background_refresh",
+            "cancelled_at": _now_iso(),
+            "reason": reason,
+        }
+        raise
+    except Exception as error:
+        _live_feed_weather_refresh_status = {
+            "status": "error",
+            "mode": "live_weather_feed_background_refresh",
+            "completed_at": _now_iso(),
+            "reason": reason,
+            "readiness_issues": [str(error)[:240]],
+        }
+
+
+def _queue_live_weather_refresh(reason: str = "manual_refresh_supervisor") -> dict[str, Any]:
+    global _live_feed_weather_refresh_task
+    if _live_feed_weather_refresh_task and not _live_feed_weather_refresh_task.done():
+        return _live_weather_refresh_queued_result(reason)
+    _live_feed_weather_refresh_task = asyncio.create_task(
+        _run_live_weather_refresh_background(reason),
+        name="parkpulse-live-weather-refresh",
+    )
+    return _live_weather_refresh_queued_result(reason)
+
+
+async def _refresh_due_live_feeds_payload(request_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = request_payload if isinstance(request_payload, dict) else {}
+    requested_sources = payload.get("sources")
+    source_filter = {str(source).strip().replace("-", "_") for source in requested_sources if str(source).strip()} if isinstance(requested_sources, list) else set()
+    stale_only = _truthy(str(payload.get("stale_only") if "stale_only" in payload else payload.get("staleOnly")) if ("stale_only" in payload or "staleOnly" in payload) else None, True)
+    refresh_margin_seconds = max(0, _int_env("PARKPULSE_LIVE_FEED_REFRESH_MARGIN_SECONDS", 20))
+    if payload.get("refresh_margin_seconds") is not None or payload.get("refreshMarginSeconds") is not None:
+        try:
+            refresh_margin_seconds = max(0, int(float(payload.get("refresh_margin_seconds", payload.get("refreshMarginSeconds")))))
+        except (TypeError, ValueError):
+            refresh_margin_seconds = 20
+
+    before = await _live_feed_health_payload(limit=500)
+    due_sources: list[str] = []
+    for row in before.get("feeds", []) if isinstance(before.get("feeds"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        source = str(row.get("source") or "")
+        if source_filter and source not in source_filter:
+            continue
+        age = row.get("age_seconds")
+        budget = int(row.get("max_stale_seconds") or 0)
+        due_soon = isinstance(age, int) and budget > 0 and age >= max(0, budget - refresh_margin_seconds)
+        if not stale_only or row.get("status") != "ready" or due_soon:
+            due_sources.append(source)
+
+    results: dict[str, Any] = {}
+    queued_sources: list[str] = []
+    raw_state: dict[str, Any] | None = None
+    for source in due_sources:
+        try:
+            if source == "weather":
+                result = _queue_live_weather_refresh("stale_feed_supervisor")
+                queued_sources.append(source)
+            else:
+                if raw_state is None:
+                    raw_state = await _raw_fast_park_state_for_feed_load()
+                if source == "ride_ops":
+                    result = ingest_live_ride_ops_feed(raw_state)
+                elif source == "guest_flow":
+                    result = ingest_live_guest_flow_feed(raw_state)
+                elif source == "staffing":
+                    result = ingest_live_staffing_feed(raw_state)
+                elif source == "food_ops":
+                    result = ingest_live_food_ops_feed(raw_state)
+                elif source == "operator_signal":
+                    result = ingest_live_operator_signal_feed(raw_state)
+                else:
+                    result = {"status": "skipped", "readiness_issues": [f"Unknown live feed source: {source}"]}
+            results[source] = result
+        except Exception as error:
+            results[source] = {"status": "error", "readiness_issues": [str(error)[:240]]}
+
+    if results:
+        _hot_endpoint_cache.pop("park_state", None)
+        _hot_endpoint_cache.pop("park_state_lite", None)
+        _invalidate_live_feed_health_cache()
+    after = await _live_feed_health_payload(limit=500)
+    errors = [source for source, result in results.items() if isinstance(result, dict) and result.get("status") == "error"]
+    refreshed_sources = [source for source in results if source not in set(queued_sources)]
+    return {
+        "status": "error" if errors else "refreshed" if refreshed_sources else "queued" if queued_sources else "no_due_feeds",
+        "mode": "live_feed_refresh_supervisor",
+        "created_at": _now_iso(),
+        "stale_only": stale_only,
+        "refresh_margin_seconds": refresh_margin_seconds,
+        "requested_sources": sorted(source_filter),
+        "refreshed_sources": refreshed_sources,
+        "queued_sources": queued_sources,
+        "result_count": len(results),
+        "results": results,
+        "before": before.get("summary"),
+        "after": after.get("summary"),
+        "after_feeds": after.get("feeds", []),
+        "readiness_issues": [f"{source}: {results[source].get('readiness_issues', ['refresh failed'])[0]}" for source in errors],
+        "boundary": "Refresh supervisor only reloads evidence feeds. It does not trust sensitive events, close review cases, set reward, dispatch actions, or promote models.",
+        "uses_seed_data": False,
+        "llm_control_authority": False,
+    }
 
 
 def _model_context_value(snapshot: dict[str, Any] | None, scenario_key: str, policy_id: str = "live_complex_park_episode") -> dict[str, Any]:
@@ -6906,6 +7098,134 @@ async def app(scope, receive, send):
             200,
             await _cached_hot_endpoint("park_state_lite", _hot_endpoint_ttls()["park_state"], _fast_park_state_lite),
         )
+        return
+
+    if method == "GET" and path == "/api/park/live-feed-health":
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        limit_raw = (query.get("limit") or [None])[0]
+        try:
+            await _send_json(send, 200, await _live_feed_health_payload(limit=int(limit_raw) if limit_raw else 500))
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "live_feed_health_and_review_contract", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "POST" and path == "/api/park/live-feeds/refresh-stale":
+        request_payload = await _read_json_body(receive)
+        try:
+            await _send_json(send, 200, await _refresh_due_live_feeds_payload(request_payload))
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "live_feed_refresh_supervisor", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "POST" and path == "/api/park/live-feed-events":
+        request_payload = await _read_json_body(receive)
+        try:
+            events = request_payload.get("events") if isinstance(request_payload.get("events"), list) else None
+            if events is not None:
+                results = [ingest_live_feed_event(event) for event in events if isinstance(event, dict)]
+                if results:
+                    _invalidate_live_feed_health_cache()
+                await _send_json(
+                    send,
+                    200,
+                    {
+                        "status": "loaded" if results else "empty",
+                        "mode": "normalized_live_feed_batch_ingest",
+                        "event_count": len(results),
+                        "results": results,
+                        "sources": sorted({str((row.get("event") or {}).get("source") or "") for row in results if isinstance(row.get("event"), dict)}),
+                        "boundary": "Batch feed ingestion records facts only. It does not trust sensitive reviews, set reward, dispatch actions, or promote models.",
+                        "uses_seed_data": False,
+                        "llm_control_authority": False,
+                    },
+                )
+                return
+            result = ingest_live_feed_event(request_payload)
+            _invalidate_live_feed_health_cache()
+            await _send_json(send, 200, result)
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "normalized_live_feed_ingest", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "GET" and path == "/api/park/live-feeds/weather":
+        await _send_json(send, 200, {"status": "ready", "mode": "live_weather_feed_config", "config": weather_feed_config()})
+        return
+
+    if method == "POST" and path == "/api/park/live-feeds/weather/load":
+        try:
+            result = ingest_live_weather_feed()
+            _hot_endpoint_cache.pop("park_state", None)
+            _hot_endpoint_cache.pop("park_state_lite", None)
+            _invalidate_live_feed_health_cache()
+            await _send_json(send, 200, result)
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "live_weather_feed_load", "readiness_issues": [str(error)[:240]], "config": weather_feed_config()})
+        return
+
+    if method == "GET" and path == "/api/park/live-feeds/ride-ops":
+        await _send_json(send, 200, {"status": "ready", "mode": "live_ride_ops_feed_config", "config": ride_ops_feed_config()})
+        return
+
+    if method == "POST" and path == "/api/park/live-feeds/ride-ops/load":
+        try:
+            result = ingest_live_ride_ops_feed(await _raw_fast_park_state_for_feed_load())
+            _hot_endpoint_cache.pop("park_state", None)
+            _hot_endpoint_cache.pop("park_state_lite", None)
+            _invalidate_live_feed_health_cache()
+            await _send_json(send, 200, result)
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "live_ride_ops_feed_load", "readiness_issues": [str(error)[:240]], "config": ride_ops_feed_config()})
+        return
+
+    if method == "GET" and path == "/api/park/live-feeds/guest-flow":
+        await _send_json(send, 200, {"status": "ready", "mode": "live_guest_flow_feed_config", "config": guest_flow_feed_config()})
+        return
+
+    if method == "POST" and path == "/api/park/live-feeds/guest-flow/load":
+        try:
+            result = ingest_live_guest_flow_feed(await _raw_fast_park_state_for_feed_load())
+            _hot_endpoint_cache.pop("park_state", None)
+            _hot_endpoint_cache.pop("park_state_lite", None)
+            _invalidate_live_feed_health_cache()
+            await _send_json(send, 200, result)
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "live_guest_flow_feed_load", "readiness_issues": [str(error)[:240]], "config": guest_flow_feed_config()})
+        return
+
+    remaining_feed_routes = {
+        "/api/park/live-feeds/staffing": ("live_staffing_feed_config", staffing_feed_config, ingest_live_staffing_feed),
+        "/api/park/live-feeds/food-ops": ("live_food_ops_feed_config", food_ops_feed_config, ingest_live_food_ops_feed),
+        "/api/park/live-feeds/operator-signal": ("live_operator_signal_feed_config", operator_signal_feed_config, ingest_live_operator_signal_feed),
+    }
+    if method == "GET" and path in remaining_feed_routes:
+        mode, config_fn, _ = remaining_feed_routes[path]
+        await _send_json(send, 200, {"status": "ready", "mode": mode, "config": config_fn()})
+        return
+
+    load_routes = {f"{route}/load": value for route, value in remaining_feed_routes.items()}
+    if method == "POST" and path in load_routes:
+        mode, config_fn, ingest_fn = load_routes[path]
+        try:
+            result = ingest_fn(await _raw_fast_park_state_for_feed_load())
+            _hot_endpoint_cache.pop("park_state", None)
+            _hot_endpoint_cache.pop("park_state_lite", None)
+            _invalidate_live_feed_health_cache()
+            await _send_json(send, 200, result)
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": mode.replace("_config", "_load"), "readiness_issues": [str(error)[:240]], "config": config_fn()})
+        return
+
+    if method == "GET" and path == "/api/park/review-training-ledger":
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        limit_raw = (query.get("limit") or [None])[0]
+        await _send_json(send, 200, review_training_ledger(limit=int(limit_raw) if limit_raw else 120))
+        return
+
+    if method == "POST" and path == "/api/park/review-training-ledger":
+        request_payload = await _read_json_body(receive)
+        result = record_review_decision(request_payload)
+        _invalidate_live_feed_health_cache()
+        await _send_json(send, 200, result)
         return
 
     if method == "GET" and path == "/api/park/live-summary":

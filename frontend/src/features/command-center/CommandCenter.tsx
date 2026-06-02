@@ -3,6 +3,7 @@
 import { ActualTrainingPanel } from "./ActualTrainingPanel";
 import { DispatchApprovalPanel } from "./DispatchApprovalPanel";
 import { EvalReceiptPanel } from "./EvalReceiptPanel";
+import { LiveFeedReviewPanel } from "./LiveFeedReviewPanel";
 import { ParkStateStrip } from "./ParkStateStrip";
 import { ProductLoopPanel } from "./ProductLoopPanel";
 import { useCommandCenter } from "./useCommandCenter";
@@ -47,6 +48,34 @@ export function CommandCenter() {
           livePollMs={command.livePollMs}
           connectionError={command.connectionError}
           onRefresh={() => void command.refreshParkState()}
+        />
+
+        <LiveFeedReviewPanel
+          health={command.liveFeedHealth}
+          ledger={command.reviewTrainingLedger}
+          isLoading={command.isLiveFeedHealthLoading}
+          isLoadingWeather={command.isLoadingLiveWeather}
+          isLoadingRideOps={command.isLoadingLiveRideOps}
+          isLoadingGuestFlow={command.isLoadingLiveGuestFlow}
+          isLoadingStaffing={command.isLoadingLiveStaffing}
+          isLoadingFoodOps={command.isLoadingLiveFoodOps}
+          isLoadingOperatorSignal={command.isLoadingLiveOperatorSignal}
+          weatherLoad={command.liveWeatherLoad}
+          rideOpsLoad={command.liveRideOpsLoad}
+          guestFlowLoad={command.liveGuestFlowLoad}
+          staffingLoad={command.liveStaffingLoad}
+          foodOpsLoad={command.liveFoodOpsLoad}
+          operatorSignalLoad={command.liveOperatorSignalLoad}
+          refreshSupervisor={command.liveFeedRefreshSupervisor}
+          onRefresh={() => void command.refreshLiveFeedHealth()}
+          onRefreshStale={() => void command.refreshStaleLiveFeeds()}
+          onLoadWeather={() => void command.loadLiveWeatherFeed()}
+          onLoadRideOps={() => void command.loadLiveRideOpsFeed()}
+          onLoadGuestFlow={() => void command.loadLiveGuestFlowFeed()}
+          onLoadStaffing={() => void command.loadLiveStaffingFeed()}
+          onLoadFoodOps={() => void command.loadLiveFoodOpsFeed()}
+          onLoadOperatorSignal={() => void command.loadLiveOperatorSignalFeed()}
+          onReviewDecision={(caseId, decision) => void command.recordReviewDecision(caseId, decision)}
         />
 
         {(command.statusMessage || command.errorMessage || command.connectionError) && (
