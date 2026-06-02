@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
-from live_feedback_loop import ingest_live_feed_event, live_feed_health, normalize_live_feed_event, record_review_decision, review_training_ledger
+import live_feedback_loop
+from live_feedback_loop import ingest_live_feed_event, live_feed_health, live_feed_storage_status, normalize_live_feed_event, record_review_decision, review_training_ledger
 
 
 def test_normalize_live_feed_event_has_stable_contract():
@@ -136,6 +137,44 @@ def test_operator_policy_boilerplate_does_not_create_sensitive_review(tmp_path, 
 
     assert result.get("review_case") is None
     assert review_training_ledger()["summary"]["open_count"] == 0
+
+
+def test_live_feed_storage_uses_mongo_when_forced(tmp_path, monkeypatch):
+    monkeypatch.delenv("PARKPULSE_LIVE_FEED_EVENT_LOG_PATH", raising=False)
+    monkeypatch.delenv("PARKPULSE_REVIEW_LEDGER_LOG_PATH", raising=False)
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_STORAGE", "mongodb")
+    monkeypatch.setenv("MONGODB_URI", "mongodb://example.test/parkpulse")
+    rows = {"live_feed_events": [], "live_review_ledger": []}
+
+    def fake_write(collection, row):
+        rows[collection].insert(0, row)
+        return True
+
+    def fake_read(collection, limit=500):
+        return rows[collection][:limit]
+
+    monkeypatch.setattr(live_feedback_loop, "_write_mongo_document", fake_write)
+    monkeypatch.setattr(live_feedback_loop, "_read_mongo_documents", fake_read)
+
+    ingest_live_feed_event(
+        {
+            "source": "operator_signal",
+            "source_event_id": "mongo-signal-1",
+            "entity_type": "guest_care",
+            "entity_id": "park_guest_care",
+            "signal_type": "guest_care",
+            "value": {"open_cases": 3, "sensitive_report": False},
+            "confidence": 0.9,
+            "raw_payload_ref": "test://mongo",
+        }
+    )
+
+    health = live_feed_health({"weather": {}, "guestFlow": {}, "staffing": {}, "foodInventory": {}})
+
+    assert rows["live_feed_events"]
+    assert live_feed_storage_status()["shared_across_instances"] is True
+    assert health["storage"]["mode"] == "mongodb"
+    assert any(row["source"] == "operator_signal" and row["status"] == "ready" for row in health["feeds"])
 
 
 def test_full_runtime_refresh_stale_supervisor_loads_missing_operator_signal(tmp_path, monkeypatch):

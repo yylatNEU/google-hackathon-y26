@@ -121,13 +121,73 @@ def _review_log_path() -> str:
     return _jsonl_path("PARKPULSE_REVIEW_LEDGER_LOG_PATH", "review_ledger.jsonl")
 
 
+def _live_feed_storage_mode() -> str:
+    return str(os.getenv("PARKPULSE_LIVE_FEED_STORAGE", "auto")).strip().lower()
+
+
+def _path_env_is_default(name: str) -> bool:
+    return not os.getenv(name, "").strip()
+
+
+def _collection_for_path(path: str) -> str | None:
+    if path == _feed_log_path():
+        return "live_feed_events"
+    if path == _review_log_path():
+        return "live_review_ledger"
+    return None
+
+
+def _mongo_live_feed_storage_enabled(path: str) -> bool:
+    mode = _live_feed_storage_mode()
+    if mode in {"jsonl", "file", "local"}:
+        return False
+    if mode in {"mongodb", "mongo"}:
+        return _collection_for_path(path) is not None
+    if mode != "auto":
+        return False
+    if not (os.getenv("MONGODB_DIRECT_URI") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")):
+        return False
+    if path == _feed_log_path() and not _path_env_is_default("PARKPULSE_LIVE_FEED_EVENT_LOG_PATH"):
+        return False
+    if path == _review_log_path() and not _path_env_is_default("PARKPULSE_REVIEW_LEDGER_LOG_PATH"):
+        return False
+    return _collection_for_path(path) is not None
+
+
+def _write_mongo_document(collection: str, row: dict[str, Any]) -> bool:
+    try:
+        from mongo_memory import record_live_feed_document
+
+        result = record_live_feed_document(collection, row)
+        return str(result.get("status") or "") == "stored"
+    except Exception:
+        return False
+
+
+def _read_mongo_documents(collection: str, limit: int = 500) -> list[dict[str, Any]]:
+    try:
+        from mongo_memory import get_latest_live_feed_documents
+
+        return get_latest_live_feed_documents(collection, limit)
+    except Exception:
+        return []
+
+
 def _append_jsonl(path: str, row: dict[str, Any]) -> None:
+    collection = _collection_for_path(path)
+    if collection and _mongo_live_feed_storage_enabled(path) and _write_mongo_document(collection, row):
+        return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
 
 
 def _read_jsonl(path: str, limit: int = 500) -> list[dict[str, Any]]:
+    collection = _collection_for_path(path)
+    if collection and _mongo_live_feed_storage_enabled(path):
+        rows = _read_mongo_documents(collection, limit)
+        if rows:
+            return rows
     if not os.path.exists(path):
         return []
     try:
@@ -144,6 +204,22 @@ def _read_jsonl(path: str, limit: int = 500) -> list[dict[str, Any]]:
         if isinstance(value, dict):
             rows.append(value)
     return rows
+
+
+def live_feed_storage_status() -> dict[str, Any]:
+    feed_collection = _collection_for_path(_feed_log_path())
+    review_collection = _collection_for_path(_review_log_path())
+    feed_mongo = bool(feed_collection and _mongo_live_feed_storage_enabled(_feed_log_path()))
+    review_mongo = bool(review_collection and _mongo_live_feed_storage_enabled(_review_log_path()))
+    return {
+        "mode": "mongodb" if feed_mongo and review_mongo else "jsonl" if not feed_mongo and not review_mongo else "hybrid",
+        "configured_mode": _live_feed_storage_mode(),
+        "event_collection": feed_collection if feed_mongo else None,
+        "review_collection": review_collection if review_mongo else None,
+        "event_log_path": None if feed_mongo else _feed_log_path(),
+        "review_log_path": None if review_mongo else _review_log_path(),
+        "shared_across_instances": feed_mongo and review_mongo,
+    }
 
 
 def _source(value: Any) -> str:
@@ -446,6 +522,7 @@ def live_feed_health(park_state: dict[str, Any] | None = None, limit: int = 500)
             "open_review_count": len(open_reviews),
             "persisted_event_count": len(persisted),
         },
+        "storage": live_feed_storage_status(),
         "feeds": rows,
         "open_reviews": open_reviews[:8],
         "growth_loop": [
