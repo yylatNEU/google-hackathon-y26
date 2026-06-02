@@ -31,7 +31,7 @@ gcloud run deploy "$SERVICE" \
   --quiet \
   --service-account "$SERVICE_ACCOUNT_EMAIL" \
   --no-allow-unauthenticated \
-  --min-instances 0 \
+  --min-instances "${PARKPULSE_CLOUD_RUN_MIN_INSTANCES:-2}" \
   --max-instances "${PARKPULSE_CLOUD_RUN_MAX_INSTANCES:-2}" \
   --memory "${PARKPULSE_CLOUD_RUN_MEMORY:-1Gi}" \
   --cpu "${PARKPULSE_CLOUD_RUN_CPU:-1}" \
