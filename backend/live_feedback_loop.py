@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 from collections import Counter
 from copy import deepcopy
@@ -83,6 +84,10 @@ REVIEW_TRIGGERS = {
     "accessibility",
 }
 
+_mongo_client_lock = threading.Lock()
+_mongo_client: Any | None = None
+_mongo_db: Any | None = None
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -125,6 +130,20 @@ def _live_feed_storage_mode() -> str:
     return str(os.getenv("PARKPULSE_LIVE_FEED_STORAGE", "auto")).strip().lower()
 
 
+def _strip_secret(value: str | None) -> str:
+    raw = (value or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        return raw[1:-1].strip()
+    return raw
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(float(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
 def _path_env_is_default(name: str) -> bool:
     return not os.getenv(name, "").strip()
 
@@ -145,7 +164,7 @@ def _mongo_live_feed_storage_enabled(path: str) -> bool:
         return _collection_for_path(path) is not None
     if mode != "auto":
         return False
-    if not (os.getenv("MONGODB_DIRECT_URI") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")):
+    if not _mongo_uri():
         return False
     if path == _feed_log_path() and not _path_env_is_default("PARKPULSE_LIVE_FEED_EVENT_LOG_PATH"):
         return False
@@ -154,21 +173,74 @@ def _mongo_live_feed_storage_enabled(path: str) -> bool:
     return _collection_for_path(path) is not None
 
 
+def _mongo_uri() -> str:
+    return _strip_secret(os.getenv("MONGODB_DIRECT_URI") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI"))
+
+
+def _live_feed_mongo_db():
+    global _mongo_client, _mongo_db
+    if _mongo_db is not None:
+        return _mongo_db
+    uri = _mongo_uri()
+    if not uri:
+        return None
+    with _mongo_client_lock:
+        if _mongo_db is not None:
+            return _mongo_db
+        try:
+            from pymongo import MongoClient
+            import certifi
+
+            timeout_ms = max(250, _int_env("MONGODB_OPERATION_TIMEOUT_MS", 1500))
+            _mongo_client = MongoClient(
+                uri,
+                serverSelectionTimeoutMS=timeout_ms,
+                connectTimeoutMS=timeout_ms,
+                socketTimeoutMS=timeout_ms,
+                tlsCAFile=os.getenv("MONGODB_TLS_CA_FILE") or certifi.where(),
+            )
+            _mongo_client.admin.command("ping")
+            _mongo_db = _mongo_client[os.getenv("MONGODB_DATABASE", "parkpulse_ops")]
+        except Exception:
+            _mongo_client = None
+            _mongo_db = None
+            return None
+    return _mongo_db
+
+
+def _mongo_document(row: dict[str, Any]) -> dict[str, Any]:
+    document = json.loads(json.dumps(row, default=str))
+    document_id = str(document.get("_id") or document.get("id") or _hash_id("live", document))
+    document["_id"] = document_id
+    document.setdefault("id", document_id)
+    document.setdefault("createdAt", document.get("created_at") or document.get("received_at") or document.get("observed_at") or _now_iso())
+    document["updatedAt"] = _now_iso()
+    return document
+
+
 def _write_mongo_document(collection: str, row: dict[str, Any]) -> bool:
     try:
-        from mongo_memory import record_live_feed_document
-
-        result = record_live_feed_document(collection, row)
-        return str(result.get("status") or "") == "stored"
+        db = _live_feed_mongo_db()
+        if db is None:
+            return False
+        document = _mongo_document(row)
+        db[collection].update_one({"_id": document["_id"]}, {"$set": document}, upsert=True)
+        return True
     except Exception:
         return False
 
 
 def _read_mongo_documents(collection: str, limit: int = 500) -> list[dict[str, Any]]:
     try:
-        from mongo_memory import get_latest_live_feed_documents
-
-        return get_latest_live_feed_documents(collection, limit)
+        db = _live_feed_mongo_db()
+        if db is None:
+            return []
+        bounded_limit = max(1, min(5000, int(limit or 500)))
+        rows = list(db[collection].find({}, {"embedding": 0, "embeddingText": 0}).sort("createdAt", -1).limit(bounded_limit))
+        for row in rows:
+            if "_id" in row:
+                row["_id"] = str(row["_id"])
+        return rows
     except Exception:
         return []
 
