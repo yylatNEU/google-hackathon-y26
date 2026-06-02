@@ -126,6 +126,59 @@ export type ReviewTrainingLedger = {
   readiness_issues?: string[];
 };
 
+export type ReviewLabelDecision = "approve_label" | "edit_label" | "reject_label" | "needs_more_evidence";
+
+export type ReviewLabelCandidate = {
+  id?: string;
+  agent_id?: string;
+  training_scope?: string;
+  source?: string;
+  priority?: string;
+  input_summary?: string;
+  proposed_label?: string;
+  label_options?: string[];
+  evidence?: Record<string, unknown>;
+  recommendation?: {
+    proposed_label?: string;
+    confidence?: number;
+    confidence_status?: string;
+    auto_label_eligible?: boolean;
+  };
+  safety_notes?: string[];
+  review_status?: string;
+  boundary?: string;
+  decision?: {
+    decision?: ReviewLabelDecision;
+    final_label?: string;
+    eligible_for_supervised_training?: boolean;
+  };
+};
+
+export type ReviewLabelPipeline = {
+  status?: string;
+  mode?: string;
+  summary?: {
+    candidate_count?: number;
+    open_count?: number;
+    decided_count?: number;
+    approved_label_count?: number;
+    training_candidate_count?: number;
+  };
+  candidates?: ReviewLabelCandidate[];
+  decided?: ReviewLabelCandidate[];
+  label_options?: ReviewLabelDecision[];
+  auto_label_rule?: {
+    enabled?: boolean;
+    confidence_threshold?: number;
+  };
+  training_rule?: string;
+  boundary?: string;
+  uses_seed_data?: boolean;
+  labels_or_reward_changed?: boolean;
+  llm_used_for_reward_or_label?: boolean;
+  readiness_issues?: string[];
+};
+
 export type LiveWeatherLoadResult = {
   status?: string;
   mode?: string;
@@ -202,6 +255,7 @@ export function useCommandCenter() {
   const [actualTraining, setActualTraining] = useState<ActualTrainingStatus | null>(null);
   const [liveFeedHealth, setLiveFeedHealth] = useState<LiveFeedHealth | null>(null);
   const [reviewTrainingLedger, setReviewTrainingLedger] = useState<ReviewTrainingLedger | null>(null);
+  const [reviewLabelPipeline, setReviewLabelPipeline] = useState<ReviewLabelPipeline | null>(null);
   const [liveWeatherLoad, setLiveWeatherLoad] = useState<LiveWeatherLoadResult | null>(null);
   const [liveRideOpsLoad, setLiveRideOpsLoad] = useState<LiveRideOpsLoadResult | null>(null);
   const [liveGuestFlowLoad, setLiveGuestFlowLoad] = useState<LiveGuestFlowLoadResult | null>(null);
@@ -209,6 +263,8 @@ export function useCommandCenter() {
   const [liveFoodOpsLoad, setLiveFoodOpsLoad] = useState<LiveFoodOpsLoadResult | null>(null);
   const [liveOperatorSignalLoad, setLiveOperatorSignalLoad] = useState<LiveOperatorSignalLoadResult | null>(null);
   const [liveFeedRefreshSupervisor, setLiveFeedRefreshSupervisor] = useState<LiveFeedRefreshSupervisorResult | null>(null);
+  const [isReviewLabelPipelineLoading, setIsReviewLabelPipelineLoading] = useState(false);
+  const [isAutoLabelingReviewLabels, setIsAutoLabelingReviewLabels] = useState(false);
 
   const activeEvalScores = useMemo<EvalScore[]>(() => {
     const scorecard = runTelemetry?.eval?.scorecard;
@@ -311,6 +367,27 @@ export function useCommandCenter() {
     }
   }, []);
 
+  const refreshReviewLabelPipeline = useCallback(async () => {
+    setIsReviewLabelPipelineLoading(true);
+    try {
+      const response = await fetchParkPulseApi("/api/park/review-label-pipeline?limit=40", { timeoutMs: 12000 });
+      setReviewLabelPipeline((await response.json()) as ReviewLabelPipeline);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Review label pipeline failed.";
+      setReviewLabelPipeline({
+        status: "error",
+        mode: "review_label_pipeline",
+        candidates: [],
+        decided: [],
+        readiness_issues: [message],
+        labels_or_reward_changed: false,
+        llm_used_for_reward_or_label: false,
+      });
+    } finally {
+      setIsReviewLabelPipelineLoading(false);
+    }
+  }, []);
+
   const refreshStaleLiveFeeds = useCallback(async () => {
     setIsRefreshingStaleFeeds(true);
     setErrorMessage(null);
@@ -328,6 +405,7 @@ export function useCommandCenter() {
       const queuedCount = payload.queued_sources?.length ?? 0;
       setStatusMessage(`Live feed refresh ${payload.status ?? "complete"}: ${refreshedCount} refreshed / ${queuedCount} queued.`);
       await refreshLiveFeedHealth();
+      void refreshReviewLabelPipeline();
       void refreshActualTraining();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to refresh stale live feeds.";
@@ -336,7 +414,7 @@ export function useCommandCenter() {
     } finally {
       setIsRefreshingStaleFeeds(false);
     }
-  }, [refreshActualTraining, refreshLiveFeedHealth]);
+  }, [refreshActualTraining, refreshLiveFeedHealth, refreshReviewLabelPipeline]);
 
   const recordReviewDecision = useCallback(
     async (caseId: string, decision: "approve_for_state" | "request_corroboration" | "hold_for_review" | "escalate") => {
@@ -351,6 +429,7 @@ export function useCommandCenter() {
         });
         setStatusMessage(`Review case ${decision.replaceAll("_", " ")}.`);
         await refreshLiveFeedHealth();
+        void refreshReviewLabelPipeline();
         void refreshActualTraining();
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "Unable to record review decision.");
@@ -358,8 +437,68 @@ export function useCommandCenter() {
         setIsLiveFeedHealthLoading(false);
       }
     },
-    [refreshActualTraining, refreshLiveFeedHealth],
+    [refreshActualTraining, refreshLiveFeedHealth, refreshReviewLabelPipeline],
   );
+
+  const recordReviewLabelDecision = useCallback(
+    async (candidate: ReviewLabelCandidate, decision: ReviewLabelDecision, finalLabel?: string) => {
+      setIsReviewLabelPipelineLoading(true);
+      setErrorMessage(null);
+      try {
+        const response = await fetchParkPulseApi("/api/park/review-label-pipeline/decision", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            candidate,
+            candidate_id: candidate.id,
+            decision,
+            final_label: finalLabel,
+            reviewer: "ops_reviewer",
+            reason: "Reviewed from command center.",
+          }),
+          timeoutMs: 12000,
+        });
+        const payload = (await response.json()) as { status?: string; readiness_issues?: string[] };
+        if (payload.status === "error") {
+          setErrorMessage(payload.readiness_issues?.[0] ?? "Unable to record review label decision.");
+        } else {
+          setStatusMessage(`Review label ${decision.replaceAll("_", " ")}.`);
+        }
+        await refreshReviewLabelPipeline();
+        void refreshActualTraining();
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Unable to record review label decision.");
+      } finally {
+        setIsReviewLabelPipelineLoading(false);
+      }
+    },
+    [refreshActualTraining, refreshReviewLabelPipeline],
+  );
+
+  const autoLabelHighConfidenceReviewLabels = useCallback(async () => {
+    setIsAutoLabelingReviewLabels(true);
+    setErrorMessage(null);
+    try {
+      const response = await fetchParkPulseApi("/api/park/review-label-pipeline/auto-label", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reviewer: "parkpulse-command-center", confidence_threshold: 0.7 }),
+        timeoutMs: 12000,
+      });
+      const payload = (await response.json()) as { status?: string; recorded_count?: number; skipped_count?: number; readiness_issues?: string[] };
+      if (payload.status === "error") {
+        setErrorMessage(payload.readiness_issues?.[0] ?? "Auto-label failed.");
+      } else {
+        setStatusMessage(`Auto-label ${payload.status ?? "complete"}: ${payload.recorded_count ?? 0} recorded / ${payload.skipped_count ?? 0} skipped.`);
+      }
+      await refreshReviewLabelPipeline();
+      void refreshActualTraining();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Auto-label failed.");
+    } finally {
+      setIsAutoLabelingReviewLabels(false);
+    }
+  }, [refreshActualTraining, refreshReviewLabelPipeline]);
 
   const loadFeed = useCallback(
     async <T extends LiveWeatherLoadResult>(
@@ -417,7 +556,8 @@ export function useCommandCenter() {
     void refreshIntegrationStatus();
     void refreshActualTraining();
     void refreshLiveFeedHealth();
-  }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveFeedHealth]);
+    void refreshReviewLabelPipeline();
+  }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveFeedHealth, refreshReviewLabelPipeline]);
 
   const runAgent = useCallback(async () => {
     setIsRunning(true);
@@ -444,13 +584,14 @@ export function useCommandCenter() {
       await park.refreshParkState();
       void refreshIntegrationStatus();
       void refreshActualTraining();
+      void refreshReviewLabelPipeline();
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Unable to run the ParkPulse agent.");
       setStatusMessage(null);
     } finally {
       setIsRunning(false);
     }
-  }, [park, refreshActualTraining, refreshIntegrationStatus]);
+  }, [park, refreshActualTraining, refreshIntegrationStatus, refreshReviewLabelPipeline]);
 
   const executeSelectedAction = useCallback(async () => {
     setIsDispatching(true);
@@ -527,6 +668,7 @@ export function useCommandCenter() {
     activeEvalScores,
     integrationStatus,
     actualTraining,
+    reviewLabelPipeline,
     selectedAction,
     policyGate,
     evalScore,
@@ -537,6 +679,8 @@ export function useCommandCenter() {
     isTrainingLoading,
     isStartingGcpTraining,
     isLiveFeedHealthLoading: isLiveFeedHealthLoading || isRefreshingStaleFeeds,
+    isReviewLabelPipelineLoading,
+    isAutoLabelingReviewLabels,
     isLoadingLiveWeather,
     isLoadingLiveRideOps,
     isLoadingLiveGuestFlow,
@@ -558,6 +702,9 @@ export function useCommandCenter() {
     refreshLiveFeedHealth,
     refreshStaleLiveFeeds,
     recordReviewDecision,
+    refreshReviewLabelPipeline,
+    recordReviewLabelDecision,
+    autoLabelHighConfidenceReviewLabels,
     loadLiveWeatherFeed,
     loadLiveRideOpsFeed,
     loadLiveGuestFlowFeed,

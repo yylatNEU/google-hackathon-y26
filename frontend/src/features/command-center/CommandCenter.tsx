@@ -6,6 +6,7 @@ import { EvalReceiptPanel } from "./EvalReceiptPanel";
 import { LiveFeedReviewPanel } from "./LiveFeedReviewPanel";
 import { ParkStateStrip } from "./ParkStateStrip";
 import { ProductLoopPanel } from "./ProductLoopPanel";
+import { ReviewLabelPipelinePanel } from "./ReviewLabelPipelinePanel";
 import { useCommandCenter } from "./useCommandCenter";
 
 export function CommandCenter() {
@@ -76,6 +77,14 @@ export function CommandCenter() {
           onLoadFoodOps={() => void command.loadLiveFoodOpsFeed()}
           onLoadOperatorSignal={() => void command.loadLiveOperatorSignalFeed()}
           onReviewDecision={(caseId, decision) => void command.recordReviewDecision(caseId, decision)}
+        />
+
+        <ReviewLabelPipelinePanel
+          pipeline={command.reviewLabelPipeline}
+          isLoading={command.isReviewLabelPipelineLoading || command.isAutoLabelingReviewLabels}
+          onRefresh={() => void command.refreshReviewLabelPipeline()}
+          onAutoLabel={() => void command.autoLabelHighConfidenceReviewLabels()}
+          onDecision={(candidate, decision, finalLabel) => void command.recordReviewLabelDecision(candidate, decision, finalLabel)}
         />
 
         {(command.statusMessage || command.errorMessage || command.connectionError) && (

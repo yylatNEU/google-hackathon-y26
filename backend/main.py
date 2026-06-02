@@ -694,6 +694,37 @@ async def _live_feed_health_payload(limit: int = 500) -> dict[str, Any]:
     return {**payload, "cache": {"status": "miss", "ttl_seconds": ttl}}
 
 
+async def _review_label_pipeline_payload(limit: int = 40) -> dict[str, Any]:
+    from review_label_pipeline import build_review_label_pipeline
+
+    review_ledger = review_training_ledger(limit=max(80, min(500, int(limit or 40) * 2)))
+    live_health = await _live_feed_health_payload(limit=500)
+    open_reviews = review_ledger.get("open_reviews", []) if isinstance(review_ledger.get("open_reviews"), list) else []
+    weak_feeds = [
+        row
+        for row in live_health.get("feeds", [])
+        if isinstance(row, dict) and str(row.get("status") or "") != "ready"
+    ] if isinstance(live_health.get("feeds"), list) else []
+    training_readiness = {
+        "agents": {
+            "scan_agent": {
+                "status": "ready_for_review_label_collection" if open_reviews or weak_feeds else "waiting_for_review_evidence",
+                "model_training_ready": False,
+                "eval_generation_ready": bool(open_reviews or weak_feeds),
+                "recommended_training_mode": "live_feed_review_supervised_labels",
+                "blockers": [] if open_reviews or weak_feeds else ["Need open review cases or weak live-feed evidence."],
+            }
+        }
+    }
+    return build_review_label_pipeline(
+        customer_details={},
+        training_readiness=training_readiness,
+        review_ledger=review_ledger,
+        live_feed_health=live_health,
+        limit=limit,
+    )
+
+
 def _live_weather_refresh_queued_result(reason: str = "manual_refresh_supervisor") -> dict[str, Any]:
     return {
         "status": "queued",
@@ -7282,6 +7313,49 @@ async def app(scope, receive, send):
         result = record_review_decision(request_payload)
         _invalidate_live_feed_health_cache()
         await _send_json(send, 200, result)
+        return
+
+    if method == "GET" and path == "/api/park/review-label-pipeline":
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        limit_raw = (query.get("limit") or [None])[0]
+        try:
+            await _send_json(send, 200, await _review_label_pipeline_payload(limit=int(limit_raw) if limit_raw else 40))
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "review_label_pipeline", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "POST" and path == "/api/park/review-label-pipeline/decision":
+        request_payload = await _read_json_body(receive)
+        try:
+            from review_label_pipeline import record_review_label_decision
+
+            await _send_json(send, 200, record_review_label_decision(request_payload))
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "review_label_decision", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "POST" and path == "/api/park/review-label-pipeline/auto-label":
+        request_payload = await _read_json_body(receive)
+        try:
+            from review_label_pipeline import auto_label_recommended_candidates
+
+            threshold = float(request_payload.get("confidence_threshold") or request_payload.get("confidenceThreshold") or 0.70)
+            reviewer = str(request_payload.get("reviewer") or "parkpulse-auto-labeler")
+            pipeline = await _review_label_pipeline_payload(limit=200)
+            await _send_json(send, 200, auto_label_recommended_candidates(pipeline, reviewer=reviewer, confidence_threshold=threshold))
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "review_label_auto_label", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "GET" and path == "/api/park/review-label-pipeline/decisions":
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        limit_raw = (query.get("limit") or [None])[0]
+        try:
+            from review_label_pipeline import review_label_decision_ledger
+
+            await _send_json(send, 200, review_label_decision_ledger(limit=int(limit_raw) if limit_raw else 120))
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "review_label_decision_ledger", "readiness_issues": [str(error)[:240]]})
         return
 
     if method == "GET" and path == "/api/park/live-summary":

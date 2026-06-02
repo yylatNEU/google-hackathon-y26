@@ -174,6 +174,7 @@ from park_replay_store import backup_replay_store, replay_collaboration_context,
 from park_scenarios import get_park_scenarios
 from park_signal_intake import classify_unstructured_signal, fuse_signal_batch, latest_signals, realistic_signal_batch
 from live_feedback_loop import ingest_live_feed_event, live_feed_health, record_review_decision, review_training_ledger
+from review_label_pipeline import auto_label_recommended_candidates, build_review_label_pipeline, record_review_label_decision, review_label_decision_ledger
 from guest_flow_live_feed import ingest_live_guest_flow_feed, guest_flow_feed_config
 from ops_remaining_live_feeds import food_ops_feed_config, ingest_live_food_ops_feed, ingest_live_operator_signal_feed, ingest_live_staffing_feed, operator_signal_feed_config, staffing_feed_config
 from ride_ops_live_feed import ingest_live_ride_ops_feed, ride_ops_feed_config
@@ -7756,6 +7757,35 @@ async def _live_feed_health_payload(limit: int = 500) -> dict[str, Any]:
     return {**payload, "cache": {"status": "miss", "ttl_seconds": ttl}}
 
 
+async def _review_label_pipeline_payload(limit: int = 40) -> dict[str, Any]:
+    review_ledger = review_training_ledger(limit=max(80, min(500, int(limit or 40) * 2)))
+    live_health = await _live_feed_health_payload(limit=500)
+    open_reviews = review_ledger.get("open_reviews", []) if isinstance(review_ledger.get("open_reviews"), list) else []
+    weak_feeds = [
+        row
+        for row in live_health.get("feeds", [])
+        if isinstance(row, dict) and str(row.get("status") or "") != "ready"
+    ] if isinstance(live_health.get("feeds"), list) else []
+    training_readiness = {
+        "agents": {
+            "scan_agent": {
+                "status": "ready_for_review_label_collection" if open_reviews or weak_feeds else "waiting_for_review_evidence",
+                "model_training_ready": False,
+                "eval_generation_ready": bool(open_reviews or weak_feeds),
+                "recommended_training_mode": "live_feed_review_supervised_labels",
+                "blockers": [] if open_reviews or weak_feeds else ["Need open review cases or weak live-feed evidence."],
+            }
+        }
+    }
+    return build_review_label_pipeline(
+        customer_details={},
+        training_readiness=training_readiness,
+        review_ledger=review_ledger,
+        live_feed_health=live_health,
+        limit=limit,
+    )
+
+
 def _live_weather_refresh_queued_result(reason: str = "manual_refresh_supervisor") -> dict[str, Any]:
     return {
         "status": "queued",
@@ -8049,6 +8079,30 @@ async def park_review_training_ledger_record(payload: dict[str, Any]):
     result = record_review_decision(payload)
     clear_hot_endpoint_cache()
     return result
+
+
+@app.get("/api/park/review-label-pipeline")
+async def park_review_label_pipeline(limit: int = 40):
+    return await _review_label_pipeline_payload(limit=max(1, min(200, limit)))
+
+
+@app.post("/api/park/review-label-pipeline/decision")
+async def park_review_label_pipeline_decision(payload: dict[str, Any]):
+    return record_review_label_decision(payload)
+
+
+@app.post("/api/park/review-label-pipeline/auto-label")
+async def park_review_label_pipeline_auto_label(payload: dict[str, Any] | None = None):
+    request_payload = payload or {}
+    threshold = float(request_payload.get("confidence_threshold") or request_payload.get("confidenceThreshold") or 0.70)
+    reviewer = str(request_payload.get("reviewer") or "parkpulse-auto-labeler")
+    pipeline = await _review_label_pipeline_payload(limit=200)
+    return auto_label_recommended_candidates(pipeline, reviewer=reviewer, confidence_threshold=threshold)
+
+
+@app.get("/api/park/review-label-pipeline/decisions")
+async def park_review_label_pipeline_decisions(limit: int = 120):
+    return review_label_decision_ledger(limit=max(1, min(500, limit)))
 
 
 @app.get("/api/park/learning/episodes")
