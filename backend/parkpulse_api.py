@@ -173,12 +173,23 @@ from park_review import build_review_snapshot
 from park_replay_store import backup_replay_store, replay_collaboration_context, replay_store_status
 from park_scenarios import get_park_scenarios
 from park_signal_intake import classify_unstructured_signal, fuse_signal_batch, latest_signals, realistic_signal_batch
+from live_feedback_loop import ingest_live_feed_event, live_feed_health, record_review_decision, review_training_ledger
+from guest_flow_live_feed import ingest_live_guest_flow_feed, guest_flow_feed_config
+from ops_remaining_live_feeds import food_ops_feed_config, ingest_live_food_ops_feed, ingest_live_operator_signal_feed, ingest_live_staffing_feed, operator_signal_feed_config, staffing_feed_config
+from ride_ops_live_feed import ingest_live_ride_ops_feed, ride_ops_feed_config
+from weather_live_feed import ingest_live_weather_feed, weather_feed_config
 from park_simulation import park_simulation
 from reliability import reliability_status
 from trace_helpers import traced_payload
 
 _background_tasks: set[asyncio.Task[Any]] = set()
 _operator_refinements: dict[str, dict[str, Any]] = {}
+_live_feed_health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_live_feed_weather_refresh_status: dict[str, Any] = {
+    "status": "idle",
+    "mode": "live_weather_feed_background_refresh",
+}
+_live_feed_weather_refresh_task: asyncio.Task[Any] | None = None
 
 DEFAULT_EVENT_REQUEST = (
     "Plan an evening park event for 8,000 guests from 6 PM to midnight. Keep it family-friendly "
@@ -272,6 +283,12 @@ def _float_env(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def _truthy(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 _memory_sync_min_interval_seconds = max(0.1, _float_env("PARKPULSE_MEMORY_SYNC_MIN_INTERVAL_SECONDS", 3.0))
@@ -1002,6 +1019,7 @@ async def sync_park_state_safe(park_state: dict[str, Any], *, force: bool = Fals
 
 def clear_hot_endpoint_cache() -> None:
     _hot_endpoint_cache.clear()
+    _live_feed_health_cache.clear()
 
 
 def _live_bigquery_enabled() -> bool:
@@ -7714,6 +7732,323 @@ async def park_world_state_reconcile_latest():
 @app.get("/api/park/signals/inbox")
 async def park_signal_inbox(limit: int = 20):
     return latest_signals(limit)
+
+
+def _live_feed_health_cache_ttl_seconds() -> float:
+    return max(0.0, _float_env("PARKPULSE_LIVE_FEED_HEALTH_CACHE_TTL_SECONDS", 3.0))
+
+
+async def _live_feed_health_payload(limit: int = 500) -> dict[str, Any]:
+    bounded_limit = max(20, min(2000, int(limit or 500)))
+    cache_key = str(bounded_limit)
+    ttl = _live_feed_health_cache_ttl_seconds()
+    now = time.time()
+    cached = _live_feed_health_cache.get(cache_key)
+    if cached and ttl > 0 and now - cached[0] <= ttl:
+        payload = dict(cached[1])
+        payload["cache"] = {"status": "hit", "ttl_seconds": ttl}
+        return payload
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
+    payload = live_feed_health(state, limit=bounded_limit)
+    if ttl > 0:
+        _live_feed_health_cache[cache_key] = (now, payload)
+    return {**payload, "cache": {"status": "miss", "ttl_seconds": ttl}}
+
+
+def _live_weather_refresh_queued_result(reason: str = "manual_refresh_supervisor") -> dict[str, Any]:
+    return {
+        "status": "queued",
+        "mode": "live_weather_feed_background_refresh",
+        "provider": weather_feed_config().get("provider", "open_meteo"),
+        "reason": reason,
+        "latest": _live_feed_weather_refresh_status,
+        "boundary": weather_feed_config().get("boundary"),
+    }
+
+
+async def _run_live_weather_refresh_background(reason: str) -> None:
+    global _live_feed_weather_refresh_status
+    _live_feed_weather_refresh_status = {
+        "status": "running",
+        "mode": "live_weather_feed_background_refresh",
+        "started_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "reason": reason,
+    }
+    try:
+        result = await asyncio.to_thread(ingest_live_weather_feed)
+        clear_hot_endpoint_cache()
+        _live_feed_weather_refresh_status = {
+            "status": result.get("status", "loaded") if isinstance(result, dict) else "loaded",
+            "mode": "live_weather_feed_background_refresh",
+            "completed_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "reason": reason,
+            "result": result,
+        }
+    except asyncio.CancelledError:
+        _live_feed_weather_refresh_status = {
+            "status": "cancelled",
+            "mode": "live_weather_feed_background_refresh",
+            "cancelled_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "reason": reason,
+        }
+        raise
+    except Exception as error:
+        _live_feed_weather_refresh_status = {
+            "status": "error",
+            "mode": "live_weather_feed_background_refresh",
+            "completed_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "reason": reason,
+            "readiness_issues": [str(error)[:240]],
+        }
+
+
+def _queue_live_weather_refresh(reason: str = "manual_refresh_supervisor") -> dict[str, Any]:
+    global _live_feed_weather_refresh_task
+    if _live_feed_weather_refresh_task and not _live_feed_weather_refresh_task.done():
+        return _live_weather_refresh_queued_result(reason)
+    _live_feed_weather_refresh_task = _track_background_task(_run_live_weather_refresh_background(reason))
+    return _live_weather_refresh_queued_result(reason)
+
+
+@app.get("/api/park/live-feed-health")
+async def park_live_feed_health(limit: int = 500):
+    return await _live_feed_health_payload(limit=limit)
+
+
+@app.post("/api/park/live-feed-events")
+async def park_live_feed_events(payload: dict[str, Any]):
+    events = payload.get("events") if isinstance(payload.get("events"), list) else None
+    if events is not None:
+        results = [ingest_live_feed_event(event) for event in events if isinstance(event, dict)]
+        clear_hot_endpoint_cache()
+        return {
+            "status": "loaded" if results else "empty",
+            "mode": "normalized_live_feed_batch_ingest",
+            "event_count": len(results),
+            "results": results,
+            "sources": sorted({str((row.get("event") or {}).get("source") or "") for row in results if isinstance(row.get("event"), dict)}),
+            "boundary": "Batch feed ingestion records facts only. It does not trust sensitive reviews, set reward, dispatch actions, or promote models.",
+            "uses_seed_data": False,
+            "llm_control_authority": False,
+        }
+    result = ingest_live_feed_event(payload)
+    clear_hot_endpoint_cache()
+    return result
+
+
+def _live_feed_refresh_requested_sources(payload: dict[str, Any]) -> set[str]:
+    requested = payload.get("sources")
+    if not isinstance(requested, list):
+        return set()
+    return {str(source).strip().replace("-", "_") for source in requested if str(source).strip()}
+
+
+def _live_feed_refresh_margin(payload: dict[str, Any]) -> int:
+    raw = payload.get("refresh_margin_seconds")
+    if raw is None:
+        raw = payload.get("refreshMarginSeconds")
+    if raw is None:
+        raw = os.getenv("PARKPULSE_LIVE_FEED_REFRESH_MARGIN_SECONDS", "20")
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        return 20
+
+
+def _live_feed_sources_due_for_refresh(before: dict[str, Any], requested_sources: set[str], stale_only: bool, refresh_margin_seconds: int) -> list[str]:
+    due_sources: list[str] = []
+    feeds = before.get("feeds", []) if isinstance(before.get("feeds"), list) else []
+    for row in feeds:
+        if not isinstance(row, dict):
+            continue
+        source = str(row.get("source") or "")
+        if not source or (requested_sources and source not in requested_sources):
+            continue
+        age = row.get("age_seconds")
+        budget = int(row.get("max_stale_seconds") or 0)
+        due_soon = isinstance(age, int) and budget > 0 and age >= max(0, budget - refresh_margin_seconds)
+        if not stale_only or row.get("status") != "ready" or due_soon:
+            due_sources.append(source)
+    return due_sources
+
+
+async def _refresh_due_live_feeds_payload(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    request_payload = payload if isinstance(payload, dict) else {}
+    requested_sources = _live_feed_refresh_requested_sources(request_payload)
+    stale_only = _truthy(
+        str(request_payload.get("stale_only") if "stale_only" in request_payload else request_payload.get("staleOnly"))
+        if ("stale_only" in request_payload or "staleOnly" in request_payload)
+        else None,
+        True,
+    )
+    refresh_margin_seconds = _live_feed_refresh_margin(request_payload)
+
+    before = await _live_feed_health_payload(limit=500)
+    due_sources = _live_feed_sources_due_for_refresh(before, requested_sources, stale_only, refresh_margin_seconds)
+
+    results: dict[str, Any] = {}
+    queued_sources: list[str] = []
+    raw_state: dict[str, Any] | None = None
+    for source in due_sources:
+        try:
+            if source == "weather":
+                result = _queue_live_weather_refresh("stale_feed_supervisor")
+                queued_sources.append(source)
+            else:
+                if raw_state is None:
+                    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+                    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
+                if source == "ride_ops":
+                    result = ingest_live_ride_ops_feed(raw_state)
+                elif source == "guest_flow":
+                    result = ingest_live_guest_flow_feed(raw_state)
+                elif source == "staffing":
+                    result = ingest_live_staffing_feed(raw_state)
+                elif source == "food_ops":
+                    result = ingest_live_food_ops_feed(raw_state)
+                elif source == "operator_signal":
+                    result = ingest_live_operator_signal_feed(raw_state)
+                else:
+                    result = {"status": "skipped", "readiness_issues": [f"Unknown live feed source: {source}"]}
+            results[source] = result
+        except Exception as error:
+            results[source] = {"status": "error", "readiness_issues": [str(error)[:240]]}
+
+    if results:
+        clear_hot_endpoint_cache()
+    after = await _live_feed_health_payload(limit=500)
+    errors = [source for source, result in results.items() if isinstance(result, dict) and result.get("status") == "error"]
+    refreshed_sources = [source for source in results if source not in set(queued_sources)]
+    remaining_issues: list[str] = []
+    for row in after.get("feeds", []) if isinstance(after.get("feeds"), list) else []:
+        if not isinstance(row, dict) or row.get("status") == "ready":
+            continue
+        source = str(row.get("source") or "unknown")
+        if requested_sources and source not in requested_sources:
+            continue
+        issues = row.get("readiness_issues") if isinstance(row.get("readiness_issues"), list) else []
+        remaining_issues.append(f"{source}: {issues[0] if issues else row.get('status') or 'not ready'}")
+    readiness_issues = [f"{source}: {results[source].get('readiness_issues', ['refresh failed'])[0]}" for source in errors]
+    return {
+        "status": "error" if errors else "refreshed" if refreshed_sources else "queued" if queued_sources else "no_due_feeds",
+        "mode": "live_feed_refresh_supervisor",
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "stale_only": stale_only,
+        "refresh_margin_seconds": refresh_margin_seconds,
+        "requested_sources": sorted(requested_sources),
+        "refreshed_sources": refreshed_sources,
+        "queued_sources": queued_sources,
+        "result_count": len(results),
+        "results": results,
+        "before": before.get("summary"),
+        "after": after.get("summary"),
+        "after_feeds": after.get("feeds", []),
+        "remaining_issues": remaining_issues,
+        "readiness_issues": readiness_issues,
+        "boundary": "Refresh supervisor only reloads evidence feeds. It does not trust sensitive events, close review cases, set reward, dispatch actions, or promote models.",
+        "uses_seed_data": False,
+        "llm_control_authority": False,
+    }
+
+
+@app.post("/api/park/live-feeds/refresh-stale")
+async def park_live_feeds_refresh_stale(payload: dict[str, Any] | None = None):
+    return await _refresh_due_live_feeds_payload(payload)
+
+
+@app.get("/api/park/live-feeds/weather")
+async def park_live_weather_feed_config():
+    return {"status": "ready", "mode": "live_weather_feed_config", "config": weather_feed_config()}
+
+
+@app.post("/api/park/live-feeds/weather/load")
+async def park_live_weather_feed_load():
+    result = ingest_live_weather_feed()
+    clear_hot_endpoint_cache()
+    return result
+
+
+@app.get("/api/park/live-feeds/ride-ops")
+async def park_live_ride_ops_feed_config():
+    return {"status": "ready", "mode": "live_ride_ops_feed_config", "config": ride_ops_feed_config()}
+
+
+@app.post("/api/park/live-feeds/ride-ops/load")
+async def park_live_ride_ops_feed_load():
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
+    result = ingest_live_ride_ops_feed(raw_state)
+    clear_hot_endpoint_cache()
+    return result
+
+
+@app.get("/api/park/live-feeds/guest-flow")
+async def park_live_guest_flow_feed_config():
+    return {"status": "ready", "mode": "live_guest_flow_feed_config", "config": guest_flow_feed_config()}
+
+
+@app.post("/api/park/live-feeds/guest-flow/load")
+async def park_live_guest_flow_feed_load():
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
+    result = ingest_live_guest_flow_feed(raw_state)
+    clear_hot_endpoint_cache()
+    return result
+
+
+@app.get("/api/park/live-feeds/staffing")
+async def park_live_staffing_feed_config():
+    return {"status": "ready", "mode": "live_staffing_feed_config", "config": staffing_feed_config()}
+
+
+@app.post("/api/park/live-feeds/staffing/load")
+async def park_live_staffing_feed_load():
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
+    result = ingest_live_staffing_feed(raw_state)
+    clear_hot_endpoint_cache()
+    return result
+
+
+@app.get("/api/park/live-feeds/food-ops")
+async def park_live_food_ops_feed_config():
+    return {"status": "ready", "mode": "live_food_ops_feed_config", "config": food_ops_feed_config()}
+
+
+@app.post("/api/park/live-feeds/food-ops/load")
+async def park_live_food_ops_feed_load():
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
+    result = ingest_live_food_ops_feed(raw_state)
+    clear_hot_endpoint_cache()
+    return result
+
+
+@app.get("/api/park/live-feeds/operator-signal")
+async def park_live_operator_signal_feed_config():
+    return {"status": "ready", "mode": "live_operator_signal_feed_config", "config": operator_signal_feed_config()}
+
+
+@app.post("/api/park/live-feeds/operator-signal/load")
+async def park_live_operator_signal_feed_load():
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
+    result = ingest_live_operator_signal_feed(raw_state)
+    clear_hot_endpoint_cache()
+    return result
+
+
+@app.get("/api/park/review-training-ledger")
+async def park_review_training_ledger(limit: int = 120):
+    return review_training_ledger(limit=max(10, min(500, limit)))
+
+
+@app.post("/api/park/review-training-ledger")
+async def park_review_training_ledger_record(payload: dict[str, Any]):
+    result = record_review_decision(payload)
+    clear_hot_endpoint_cache()
+    return result
 
 
 @app.get("/api/park/learning/episodes")

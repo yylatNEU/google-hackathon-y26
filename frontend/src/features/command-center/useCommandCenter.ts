@@ -75,6 +75,85 @@ export type ActualTrainingStatus = {
   };
 };
 
+export type LiveFeedHealth = {
+  status?: string;
+  mode?: string;
+  cache?: { status?: string; ttl_seconds?: number };
+  summary?: {
+    required_feed_count?: number;
+    ready_feed_count?: number;
+    missing_or_weak_feed_count?: number;
+    open_review_count?: number;
+  };
+  feeds?: Array<{
+    source?: string;
+    label?: string;
+    owner?: string;
+    status?: string;
+    age_seconds?: number | null;
+    max_stale_seconds?: number;
+    confidence?: number;
+    latest_signal_type?: string;
+    readiness_issues?: string[];
+    value?: unknown;
+  }>;
+  open_reviews?: ReviewTrainingLedger["rows"];
+  growth_loop?: string[];
+  readiness_issues?: string[];
+};
+
+export type ReviewTrainingLedger = {
+  status?: string;
+  mode?: string;
+  summary?: {
+    open_count?: number;
+    closed_count?: number;
+    training_candidate_count?: number;
+  };
+  rows?: Array<{
+    id?: string;
+    status?: string;
+    reason?: string;
+    priority?: string;
+    owner?: string;
+    training_effect?: string;
+    event?: { source?: string; signal_type?: string };
+    disposition?: { decision?: string };
+  }>;
+  open_reviews?: ReviewTrainingLedger["rows"];
+  closed_reviews?: ReviewTrainingLedger["rows"];
+  training_rule?: string;
+  readiness_issues?: string[];
+};
+
+export type LiveWeatherLoadResult = {
+  status?: string;
+  mode?: string;
+  provider?: string;
+  event_count?: number;
+  loaded_at?: string;
+  fetch?: { fetched_at?: string; config?: { location_label?: string; source?: string } };
+  readiness_issues?: string[];
+};
+
+export type LiveRideOpsLoadResult = LiveWeatherLoadResult;
+export type LiveGuestFlowLoadResult = LiveWeatherLoadResult;
+export type LiveStaffingLoadResult = LiveWeatherLoadResult;
+export type LiveFoodOpsLoadResult = LiveWeatherLoadResult;
+export type LiveOperatorSignalLoadResult = LiveWeatherLoadResult;
+
+export type LiveFeedRefreshSupervisorResult = {
+  status?: string;
+  mode?: string;
+  refreshed_sources?: string[];
+  queued_sources?: string[];
+  readiness_issues?: string[];
+  remaining_issues?: string[];
+  before?: LiveFeedHealth["summary"];
+  after?: LiveFeedHealth["summary"];
+  after_feeds?: LiveFeedHealth["feeds"];
+};
+
 function normalizeRunTelemetry(payload: RunPayload): RunTelemetry {
   return payload.run_telemetry ?? payload;
 }
@@ -110,9 +189,26 @@ export function useCommandCenter() {
   const [isApproving, setIsApproving] = useState(false);
   const [isTrainingLoading, setIsTrainingLoading] = useState(false);
   const [isStartingGcpTraining, setIsStartingGcpTraining] = useState(false);
+  const [isLiveFeedHealthLoading, setIsLiveFeedHealthLoading] = useState(false);
+  const [isRefreshingStaleFeeds, setIsRefreshingStaleFeeds] = useState(false);
+  const [isLoadingLiveWeather, setIsLoadingLiveWeather] = useState(false);
+  const [isLoadingLiveRideOps, setIsLoadingLiveRideOps] = useState(false);
+  const [isLoadingLiveGuestFlow, setIsLoadingLiveGuestFlow] = useState(false);
+  const [isLoadingLiveStaffing, setIsLoadingLiveStaffing] = useState(false);
+  const [isLoadingLiveFoodOps, setIsLoadingLiveFoodOps] = useState(false);
+  const [isLoadingLiveOperatorSignal, setIsLoadingLiveOperatorSignal] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [actualTraining, setActualTraining] = useState<ActualTrainingStatus | null>(null);
+  const [liveFeedHealth, setLiveFeedHealth] = useState<LiveFeedHealth | null>(null);
+  const [reviewTrainingLedger, setReviewTrainingLedger] = useState<ReviewTrainingLedger | null>(null);
+  const [liveWeatherLoad, setLiveWeatherLoad] = useState<LiveWeatherLoadResult | null>(null);
+  const [liveRideOpsLoad, setLiveRideOpsLoad] = useState<LiveRideOpsLoadResult | null>(null);
+  const [liveGuestFlowLoad, setLiveGuestFlowLoad] = useState<LiveGuestFlowLoadResult | null>(null);
+  const [liveStaffingLoad, setLiveStaffingLoad] = useState<LiveStaffingLoadResult | null>(null);
+  const [liveFoodOpsLoad, setLiveFoodOpsLoad] = useState<LiveFoodOpsLoadResult | null>(null);
+  const [liveOperatorSignalLoad, setLiveOperatorSignalLoad] = useState<LiveOperatorSignalLoadResult | null>(null);
+  const [liveFeedRefreshSupervisor, setLiveFeedRefreshSupervisor] = useState<LiveFeedRefreshSupervisorResult | null>(null);
 
   const activeEvalScores = useMemo<EvalScore[]>(() => {
     const scorecard = runTelemetry?.eval?.scorecard;
@@ -192,10 +288,136 @@ export function useCommandCenter() {
     }
   }, []);
 
+  const refreshLiveFeedHealth = useCallback(async () => {
+    setIsLiveFeedHealthLoading(true);
+    try {
+      const [healthResponse, ledgerResponse] = await Promise.all([
+        fetchParkPulseApi("/api/park/live-feed-health?limit=500", { timeoutMs: 12000 }),
+        fetchParkPulseApi("/api/park/review-training-ledger?limit=80", { timeoutMs: 12000 }),
+      ]);
+      setLiveFeedHealth((await healthResponse.json()) as LiveFeedHealth);
+      setReviewTrainingLedger((await ledgerResponse.json()) as ReviewTrainingLedger);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Live feed health failed.";
+      setLiveFeedHealth({
+        status: "error",
+        mode: "live_feed_health_and_review_contract",
+        feeds: [],
+        summary: { required_feed_count: 0, ready_feed_count: 0, missing_or_weak_feed_count: 0, open_review_count: 0 },
+        readiness_issues: [message],
+      });
+    } finally {
+      setIsLiveFeedHealthLoading(false);
+    }
+  }, []);
+
+  const refreshStaleLiveFeeds = useCallback(async () => {
+    setIsRefreshingStaleFeeds(true);
+    setErrorMessage(null);
+    setStatusMessage("Refreshing stale live feeds without blocking on weather.");
+    try {
+      const response = await fetchParkPulseApi("/api/park/live-feeds/refresh-stale", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ stale_only: true, refresh_margin_seconds: 20 }),
+        timeoutMs: longRunningRequestTimeoutMs,
+      });
+      const payload = (await response.json()) as LiveFeedRefreshSupervisorResult;
+      setLiveFeedRefreshSupervisor(payload);
+      const refreshedCount = payload.refreshed_sources?.length ?? 0;
+      const queuedCount = payload.queued_sources?.length ?? 0;
+      setStatusMessage(`Live feed refresh ${payload.status ?? "complete"}: ${refreshedCount} refreshed / ${queuedCount} queued.`);
+      await refreshLiveFeedHealth();
+      void refreshActualTraining();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to refresh stale live feeds.";
+      setErrorMessage(message);
+      setLiveFeedRefreshSupervisor({ status: "error", mode: "live_feed_refresh_supervisor", readiness_issues: [message] });
+    } finally {
+      setIsRefreshingStaleFeeds(false);
+    }
+  }, [refreshActualTraining, refreshLiveFeedHealth]);
+
+  const recordReviewDecision = useCallback(
+    async (caseId: string, decision: "approve_for_state" | "request_corroboration" | "hold_for_review" | "escalate") => {
+      setIsLiveFeedHealthLoading(true);
+      setErrorMessage(null);
+      try {
+        await fetchParkPulseApi("/api/park/review-training-ledger", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ case_id: caseId, decision, reviewer: "ops_lead" }),
+          timeoutMs: 12000,
+        });
+        setStatusMessage(`Review case ${decision.replaceAll("_", " ")}.`);
+        await refreshLiveFeedHealth();
+        void refreshActualTraining();
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Unable to record review decision.");
+      } finally {
+        setIsLiveFeedHealthLoading(false);
+      }
+    },
+    [refreshActualTraining, refreshLiveFeedHealth],
+  );
+
+  const loadFeed = useCallback(
+    async <T extends LiveWeatherLoadResult>(
+      path: string,
+      label: string,
+      setLoading: (value: boolean) => void,
+      setResult: (value: T | null) => void,
+    ) => {
+      setLoading(true);
+      setErrorMessage(null);
+      try {
+        const response = await fetchParkPulseApi(path, { method: "POST", timeoutMs: longRunningRequestTimeoutMs });
+        const payload = (await response.json()) as T;
+        setResult(payload);
+        setStatusMessage(`${label} feed ${payload.status ?? "loaded"}.`);
+        await refreshLiveFeedHealth();
+        void park.refreshParkState();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : `Unable to load ${label} feed.`;
+        setErrorMessage(message);
+        setResult({ status: "error", mode: `${label.replaceAll(" ", "_")}_feed_load`, readiness_issues: [message] } as T);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [park, refreshLiveFeedHealth],
+  );
+
+  const loadLiveWeatherFeed = useCallback(
+    () => loadFeed<LiveWeatherLoadResult>("/api/park/live-feeds/weather/load", "weather", setIsLoadingLiveWeather, setLiveWeatherLoad),
+    [loadFeed],
+  );
+  const loadLiveRideOpsFeed = useCallback(
+    () => loadFeed<LiveRideOpsLoadResult>("/api/park/live-feeds/ride-ops/load", "ride ops", setIsLoadingLiveRideOps, setLiveRideOpsLoad),
+    [loadFeed],
+  );
+  const loadLiveGuestFlowFeed = useCallback(
+    () => loadFeed<LiveGuestFlowLoadResult>("/api/park/live-feeds/guest-flow/load", "guest flow", setIsLoadingLiveGuestFlow, setLiveGuestFlowLoad),
+    [loadFeed],
+  );
+  const loadLiveStaffingFeed = useCallback(
+    () => loadFeed<LiveStaffingLoadResult>("/api/park/live-feeds/staffing/load", "staffing", setIsLoadingLiveStaffing, setLiveStaffingLoad),
+    [loadFeed],
+  );
+  const loadLiveFoodOpsFeed = useCallback(
+    () => loadFeed<LiveFoodOpsLoadResult>("/api/park/live-feeds/food-ops/load", "food ops", setIsLoadingLiveFoodOps, setLiveFoodOpsLoad),
+    [loadFeed],
+  );
+  const loadLiveOperatorSignalFeed = useCallback(
+    () => loadFeed<LiveOperatorSignalLoadResult>("/api/park/live-feeds/operator-signal/load", "operator signal", setIsLoadingLiveOperatorSignal, setLiveOperatorSignalLoad),
+    [loadFeed],
+  );
+
   useEffect(() => {
     void refreshIntegrationStatus();
     void refreshActualTraining();
-  }, [refreshActualTraining, refreshIntegrationStatus]);
+    void refreshLiveFeedHealth();
+  }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveFeedHealth]);
 
   const runAgent = useCallback(async () => {
     setIsRunning(true);
@@ -314,8 +536,33 @@ export function useCommandCenter() {
     isApproving,
     isTrainingLoading,
     isStartingGcpTraining,
+    isLiveFeedHealthLoading: isLiveFeedHealthLoading || isRefreshingStaleFeeds,
+    isLoadingLiveWeather,
+    isLoadingLiveRideOps,
+    isLoadingLiveGuestFlow,
+    isLoadingLiveStaffing,
+    isLoadingLiveFoodOps,
+    isLoadingLiveOperatorSignal,
     statusMessage,
     errorMessage,
+    liveFeedHealth,
+    reviewTrainingLedger,
+    liveWeatherLoad,
+    liveRideOpsLoad,
+    liveGuestFlowLoad,
+    liveStaffingLoad,
+    liveFoodOpsLoad,
+    liveOperatorSignalLoad,
+    liveFeedRefreshSupervisor,
     refreshActualTraining,
+    refreshLiveFeedHealth,
+    refreshStaleLiveFeeds,
+    recordReviewDecision,
+    loadLiveWeatherFeed,
+    loadLiveRideOpsFeed,
+    loadLiveGuestFlowFeed,
+    loadLiveStaffingFeed,
+    loadLiveFoodOpsFeed,
+    loadLiveOperatorSignalFeed,
   };
 }

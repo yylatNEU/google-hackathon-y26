@@ -77,6 +77,8 @@ COLLECTION_PURPOSES = {
     "cache_events": "Audit trail for derived memory refreshes, cache reads, and role-cache invalidation causes.",
     "agent_performance_scorecards": "Per-role proof metrics for cache hit rate, retrieval latency, quality, rollback, and outcome lift.",
     "cache_accuracy_replays": "Replay evidence comparing fresh retrieval, fresh cache, stale cache, and dangerous drift behavior.",
+    "live_feed_events": "Normalized live operating feed events shared across Cloud Run instances.",
+    "live_review_ledger": "Human review cases and dispositions for live feed trust and training eligibility.",
 }
 
 AGENT_ROLE_CONFIGS = {
@@ -894,6 +896,8 @@ class OperationalMemory:
             "cache_events": [],
             "agent_performance_scorecards": [],
             "cache_accuracy_replays": [],
+            "live_feed_events": [],
+            "live_review_ledger": [],
         }
 
     def initialize(self) -> dict[str, Any]:
@@ -991,6 +995,10 @@ class OperationalMemory:
         self._create_index(self.db.cache_events, [("createdAt", DESCENDING), ("scenarioKey", ASCENDING), ("agentRole", ASCENDING)])
         self._create_index(self.db.agent_performance_scorecards, [("agentRole", ASCENDING), ("scenarioKey", ASCENDING), ("updatedAt", DESCENDING)])
         self._create_index(self.db.cache_accuracy_replays, [("createdAt", DESCENDING), ("scenarioKey", ASCENDING), ("agentRole", ASCENDING)])
+        self._create_index(self.db.live_feed_events, [("createdAt", DESCENDING), ("source", ASCENDING)])
+        self._create_index(self.db.live_feed_events, [("source", ASCENDING), ("signal_type", ASCENDING), ("createdAt", DESCENDING)])
+        self._create_index(self.db.live_review_ledger, [("createdAt", DESCENDING), ("status", ASCENDING)])
+        self._create_index(self.db.live_review_ledger, [("case_id", ASCENDING), ("source_event_id", ASCENDING), ("createdAt", DESCENDING)])
 
     def seed_defaults(self) -> None:
         self._invalidate_dashboard_cache()
@@ -3887,6 +3895,38 @@ class OperationalMemory:
             return [_public_doc(row) for row in rows]
         return [_public_doc(row) for row in deepcopy(self._fallback[collection_name][:limit])]
 
+    def record_live_feed_document(self, collection_name: str, row: dict[str, Any]) -> dict[str, Any]:
+        if collection_name not in {"live_feed_events", "live_review_ledger"}:
+            raise ValueError(f"Unsupported live feed collection: {collection_name}")
+        now = _utc_now()
+        document = _clean_for_bson(deepcopy(row))
+        document_id = str(document.get("_id") or document.get("id") or hashlib.sha1(json.dumps(document, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16])
+        document["_id"] = document_id
+        document.setdefault("id", document_id)
+        document.setdefault("createdAt", document.get("created_at") or document.get("received_at") or document.get("observed_at") or now)
+        document["updatedAt"] = now
+        document["documentType"] = collection_name.rstrip("s")
+        collection = self._collection(collection_name)
+        if collection is not None:
+            collection.update_one({"_id": document_id}, {"$set": document}, upsert=True)
+        else:
+            rows = self._fallback.setdefault(collection_name, [])
+            rows[:] = [existing for existing in rows if existing.get("_id") != document_id and existing.get("id") != document_id]
+            rows.insert(0, document)
+            del rows[500:]
+        return {"status": "stored", "mode": self.mode, "collection": collection_name, "id": document_id}
+
+    def latest_live_feed_documents(self, collection_name: str, limit: int = 500) -> list[dict[str, Any]]:
+        if collection_name not in {"live_feed_events", "live_review_ledger"}:
+            raise ValueError(f"Unsupported live feed collection: {collection_name}")
+        bounded_limit = max(1, min(5000, int(limit or 500)))
+        collection = self._collection(collection_name)
+        if collection is not None:
+            rows = list(collection.find({}, {"embedding": 0, "embeddingText": 0}).sort("createdAt", DESCENDING).limit(bounded_limit))
+            return [_public_doc(row) for row in rows]
+        rows = deepcopy(self._fallback.setdefault(collection_name, [])[:bounded_limit])
+        return [_public_doc(row) for row in rows]
+
     def backfill_embeddings(self, collection_names: list[str] | None = None, limit: int = 250) -> dict[str, Any]:
         self._invalidate_dashboard_cache()
         allowed = {"playbooks", "incidents", "agent_learnings"}
@@ -4542,6 +4582,24 @@ def get_latest_memory_documents_fast(collection_name: str, limit: int = 5) -> li
         return _memory.latest_documents(collection_name, limit)
     except Exception:
         return []
+
+
+def record_live_feed_document(collection_name: str, row: dict[str, Any]) -> dict[str, Any]:
+    return _safe_memory_call(
+        f"mongo.{collection_name}.record",
+        lambda: _memory.record_live_feed_document(collection_name, row),
+        lambda error: {"status": "skipped", "mode": _memory.mode, "collection": collection_name, "error": str(error)[:300]},
+        retry_operation_on_fallback=False,
+    )
+
+
+def get_latest_live_feed_documents(collection_name: str, limit: int = 500) -> list[dict[str, Any]]:
+    return _safe_memory_call(
+        f"mongo.{collection_name}.latest",
+        lambda: _memory.latest_live_feed_documents(collection_name, limit),
+        lambda error: [],
+        retry_operation_on_fallback=False,
+    )
 
 
 def backfill_memory_embeddings(collection_names: list[str] | None = None, limit: int = 250) -> dict[str, Any]:
