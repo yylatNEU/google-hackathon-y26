@@ -17,6 +17,7 @@ if [[ -z "$PROJECT_ID" ]]; then
   exit 2
 fi
 
+scripts/preflight_private_deploy_contract.sh
 scripts/gcp_bootstrap_private.sh "$PROJECT_ID" "$REGION"
 
 DEPLOY_ARGS=()
