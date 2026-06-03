@@ -496,6 +496,7 @@ def frontend_e2e_check() -> CheckResult:
     frontend_port = free_port()
     backend_url = f"http://127.0.0.1:{backend_port}"
     frontend_url = f"http://127.0.0.1:{frontend_port}"
+    runtime_dir = Path(os.environ.get("PARKPULSE_FRONTEND_RUNTIME_DIR", "/tmp/parkpulse_frontend_runtime"))
     backend: subprocess.Popen[str] | None = None
     frontend: subprocess.Popen[str] | None = None
     logs: list[str] = []
@@ -528,7 +529,7 @@ def frontend_e2e_check() -> CheckResult:
             )
 
         frontend = subprocess.Popen(
-            ["npm", "exec", "vite", "preview", "--", "--host", "127.0.0.1", "--port", str(frontend_port)],
+            ["npm", "run", "start", "--", "--host", "127.0.0.1", "--port", str(frontend_port)],
             cwd=FRONTEND_DIR,
             env=os.environ.copy(),
             text=True,
@@ -555,7 +556,7 @@ def frontend_e2e_check() -> CheckResult:
         env["PARKPULSE_TEST_APP_URL"] = frontend_url
         completed = subprocess.run(
             command,
-            cwd=FRONTEND_DIR,
+            cwd=runtime_dir,
             env=env,
             text=True,
             stdout=subprocess.PIPE,
@@ -570,7 +571,7 @@ def frontend_e2e_check() -> CheckResult:
             summary="Completed successfully" if completed.returncode == 0 else f"Exited with code {completed.returncode}",
             duration_seconds=round(time.monotonic() - started, 2),
             command=command,
-            cwd=str(FRONTEND_DIR),
+            cwd=str(runtime_dir),
             output_tail=tail("\n".join(logs)),
             details={"returncode": completed.returncode, "backend_port": backend_port, "frontend_port": frontend_port},
         )

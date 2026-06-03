@@ -7,7 +7,7 @@ SERVICE="${PARKPULSE_CLOUD_RUN_SERVICE:-parkpulse-private-api}"
 SERVICE_ACCOUNT_NAME="${PARKPULSE_CLOUD_RUN_SA:-parkpulse-private-run}"
 SERVICE_ACCOUNT_EMAIL="${SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 DATASET="${BIGQUERY_DATASET:-parkpulse_analytics}"
-MONGODB_SECRET="${PARKPULSE_MONGODB_SECRET:-parkpulse-mongodb-uri}"
+MONGO_URI_RESOURCE_NAME="${PARKPULSE_MONGODB_SECRET:-parkpulse-mongodb-uri}"
 MONGODB_DATABASE="${MONGODB_DATABASE:-parkpulse_ops}"
 
 if [[ -z "$PROJECT_ID" ]]; then
@@ -19,8 +19,8 @@ scripts/gcp_bootstrap_private.sh "$PROJECT_ID" "$REGION"
 
 DEPLOY_ARGS=()
 MONGO_OPTIONAL="true"
-if gcloud secrets describe "$MONGODB_SECRET" --project "$PROJECT_ID" >/dev/null 2>&1; then
-  DEPLOY_ARGS+=(--set-secrets "MONGODB_URI=${MONGODB_SECRET}:latest")
+if gcloud secrets describe "$MONGO_URI_RESOURCE_NAME" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  DEPLOY_ARGS+=(--set-secrets "MONGODB_URI=${MONGO_URI_RESOURCE_NAME}:latest")
   MONGO_OPTIONAL="false"
 fi
 
