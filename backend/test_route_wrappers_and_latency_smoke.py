@@ -153,9 +153,20 @@ def test_gcp_route_wrappers(monkeypatch):
     monkeypatch.setattr(gcp_trace_eval, "get_gcp_trace_eval_status", lambda: types.SimpleNamespace(public_dict=lambda: {"ready": True}))
     monkeypatch.setattr(gcp_trace_eval, "verify_gcp_trace_export", lambda: {"status": "flush_succeeded"})
     monkeypatch.setattr(bigquery_analytics, "online_improvement_status", lambda: {"ready": True})
-    monkeypatch.setattr(bigquery_analytics, "bigquery_status", lambda: {"ready": True})
+    monkeypatch.setattr(bigquery_analytics, "bigquery_status", lambda: {"ready": True, "project": "demo", "dataset": "parkpulse"})
     monkeypatch.setattr(arize_config, "get_arize_status", lambda: types.SimpleNamespace(public_dict=lambda: {"ready": False}))
-    monkeypatch.setattr(evaluator_loop, "evaluator_loop_status", lambda: {"status": "local_only"})
+    monkeypatch.setattr(
+        evaluator_loop,
+        "evaluator_loop_status",
+        lambda: {
+            "status": "local_only",
+            "provider": "local_scorecard",
+            "hosted_configured": False,
+            "hosted_trigger_enabled": False,
+            "readiness_issues": ["hosted eval off"],
+            "tooling": {"vertex_eval_transport": "rest"},
+        },
+    )
     monkeypatch.setattr(evaluator_loop, "run_vertex_hosted_evaluation", lambda payload: {"status": "skipped", "provider": "vertex", "evaluator_id": "e", "location": "us", "reason": "off"})
     monkeypatch.setattr(scenario_eval_sweep, "run_vertex_eval_scenario_sweep", lambda *args, **kwargs: asyncio.sleep(0, result={"scenarios": [], "summary": {}}))
     monkeypatch.setattr(scenario_eval_sweep, "build_sweep_analytics_rows", lambda result: {"rows": [{"scenario_count": len(result.get("scenarios", []))}]})
@@ -163,7 +174,19 @@ def test_gcp_route_wrappers(monkeypatch):
     monkeypatch.setattr(mongo_memory, "record_scenario_eval_sweep_fast", lambda result: "sweep-1")
     monkeypatch.setattr(mongo_memory, "get_latest_memory_documents_fast", lambda collection, limit: [{"collection": collection, "limit": limit}])
 
-    monkeypatch.setattr(gcp_operations, "gcp_operations_status", lambda: {"ready": True})
+    monkeypatch.setattr(
+        gcp_operations,
+        "gcp_operations_status",
+        lambda: {
+            "ready": True,
+            "pubsub": {"ready": True, "enabled": True, "topic": "projects/demo/topics/ops"},
+            "workflows": {"ready": False, "enabled": False},
+            "fcm": {"ready": True, "mode": "pseudo_firebase", "pseudo": {"ready": True}, "guest_topic": "guests", "worker_topic": "workers"},
+            "firestore": {"ready": False, "enabled": False, "mirror": {"ready": True}},
+            "agent_builder": {"ready": True, "enabled": True, "runtime": "Agent Engine", "agent_count": 12, "tool_count": 40},
+            "dataflow": {"ready": False, "enabled": False, "mirror": {"ready": True}},
+        },
+    )
     monkeypatch.setattr(gcp_operations, "pseudo_firebase_status", lambda: {"ready": True})
     monkeypatch.setattr(gcp_operations, "firestore_status", lambda: {"ready": False})
     monkeypatch.setattr(gcp_operations, "latest_firestore_operations", lambda limit, kind=None: [{"kind": kind, "limit": limit}])
@@ -182,7 +205,19 @@ def test_gcp_route_wrappers(monkeypatch):
             self.__dict__.update(kwargs)
 
     async def fake_agent_run(request):
-        return {"scenario_key": request.scenario_key, "execute": request.execute}
+        return {
+            "status": "complete",
+            "scenario_key": request.scenario_key,
+            "execute": request.execute,
+            "decision_id": "decision-1",
+            "outcome_id": "outcome-1",
+            "eval": {
+                "scorecard": {"overall": 91, "status": "passed", "decision_id": "decision-1"},
+                "gcp_trace_eval": {"trace_state": "export_configured", "trace_id": "trace-1", "span_id": "span-1", "ready": True},
+                "hosted_eval": {"status": "local_scorecard_only", "trigger": {"status": "not_triggered"}},
+            },
+            "analytics": {"inserted": False, "row_counts": {"eval_results": 1}, "status": "preview"},
+        }
 
     client = client_for(
         register_gcp_routes,
@@ -203,6 +238,14 @@ def test_gcp_route_wrappers(monkeypatch):
     evaluator_loop_status = client.get("/api/gcp/evaluator-loop").json()
     assert evaluator_loop_status["status"] == "local_only"
     assert evaluator_loop_status["judge_agent"]["department"] == "qa_judge"
+    readiness = client.get("/api/gcp/live-readiness").json()
+    assert readiness["judge_agent"]["agent_id"] == "gcp_eval_judge_agent"
+    assert readiness["checks"]["pubsub"]["proof_mode"] == "live"
+    assert readiness["checks"]["firestore"]["proof_mode"] == "mocked"
+    smoke = client.post("/api/gcp/judge-smoke", json={"scenario_key": "ride_down", "execute": False}).json()
+    assert smoke["status"] == "complete"
+    assert smoke["smoke"]["proof"]["local_scorecard"]["proof_mode"] == "live"
+    assert smoke["smoke"]["proof"]["analytics_export"]["proof_mode"] == "mocked"
     evaluator_verify = client.post("/api/gcp/evaluator-loop/verify?scenario_key=s").json()
     assert evaluator_verify["hosted_eval"]["provider"] == "vertex"
     assert evaluator_verify["judge_agent"]["agent_id"] == "gcp_eval_judge_agent"

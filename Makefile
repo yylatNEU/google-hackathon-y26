@@ -4,7 +4,7 @@ PERF_CONCURRENCY ?= 50
 PERF_TARGET_P95_MS ?= 250
 TEST_PYTHON ?= /tmp/parkpulse_backend_venv/bin/python
 
-.PHONY: qa qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate live-agents-smoke live-feed-agent-smoke test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-deploy-private gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private
+.PHONY: qa qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate live-agents-smoke live-feed-agent-smoke test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-judge-smoke gcp-deploy-private gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private
 
 qa:
 	python3 scripts/qa_agent.py
@@ -53,6 +53,9 @@ gcp-bootstrap:
 
 gcp-local:
 	scripts/run_local_gcp.sh
+
+gcp-judge-smoke:
+	PYTHONPATH=backend python3 scripts/gcp_judge_smoke.py
 
 gcp-deploy-private:
 	scripts/deploy_private_cloud_run.sh

@@ -177,7 +177,7 @@ public class RoleAuthService {
         if ("dispatch_live_action".equals(capability)) {
             return "ops_team".equals(role);
         }
-        if ("read_platform_status".equals(capability) || "manage_platform_store".equals(capability)) {
+        if ("read_platform_status".equals(capability) || "manage_platform_store".equals(capability) || "manage_agent_trust".equals(capability)) {
             return "ml_ops_admin".equals(role);
         }
         return false;

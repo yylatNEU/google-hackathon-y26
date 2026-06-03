@@ -12,7 +12,9 @@ from agent_handshake import (  # noqa: E402
     _credential_revocations,
     _partner_registry,
     _sessions,
+    _verify_certification_claims,
     agent_handshake_scenario_catalog,
+    agent_contract,
     capability_handshake,
     certify_agent_onboarding,
     certification_issuer_metadata,
@@ -30,6 +32,8 @@ from agent_handshake import (  # noqa: E402
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
     run_agent_handshake_scenario_evaluations,
+    run_agent_handshake_policy_challenges,
+    session_protocol_receipt,
     agent_trust_registry_status,
     list_agent_trust_audit_events,
     list_agent_trust_keys,
@@ -38,6 +42,14 @@ from agent_handshake import (  # noqa: E402
     upsert_agent_trust_partner,
     verify_agent_certification_credential,
 )
+
+
+def _assert_valid_protocol_signature(artifact: dict, artifact_type: str):
+    signature = artifact.get("signature") or {}
+    assert signature["artifact_type"] == artifact_type
+    assert signature["protocol_version"] == "parkpulse-ahp-0.1"
+    assert signature["alg"] == certification_issuer_metadata()["signing"]["alg"]
+    assert _verify_certification_claims({key: value for key, value in signature.items() if key != "sig"}, signature["sig"])
 
 
 def _full_delegation_token():
@@ -225,6 +237,7 @@ def test_protocol_extension_scenario_changes_backend_agent_outputs():
 
 def test_protocol_scenario_catalog_and_all_mode_eval_pass():
     catalog = agent_handshake_scenario_catalog()
+    _assert_valid_protocol_signature(catalog, "agent_handshake_scenario_catalog")
     scenario_ids = {item["id"] for item in catalog["scenarios"]}
     assert {"visit_planning", "incident_response", "accessibility_support", "commerce_resolution", "group_coordination"}.issubset(scenario_ids)
     assert catalog["configurable"] is True
@@ -238,6 +251,54 @@ def test_protocol_scenario_catalog_and_all_mode_eval_pass():
     assert all(item["evaluation"]["case"].startswith("protocol_scenario_") for item in evaluated["results"])
     for item in evaluated["results"]:
         _sessions.pop(item["session_id"], None)
+
+
+def test_agent_contract_policy_challenges_and_receipt_are_signed():
+    contract = agent_contract()
+    _assert_valid_protocol_signature(contract, "agent_contract")
+    _assert_valid_protocol_signature(contract["scenario_catalog"], "agent_handshake_scenario_catalog")
+    assert "POST /api/park/agent-handshake/policy-challenges" in contract["routes"]
+    assert "GET /api/park/session/{session_id}/receipt" in contract["routes"]
+
+    challenges = run_agent_handshake_policy_challenges({"actions": ["payment", "health_data_sharing", "override_safety_delay"]})
+    _assert_valid_protocol_signature(challenges, "agent_handshake_policy_challenges")
+    assert challenges["status"] == "passed"
+    assert challenges["passed"] == 3
+    assert all(result["allowed"] is False and result["requires_user_approval"] is True for result in challenges["results"])
+    _sessions.pop(challenges["session_id"], None)
+
+    token = _full_delegation_token()
+    identity = identity_handshake(
+        {
+            "agent_id": "john_personal_agent",
+            "represents": "guest_user_123",
+            "proof": "signed_token",
+            "requested_session": "signed_receipt_case",
+            "delegation_token": token,
+        }
+    )
+    session_id = identity["session"]["session_id"]
+    capability_handshake(
+        session_id,
+        {
+            "can_share": ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference"],
+            "can_receive": ["route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer"],
+            "cannot_do": ["auto_purchase", "share_health_data", "accept_refund_without_user"],
+            "delegation_token": token,
+        },
+    )
+    intent_handshake(session_id, {"goal": "signed_receipt", "time_window": "3_hours", "constraints": {"children": 2}, "delegation_token": token})
+    propose_plan(session_id, {"planner": "receipt_test", "delegation_token": token})
+    commit_plan(session_id, {"accepted": True, "delegation_token": token})
+    commerce_agent_evaluate(session_id, {"action": "payment", "amount": 42, "reason": "Receipt proof.", "delegation_token": token})
+
+    receipt_payload = session_protocol_receipt(session_id, {"delegation_token": token})
+    receipt = receipt_payload["receipt"]
+    _assert_valid_protocol_signature(receipt, "agent_handshake_session_receipt")
+    assert receipt["session_id"] == session_id
+    assert receipt["policy_gates_triggered"]
+    assert receipt["conversation_digest"]
+    _sessions.pop(session_id, None)
 
 
 def test_external_agent_contract_rejects_under_scoped_client_before_capability_scope():
@@ -396,34 +457,6 @@ def test_agent_trust_registry_admin_persists_partner_revocation_and_key_rotation
     _partner_registry.clear()
     _credential_revocations.clear()
 
-
-def test_agent_trust_management_requires_ml_ops_admin_role():
-    admin = authorize_role_action("ml_ops_admin", "manage_agent_trust", resource="agent_trust_key_rotation", default_role="ml_ops_admin")
-    ops = authorize_role_action("ops_team", "manage_agent_trust", resource="agent_trust_key_rotation", default_role="ml_ops_admin")
-    customer = authorize_role_action("customer", "manage_agent_trust", resource="agent_trust_key_rotation", default_role="ml_ops_admin")
-    assert admin["allowed"] is True
-    assert ops["allowed"] is False
-    assert customer["allowed"] is False
-
-
-def test_external_identity_headers_map_to_admin_role(monkeypatch):
-    monkeypatch.setenv("PARKPULSE_TRUST_GOOGLE_IAP", "1")
-    monkeypatch.setenv("PARKPULSE_ADMIN_EMAILS", "admin@example.com")
-    identity = verify_external_role_identity({"x-goog-authenticated-user-email": "accounts.google.com:admin@example.com"}, default_role="ops_team")
-    assert identity["authenticated"] is True
-    assert identity["auth_method"] == "external_google_iap"
-    assert identity["role"] == "ml_ops_admin"
-    assert identity_provider_readiness()["external_identity_ready"] is True
-
-
-def test_external_identity_headers_block_unmapped_identity(monkeypatch):
-    monkeypatch.setenv("PARKPULSE_TRUST_OIDC_HEADERS", "1")
-    monkeypatch.setenv("PARKPULSE_ADMIN_GROUPS", "parkpulse-admins")
-    identity = verify_external_role_identity({"x-parkpulse-verified-email": "viewer@example.com", "x-parkpulse-verified-groups": "parkpulse-viewers"}, default_role="ml_ops_admin")
-    assert identity["authenticated"] is False
-    assert identity["status"] == "role_unmapped"
-    assert identity["role"] == "ml_ops_admin"
-
     status = agent_trust_registry_status()
     assert status["store"]["mode"] == "sqlite_wal"
     assert status["active_key"]["kid"] == certification_issuer_metadata()["signing"]["kid"]
@@ -454,3 +487,31 @@ def test_external_identity_headers_block_unmapped_identity(monkeypatch):
     ah._trust_registry_loaded = False
     _partner_registry.clear()
     _credential_revocations.clear()
+
+
+def test_agent_trust_management_requires_ml_ops_admin_role():
+    admin = authorize_role_action("ml_ops_admin", "manage_agent_trust", resource="agent_trust_key_rotation", default_role="ml_ops_admin")
+    ops = authorize_role_action("ops_team", "manage_agent_trust", resource="agent_trust_key_rotation", default_role="ml_ops_admin")
+    customer = authorize_role_action("customer", "manage_agent_trust", resource="agent_trust_key_rotation", default_role="ml_ops_admin")
+    assert admin["allowed"] is True
+    assert ops["allowed"] is False
+    assert customer["allowed"] is False
+
+
+def test_external_identity_headers_map_to_admin_role(monkeypatch):
+    monkeypatch.setenv("PARKPULSE_TRUST_GOOGLE_IAP", "1")
+    monkeypatch.setenv("PARKPULSE_ADMIN_EMAILS", "admin@example.com")
+    identity = verify_external_role_identity({"x-goog-authenticated-user-email": "accounts.google.com:admin@example.com"}, default_role="ops_team")
+    assert identity["authenticated"] is True
+    assert identity["auth_method"] == "external_google_iap"
+    assert identity["role"] == "ml_ops_admin"
+    assert identity_provider_readiness()["external_identity_ready"] is True
+
+
+def test_external_identity_headers_block_unmapped_identity(monkeypatch):
+    monkeypatch.setenv("PARKPULSE_TRUST_OIDC_HEADERS", "1")
+    monkeypatch.setenv("PARKPULSE_ADMIN_GROUPS", "parkpulse-admins")
+    identity = verify_external_role_identity({"x-parkpulse-verified-email": "viewer@example.com", "x-parkpulse-verified-groups": "parkpulse-viewers"}, default_role="ml_ops_admin")
+    assert identity["authenticated"] is False
+    assert identity["status"] == "role_unmapped"
+    assert identity["role"] == "ml_ops_admin"

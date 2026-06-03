@@ -194,6 +194,54 @@ class ParkPulseSpringBackendApplicationTests {
 	}
 
 	@Test
+	void agentTrustRegistryRunsNativelyInSpringWithAdminGate() throws Exception {
+		mockMvc.perform(get("/api/park/agent-trust/status").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isForbidden());
+
+		mockMvc.perform(get("/api/park/agent-trust/status").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("durable_agent_trust_registry")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(
+				post("/api/park/agent-trust/partners")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"partner_id\":\"spring_partner\",\"partner_name\":\"Spring Partner\",\"allowed_scopes\":[\"location\",\"route_plan\"],\"actor\":\"spring-admin\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("upserted")))
+			.andExpect(jsonPath("$.partner.partner_id", equalTo("spring_partner")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(get("/api/park/agent-trust/partners").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.count", notNullValue()))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(
+				post("/api/park/agent-trust/keys/rotate")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"version\":\"spring-test-key\",\"actor\":\"spring-admin\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("rotated")))
+			.andExpect(jsonPath("$.signing.version", equalTo("spring-test-key")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(get("/api/park/agent-trust/keys").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.active_key.version", equalTo("spring-test-key")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(get("/api/park/agent-trust/audit?limit=5").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.count", notNullValue()))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+	}
+
+	@Test
 	void rejectsRoleTokensWithWrongAudience() throws Exception {
 		mockMvc.perform(get("/api/park/platform-store").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin", "wrong-audience", "parkpulse-local-dev", 0)))
 			.andExpect(status().isUnauthorized());

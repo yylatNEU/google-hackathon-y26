@@ -13,6 +13,15 @@ type ScopePayload = {
     status?: string;
     source?: string;
     venueIdentity?: { name?: string; profileType?: string };
+    readiness?: {
+      status?: string;
+      counts?: Record<string, number>;
+      issues?: Array<{ detail?: string; severity?: string }>;
+    };
+    sourceIntegrity?: {
+      usesApprovedSyntheticProfile?: boolean;
+      realVenueFeedConnected?: boolean;
+    };
     counts?: Record<string, number>;
     issues?: Array<{ detail?: string; severity?: string }>;
   };
@@ -70,6 +79,7 @@ type JourneyPayload = {
   };
   staffHandoff?: { recommended?: boolean; owner?: string; message?: string };
   guardrails?: string[];
+  evidence?: Array<{ id?: string; source?: string; label?: string; detail?: string }>;
   readinessIssues?: string[];
   venueProfile?: ScopePayload["venueProfile"];
 };
@@ -108,8 +118,14 @@ export default function AccessibilityJourneyPage() {
   const [error, setError] = useState("");
 
   const activeNeeds = useMemo(() => new Set(needs), [needs]);
-  const venueStatus = scope?.venueProfile?.status ?? journey?.venueProfile?.status ?? "unknown";
-  const venueCounts = scope?.venueProfile?.counts ?? journey?.venueProfile?.counts ?? {};
+  const activeVenue = journey?.venueProfile ?? scope?.venueProfile;
+  const venueStatus = activeVenue?.status ?? activeVenue?.readiness?.status ?? "unknown";
+  const venueCounts = activeVenue?.counts ?? activeVenue?.readiness?.counts ?? {};
+  const sourceMode = activeVenue?.sourceIntegrity?.usesApprovedSyntheticProfile
+    ? "approved synthetic"
+    : activeVenue?.sourceIntegrity?.realVenueFeedConnected
+      ? "real venue feed"
+      : "not connected";
 
   async function refreshScope() {
     try {
@@ -150,7 +166,10 @@ export default function AccessibilityJourneyPage() {
   }
 
   useEffect(() => {
-    void refreshScope();
+    void (async () => {
+      await refreshScope();
+      await buildJourney();
+    })();
   }, []);
 
   return (
@@ -166,9 +185,9 @@ export default function AccessibilityJourneyPage() {
           </div>
           <div className="grid grid-cols-3 gap-2 text-xs">
             {[
-              ["Venue", fmt(venueStatus)],
+              ["Venue", fmt(activeVenue?.venueIdentity?.name ?? venueStatus)],
               ["Locations", venueCounts.locations ?? 0],
-              ["Source", fmt(scope?.venueProfile?.source)],
+              ["Source", sourceMode],
             ].map(([label, value]) => (
               <div key={label} className="rounded border border-slate-800 bg-slate-900 p-3">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</div>
@@ -283,6 +302,19 @@ export default function AccessibilityJourneyPage() {
 
               {journey?.summary?.reviewReason ? <p className="mt-3 rounded border border-amber-300/40 bg-amber-300/10 p-3 text-sm font-bold text-amber-100">{journey.summary.reviewReason}</p> : null}
 
+              <div className="mt-4 grid gap-2 text-xs sm:grid-cols-3">
+                {[
+                  ["Profile", activeVenue?.venueIdentity?.name ?? "--"],
+                  ["Readiness", fmt(venueStatus)],
+                  ["Feed", sourceMode],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded border border-slate-800 bg-slate-950 p-3">
+                    <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</div>
+                    <div className="mt-1 font-black text-slate-100">{value}</div>
+                  </div>
+                ))}
+              </div>
+
               <div className="mt-4 space-y-3">
                 {(journey?.planSteps ?? []).map((step, index) => (
                   <article key={step.id ?? index} className="rounded border border-slate-800 bg-slate-950 p-3">
@@ -331,6 +363,33 @@ export default function AccessibilityJourneyPage() {
                   {(journey?.guardrails ?? scope?.customer_copy_rules ?? []).slice(0, 5).map((rule) => (
                     <div key={rule} className="rounded border border-slate-800 bg-slate-950 p-3 text-sm leading-relaxed text-slate-400">{rule}</div>
                   ))}
+                </div>
+              </div>
+            </section>
+
+            <section className="grid gap-4 lg:grid-cols-2">
+              <div className="rounded border border-slate-800 bg-slate-900 p-4">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Evidence</div>
+                <div className="mt-3 space-y-2">
+                  {(journey?.evidence ?? []).map((item) => (
+                    <div key={item.id ?? item.label} className="rounded border border-slate-800 bg-slate-950 p-3">
+                      <div className="font-black text-slate-100">{item.label ?? item.id}</div>
+                      <div className="mt-1 text-xs font-bold text-cyan-200">{item.source}</div>
+                      <div className="mt-2 text-xs leading-relaxed text-slate-500">{item.detail}</div>
+                    </div>
+                  ))}
+                  {!journey?.evidence?.length ? <p className="text-sm text-slate-500">No evidence attached yet.</p> : null}
+                </div>
+              </div>
+
+              <div className="rounded border border-slate-800 bg-slate-900 p-4">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Staff handoff</div>
+                <div className="mt-3 rounded border border-slate-800 bg-slate-950 p-3">
+                  <div className="text-sm font-black text-slate-100">{journey?.staffHandoff?.owner ?? "Guest Services"}</div>
+                  <div className="mt-1 text-xs font-bold text-slate-400">Recommended {fmt(journey?.staffHandoff?.recommended)}</div>
+                  <p className="mt-3 text-sm leading-relaxed text-slate-400">
+                    {journey?.staffHandoff?.message ?? "Build a journey to see staff confirmation notes."}
+                  </p>
                 </div>
               </div>
             </section>

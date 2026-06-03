@@ -186,8 +186,16 @@ def run_happy_path(api: str) -> dict[str, Any]:
     if queue.get("status") != "recommended":
         raise ConformanceFailure(f"Queue reroute must be recommended, got {queue.get('status')}")
 
+    receipt = post_json(api, f"/api/park/session/{session_id}/receipt", {"delegation_token": token}).payload
+    signed_receipt = receipt.get("receipt") if isinstance(receipt.get("receipt"), dict) else {}
+    signature = signed_receipt.get("signature") if isinstance(signed_receipt.get("signature"), dict) else {}
+    if receipt.get("status") != "ready" or signature.get("artifact_type") != "agent_handshake_session_receipt" or not signature.get("sig"):
+        raise ConformanceFailure(f"Session receipt was not signed correctly: {receipt}")
+
     return {
         "session_id": session_id,
+        "receipt_id": signed_receipt.get("receipt_id"),
+        "receipt_signature_kid": signature.get("kid"),
         "cases": {
             "identity_trust": identity_eval,
             "capability_scope": capability_eval,
@@ -328,6 +336,9 @@ def run_auth_readiness_case(api: str, external_admin_email: str | None = None) -
 
 def run_scenario_eval_case(api: str) -> dict[str, Any]:
     catalog = get_json(api, "/api/park/agent-handshake/scenarios").payload
+    catalog_signature = catalog.get("signature") if isinstance(catalog.get("signature"), dict) else {}
+    if catalog_signature.get("artifact_type") != "agent_handshake_scenario_catalog" or not catalog_signature.get("sig"):
+        raise ConformanceFailure(f"Scenario catalog is not signed: {catalog_signature}")
     scenario_ids = [str(item.get("id")) for item in catalog.get("scenarios", []) if isinstance(item, dict) and item.get("id")]
     if not scenario_ids:
         raise ConformanceFailure(f"Scenario catalog did not expose any scenarios: {catalog}")
@@ -347,6 +358,25 @@ def run_scenario_eval_case(api: str) -> dict[str, Any]:
         "passed": evaluated["passed"],
         "average_score": evaluated["average_score"],
         "scenario_ids": result_ids,
+        "catalog_signature_kid": catalog_signature.get("kid"),
+    }
+
+
+def run_policy_challenge_case(api: str) -> dict[str, Any]:
+    challenged = post_json(api, "/api/park/agent-handshake/policy-challenges", {}).payload
+    signature = challenged.get("signature") if isinstance(challenged.get("signature"), dict) else {}
+    if challenged.get("status") != "passed":
+        raise ConformanceFailure(f"Policy challenges failed: {challenged}")
+    if signature.get("artifact_type") != "agent_handshake_policy_challenges" or not signature.get("sig"):
+        raise ConformanceFailure(f"Policy challenge report is not signed: {signature}")
+    if challenged.get("passed") != challenged.get("challenge_count"):
+        raise ConformanceFailure(f"Not all policy challenges passed: {challenged}")
+    return {
+        "status": challenged["status"],
+        "challenge_count": challenged["challenge_count"],
+        "passed": challenged["passed"],
+        "signature_kid": signature.get("kid"),
+        "actions": [item.get("action") for item in challenged.get("results", []) if isinstance(item, dict)],
     }
 
 
@@ -364,6 +394,7 @@ def main() -> int:
         trust_admin = run_trust_admin_gate_case(args.api, args.external_admin_email or None)
         auth_readiness = run_auth_readiness_case(args.api, args.external_admin_email or None)
         scenario_eval = run_scenario_eval_case(args.api)
+        policy_challenges = run_policy_challenge_case(args.api)
         result = {
             "status": "passed",
             "api": args.api,
@@ -373,9 +404,12 @@ def main() -> int:
             "trust_admin_gate": trust_admin,
             "auth_readiness": auth_readiness,
             "scenario_eval": scenario_eval,
+            "policy_challenges": policy_challenges,
             "summary": {
                 "required_cases_passed": ["identity_trust", "capability_scope", "commerce_payment_probe", "queue_reroute"],
                 "protocol_scenarios_passed": scenario_eval["passed"] == scenario_eval["scenario_count"],
+                "policy_challenges_passed": policy_challenges["passed"] == policy_challenges["challenge_count"],
+                "signed_receipt_issued": bool(happy.get("receipt_signature_kid")),
                 "under_scoped_capability_rejected": rejected["http_status"] == 403,
                 "certification_credential_verified": onboarding["credential_status"] == "verified",
                 "certification_revocation_enforced": onboarding["revoked_status"] == "rejected",

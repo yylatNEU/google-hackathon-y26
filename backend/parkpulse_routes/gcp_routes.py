@@ -24,6 +24,11 @@ class GcpWorkflowRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class GcpJudgeSmokeRequest(BaseModel):
+    scenario_key: str = Field(default="ride_down")
+    execute: bool = Field(default=False)
+
+
 def _trace_eval_judge_payload() -> dict[str, Any]:
     from park_multi_agent import get_judge_trace_eval_contract
 
@@ -98,6 +103,28 @@ def register_gcp_routes(app: Any, deps: dict[str, Any]) -> None:
     @router.get("/api/gcp/evaluator-loop")
     async def gcp_evaluator_loop_status():
         return _evaluator_loop_status_for_route()
+
+    @router.get("/api/gcp/live-readiness")
+    async def gcp_live_readiness():
+        from gcp_live_readiness import build_gcp_live_readiness
+
+        return build_gcp_live_readiness()
+
+    @router.post("/api/gcp/judge-smoke")
+    async def gcp_judge_smoke(request: GcpJudgeSmokeRequest):
+        from gcp_live_readiness import run_gcp_judge_trace_eval_smoke
+
+        park_agent_run = deps["park_agent_run"]
+        park_agent_run_request = deps["ParkAgentRunRequest"]
+
+        async def run_scenario(scenario_key: str, execute: bool) -> dict[str, Any]:
+            return await park_agent_run(park_agent_run_request(scenario_key=scenario_key, execute=execute))
+
+        return await run_gcp_judge_trace_eval_smoke(
+            scenario_key=request.scenario_key,
+            execute=request.execute,
+            scenario_runner=run_scenario,
+        )
 
     @router.post("/api/gcp/evaluator-loop/verify")
     async def gcp_evaluator_loop_verify(scenario_key: str = "ride_down"):

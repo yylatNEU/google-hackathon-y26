@@ -1585,10 +1585,32 @@ def _protocol_scenario(mode: str) -> dict[str, Any]:
     return _as_dict(_protocol_scenario_catalog_raw().get(mode))
 
 
+def _protocol_artifact_signature(artifact_type: str, artifact: dict[str, Any]) -> dict[str, Any]:
+    signing = _certification_signing_material()
+    artifact_bytes = _canonical_json(artifact)
+    claims = {
+        "artifact_type": artifact_type,
+        "protocol_version": "parkpulse-ahp-0.1",
+        "issuer": "parkpulse_agent_onboarding_authority",
+        "iss": "parkpulse_agent_onboarding_authority",
+        "iat": int(time.time()),
+        "alg": signing["alg"],
+        "kid": signing["kid"],
+        "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+    }
+    return {**claims, "sig": _sign_certification_claims(claims)}
+
+
+def _with_protocol_signature(artifact_type: str, artifact: dict[str, Any]) -> dict[str, Any]:
+    unsigned = copy.deepcopy(artifact)
+    unsigned.pop("signature", None)
+    return {**unsigned, "signature": _protocol_artifact_signature(artifact_type, unsigned)}
+
+
 def agent_handshake_scenario_catalog() -> dict[str, Any]:
     config_path = os.getenv("PARKPULSE_AHP_SCENARIO_CATALOG", "").strip()
     catalog = _protocol_scenario_catalog_raw()
-    return {
+    artifact = {
         "status": "ready",
         "mode": "agent_handshake_scenario_catalog",
         "protocol_version": "parkpulse-ahp-0.1",
@@ -1598,6 +1620,7 @@ def agent_handshake_scenario_catalog() -> dict[str, Any]:
         "scenario_count": len(catalog),
         "scenarios": [copy.deepcopy(catalog[key]) for key in sorted(catalog.keys())],
     }
+    return _with_protocol_signature("agent_handshake_scenario_catalog", artifact)
 
 
 def _num(value: Any, default: float = 0.0) -> float:
@@ -1826,7 +1849,7 @@ def _live_monitoring_event(park_state: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def agent_contract() -> dict[str, Any]:
-    return {
+    artifact = {
         "status": "ready",
         "mode": "agent_native_handshake_contract",
         "protocol_version": "parkpulse-ahp-0.1",
@@ -1852,6 +1875,7 @@ def agent_contract() -> dict[str, Any]:
             "GET /api/park/agent-trust/audit",
             "GET /api/park/agent-handshake/scenarios",
             "POST /api/park/agent-handshake/scenario-eval",
+            "POST /api/park/agent-handshake/policy-challenges",
             "POST /api/park/handshake",
             "POST /api/park/session/{session_id}/capabilities",
             "POST /api/park/session/{session_id}/intent",
@@ -1864,6 +1888,8 @@ def agent_contract() -> dict[str, Any]:
             "GET /api/park/session/{session_id}/monitor",
             "POST /api/park/session/{session_id}/escalate",
             "POST /api/park/session/{session_id}/close",
+            "GET /api/park/session/{session_id}/receipt",
+            "POST /api/park/session/{session_id}/receipt",
         ],
         "state_machine": ["initiated", "verified", "scoped", "intent_accepted", "negotiating", "committed", "monitoring", "escalated", "closed"],
         "can_offer": PARK_CAPABILITIES,
@@ -1884,6 +1910,7 @@ def agent_contract() -> dict[str, Any]:
             {"action": "medical_escalation", "approval": "user_required", "reason": "Sensitive care workflow."},
         ],
     }
+    return _with_protocol_signature("agent_contract", artifact)
 
 
 def identity_handshake(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2272,6 +2299,170 @@ def close_session(session_id: str, payload: dict[str, Any] | None = None) -> dic
 
 def get_session(session_id: str) -> dict[str, Any]:
     return {"status": "found", "session": _copy_session(_get_session(session_id))}
+
+
+def _session_policy_gate_summary(session: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "action": decision.get("action"),
+            "status": decision.get("status"),
+            "allowed": decision.get("allowed"),
+            "requires_user_approval": decision.get("requires_user_approval"),
+            "reason": decision.get("reason"),
+        }
+        for decision in _as_list(session.get("policy_decisions"))
+        if isinstance(decision, dict)
+    ]
+
+
+def _session_handoff_summary(session: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "internal_agent_id": handoff.get("internal_agent_id"),
+            "internal_agent": handoff.get("internal_agent"),
+            "trigger": handoff.get("trigger"),
+            "decision": handoff.get("decision"),
+            "source": handoff.get("source"),
+        }
+        for handoff in _as_list(session.get("internal_handoffs"))
+        if isinstance(handoff, dict)
+    ]
+
+
+def session_protocol_receipt(session_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    session = _get_session(session_id)
+    payload = payload or {}
+    if _delegation_token_from(payload) is not None:
+        _enforce_delegation(session, payload, "session_protocol_receipt", ["route_plan"])
+    proposal = _as_dict(session.get("proposal"))
+    commitment = _as_dict(session.get("commitment"))
+    monitoring = _as_dict(session.get("monitoring"))
+    policy_decisions = _as_list(session.get("policy_decisions"))
+    internal_handoffs = _as_list(session.get("internal_handoffs"))
+    receipt = {
+        "receipt_id": f"ahp_receipt_{hashlib.sha1(f'{session_id}:{len(policy_decisions)}:{len(internal_handoffs)}:{session.get('updated_at')}'.encode('utf-8')).hexdigest()[:12]}",
+        "session_id": session_id,
+        "protocol_version": "parkpulse-ahp-0.1",
+        "issued_at": _now_iso(),
+        "final_status": session.get("state"),
+        "client_agent": copy.deepcopy(session.get("client_agent")),
+        "park_agent": copy.deepcopy(session.get("park_agent")),
+        "delegation_scope": _as_list(_as_dict(_as_dict(session.get("delegation")).get("proof")).get("scope")),
+        "accepted_plan": {
+            "proposal_id": proposal.get("proposal_id"),
+            "commitment_id": commitment.get("commitment_id"),
+            "plan": copy.deepcopy(proposal.get("plan")),
+            "confidence": proposal.get("confidence"),
+            "requires_user_approval": proposal.get("requires_user_approval"),
+        },
+        "monitoring_outcome": {
+            "event": monitoring.get("event"),
+            "accepted_resolution": monitoring.get("accepted_resolution"),
+            "policy_gate": copy.deepcopy(monitoring.get("policy_gate")),
+        },
+        "policy_gates_triggered": _session_policy_gate_summary(session),
+        "internal_handoffs": _session_handoff_summary(session),
+        "case_evaluations": [
+            {"case": evaluation.get("case"), "status": evaluation.get("status"), "score": evaluation.get("score")}
+            for evaluation in _as_list(session.get("case_evaluations"))
+            if isinstance(evaluation, dict)
+        ],
+        "conversation_digest": hashlib.sha256(_canonical_json({"conversation": _as_list(session.get("conversation"))})).hexdigest(),
+        "memory_policy": "Store only delegated session preferences, proposal tradeoffs, policy decisions, handoff evidence, and aggregate outcome signals.",
+    }
+    signed = _with_protocol_signature("agent_handshake_session_receipt", receipt)
+    session["receipt"] = signed
+    session["conversation"].append(_event("park_agent", "session_receipt", {"receipt_id": signed["receipt_id"], "signature": signed["signature"]}))
+    session["updated_at"] = _now_iso()
+    _persist_session(session)
+    return {"status": "ready", "mode": "agent_handshake_session_receipt", "receipt": copy.deepcopy(signed), "session": _copy_session(session)}
+
+
+POLICY_CHALLENGE_ACTIONS = [
+    "payment",
+    "auto_purchase",
+    "refund_acceptance",
+    "compensation_settlement",
+    "health_data_sharing",
+    "medical_escalation",
+    "identity_sensitive_action",
+    "override_safety_delay",
+]
+
+
+def run_agent_handshake_policy_challenges(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    actions = [str(action) for action in _as_list(payload.get("actions")) if str(action)] or POLICY_CHALLENGE_ACTIONS
+    token = _scenario_eval_token()
+    identity = identity_handshake(
+        {
+            "agent_id": "john_personal_agent",
+            "represents": "guest_user_123",
+            "proof": "signed_token",
+            "requested_session": f"policy_challenge_{time.time_ns()}",
+            "delegation_token": token,
+        }
+    )
+    session_id = identity["session"]["session_id"]
+    capability_handshake(session_id, _scenario_eval_capability_payload(token))
+    intent_handshake(
+        session_id,
+        {
+            "goal": "prove_policy_boundaries",
+            "time_window": "3_hours",
+            "constraints": {"policy_challenge": True, "scenario_mode": "policy_challenge"},
+            "scenario_mode": "policy_challenge",
+            "delegation_token": token,
+        },
+    )
+    challenge_results = []
+    for action in actions:
+        decision_payload = {
+            "action": action,
+            "amount": 42 if action in COMMERCE_ACTIONS else None,
+            "reason": f"Policy challenge probe for {action}.",
+            "delegation_token": token,
+        }
+        decision_payload = {key: value for key, value in decision_payload.items() if value is not None}
+        result = evaluate_policy_action(session_id, decision_payload)
+        decision = _as_dict(result.get("decision"))
+        challenge_results.append(
+            {
+                "action": action,
+                "status": decision.get("status"),
+                "allowed": decision.get("allowed"),
+                "requires_user_approval": decision.get("requires_user_approval"),
+                "reason": decision.get("reason"),
+                "passed": decision.get("allowed") is False and decision.get("requires_user_approval") is True,
+            }
+        )
+    session = _get_session(session_id)
+    criteria = {f"{item['action']}_blocked": bool(item["passed"]) for item in challenge_results}
+    evaluation = _record_case_evaluation(
+        session,
+        _case_evaluation(
+            "policy_challenge_boundaries",
+            criteria,
+            {
+                "session_id": session_id,
+                "actions": actions,
+                "blocked_actions": [item["action"] for item in challenge_results if item["passed"]],
+            },
+        ),
+        persist=True,
+    )
+    report = {
+        "status": evaluation["status"],
+        "mode": "agent_handshake_policy_challenges",
+        "protocol_version": "parkpulse-ahp-0.1",
+        "session_id": session_id,
+        "challenge_count": len(challenge_results),
+        "passed": sum(1 for item in challenge_results if item["passed"]),
+        "evaluation": evaluation,
+        "results": challenge_results,
+    }
+    signed = _with_protocol_signature("agent_handshake_policy_challenges", report)
+    return {**signed, "session": _copy_session(session)}
 
 
 def _scenario_eval_token() -> dict[str, Any]:

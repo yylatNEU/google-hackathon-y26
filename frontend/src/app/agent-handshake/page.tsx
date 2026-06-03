@@ -44,6 +44,17 @@ type CaseEvaluation = {
   criteria: Record<string, boolean>;
 };
 
+type ProtocolSignature = {
+  artifact_type: string;
+  protocol_version: string;
+  issuer: string;
+  iat: number;
+  alg: string;
+  kid: string;
+  sha256: string;
+  sig: string;
+};
+
 type ScenarioEvalResult = {
   scenario_id: string;
   mode: string;
@@ -66,6 +77,25 @@ type ScenarioEvalReport = {
   average_score: number;
   catalog_source: string;
   results: ScenarioEvalResult[];
+};
+
+type PolicyChallengeReport = {
+  status: "passed" | "failed";
+  mode: string;
+  protocol_version: string;
+  session_id: string;
+  challenge_count: number;
+  passed: number;
+  signature: ProtocolSignature;
+  evaluation: CaseEvaluation;
+  results: Array<{
+    action: string;
+    status: string;
+    allowed: boolean;
+    requires_user_approval: boolean;
+    reason: string;
+    passed: boolean;
+  }>;
 };
 
 type InternalHandoff = {
@@ -1118,6 +1148,52 @@ function ScenarioEvalPanel({ report, running, onRun }: { report: ScenarioEvalRep
   );
 }
 
+function PolicyChallengePanel({ report, running, onRun }: { report: PolicyChallengeReport | null; running: boolean; onRun: () => void }) {
+  const results = report?.results ?? [];
+  return (
+    <section className="mx-auto max-w-7xl px-4 pb-6 md:px-8">
+      <div className="rounded-lg border border-slate-800 bg-[#11161a] p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-[11px] font-black uppercase tracking-normal text-slate-500">Policy challenge suite</div>
+            <h2 className="mt-1 text-xl font-black text-slate-100">Sensitive-action boundary proof</h2>
+            <p className="mt-2 max-w-3xl text-sm font-bold leading-6 text-slate-400">Automatically probes payment, refund, health-data, medical, identity-sensitive, settlement, purchase, and safety-override requests.</p>
+          </div>
+          <button type="button" onClick={onRun} disabled={running} className="rounded border border-amber-300 bg-amber-300 px-4 py-3 text-sm font-black text-slate-950 hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50">
+            {running ? "Challenging policy" : "Run policy challenges"}
+          </button>
+        </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-4">
+          {[
+            ["Status", report?.status ?? "idle"],
+            ["Blocked", report ? `${report.passed}/${report.challenge_count}` : "-"],
+            ["Signature", report?.signature?.kid ?? "not issued"],
+            ["Case", report?.evaluation?.case ?? "not run"],
+          ].map(([label, value]) => (
+            <div key={label} className="rounded border border-slate-800 bg-slate-950 p-3">
+              <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">{label}</div>
+              <div className="mt-1 truncate text-sm font-black text-slate-100">{value}</div>
+            </div>
+          ))}
+        </div>
+        {results.length ? (
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {results.map((result) => (
+              <article key={result.action} className="rounded border border-slate-800 bg-slate-950 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-black text-slate-100">{titleize(result.action)}</div>
+                  <span className={`rounded border px-2 py-1 text-[10px] font-black uppercase tracking-normal ${badgeClass(result.passed ? "passed" : "failed")}`}>{result.passed ? "blocked" : "open"}</span>
+                </div>
+                <p className="mt-2 text-[11px] font-bold leading-5 text-slate-400">{result.reason}</p>
+              </article>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 function SessionPanels({ session }: { session: HandshakeSession }) {
   const proposal = session.proposal;
   const handoffs = [...(session.internal_handoffs ?? [])].slice(-10).reverse();
@@ -1227,6 +1303,8 @@ export default function AgentHandshakePage() {
   const [trustAdminRunning, setTrustAdminRunning] = useState(false);
   const [scenarioEval, setScenarioEval] = useState<ScenarioEvalReport | null>(null);
   const [scenarioEvalRunning, setScenarioEvalRunning] = useState(false);
+  const [policyChallenge, setPolicyChallenge] = useState<PolicyChallengeReport | null>(null);
+  const [policyChallengeRunning, setPolicyChallengeRunning] = useState(false);
   const [selectedScenarioId, setSelectedScenarioId] = useState(protocolScenarios[0].id);
   const [onboardingRunning, setOnboardingRunning] = useState(false);
   const [running, setRunning] = useState(false);
@@ -1422,6 +1500,31 @@ export default function AgentHandshakePage() {
     }
   }
 
+  async function runPolicyChallenges() {
+    setPolicyChallengeRunning(true);
+    setError(null);
+    try {
+      const report = await readJson<PolicyChallengeReport>("/api/park/agent-handshake/policy-challenges", {
+        method: "POST",
+        headers: jsonHeaders,
+        timeoutMs: 90000,
+        body: JSON.stringify({}),
+      } as RequestInit & { timeoutMs: number });
+      setPolicyChallenge(report);
+      if (report.session_id) {
+        const refreshed = await readJson<{ session: HandshakeSession }>(`/api/park/session/${report.session_id}`);
+        setSession(refreshed.session);
+      }
+      setStatus(report.status === "passed" ? "ready" : "error");
+      if (report.status !== "passed") setError("One or more policy challenges failed.");
+    } catch (apiError) {
+      setError(apiError instanceof Error ? apiError.message : "Unable to run policy challenges.");
+      setStatus("error");
+    } finally {
+      setPolicyChallengeRunning(false);
+    }
+  }
+
   async function runClientAgent() {
     setRunning(true);
     setError(null);
@@ -1445,6 +1548,7 @@ export default function AgentHandshakePage() {
       { id: "monitor", label: `${scenario.mode} monitor event`, path: "/api/park/session/{session_id}/monitor", request: {}, status: "pending" },
       { id: "commerce", label: "Policy-gated Commerce Agent", path: "/api/park/internal-agents/commerce/evaluate", request: {}, status: "pending" },
       { id: "queue", label: "Scenario Queue Agent", path: "/api/park/internal-agents/queue/reroute", request: {}, status: "pending" },
+      { id: "receipt", label: "Signed protocol receipt", path: "/api/park/session/{session_id}/receipt", request: {}, status: "pending" },
     ];
     setSteps(baseSteps);
     try {
@@ -1465,6 +1569,7 @@ export default function AgentHandshakePage() {
       await callStep("monitor", `/api/park/session/${sessionId}/monitor`, withToken({ event: scenarioConfig.monitorEvent, scenario_mode: scenario.id, expected_outcome: scenario.outcome }));
       await callStep("commerce", "/api/park/internal-agents/commerce/evaluate", withToken({ session_id: sessionId, action: scenarioConfig.commerceAction, amount: 42, reason: scenarioConfig.commerceReason, scenario_mode: scenario.id }));
       await callStep("queue", "/api/park/internal-agents/queue/reroute", withToken({ session_id: sessionId, walking_priority: scenarioConfig.priorityChange.walking_distance ?? "medium", reason: scenarioConfig.queueReason, scenario_mode: scenario.id, expected_handoffs: scenario.handoffs }));
+      await callStep("receipt", `/api/park/session/${sessionId}/receipt`, withToken({ outcome: scenario.outcome, scenario_mode: scenario.id }));
       setStatus("ready");
     } catch (apiError) {
       setError(apiError instanceof Error ? apiError.message : "Unable to run client-agent simulator.");
@@ -1547,6 +1652,7 @@ export default function AgentHandshakePage() {
       <AgentOnboardingPanel agent={onboardedAgent} running={onboardingRunning} credentialVerification={credentialVerification} onVerifyCredential={() => void verifyCredential()} onCertifyFull={() => void certifyAgent("full")} onCertifyUnderScoped={() => void certifyAgent("under_scoped")} />
       <TrustAdminGatePanel probe={trustAdminProbe} running={trustAdminRunning} onRun={() => void runTrustAdminGate()} />
       <ScenarioEvalPanel report={scenarioEval} running={scenarioEvalRunning} onRun={() => void runScenarioEval()} />
+      <PolicyChallengePanel report={policyChallenge} running={policyChallengeRunning} onRun={() => void runPolicyChallenges()} />
       <Simulator steps={steps} running={running} scenario={selectedScenario} onRun={runClientAgent} onReject={runRejectionDemo} />
       {session ? <SessionPanels session={session} /> : null}
     </main>

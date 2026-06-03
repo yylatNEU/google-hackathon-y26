@@ -267,6 +267,9 @@ def _venue_profile_summary(venue_profile: dict[str, Any]) -> dict[str, Any]:
     readiness = venue_profile.get("readiness") or {}
     return {
         "venueIdentity": venue_profile.get("venueIdentity"),
+        "status": readiness.get("status"),
+        "counts": readiness.get("counts") or {},
+        "issues": readiness.get("issues") or [],
         "readiness": {
             "status": readiness.get("status"),
             "autofillAllowed": readiness.get("autofillAllowed"),

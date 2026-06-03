@@ -47,7 +47,9 @@ from agent_handshake import (
     register_agent_onboarding,
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
+    run_agent_handshake_policy_challenges,
     run_agent_handshake_scenario_evaluations,
+    session_protocol_receipt,
     upsert_agent_trust_partner,
     verify_agent_certification_credential,
 )
@@ -436,6 +438,7 @@ def _api_capability_registry() -> dict[str, Any]:
                     "/api/park/agent-handshake/demo",
                     "/api/park/agent-handshake/scenarios",
                     "/api/park/agent-handshake/scenario-eval",
+                    "/api/park/agent-handshake/policy-challenges",
                     "/api/park/handshake",
                     "/api/park/session/{id}/capabilities",
                     "/api/park/session/{id}/intent",
@@ -447,6 +450,7 @@ def _api_capability_registry() -> dict[str, Any]:
                     "/api/park/internal-agents/queue/reroute",
                     "/api/park/session/{id}/monitor",
                     "/api/park/session/{id}/escalate",
+                    "/api/park/session/{id}/receipt",
                     "/api/park/session/{id}/close",
                 ],
                 "timeout_tier": "hot_path_seconds",
@@ -607,6 +611,7 @@ async def _send_json(send, status: int, payload: dict[str, Any]) -> None:
             "status": status,
             "headers": [
                 (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
                 (b"cache-control", b"no-store"),
                 (b"access-control-allow-origin", b"*"),
             ],
@@ -11749,6 +11754,11 @@ async def app(scope, receive, send):
         await _send_json(send, 200, run_agent_handshake_scenario_evaluations(request_payload))
         return
 
+    if method in {"GET", "POST"} and path == "/api/park/agent-handshake/policy-challenges":
+        request_payload = await _read_json_body(receive) if method == "POST" else {}
+        await _send_json(send, 200, run_agent_handshake_policy_challenges(request_payload))
+        return
+
     if method == "POST" and path == "/api/park/delegation-token":
         await _send_json(send, 200, issue_delegation_token(await _read_json_body(receive)))
         return
@@ -11916,6 +11926,10 @@ async def app(scope, receive, send):
                 return
             if method == "POST" and action == "escalate":
                 await _send_json(send, 200, escalate_agent_session(session_id, await _read_json_body(receive)))
+                return
+            if method in {"GET", "POST"} and action == "receipt":
+                payload = await _read_json_body(receive) if method == "POST" else {}
+                await _send_json(send, 200, session_protocol_receipt(session_id, payload))
                 return
             if method == "POST" and action == "close":
                 await _send_json(send, 200, close_agent_session(session_id, await _read_json_body(receive)))

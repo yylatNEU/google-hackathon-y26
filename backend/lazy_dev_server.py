@@ -312,7 +312,9 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             register_agent_onboarding,
             revoke_agent_certification_credential,
             rotate_agent_certification_key,
+            run_agent_handshake_policy_challenges,
             run_agent_handshake_scenario_evaluations,
+            session_protocol_receipt,
             upsert_agent_trust_partner,
             verify_agent_certification_credential,
         )
@@ -326,6 +328,9 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                 return True
             if self.command in {"GET", "POST"} and path == "/api/park/agent-handshake/scenario-eval":
                 self._send_direct_json(200, run_agent_handshake_scenario_evaluations(payload))
+                return True
+            if self.command in {"GET", "POST"} and path == "/api/park/agent-handshake/policy-challenges":
+                self._send_direct_json(200, run_agent_handshake_policy_challenges(payload))
                 return True
             if self.command == "POST" and path == "/api/park/delegation-token":
                 self._send_direct_json(200, issue_delegation_token(payload))
@@ -424,6 +429,9 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                     return True
                 if self.command == "POST" and action == "escalate":
                     self._send_direct_json(200, escalate_session(session_id, payload))
+                    return True
+                if self.command in {"GET", "POST"} and action == "receipt":
+                    self._send_direct_json(200, session_protocol_receipt(session_id, payload))
                     return True
                 if self.command == "POST" and action == "close":
                     self._send_direct_json(200, close_session(session_id, payload))

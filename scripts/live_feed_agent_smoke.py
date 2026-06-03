@@ -45,23 +45,36 @@ async def main() -> int:
     )
     live_case = payload.get("live_feed_case", {}) if isinstance(payload.get("live_feed_case"), dict) else {}
     tool_use = payload.get("tool_use_clarity", {}) if isinstance(payload.get("tool_use_clarity"), dict) else {}
-    summary = {
-        "status": "passed"
-        if payload.get("status") == "complete"
+    proposal_count = int(tool_use.get("proposal_count") or 0)
+    grounded_proposal_count = int(tool_use.get("live_feed_grounded_proposal_count") or 0)
+    missing_policy_check_count = int(tool_use.get("missing_policy_check_count") or 0)
+    cooperation_graph_present = bool(tool_use.get("cooperation_graph_present"))
+    trace_contract_present = bool((tool_use.get("judge", {}) if isinstance(tool_use.get("judge"), dict) else {}).get("trace_contract_present"))
+    passed = (
+        payload.get("status") == "complete"
         and payload.get("uses_seed_data") is False
         and payload.get("scripted_case") is False
         and int(live_case.get("persisted_event_count") or 0) > 0
         and int(live_case.get("ready_feed_count") or 0) >= 4
-        and int(tool_use.get("proposal_count") or 0) > 0
-        and (tool_use.get("judge", {}) if isinstance(tool_use.get("judge"), dict) else {}).get("trace_contract_present")
-        else "failed",
+        and proposal_count > 0
+        and grounded_proposal_count == proposal_count
+        and missing_policy_check_count == 0
+        and cooperation_graph_present
+        and trace_contract_present
+    )
+    summary = {
+        "status": "passed" if passed else "failed",
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
         "run_status": payload.get("status"),
         "persisted_event_count": live_case.get("persisted_event_count"),
         "ready_feed_count": live_case.get("ready_feed_count"),
         "lead_source": live_case.get("lead_source"),
         "lead_signal_type": live_case.get("lead_signal_type"),
-        "proposal_count": tool_use.get("proposal_count"),
+        "proposal_count": proposal_count,
+        "live_feed_evidence_count": tool_use.get("live_feed_evidence_count"),
+        "live_feed_grounded_proposal_count": grounded_proposal_count,
+        "missing_policy_check_count": missing_policy_check_count,
+        "cooperation_graph_present": cooperation_graph_present,
         "judge": tool_use.get("judge"),
         "active_departments": (
             (payload.get("agent_orchestration") or payload.get("orchestration") or {})
@@ -77,6 +90,7 @@ async def main() -> int:
         "summary": summary,
         "load_results": load_results,
         "live_feed_case": live_case,
+        "live_feed_cooperation": payload.get("live_feed_cooperation"),
         "tool_use_clarity": tool_use,
     }
     output_path = REPO_ROOT / "output/qa/live-feed-agent-smoke.json"

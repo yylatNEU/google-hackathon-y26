@@ -73,7 +73,9 @@ from agent_handshake import (
     register_agent_onboarding,
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
+    run_agent_handshake_policy_challenges,
     run_agent_handshake_scenario_evaluations,
+    session_protocol_receipt,
     upsert_agent_trust_partner,
     verify_agent_certification_credential,
 )
@@ -544,6 +546,9 @@ class ParkAgentRunRequest(BaseModel):
     auto_unexpected_event: bool = Field(default=False)
     operator_message: str | None = Field(default=None)
     execute: bool = Field(default=True)
+    live_feed_case: dict[str, Any] | None = Field(default=None)
+    live_feed_health: dict[str, Any] | None = Field(default=None)
+    orchestration_source: str | None = Field(default=None)
 
 
 class LiveFeedAgentRunRequest(BaseModel):
@@ -643,6 +648,12 @@ async def park_agent_handshake_scenarios():
 @app.post("/api/park/agent-handshake/scenario-eval")
 async def park_agent_handshake_scenario_eval(body: dict[str, Any] | None = None):
     return run_agent_handshake_scenario_evaluations(body or {})
+
+
+@app.get("/api/park/agent-handshake/policy-challenges")
+@app.post("/api/park/agent-handshake/policy-challenges")
+async def park_agent_handshake_policy_challenges(body: dict[str, Any] | None = None):
+    return run_agent_handshake_policy_challenges(body or {})
 
 
 @app.post("/api/park/delegation-token")
@@ -859,6 +870,17 @@ async def park_agent_monitor(session_id: str, body: dict[str, Any] | None = None
 async def park_agent_escalate(session_id: str, body: dict[str, Any] | None = None):
     try:
         return escalate_agent_session(session_id, body or {})
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+@app.get("/api/park/session/{session_id}/receipt")
+@app.post("/api/park/session/{session_id}/receipt")
+async def park_agent_receipt(session_id: str, body: dict[str, Any] | None = None):
+    try:
+        return session_protocol_receipt(session_id, body or {})
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except PermissionError as error:
@@ -6787,13 +6809,27 @@ async def park_agent_run(request: ParkAgentRunRequest):
             context["operator_mode"] = "operator_command"
             context["operator_constraints"] = local_operator_constraints
             context["operator_route"] = operator_route
+        if request.live_feed_case:
+            context["live_feed_case"] = request.live_feed_case
+            context["live_feed_health"] = request.live_feed_health or {}
+            context["orchestration_source"] = request.orchestration_source or "live_feed"
         proposal_route = _role_proposal_route_for_agent_run(scenario_key, operator_route)
+        if request.live_feed_case:
+            proposal_route = {
+                **proposal_route,
+                "route": "live_feed_department_cooperation",
+                "orchestration_source": request.orchestration_source or "live_feed",
+                "live_feed_lead_source": request.live_feed_case.get("lead_source"),
+                "live_feed_lead_signal_type": request.live_feed_case.get("lead_signal_type"),
+            }
         role_agent_proposals = build_role_agent_proposals(
             state,
             proposal_route,
             local_operator_constraints,
             context,
         )
+        if request.live_feed_case:
+            role_agent_proposals = _enrich_role_proposals_with_live_feed(role_agent_proposals, request.live_feed_case)
         context["role_agent_proposals"] = role_agent_proposals
         workflow_timer.mark(
             "collaborate.role_proposals",
@@ -8889,13 +8925,206 @@ def _live_feed_case_from_health(health: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _live_feed_evidence_rows(live_feed_case: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(live_feed_case, dict):
+        return []
+    rows = live_feed_case.get("evidence", [])
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _live_feed_row_label(row: dict[str, Any]) -> str:
+    source = row.get("source") or "live_feed"
+    signal_type = row.get("signal_type") or "signal"
+    event_id = row.get("event_id") or "unpersisted"
+    confidence = row.get("confidence")
+    age_seconds = row.get("age_seconds")
+    detail = f"live_feed:{source}:{signal_type}:event={event_id}"
+    if confidence is not None:
+        detail += f":confidence={confidence}"
+    if age_seconds is not None:
+        detail += f":age_seconds={age_seconds}"
+    summary = str(row.get("summary") or "").strip()
+    return f"{detail}:summary={summary[:96]}" if summary else detail
+
+
+def _live_feed_sources_for_department(department: str, agent_id: str) -> set[str]:
+    department = str(department or "")
+    agent_id = str(agent_id or "")
+    mapping = {
+        "operations": {"ride_ops", "guest_flow", "weather", "operator_signal"},
+        "safety": {"ride_ops", "guest_flow", "weather", "operator_signal"},
+        "maintenance": {"ride_ops", "maintenance", "operator_signal"},
+        "guest_experience": {"guest_flow", "operator_signal", "ride_ops"},
+        "food_retail": {"food_ops", "guest_flow", "weather", "operator_signal"},
+        "finance": {"food_ops", "ride_ops", "guest_flow", "staffing"},
+        "hr_labor": {"staffing", "ride_ops", "food_ops", "operator_signal"},
+        "marketing": {"guest_flow", "food_ops", "weather", "operator_signal"},
+        "security": {"guest_flow", "operator_signal", "ride_ops"},
+        "compliance": {"ride_ops", "guest_flow", "staffing", "food_ops", "operator_signal", "weather"},
+        "executive": {"ride_ops", "guest_flow", "staffing", "food_ops", "operator_signal", "weather"},
+        "qa_judge": {"ride_ops", "guest_flow", "staffing", "food_ops", "operator_signal", "weather"},
+    }
+    if agent_id in {"decision_bridge_agent", "park_understanding_agent", "safety_policy_agent"}:
+        return mapping["executive"] if agent_id != "safety_policy_agent" else mapping["safety"]
+    if agent_id == "food_demand_agent":
+        return mapping["food_retail"]
+    if agent_id == "staffing_agent":
+        return mapping["hr_labor"]
+    if agent_id == "guest_flow_agent":
+        return mapping["guest_experience"]
+    if agent_id == "ride_ops_agent":
+        return mapping["operations"]
+    return mapping.get(department, set())
+
+
+def _select_live_feed_rows_for_proposal(proposal: dict[str, Any], evidence_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    department = str(proposal.get("department") or "")
+    agent_id = str(proposal.get("agent_id") or "")
+    wanted_sources = _live_feed_sources_for_department(department, agent_id)
+    matched = [row for row in evidence_rows if str(row.get("source") or "") in wanted_sources]
+    if not matched:
+        matched = evidence_rows[:2]
+    return matched[:3]
+
+
+def _build_live_feed_cooperation_graph(role_agent_proposals: dict[str, Any], live_feed_case: dict[str, Any]) -> dict[str, Any]:
+    proposals = role_agent_proposals.get("proposals", []) if isinstance(role_agent_proposals.get("proposals"), list) else []
+    evidence_rows = _live_feed_evidence_rows(live_feed_case)
+    feed_nodes = [
+        {
+            "id": f"feed:{row.get('source')}",
+            "type": "live_feed",
+            "source": row.get("source"),
+            "event_id": row.get("event_id"),
+            "confidence": row.get("confidence"),
+            "signal_type": row.get("signal_type"),
+        }
+        for row in evidence_rows
+        if row.get("source")
+    ]
+    department_nodes = [
+        {
+            "id": f"department:{proposal.get('department')}",
+            "type": "department_agent",
+            "department": proposal.get("department"),
+            "agent": proposal.get("agent_id"),
+        }
+        for proposal in proposals
+    ]
+    tool_nodes = []
+    edges = []
+    for proposal in proposals:
+        envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+        department_id = f"department:{proposal.get('department')}"
+        tool_id = f"tool:{envelope.get('requested_tool') or proposal.get('requested_tool')}"
+        if tool_id not in {node.get("id") for node in tool_nodes}:
+            tool_nodes.append(
+                {
+                    "id": tool_id,
+                    "type": "proposed_tool",
+                    "tool": envelope.get("requested_tool") or proposal.get("requested_tool"),
+                    "executor": envelope.get("executor_agent", "tool_executor_agent"),
+                    "executor_status": envelope.get("executor_status") or proposal.get("executor_status"),
+                }
+            )
+        for event_id in (proposal.get("live_feed_grounding", {}) if isinstance(proposal.get("live_feed_grounding"), dict) else {}).get("event_ids", []):
+            source = next((row.get("source") for row in evidence_rows if row.get("event_id") == event_id), None)
+            if source:
+                edges.append({"from": f"feed:{source}", "to": department_id, "relation": "observed_by"})
+        edges.append({"from": department_id, "to": tool_id, "relation": "proposes_narrow_tool"})
+        edges.append({"from": tool_id, "to": "judge:compliance_eval", "relation": "requires_policy_trace_check"})
+        edges.append({"from": "judge:compliance_eval", "to": "executive:tradeoff", "relation": "escalates_if_risky"})
+        edges.append({"from": "executive:tradeoff", "to": "executor:tool_executor_agent", "relation": "approved_actions_only"})
+    unique_departments = {node["id"]: node for node in department_nodes if node.get("department")}
+    unique_feeds = {node["id"]: node for node in feed_nodes if node.get("id")}
+    return {
+        "mode": "live_feed_department_cooperation",
+        "nodes": [
+            *unique_feeds.values(),
+            *unique_departments.values(),
+            *tool_nodes,
+            {"id": "judge:compliance_eval", "type": "policy_and_eval_judge"},
+            {"id": "executive:tradeoff", "type": "executive_agent"},
+            {"id": "executor:tool_executor_agent", "type": "tool_executor"},
+        ],
+        "edges": edges,
+        "contract": "Department agents read live evidence widely, write only narrow proposed tool calls, and Tool Executor is the only real action performer.",
+    }
+
+
+def _enrich_role_proposals_with_live_feed(
+    role_agent_proposals: dict[str, Any],
+    live_feed_case: dict[str, Any] | None,
+) -> dict[str, Any]:
+    evidence_rows = _live_feed_evidence_rows(live_feed_case)
+    if not isinstance(role_agent_proposals, dict) or not evidence_rows:
+        return role_agent_proposals
+    proposals = role_agent_proposals.get("proposals", [])
+    if not isinstance(proposals, list):
+        return role_agent_proposals
+    grounded_count = 0
+    for proposal in proposals:
+        if not isinstance(proposal, dict):
+            continue
+        selected_rows = _select_live_feed_rows_for_proposal(proposal, evidence_rows)
+        if not selected_rows:
+            continue
+        grounded_count += 1
+        live_evidence = [_live_feed_row_label(row) for row in selected_rows]
+        existing_evidence = [str(item) for item in proposal.get("evidence", []) if str(item).strip()]
+        merged_evidence = list(dict.fromkeys([*live_evidence, *existing_evidence]))[:8]
+        event_ids = [row.get("event_id") for row in selected_rows if row.get("event_id")]
+        sources = list(dict.fromkeys(str(row.get("source")) for row in selected_rows if row.get("source")))
+        confidence_values = [float(row.get("confidence") or 0) for row in selected_rows]
+        proposal["evidence"] = merged_evidence
+        proposal["live_feed_grounding"] = {
+            "source": "live_feed_health",
+            "event_ids": event_ids,
+            "sources": sources,
+            "source_count": len(sources),
+            "max_confidence": round(max(confidence_values), 3) if confidence_values else None,
+            "evidence_count": len(selected_rows),
+        }
+        proposal["input_signals"] = {
+            **(proposal.get("input_signals") if isinstance(proposal.get("input_signals"), dict) else {}),
+            "live_feed_event_ids": event_ids,
+            "live_feed_sources": sources,
+            "orchestration_source": "live_feed",
+        }
+        envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+        if envelope:
+            envelope["evidence"] = merged_evidence[:5]
+            envelope["policy_check"] = envelope.get("policy_check") or "pending_policy_gate"
+            envelope["expected_outcome"] = envelope.get("expected_outcome") or proposal.get("recommendation") or "department proposal reviewed"
+            envelope["rollback"] = envelope.get("rollback") or "cancel proposed action if live feed normalizes"
+            envelope["live_feed_event_ids"] = event_ids
+            envelope["live_feed_sources"] = sources
+            proposal["proposal_envelope"] = envelope
+        proposal["policy_check"] = proposal.get("policy_check") or envelope.get("policy_check") or "pending_policy_gate"
+        proposal["expected_outcome"] = proposal.get("expected_outcome") or envelope.get("expected_outcome") or proposal.get("recommendation")
+        proposal["rollback"] = proposal.get("rollback") or envelope.get("rollback") or "cancel proposed action if live feed normalizes"
+    event_ids = [row.get("event_id") for row in evidence_rows if row.get("event_id")]
+    role_agent_proposals["orchestration_source"] = "live_feed"
+    role_agent_proposals["live_feed_evidence_count"] = len(evidence_rows)
+    role_agent_proposals["live_feed_event_ids"] = event_ids[:12]
+    role_agent_proposals["live_feed_grounded_proposal_count"] = grounded_count
+    role_agent_proposals["cooperation_graph"] = _build_live_feed_cooperation_graph(role_agent_proposals, live_feed_case or {})
+    role_agent_proposals["mediator_summary"] = (
+        "Department agents are grounded in persisted live-feed event IDs, submit narrow tool proposals, "
+        "then Compliance/Eval and Executive arbitrate before Tool Executor can perform any real action."
+    )
+    return role_agent_proposals
+
+
 def _tool_use_clarity_from_run(payload: dict[str, Any]) -> dict[str, Any]:
     proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
     proposal_rows = proposals.get("proposals", []) if isinstance(proposals.get("proposals"), list) else []
     trace_contract = payload.get("trace_contract", {}) if isinstance(payload.get("trace_contract"), dict) else {}
+    governance = payload.get("governance", {}) if isinstance(payload.get("governance"), dict) else {}
     tool_rows = []
     for proposal in proposal_rows[:8]:
         envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+        grounding = proposal.get("live_feed_grounding", {}) if isinstance(proposal.get("live_feed_grounding"), dict) else {}
         tool_rows.append(
             {
                 "department": proposal.get("department") or envelope.get("department"),
@@ -8904,16 +9133,26 @@ def _tool_use_clarity_from_run(payload: dict[str, Any]) -> dict[str, Any]:
                 "intent": envelope.get("intent") or proposal.get("recommendation"),
                 "evidence": envelope.get("evidence") or proposal.get("evidence", []),
                 "risk_level": envelope.get("risk_level") or proposal.get("risk_level"),
-                "policy_check": envelope.get("policy_check") or proposal.get("policy_check"),
+                "policy_check": envelope.get("policy_check") or proposal.get("policy_check") or governance.get("gate_status") or "pending_policy_gate",
                 "expected_outcome": envelope.get("expected_outcome") or proposal.get("expected_outcome"),
                 "rollback": envelope.get("rollback") or proposal.get("rollback"),
+                "live_feed_event_ids": envelope.get("live_feed_event_ids") or grounding.get("event_ids", []),
+                "live_feed_sources": envelope.get("live_feed_sources") or grounding.get("sources", []),
                 "executor_agent": envelope.get("executor_agent", "tool_executor_agent"),
                 "executor_status": envelope.get("executor_status") or proposal.get("executor_status"),
             }
         )
+    missing_policy_check_count = sum(1 for row in tool_rows if not row.get("policy_check"))
+    live_feed_grounded_tool_count = sum(1 for row in tool_rows if row.get("live_feed_event_ids"))
     return {
         "mode": "clear_department_tool_use",
         "proposal_count": len(proposal_rows),
+        "orchestration_source": proposals.get("orchestration_source"),
+        "live_feed_evidence_count": proposals.get("live_feed_evidence_count", 0),
+        "live_feed_grounded_proposal_count": proposals.get("live_feed_grounded_proposal_count", 0),
+        "live_feed_grounded_tool_count": live_feed_grounded_tool_count,
+        "missing_policy_check_count": missing_policy_check_count,
+        "cooperation_graph_present": bool(proposals.get("cooperation_graph")),
         "tools": tool_rows,
         "trace_steps": [
             {
@@ -8927,7 +9166,7 @@ def _tool_use_clarity_from_run(payload: dict[str, Any]) -> dict[str, Any]:
         ],
         "judge": {
             "eval_status": (payload.get("eval", {}).get("scorecard", {}) if isinstance(payload.get("eval"), dict) else {}).get("status"),
-            "policy_gate": (payload.get("governance", {}) if isinstance(payload.get("governance"), dict) else {}).get("gate_status"),
+            "policy_gate": governance.get("gate_status"),
             "trace_contract_present": bool(trace_contract),
         },
     }
@@ -8975,6 +9214,9 @@ async def park_live_feed_agent_run(request: LiveFeedAgentRunRequest):
             auto_unexpected_event=False,
             operator_message=live_case["operator_message"],
             execute=request.execute,
+            live_feed_case=live_case,
+            live_feed_health=health,
+            orchestration_source="live_feed",
         )
     )
     if isinstance(payload, dict):
@@ -8985,6 +9227,8 @@ async def park_live_feed_agent_run(request: LiveFeedAgentRunRequest):
         payload["live_feed_case"] = live_case
         payload["live_feed_health"] = health
         payload["live_feed_refresh"] = refresh
+        proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
+        payload["live_feed_cooperation"] = proposals.get("cooperation_graph") or _build_live_feed_cooperation_graph(proposals, live_case)
         payload["tool_use_clarity"] = _tool_use_clarity_from_run(payload)
     return payload
 

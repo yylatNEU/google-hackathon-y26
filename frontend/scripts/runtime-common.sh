@@ -24,6 +24,8 @@ parkpulse_prepare_runtime() {
     --exclude '.next-build' \
     --exclude '.package-lock.hash' \
     --exclude 'node_modules' \
+    --exclude 'playwright-report' \
+    --exclude 'test-results' \
     "$SOURCE_DIR/" "$RUNTIME_DIR/"
 
   SOURCE_LOCK_HASH="$(shasum "$SOURCE_DIR/package-lock.json" | awk '{print $1}')"

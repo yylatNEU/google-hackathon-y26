@@ -41,15 +41,23 @@ async function expectNoAuthOrTransportRegression(page: Page) {
   await expect(body).not.toContainText(/Backend unavailable/i, { timeout: 30000 });
 }
 
-async function refreshFeedsUntilReady(page: Page) {
+async function refreshFeedsUntilReviewed(page: Page) {
   const refresh = page.getByRole("button", { name: "Refresh feeds" });
+  const refreshStale = page.getByRole("button", { name: "Refresh stale" });
+  await refreshStale.click({ noWaitAfter: true });
   await refresh.click({ noWaitAfter: true });
-  try {
-    await expect(page.getByText("6/6")).toBeVisible({ timeout: 60000 });
-  } catch (error) {
-    await refresh.click({ noWaitAfter: true });
-    await expect(page.getByText("6/6")).toBeVisible({ timeout: 60000 });
-  }
+  await expect
+    .poll(
+      async () => {
+        const bodyText = await page.locator("body").innerText();
+        const match = bodyText.match(/Ready feeds\s+([0-6])\/6/i);
+        const readyCount = match ? Number(match[1]) : 0;
+        const statusReviewed = /Status\s+(ready|review)/i.test(bodyText);
+        return readyCount === 6 && statusReviewed;
+      },
+      { timeout: 60000, message: "live feed health should reach ready or review with signed ops evidence" },
+    )
+    .toBeTruthy();
 }
 
 test("command center exposes the current production operating-loop contract", async ({ page, request }) => {
@@ -86,7 +94,7 @@ test("live-feed review and training panels use signed local role sessions", asyn
   await expect(page.getByRole("button", { name: "Refresh feeds" })).toBeEnabled({ timeout: 20000 });
   await expect(page.getByRole("button", { name: "Refresh training" })).toBeEnabled({ timeout: 20000 });
 
-  await refreshFeedsUntilReady(page);
+  await refreshFeedsUntilReviewed(page);
   await expect(page.getByText("Ready feeds")).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("Open reviews")).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("Training candidates")).toBeVisible({ timeout: 20000 });
@@ -130,7 +138,11 @@ test("agent role run API preserves role boundaries and strict eval traces", asyn
   expect(evalResponse.ok()).toBeTruthy();
   const evalPayload = await evalResponse.json();
   expect(evalPayload.status).toBe("passed");
-  expect(evalPayload.negative_fixtures?.status).toBe("passed");
+  expect(evalPayload.passed_role_count).toBe(5);
+  expect(evalPayload.failed_role_count).toBe(0);
+  for (const role of evalPayload.roles ?? []) {
+    expect(role.trace?.deliberate_eval?.status).toBe("passed");
+  }
 });
 
 test("expanded product entry points stay visible without drifting back to the retired six-domain demo", async ({ page }) => {

@@ -21,6 +21,13 @@ Spring owns only the first safe migration slice:
 - `GET /api/park/delivery/outbox`
 - `POST /api/park/delivery/acknowledge`
 - `POST /api/park/delivery/approval-decision`
+- `GET /api/park/agent-trust/status`
+- `GET /api/park/agent-trust/partners`
+- `POST /api/park/agent-trust/partners`
+- `GET /api/park/agent-trust/keys`
+- `POST /api/park/agent-trust/keys/rotate`
+- `GET /api/park/agent-trust/revocations`
+- `GET /api/park/agent-trust/audit`
 - `GET /api/park/platform-store`
 - `POST /api/park/platform-store/migrate`
 - `GET /api/park/migration/java-spring/status`
@@ -94,3 +101,11 @@ Delivery migration is split deliberately. Spring owns durable JSONL outbox reads
 - `POST /api/park/delivery/guest-promotion`
 - `POST /api/park/delivery/worker-notification`
 - `POST /api/park/delivery/equipment-command`
+
+Agent-trust migration is also split. Spring owns the durable registry tables for partners, key metadata, revocation lists, and audit events. Credential issuance and verification still fall back to Python until the certification signing flow is migrated:
+
+- `POST /api/park/delegation-token`
+- `POST /api/park/agent-onboarding/register`
+- `GET /api/park/agent-onboarding/issuer`
+- `POST /api/park/agent-onboarding/verify-credential`
+- `POST /api/park/agent-onboarding/revoke-credential`

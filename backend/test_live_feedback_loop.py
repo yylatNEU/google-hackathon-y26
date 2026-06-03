@@ -279,3 +279,56 @@ def test_full_runtime_live_feed_health_uses_short_ttl_cache(tmp_path, monkeypatc
     assert first["cache"]["status"] == "miss"
     assert second["cache"]["status"] == "hit"
     assert calls["count"] == 1
+
+
+def test_live_feed_orchestration_enriches_department_tool_proposals():
+    import parkpulse_api
+
+    role_agent_proposals = {
+        "proposals": [
+            {
+                "agent_id": "ride_ops_agent",
+                "department": "operations",
+                "requested_tool": "recommend_route_change",
+                "recommendation": "Move guests away from the blocked ride path.",
+                "evidence": ["scenario=ride_down"],
+                "proposal_envelope": {
+                    "requested_tool": "recommend_route_change",
+                    "executor_agent": "tool_executor_agent",
+                    "executor_status": "awaiting_executive",
+                },
+            }
+        ]
+    }
+    live_feed_case = {
+        "evidence": [
+            {
+                "source": "ride_ops",
+                "signal_type": "capacity",
+                "event_id": "feed-ride-1",
+                "confidence": 0.91,
+                "age_seconds": 3,
+                "summary": "Dragon Coaster capacity pressure rising.",
+            },
+            {
+                "source": "guest_flow",
+                "signal_type": "crowd_density",
+                "event_id": "feed-flow-1",
+                "confidence": 0.87,
+                "age_seconds": 5,
+                "summary": "Coaster Plaza density elevated.",
+            },
+        ]
+    }
+
+    enriched = parkpulse_api._enrich_role_proposals_with_live_feed(role_agent_proposals, live_feed_case)
+    proposal = enriched["proposals"][0]
+    envelope = proposal["proposal_envelope"]
+
+    assert enriched["orchestration_source"] == "live_feed"
+    assert enriched["live_feed_grounded_proposal_count"] == 1
+    assert enriched["cooperation_graph"]["mode"] == "live_feed_department_cooperation"
+    assert proposal["live_feed_grounding"]["event_ids"] == ["feed-ride-1", "feed-flow-1"]
+    assert envelope["live_feed_event_ids"] == ["feed-ride-1", "feed-flow-1"]
+    assert envelope["policy_check"] == "pending_policy_gate"
+    assert envelope["evidence"][0].startswith("live_feed:ride_ops:capacity:event=feed-ride-1")

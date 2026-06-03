@@ -372,7 +372,7 @@ export function useCommandCenter() {
     try {
       const response = await fetchParkPulseApi("/api/park/live-feeds/refresh-stale", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify({ stale_only: true, refresh_margin_seconds: 20 }),
         timeoutMs: longRunningRequestTimeoutMs,
       });
