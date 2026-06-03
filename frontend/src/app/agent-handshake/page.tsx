@@ -413,6 +413,123 @@ function MiniMap({ activeState }: { activeState: string }) {
   );
 }
 
+function ProtocolExplorer() {
+  const [selectedId, setSelectedId] = useState(protocolScenarios[0].id);
+  const selected = protocolScenarios.find((scenario) => scenario.id === selectedId) ?? protocolScenarios[0];
+  return (
+    <section className="mx-auto max-w-7xl px-4 pb-6 md:px-8">
+      <div className="rounded-lg border border-slate-800 bg-[#11161a] p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-[11px] font-black uppercase tracking-normal text-slate-500">Protocol explorer</div>
+            <h2 className="mt-1 text-2xl font-black text-slate-100">Handshake protocol as the product</h2>
+            <p className="mt-2 max-w-4xl text-sm font-bold leading-6 text-slate-400">
+              The same identity, permission, goal, negotiation, policy, and outcome handshakes can power many guest-agent scenarios. ParkPulse is the first vertical demo.
+            </p>
+          </div>
+          <div className="rounded border border-cyan-300/70 px-3 py-2 text-xs font-black uppercase tracking-normal text-cyan-100">Reusable agent contract</div>
+        </div>
+
+        <div className="mt-4 grid gap-2 lg:grid-cols-5">
+          {protocolScenarios.map((scenario) => (
+            <button
+              key={scenario.id}
+              type="button"
+              onClick={() => setSelectedId(scenario.id)}
+              className={`rounded border px-3 py-3 text-left text-xs font-black transition ${selected.id === scenario.id ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-slate-800 bg-slate-950 text-slate-200 hover:border-cyan-300/70"}`}
+            >
+              <span className="block text-[10px] uppercase tracking-normal opacity-70">Mode</span>
+              <span className="mt-1 block">{scenario.mode}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-[1.05fr_.95fr]">
+          <div className="rounded border border-slate-800 bg-slate-950 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">Selected handshake mode</div>
+                <h3 className="mt-1 text-xl font-black text-slate-100">{selected.mode}</h3>
+              </div>
+              <span className="rounded border border-emerald-300/70 px-2 py-1 text-[10px] font-black uppercase tracking-normal text-emerald-100">Negotiable</span>
+            </div>
+            <div className="mt-4 grid gap-3">
+              {[
+                ["Client intent", selected.clientIntent],
+                ["Park agent offer", selected.parkOffer],
+                ["Negotiation move", selected.negotiation],
+                ["Outcome", selected.outcome],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded border border-slate-800 bg-[#0b1014] p-3">
+                  <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">{label}</div>
+                  <div className="mt-1 text-sm font-bold leading-6 text-slate-200">{value}</div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div className="rounded border border-slate-800 bg-[#0b1014] p-3">
+                <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">Internal handoff</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {selected.handoffs.map((agent) => (
+                    <span key={agent} className="rounded border border-cyan-300/60 px-2 py-1 text-[10px] font-black uppercase tracking-normal text-cyan-100">{agent}</span>
+                  ))}
+                </div>
+              </div>
+              <div className="rounded border border-slate-800 bg-[#0b1014] p-3">
+                <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">Policy gate</div>
+                <div className="mt-2 grid gap-2">
+                  <div className="text-[11px] font-bold leading-5 text-emerald-100">Allowed: {selected.allowed.map(titleize).join(", ")}</div>
+                  <div className="text-[11px] font-bold leading-5 text-rose-100">Blocked: {selected.blocked.map(titleize).join(", ")}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded border border-slate-800 bg-slate-950 p-4">
+            <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">Protocol phases</div>
+            <div className="mt-3 grid gap-2">
+              {protocolPhases.map((phase, index) => (
+                <div key={phase.id} className="grid grid-cols-[2rem_1fr] gap-3 rounded border border-slate-800 bg-[#0b1014] p-3">
+                  <div className="flex h-8 w-8 items-center justify-center rounded border border-cyan-300 bg-cyan-300 text-xs font-black text-slate-950">{index + 1}</div>
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="text-sm font-black text-slate-100">{phase.label}</div>
+                      <span className="rounded border border-slate-700 px-2 py-0.5 text-[9px] font-black uppercase tracking-normal text-slate-400">{phase.artifact}</span>
+                    </div>
+                    <div className="mt-1 text-[11px] font-bold leading-5 text-slate-400">{phase.purpose}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-[.9fr_1.1fr]">
+          <div className="rounded border border-slate-800 bg-slate-950 p-4">
+            <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">Negotiation primitives</div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {["proposal", "counterproposal", "priority_change", "tradeoff_explanation", "confidence", "commitment_receipt", "live_revision", "escalation_request"].map((primitive) => (
+                <div key={primitive} className="rounded border border-slate-800 bg-[#0b1014] px-3 py-2 text-[11px] font-black text-amber-100">{titleize(primitive)}</div>
+              ))}
+            </div>
+          </div>
+          <div className="rounded border border-slate-800 bg-slate-950 p-4">
+            <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">Extension potential</div>
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              {extensionMarkets.map((item) => (
+                <div key={item.market} className="rounded border border-slate-800 bg-[#0b1014] p-3">
+                  <div className="text-xs font-black text-slate-100">{item.market}</div>
+                  <div className="mt-1 text-[11px] font-bold leading-5 text-slate-400">{item.example}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ContractPanel({ contract }: { contract: AgentContract | null }) {
   return (
     <section className="mx-auto max-w-7xl px-4 pb-6 md:px-8">
@@ -1235,6 +1352,7 @@ export default function AgentHandshakePage() {
         <AgentCard title="ParkPulse Park Agent" subtitle="Park counterparty" items={parkItems} accent="bg-cyan-300" />
       </section>
 
+      <ProtocolExplorer />
       <ContractPanel contract={contract} />
       <AgentOnboardingPanel agent={onboardedAgent} running={onboardingRunning} credentialVerification={credentialVerification} onVerifyCredential={() => void verifyCredential()} onCertifyFull={() => void certifyAgent("full")} onCertifyUnderScoped={() => void certifyAgent("under_scoped")} />
       <TrustAdminGatePanel probe={trustAdminProbe} running={trustAdminRunning} onRun={() => void runTrustAdminGate()} />
