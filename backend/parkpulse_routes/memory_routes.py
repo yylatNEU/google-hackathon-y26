@@ -57,7 +57,7 @@ def _role_auth_secret() -> str:
 
 
 def _signed_role_required_for_mutation() -> bool:
-    return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION"), False)
+    return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION"), _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_TOKEN"), False))
 
 
 def _extract_role_token(request: Request) -> str | None:
