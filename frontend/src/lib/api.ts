@@ -1,5 +1,6 @@
 const localApiUrls = ["http://127.0.0.1:8000"];
 const defaultRequestTimeoutMs = 12000;
+const transientTransportAttempts = 2;
 export const longRunningRequestTimeoutMs = 30000;
 
 type ParkPulseRequestInit = RequestInit & {
@@ -19,8 +20,14 @@ export function getApiUrls() {
   const configured = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.NEXT_PUBLIC_API_URL;
   const sameOrigin = typeof globalThis.location !== "undefined" ? globalThis.location.origin : undefined;
   const configuredUrls = [viteEnv?.VITE_API_URL, configured].filter(Boolean) as string[];
-  if (configuredUrls.length) return Array.from(new Set(configuredUrls));
-  return Array.from(new Set([...localApiUrls, sameOrigin].filter(Boolean) as string[]));
+  const localDevSameOrigin =
+    sameOrigin && (
+      sameOrigin.includes("127.0.0.1:5173") ||
+      sameOrigin.includes("localhost:5173")
+    );
+  if (localDevSameOrigin) return Array.from(new Set(localApiUrls));
+  const fallbacks = [...localApiUrls, sameOrigin];
+  return Array.from(new Set([...configuredUrls, ...fallbacks].filter(Boolean) as string[]));
 }
 
 function headersToEntries(headers?: HeadersInit): Array<[string, string]> {
@@ -86,9 +93,11 @@ function requestWithXhr(url: string, init?: RequestInit, timeoutMs = defaultRequ
     }
 
     xhr.onload = () => {
+      const contentType = xhr.getResponseHeader("content-type");
       const response = {
         ok: xhr.status >= 200 && xhr.status < 300,
         status: xhr.status,
+        headers: { get: (name: string) => name.toLowerCase() === "content-type" ? contentType : null },
         json: async () => JSON.parse(xhr.responseText || "null"),
         text: async () => xhr.responseText,
       } as Response;
@@ -129,6 +138,14 @@ function isTransportError(error: Error) {
   );
 }
 
+function responseContentType(response: Response) {
+  try {
+    return response.headers?.get("content-type") ?? "";
+  } catch {
+    return "";
+  }
+}
+
 function normalizeParkPulseApiError(error: unknown, path: string) {
   if (error instanceof Error) {
     if (isTransportError(error)) {
@@ -143,23 +160,36 @@ function normalizeParkPulseApiError(error: unknown, path: string) {
 export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestInit) {
   let lastError: unknown;
   const { timeoutMs = defaultRequestTimeoutMs, ...requestInit } = init ?? {};
+  const method = String(requestInit.method ?? "GET").toUpperCase();
+  const maxAttempts = method === "GET" || method === "HEAD" ? transientTransportAttempts : 1;
 
   for (const apiUrl of getApiUrls()) {
-    try {
-      const headerEntries = headersToEntries(requestInit.headers);
-      const requestedRole = headerValue(headerEntries, "x-parkpulse-role");
-      const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
-      const signedHeaders =
-        requestedRole && !hasAuthorization && path !== "/api/park/auth/dev-session"
-          ? { ...Object.fromEntries(headerEntries), authorization: `Bearer ${await getSignedRoleToken(apiUrl, requestedRole, timeoutMs)}` }
-          : requestInit.headers;
-      const response = await request(`${apiUrl}${path}`, { ...requestInit, headers: signedHeaders }, timeoutMs);
-      if (response.ok) {
-        return response;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const headerEntries = headersToEntries(requestInit.headers);
+        const requestedRole = headerValue(headerEntries, "x-parkpulse-role");
+        const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
+        const signedHeaders =
+          requestedRole && !hasAuthorization && path !== "/api/park/auth/dev-session"
+            ? { ...Object.fromEntries(headerEntries), authorization: `Bearer ${await getSignedRoleToken(apiUrl, requestedRole, timeoutMs)}` }
+            : requestInit.headers;
+        const response = await request(`${apiUrl}${path}`, { ...requestInit, headers: signedHeaders }, timeoutMs);
+        if (response.ok) {
+          const contentType = responseContentType(response).toLowerCase();
+          if (path.startsWith("/api/") && contentType.includes("text/html")) {
+            lastError = new Error(`${apiUrl}${path} returned HTML instead of API JSON`);
+            break;
+          }
+          return response;
+        }
+        lastError = new Error(`${apiUrl}${path} returned ${response.status}`);
+        break;
+      } catch (error) {
+        lastError = error;
+        if (!(error instanceof Error) || !isTransportError(error) || attempt >= maxAttempts) {
+          break;
+        }
       }
-      lastError = new Error(`${apiUrl}${path} returned ${response.status}`);
-    } catch (error) {
-      lastError = error;
     }
   }
 

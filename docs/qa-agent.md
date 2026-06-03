@@ -1,6 +1,6 @@
 # Routine QA Agent
 
-The project-level QA agent lives at `scripts/qa_agent.py`. It runs deterministic checks across the Python backend and Next.js frontend, then writes Markdown and JSON reports to `output/qa`.
+The project-level QA agent lives at `scripts/qa_agent.py`. It runs deterministic checks across the Python backend, Spring migration backend, and Next.js frontend, then writes Markdown and JSON reports to `output/qa`.
 
 The deployed Production Reliability QA Engineer lives in the backend role system as `parkpulse.production_reliability_qa`. It is a read-only ParkPulse agent for go/no-go reliability review, failure-mode coverage, policy-gate safety, fallback behavior, dispatch idempotency, observability, and load readiness.
 
@@ -11,6 +11,7 @@ make qa
 make qa-quick
 make qa-backend
 make qa-frontend
+make qa-spring
 ```
 
 ## Production Reliability QA Agent
@@ -51,6 +52,7 @@ That gate requires every selected scope to report at least 98% line coverage. Se
 - Static hygiene: scans text files for merge conflicts, high-confidence secrets, and open task markers.
 - Backend compile: compiles every backend Python file outside virtual environments and caches.
 - Backend smoke: loads policy books, simulation state, and governance status without calling external LLM APIs.
+- Spring backend tests: runs `spring-backend/mvnw test` so the Java migration slice is covered by the routine backend gate.
 - Frontend lint: runs the existing `npm run lint` command.
 - Frontend TypeScript: runs `npx tsc --noEmit --pretty false`.
 - Frontend build: runs `npm run build` unless `--quick` is used.

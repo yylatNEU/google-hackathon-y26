@@ -20,6 +20,7 @@ from agent_role_skills import build_deliberate_role_eval_report, build_deliberat
 from agent_role_trace_samples import record_agent_role_trace_sample
 from agent_handshake import (
     agent_contract,
+    agent_handshake_scenario_catalog,
     agent_trust_registry_status,
     capability_handshake,
     certify_agent_onboarding,
@@ -46,6 +47,7 @@ from agent_handshake import (
     register_agent_onboarding,
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
+    run_agent_handshake_scenario_evaluations,
     upsert_agent_trust_partner,
     verify_agent_certification_credential,
 )
@@ -432,6 +434,8 @@ def _api_capability_registry() -> dict[str, Any]:
                     "/api/park/agent-contract",
                     "/api/park/delegation-token",
                     "/api/park/agent-handshake/demo",
+                    "/api/park/agent-handshake/scenarios",
+                    "/api/park/agent-handshake/scenario-eval",
                     "/api/park/handshake",
                     "/api/park/session/{id}/capabilities",
                     "/api/park/session/{id}/intent",
@@ -11736,6 +11740,15 @@ async def app(scope, receive, send):
         await _send_json(send, 200, agent_contract())
         return
 
+    if method == "GET" and path == "/api/park/agent-handshake/scenarios":
+        await _send_json(send, 200, agent_handshake_scenario_catalog())
+        return
+
+    if method in {"GET", "POST"} and path == "/api/park/agent-handshake/scenario-eval":
+        request_payload = await _read_json_body(receive) if method == "POST" else {}
+        await _send_json(send, 200, run_agent_handshake_scenario_evaluations(request_payload))
+        return
+
     if method == "POST" and path == "/api/park/delegation-token":
         await _send_json(send, 200, issue_delegation_token(await _read_json_body(receive)))
         return
@@ -11897,9 +11910,9 @@ async def app(scope, receive, send):
                 payload = await _read_json_body(receive) if method == "POST" else {}
                 event = str(payload.get("event") or "live")
                 try:
-                    await _send_json(send, 200, monitor_session(session_id, event or None, park_state=await _fast_park_state_lite()))
+                    await _send_json(send, 200, monitor_session(session_id, {**payload, "event": event}, park_state=await _fast_park_state_lite()))
                 except Exception:
-                    await _send_json(send, 200, monitor_session(session_id, event or None))
+                    await _send_json(send, 200, monitor_session(session_id, {**payload, "event": event}))
                 return
             if method == "POST" and action == "escalate":
                 await _send_json(send, 200, escalate_agent_session(session_id, await _read_json_body(receive)))
@@ -15267,6 +15280,37 @@ async def app(scope, receive, send):
             return
         response_payload = await _build_agent_run_payload_with_runtime(payload, "post_agent_run")
         await _send_json(send, 200, response_payload)
+        return
+
+    if method == "POST" and path == "/api/park/live-feed-agent-run":
+        payload = await _read_json_body(receive)
+        if not await _authorize_or_send(send, scope, "read_ops_evidence", "live_feed_agent_run", payload, default_role="ops_team"):
+            return
+        try:
+            module = await _get_full_module_for_first_response(float(_timeout_tiers()["agent_run_full_load_seconds"]))
+            request_cls = getattr(module, "LiveFeedAgentRunRequest")
+            request = request_cls(
+                refresh_stale=str(payload.get("refresh_stale", payload.get("refreshStale", "true"))).strip().lower()
+                not in {"0", "false", "no", "off"},
+                execute=str(payload.get("execute", "false")).strip().lower() in {"1", "true", "yes", "on"},
+                min_ready_feeds=int(payload.get("min_ready_feeds") or payload.get("minReadyFeeds") or 4),
+                require_persisted_events=str(payload.get("require_persisted_events", payload.get("requirePersistedEvents", "true"))).strip().lower()
+                not in {"0", "false", "no", "off"},
+            )
+            result = await asyncio.wait_for(module.park_live_feed_agent_run(request), timeout=float(_timeout_tiers()["agent_run_seconds"]))
+            await _send_json(send, 200, _store_run_receipt(result, message=(result.get("live_feed_case", {}) or {}).get("operator_message", "live feed case"), mode="live_feed_agent_run", kind="agent_run") if isinstance(result, dict) else result)
+        except Exception as error:
+            await _send_json(
+                send,
+                200,
+                {
+                    "status": "error",
+                    "mode": "live_feed_agent_run",
+                    "readiness_issues": [str(error)[:240]],
+                    "uses_seed_data": False,
+                    "scripted_case": False,
+                },
+            )
         return
 
     if method == "POST" and path == "/api/park/agent-role-run":

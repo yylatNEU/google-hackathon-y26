@@ -12,6 +12,7 @@ from agent_handshake import (  # noqa: E402
     _credential_revocations,
     _partner_registry,
     _sessions,
+    agent_handshake_scenario_catalog,
     capability_handshake,
     certify_agent_onboarding,
     certification_issuer_metadata,
@@ -28,6 +29,7 @@ from agent_handshake import (  # noqa: E402
     register_agent_onboarding,
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
+    run_agent_handshake_scenario_evaluations,
     agent_trust_registry_status,
     list_agent_trust_audit_events,
     list_agent_trust_keys,
@@ -143,6 +145,99 @@ def test_external_agent_contract_conformance_happy_path():
     assert {"identity_trust", "capability_scope", "commerce_payment_probe", "queue_reroute"}.issubset(proven_cases)
     assert {handoff["internal_agent_id"] for handoff in final_session["internal_handoffs"]} >= {"commerce_agent", "queue_agent"}
     _sessions.pop(session_id, None)
+
+
+def test_protocol_extension_scenario_changes_backend_agent_outputs():
+    token = _full_delegation_token()
+    identity = identity_handshake(
+        {
+            "agent_id": "john_personal_agent",
+            "represents": "guest_user_123",
+            "proof": "signed_token",
+            "requested_session": "incident_extension_case",
+            "delegation_token": token,
+        }
+    )
+    session_id = identity["session"]["session_id"]
+    capability_handshake(
+        session_id,
+        {
+            "can_share": ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference"],
+            "can_receive": ["route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer"],
+            "cannot_do": ["auto_purchase", "share_health_data", "accept_refund_without_user"],
+            "delegation_token": token,
+        },
+    )
+    intent_handshake(
+        session_id,
+        {
+            "goal": "protect_family_time_during_incident",
+            "scenario_mode": "incident_response",
+            "time_window": "3_hours",
+            "constraints": {
+                "scenario_mode": "incident_response",
+                "children": 2,
+                "avoid_wait_over_minutes": 35,
+                "avoid_thrill_rides": True,
+                "food_allergy": "peanut",
+            },
+            "delegation_token": token,
+        },
+    )
+
+    proposed = propose_plan(session_id, {"scenario_mode": "incident_response", "planner": "protocol_extension", "delegation_token": token})
+    assert proposed["proposal"]["scenario_mode"] == "incident_response"
+    assert "Indoor Surf Simulator" in proposed["proposal"]["plan"]
+    assert proposed["proposal"]["state_evidence"]["source"] == "scenario_static_plan"
+
+    revised = counter_proposal(
+        session_id,
+        {
+            "scenario_mode": "incident_response",
+            "counter_request": "Prioritize time over compensation.",
+            "priority_change": {"walking_distance": "medium", "wait_time": "highest"},
+            "delegation_token": token,
+        },
+    )
+    assert "incident response" in revised["proposal"]["rationale"]
+
+    monitored = monitor_session(session_id, {"scenario_mode": "incident_response", "event": "wave_pool_safety_delay", "delegation_token": token})
+    assert monitored["monitoring"]["state_evidence"]["scenario_mode"] == "incident_response"
+    assert monitored["monitoring"]["park_agent_revision"] == "Priority access to Lazy River in 25 minutes."
+
+    queue = queue_agent_reroute(
+        session_id,
+        {
+            "scenario_mode": "incident_response",
+            "walking_priority": "highest",
+            "reason": "Incident-response route proof.",
+            "delegation_token": token,
+        },
+    )
+    assert queue["proposal"]["scenario_mode"] == "incident_response"
+    assert "Lazy River priority return" in queue["proposal"]["plan"]
+
+    final_session = get_session(session_id)["session"]
+    assert {handoff["internal_agent_id"] for handoff in final_session["internal_handoffs"]} >= {"safety_agent", "queue_agent", "commerce_agent"}
+    assert any(decision["action"] == "priority_access" and decision["payload"].get("scenario_mode") == "incident_response" for decision in final_session["policy_decisions"])
+    _sessions.pop(session_id, None)
+
+
+def test_protocol_scenario_catalog_and_all_mode_eval_pass():
+    catalog = agent_handshake_scenario_catalog()
+    scenario_ids = {item["id"] for item in catalog["scenarios"]}
+    assert {"visit_planning", "incident_response", "accessibility_support", "commerce_resolution", "group_coordination"}.issubset(scenario_ids)
+    assert catalog["configurable"] is True
+
+    evaluated = run_agent_handshake_scenario_evaluations()
+    assert evaluated["status"] == "passed"
+    assert evaluated["scenario_count"] == len(scenario_ids)
+    assert evaluated["passed"] == evaluated["scenario_count"]
+    assert evaluated["average_score"] == 1
+    assert {item["scenario_id"] for item in evaluated["results"]} == scenario_ids
+    assert all(item["evaluation"]["case"].startswith("protocol_scenario_") for item in evaluated["results"])
+    for item in evaluated["results"]:
+        _sessions.pop(item["session_id"], None)
 
 
 def test_external_agent_contract_rejects_under_scoped_client_before_capability_scope():

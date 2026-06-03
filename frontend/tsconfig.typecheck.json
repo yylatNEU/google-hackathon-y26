@@ -15,6 +15,7 @@
     "./src/app/layout.tsx",
     "./src/app/page.tsx",
     "./src/app/agent-handshake/page.tsx",
+    "./src/app/accessibility-journey/page.tsx",
     "./src/app/executive/page.tsx",
     "./src/app/experience-studio/page.tsx",
     "./src/app/venue-profile/page.tsx",
@@ -29,6 +30,7 @@
     "./src/features/command-center/style.ts",
     "./src/features/command-center/useCommandCenter.ts",
     "./src/features/experience-studio/ExperienceStudio.tsx",
+    "./src/features/accessibility-journey/AccessibilityJourneyPage.tsx",
     "./src/features/venue-profile/VenueProfilePage.tsx",
     "./src/features/labs/LabsPage.tsx"
   ],

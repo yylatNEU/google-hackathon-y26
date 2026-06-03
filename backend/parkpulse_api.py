@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 
 from agent_handshake import (
     agent_contract,
+    agent_handshake_scenario_catalog,
     agent_trust_registry_status,
     capability_handshake,
     certify_agent_onboarding,
@@ -72,6 +73,7 @@ from agent_handshake import (
     register_agent_onboarding,
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
+    run_agent_handshake_scenario_evaluations,
     upsert_agent_trust_partner,
     verify_agent_certification_credential,
 )
@@ -544,6 +546,13 @@ class ParkAgentRunRequest(BaseModel):
     execute: bool = Field(default=True)
 
 
+class LiveFeedAgentRunRequest(BaseModel):
+    refresh_stale: bool = Field(default=True)
+    execute: bool = Field(default=False)
+    min_ready_feeds: int = Field(default=4, ge=1, le=6)
+    require_persisted_events: bool = Field(default=True)
+
+
 class EvalScenarioSweepRequest(BaseModel):
     scenario_keys: list[str] | None = Field(default=None)
     execute: bool = Field(default=False)
@@ -623,6 +632,17 @@ class ParkTickRequest(BaseModel):
 @app.get("/api/park/agent-contract")
 async def park_agent_contract():
     return agent_contract()
+
+
+@app.get("/api/park/agent-handshake/scenarios")
+async def park_agent_handshake_scenarios():
+    return agent_handshake_scenario_catalog()
+
+
+@app.get("/api/park/agent-handshake/scenario-eval")
+@app.post("/api/park/agent-handshake/scenario-eval")
+async def park_agent_handshake_scenario_eval(body: dict[str, Any] | None = None):
+    return run_agent_handshake_scenario_evaluations(body or {})
 
 
 @app.post("/api/park/delegation-token")
@@ -823,14 +843,16 @@ async def park_agent_policy_check(session_id: str, body: dict[str, Any] | None =
 @app.get("/api/park/session/{session_id}/monitor")
 @app.post("/api/park/session/{session_id}/monitor")
 async def park_agent_monitor(session_id: str, body: dict[str, Any] | None = None):
+    request_body = body or {}
+    event = str(request_body.get("event") or "live")
     try:
-        return monitor_session(session_id, str((body or {}).get("event") or "live") or None, park_state=await park_simulation.get_state_lite())
+        return monitor_session(session_id, {**request_body, "event": event}, park_state=await park_simulation.get_state_lite())
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except PermissionError as error:
         raise HTTPException(status_code=403, detail=str(error)) from error
     except Exception:
-        return monitor_session(session_id, str((body or {}).get("event") or "") or None)
+        return monitor_session(session_id, {**request_body, "event": event})
 
 
 @app.post("/api/park/session/{session_id}/escalate")
@@ -5330,6 +5352,85 @@ def _build_proactive_dispatches(
     return dispatches
 
 
+def _proactive_observed_outcome_application(
+    dispatches: list[dict[str, Any]],
+    reason: str,
+    *,
+    status: str = "deferred",
+    message: str | None = None,
+) -> dict[str, Any]:
+    observed = [
+        item
+        for item in dispatches
+        if isinstance(item, dict)
+        and isinstance(item.get("response"), dict)
+        and item.get("response", {}).get("state") in {"observed", "acknowledged"}
+    ]
+    channels = sorted({str(item.get("channel")) for item in observed if item.get("channel")})
+    moved_guests = sum(
+        int(item.get("response", {}).get("followThroughCount", 0) or 0)
+        for item in observed
+        if item.get("channel") == "guest_app"
+    )
+    worker_acks = sum(
+        int(item.get("response", {}).get("acknowledgedCount", 0) or 0)
+        for item in observed
+        if item.get("channel") == "worker_device"
+    )
+    equipment_applied = sum(
+        1
+        for item in observed
+        if item.get("channel") == "equipment_controller" and item.get("response", {}).get("applied")
+    )
+    return {
+        "status": status,
+        "mode": "latency_safe_observed_response",
+        "reason": reason,
+        "message": message
+        or "Full counterfactual simulator deferred on the Proact hot path; receiver telemetry was still observed and traced.",
+        "dispatch_count": len(dispatches),
+        "channels": channels,
+        "movedGuests": moved_guests,
+        "workerAcknowledgments": worker_acks,
+        "equipmentCommandsApplied": equipment_applied,
+        "stateImpact": {
+            "headline": (
+                f"Observed {moved_guests} guest follow-throughs, {worker_acks} staff acknowledgments, "
+                f"and {equipment_applied} equipment confirmations before full simulator replay."
+            ),
+            "domain": "proactive_eventops",
+        },
+    }
+
+
+async def _apply_proactive_delivery_outcomes(
+    dispatches: list[dict[str, Any]],
+    reason: str,
+) -> dict[str, Any]:
+    if not _truthy(os.getenv("PARKPULSE_PROACTIVE_FULL_OUTCOME_SIM"), False):
+        return _proactive_observed_outcome_application(dispatches, reason)
+    timeout_seconds = max(1.0, _float_env("PARKPULSE_PROACTIVE_OUTCOME_TIMEOUT_SECONDS", 6.0))
+    try:
+        return await asyncio.wait_for(
+            park_simulation.apply_delivery_outcomes(dispatches, reason),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        return _proactive_observed_outcome_application(
+            dispatches,
+            reason,
+            status="timeout_deferred",
+            message=f"Full counterfactual simulator exceeded {timeout_seconds:g}s; receiver telemetry was kept as the proof surface.",
+        )
+    except Exception as error:
+        return _proactive_observed_outcome_application(
+            dispatches,
+            reason,
+            status="degraded",
+            message=f"Full counterfactual simulator failed: {type(error).__name__}. Receiver telemetry was kept as the proof surface.",
+        )
+
+
 def _rate_percent(value: Any) -> str:
     try:
         return f"{round(float(value or 0) * 100)}%"
@@ -7470,7 +7571,7 @@ async def _build_proactive_run_payload(emit_trace=None):
             },
         )
         response_metrics = response_summary(dispatches)
-        outcome_application = await park_simulation.apply_delivery_outcomes(dispatches, "proactive_closed_loop")
+        outcome_application = await _apply_proactive_delivery_outcomes(dispatches, "proactive_closed_loop")
         clear_hot_endpoint_cache()
         outcome_state = await park_simulation.get_state()
         await sync_park_state_safe(outcome_state)
@@ -7519,7 +7620,17 @@ async def _build_proactive_run_payload(emit_trace=None):
             },
         )
         event_revision: dict[str, Any] | None = None
-        if brief.get("should_revise_event_plan"):
+        if brief.get("should_revise_event_plan") and not _truthy(os.getenv("PARKPULSE_PROACTIVE_ENABLE_EVENT_REVISION"), False):
+            event_revision = {
+                "status": "deferred",
+                "reason": "Event plan revision deferred on the Proact hot path; set PARKPULSE_PROACTIVE_ENABLE_EVENT_REVISION=true for full revision replay.",
+                "plan_revision_prompt": brief.get("plan_revision_prompt", ""),
+                "memory": {
+                    "mode": context.get("status", {}).get("mode"),
+                    "connected": context.get("status", {}).get("connected"),
+                },
+            }
+        elif brief.get("should_revise_event_plan"):
             revision_prompt = (
                 f"Revise the current temporary event plan using this proactive outcome loop. "
                 f"Operator instruction: {brief.get('plan_revision_prompt', '')}. "
@@ -7536,7 +7647,7 @@ async def _build_proactive_run_payload(emit_trace=None):
             revision_context = _collaboration_context(revision_context, "proactive_eventops")
             from park_event_planner import build_event_ops_plan
 
-            revision_timeout = max(1.0, _float_env("PARKPULSE_PROACTIVE_REVISION_TIMEOUT_SECONDS", 8.0))
+            revision_timeout = max(1.0, _float_env("PARKPULSE_PROACTIVE_REVISION_TIMEOUT_SECONDS", 3.0))
             revised_plan = None
             try:
                 revised_plan = await asyncio.wait_for(
@@ -8675,6 +8786,207 @@ async def park_live_feed_events(payload: dict[str, Any]):
     result = await asyncio.to_thread(ingest_live_feed_events, events) if events is not None else await asyncio.to_thread(ingest_live_feed_event, payload)
     clear_hot_endpoint_cache()
     return result
+
+
+def _live_feed_value_summary(value: Any) -> str:
+    if not isinstance(value, dict):
+        return str(value)[:180]
+    if "note" in value:
+        return str(value.get("note"))[:180]
+    top_path = value.get("top_path") if isinstance(value.get("top_path"), dict) else {}
+    if top_path:
+        return (
+            f"path {top_path.get('from_name') or top_path.get('from')} to "
+            f"{top_path.get('to_name') or top_path.get('to')} at {top_path.get('congestion_level_pct')}% congestion"
+        )
+    top_zone = value.get("top_zone") if isinstance(value.get("top_zone"), dict) else {}
+    if top_zone:
+        return f"zone {top_zone.get('name') or top_zone.get('id')} at {top_zone.get('density_pct')}% density"
+    if "wait_mins" in value:
+        return f"{value.get('name') or value.get('id')} wait {value.get('wait_mins')}m status {value.get('status')}"
+    if "mobile_order_backlog" in value:
+        return f"{value.get('name') or value.get('id')} backlog {value.get('mobile_order_backlog')} ETA {value.get('pickup_eta_minutes')}m"
+    if "coverage_status" in value:
+        return f"staff coverage {value.get('coverage_status')} with {value.get('open_callouts')} callouts"
+    if "open_cases" in value:
+        return f"{value.get('open_cases')} guest-care cases, complaint rate {value.get('complaint_rate_pct')}%"
+    compact = ", ".join(f"{key}={value[key]}" for key in list(value)[:4] if key not in {"locations", "rides", "zones", "paths"})
+    return compact[:180] if compact else "live feed value attached"
+
+
+def _live_feed_case_from_health(health: dict[str, Any]) -> dict[str, Any]:
+    feeds = [row for row in health.get("feeds", []) if isinstance(row, dict)]
+    ready = [row for row in feeds if row.get("status") == "ready"]
+    issue_rows = [row for row in feeds if row.get("status") != "ready"]
+    evidence_rows = [
+        {
+            "source": row.get("source"),
+            "label": row.get("label"),
+            "owner": row.get("owner"),
+            "status": row.get("status"),
+            "signal_type": row.get("latest_signal_type"),
+            "confidence": row.get("confidence"),
+            "age_seconds": row.get("age_seconds"),
+            "event_id": row.get("latest_event_id"),
+            "summary": _live_feed_value_summary(row.get("value")),
+        }
+        for row in ready[:8]
+    ]
+    ranked = sorted(
+        evidence_rows,
+        key=lambda row: (
+            1 if row.get("source") in {"operator_signal", "guest_flow", "ride_ops", "food_ops", "staffing"} else 0,
+            float(row.get("confidence") or 0),
+        ),
+        reverse=True,
+    )
+    lead = ranked[0] if ranked else {}
+    evidence_text = "; ".join(
+        f"{row.get('source')} {row.get('signal_type')}: {row.get('summary')}"
+        for row in ranked[:5]
+        if row.get("source")
+    )
+    if not evidence_text:
+        evidence_text = "No ready live feed evidence is available."
+    operator_message = (
+        "Use only the current live-feed evidence to coordinate department agents. "
+        f"Lead signal: {lead.get('source') or 'none'} {lead.get('signal_type') or ''}. "
+        f"Evidence: {evidence_text}. "
+        "Have departments propose narrow tool calls, let Compliance/Judge check policy and trace quality, "
+        "let Executive choose tradeoffs, and keep Tool Executor as the only action performer."
+    )
+    summary = health.get("summary", {}) if isinstance(health.get("summary"), dict) else {}
+    return {
+        "mode": "live_feed_case_synthesis",
+        "source": "live_feed_health",
+        "uses_seed_data": False,
+        "scripted_case": False,
+        "persisted_event_count": summary.get("persisted_event_count", 0),
+        "ready_feed_count": summary.get("ready_feed_count", 0),
+        "required_feed_count": summary.get("required_feed_count", 0),
+        "missing_or_weak_feed_count": summary.get("missing_or_weak_feed_count", 0),
+        "open_review_count": summary.get("open_review_count", 0),
+        "lead_source": lead.get("source"),
+        "lead_signal_type": lead.get("signal_type"),
+        "operator_message": operator_message,
+        "evidence": evidence_rows,
+        "feed_issues": [
+            {
+                "source": row.get("source"),
+                "status": row.get("status"),
+                "readiness_issues": row.get("readiness_issues", []),
+            }
+            for row in issue_rows
+        ],
+        "reasoning": [
+            "Observe: read the latest normalized live feed rows and review state.",
+            "Interpret: rank ready feeds by confidence and operational relevance.",
+            "Predict: ask role agents to reason from the live feed case without forcing a seeded scenario.",
+            "Recommend: require each department to propose narrow tool calls only.",
+            "Justify: attach feed event IDs, confidence, age, and policy findings to the run trace.",
+            "Trace: preserve candidates, policy gate, dispatch envelopes, eval, outcome, and memory write.",
+        ],
+    }
+
+
+def _tool_use_clarity_from_run(payload: dict[str, Any]) -> dict[str, Any]:
+    proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
+    proposal_rows = proposals.get("proposals", []) if isinstance(proposals.get("proposals"), list) else []
+    trace_contract = payload.get("trace_contract", {}) if isinstance(payload.get("trace_contract"), dict) else {}
+    tool_rows = []
+    for proposal in proposal_rows[:8]:
+        envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+        tool_rows.append(
+            {
+                "department": proposal.get("department") or envelope.get("department"),
+                "agent": proposal.get("agent_id") or envelope.get("proposed_by"),
+                "tool": envelope.get("requested_tool") or proposal.get("requested_tool"),
+                "intent": envelope.get("intent") or proposal.get("recommendation"),
+                "evidence": envelope.get("evidence") or proposal.get("evidence", []),
+                "risk_level": envelope.get("risk_level") or proposal.get("risk_level"),
+                "policy_check": envelope.get("policy_check") or proposal.get("policy_check"),
+                "expected_outcome": envelope.get("expected_outcome") or proposal.get("expected_outcome"),
+                "rollback": envelope.get("rollback") or proposal.get("rollback"),
+                "executor_agent": envelope.get("executor_agent", "tool_executor_agent"),
+                "executor_status": envelope.get("executor_status") or proposal.get("executor_status"),
+            }
+        )
+    return {
+        "mode": "clear_department_tool_use",
+        "proposal_count": len(proposal_rows),
+        "tools": tool_rows,
+        "trace_steps": [
+            {
+                "step": row.get("step"),
+                "phase": row.get("phase"),
+                "evidence": row.get("evidence"),
+                "artifact_id": row.get("artifact_id"),
+            }
+            for row in trace_contract.get("trace_table", [])[:8]
+            if isinstance(row, dict)
+        ],
+        "judge": {
+            "eval_status": (payload.get("eval", {}).get("scorecard", {}) if isinstance(payload.get("eval"), dict) else {}).get("status"),
+            "policy_gate": (payload.get("governance", {}) if isinstance(payload.get("governance"), dict) else {}).get("gate_status"),
+            "trace_contract_present": bool(trace_contract),
+        },
+    }
+
+
+@app.post("/api/park/live-feed-agent-run")
+async def park_live_feed_agent_run(request: LiveFeedAgentRunRequest):
+    refresh = None
+    if request.refresh_stale:
+        before = await _live_feed_health_payload(limit=500)
+        before_summary = before.get("summary", {}) if isinstance(before.get("summary"), dict) else {}
+        if int(before_summary.get("persisted_event_count") or 0) <= 0:
+            refresh = await _refresh_due_live_feeds_payload(
+                {
+                    "stale_only": False,
+                    "refresh_margin_seconds": 20,
+                    "sources": ["ride_ops", "guest_flow", "staffing", "food_ops", "operator_signal"],
+                }
+            )
+        else:
+            refresh = await _refresh_due_live_feeds_payload({"stale_only": True, "refresh_margin_seconds": 20})
+    health = await _live_feed_health_payload(limit=500)
+    live_case = _live_feed_case_from_health(health)
+    readiness_issues: list[str] = []
+    if request.require_persisted_events and int(live_case.get("persisted_event_count") or 0) <= 0:
+        readiness_issues.append("No persisted live feed events are available; load live feeds before running a live-feed case.")
+    if int(live_case.get("ready_feed_count") or 0) < request.min_ready_feeds:
+        readiness_issues.append(f"Only {live_case.get('ready_feed_count')} live feeds are ready; {request.min_ready_feeds} are required.")
+    if readiness_issues:
+        return {
+            "status": "blocked",
+            "mode": "live_feed_agent_run",
+            "live_feed_case": live_case,
+            "live_feed_health": health,
+            "live_feed_refresh": refresh,
+            "readiness_issues": readiness_issues,
+            "uses_seed_data": False,
+            "scripted_case": False,
+        }
+
+    payload = await park_agent_run(
+        ParkAgentRunRequest(
+            scenario_key=None,
+            operation_mode=False,
+            auto_unexpected_event=False,
+            operator_message=live_case["operator_message"],
+            execute=request.execute,
+        )
+    )
+    if isinstance(payload, dict):
+        payload["mode"] = "live_feed_agent_run"
+        payload["source"] = "live_feed_health"
+        payload["uses_seed_data"] = False
+        payload["scripted_case"] = False
+        payload["live_feed_case"] = live_case
+        payload["live_feed_health"] = health
+        payload["live_feed_refresh"] = refresh
+        payload["tool_use_clarity"] = _tool_use_clarity_from_run(payload)
+    return payload
 
 
 def _live_feed_refresh_requested_sources(payload: dict[str, Any]) -> set[str]:

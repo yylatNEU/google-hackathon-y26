@@ -191,6 +191,8 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
   const topProposals = proposalArtifact?.proposals?.slice(0, 4) ?? [];
   const smokeSummary = props.liveAgentsSmoke?.summary;
   const proactRun = props.liveAgentsSmoke?.role_runs?.find((row) => row.mode === "proact");
+  const liveFeedCase = props.runTelemetry?.live_feed_case;
+  const toolUseClarity = props.runTelemetry?.tool_use_clarity;
 
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
@@ -227,6 +229,87 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
           <p className="mt-2 text-xs leading-relaxed text-slate-400">Trace, eval, and training rows are written from actual decisions and observed outcomes.</p>
         </div>
       </div>
+
+      {liveFeedCase && (
+        <div className="mt-5 rounded-lg border border-emerald-400/30 bg-emerald-950/15 p-4">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+            <div>
+              <div className="text-[10px] font-black uppercase tracking-widest text-emerald-200">Live-feed case</div>
+              <h3 className="mt-1 text-lg font-black text-slate-100">
+                {humanize(liveFeedCase.lead_source ?? "live feed")} {humanize(liveFeedCase.lead_signal_type ?? "evidence")}
+              </h3>
+              <p className="mt-2 max-w-4xl text-xs leading-relaxed text-slate-300">
+                {liveFeedCase.operator_message ?? "Current feed evidence is attached to this run."}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {[
+                ["Events", liveFeedCase.persisted_event_count],
+                ["Ready", liveFeedCase.ready_feed_count],
+                ["Weak", liveFeedCase.missing_or_weak_feed_count],
+                ["Reviews", liveFeedCase.open_review_count],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded border border-emerald-300/20 bg-slate-950 px-3 py-2 text-center">
+                  <div className="text-[10px] font-black uppercase text-slate-500">{label}</div>
+                  <div className="mt-1 text-lg font-black text-emerald-100">{value ?? "--"}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="mt-4 grid gap-3 xl:grid-cols-[1.2fr_.8fr]">
+            <div className="rounded border border-slate-800 bg-slate-950 p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-emerald-200">Evidence</div>
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                {(liveFeedCase.evidence ?? []).slice(0, 6).map((row, index) => (
+                  <div key={`${row.source ?? "feed"}-${row.event_id ?? index}`} className="rounded border border-slate-800 bg-slate-900 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs font-black text-slate-100">{humanize(row.source ?? "feed")}</div>
+                      <div className="text-[10px] font-black uppercase text-slate-500">{row.confidence ?? "--"} conf</div>
+                    </div>
+                    <div className="mt-1 text-[10px] font-black uppercase text-emerald-200">{humanize(row.signal_type ?? "signal")}</div>
+                    <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-slate-400">{row.summary}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="rounded border border-slate-800 bg-slate-950 p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-emerald-200">Reasoning</div>
+              <div className="mt-3 space-y-2">
+                {(liveFeedCase.reasoning ?? []).slice(0, 6).map((step) => (
+                  <div key={step} className="rounded border border-slate-800 bg-slate-900 px-3 py-2 text-xs leading-relaxed text-slate-300">
+                    {step}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          {toolUseClarity && (
+            <div className="mt-3 rounded border border-slate-800 bg-slate-950 p-3">
+              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div className="text-[10px] font-black uppercase tracking-widest text-emerald-200">Tool use</div>
+                  <div className="mt-1 text-sm font-black text-slate-100">
+                    {toolUseClarity.proposal_count ?? 0} department proposals, judge {humanize(toolUseClarity.judge?.eval_status ?? toolUseClarity.judge?.policy_gate ?? "pending")}
+                  </div>
+                </div>
+                <div className="rounded border border-slate-800 bg-slate-900 px-3 py-2 text-[10px] font-black uppercase text-slate-400">
+                  Executor only
+                </div>
+              </div>
+              <div className="mt-3 grid gap-2 xl:grid-cols-4">
+                {(toolUseClarity.tools ?? []).slice(0, 4).map((tool, index) => (
+                  <div key={`${tool.agent ?? "agent"}-${tool.tool ?? index}`} className="rounded border border-slate-800 bg-slate-900 p-3">
+                    <div className="text-[10px] font-black uppercase text-slate-500">{humanize(tool.department ?? "department")}</div>
+                    <div className="mt-1 text-sm font-black text-slate-100">{humanize(tool.tool ?? "tool")}</div>
+                    <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-slate-400">{tool.intent}</p>
+                    <div className="mt-2 text-[10px] font-black uppercase text-emerald-200">{humanize(tool.executor_agent ?? "tool_executor_agent")}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className={`mt-5 rounded-lg border p-4 ${liveAgentsStatusClass(smokeSummary?.status)}`}>
         <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">

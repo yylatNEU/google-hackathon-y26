@@ -326,6 +326,30 @@ def run_auth_readiness_case(api: str, external_admin_email: str | None = None) -
     return result
 
 
+def run_scenario_eval_case(api: str) -> dict[str, Any]:
+    catalog = get_json(api, "/api/park/agent-handshake/scenarios").payload
+    scenario_ids = [str(item.get("id")) for item in catalog.get("scenarios", []) if isinstance(item, dict) and item.get("id")]
+    if not scenario_ids:
+        raise ConformanceFailure(f"Scenario catalog did not expose any scenarios: {catalog}")
+    evaluated = post_json(api, "/api/park/agent-handshake/scenario-eval", {"scenarios": scenario_ids}).payload
+    if evaluated.get("status") != "passed":
+        raise ConformanceFailure(f"Protocol scenario eval failed: {evaluated}")
+    result_ids = [str(item.get("scenario_id")) for item in evaluated.get("results", []) if isinstance(item, dict)]
+    missing = sorted(set(scenario_ids) - set(result_ids))
+    if missing:
+        raise ConformanceFailure(f"Protocol scenario eval missed scenarios: {missing}")
+    failed = [item for item in evaluated.get("results", []) if isinstance(item, dict) and item.get("status") != "passed"]
+    if failed:
+        raise ConformanceFailure(f"Protocol scenario eval returned failed cases: {failed}")
+    return {
+        "status": evaluated["status"],
+        "scenario_count": evaluated["scenario_count"],
+        "passed": evaluated["passed"],
+        "average_score": evaluated["average_score"],
+        "scenario_ids": result_ids,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run ParkPulse Agent Handshake Protocol conformance checks.")
     parser.add_argument("--api", default="http://127.0.0.1:8001", help="ParkPulse API base URL.")
@@ -339,6 +363,7 @@ def main() -> int:
         onboarding = run_onboarding_case(args.api, args.external_admin_email or None)
         trust_admin = run_trust_admin_gate_case(args.api, args.external_admin_email or None)
         auth_readiness = run_auth_readiness_case(args.api, args.external_admin_email or None)
+        scenario_eval = run_scenario_eval_case(args.api)
         result = {
             "status": "passed",
             "api": args.api,
@@ -347,8 +372,10 @@ def main() -> int:
             "onboarding_case": onboarding,
             "trust_admin_gate": trust_admin,
             "auth_readiness": auth_readiness,
+            "scenario_eval": scenario_eval,
             "summary": {
                 "required_cases_passed": ["identity_trust", "capability_scope", "commerce_payment_probe", "queue_reroute"],
+                "protocol_scenarios_passed": scenario_eval["passed"] == scenario_eval["scenario_count"],
                 "under_scoped_capability_rejected": rejected["http_status"] == 403,
                 "certification_credential_verified": onboarding["credential_status"] == "verified",
                 "certification_revocation_enforced": onboarding["revoked_status"] == "rejected",

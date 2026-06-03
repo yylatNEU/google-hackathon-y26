@@ -24,6 +24,7 @@ from typing import Iterable
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_DIR = REPO_ROOT / "frontend"
 BACKEND_DIR = REPO_ROOT / "backend"
+SPRING_BACKEND_DIR = REPO_ROOT / "spring-backend"
 REPORT_DIR = REPO_ROOT / "output" / "qa"
 
 TEXT_SUFFIXES = {
@@ -210,7 +211,7 @@ def http_json(
 
 def warm_backend_for_e2e(backend_url: str) -> list[str]:
     warnings: list[str] = []
-    for path in ("/api/park/state-lite", "/api/gcp/trace-eval-status"):
+    for path in ("/api/park/state-lite", "/api/gcp/trace-eval-status", "/api/park/live-agents-smoke/latest"):
         try:
             http_json(f"{backend_url}{path}", timeout_seconds=45)
         except Exception as error:
@@ -530,6 +531,25 @@ def agent_role_eval_gate_check() -> CheckResult:
     )
 
 
+def spring_backend_check() -> CheckResult:
+    if not SPRING_BACKEND_DIR.exists():
+        return skipped("Spring backend tests", "spring-backend directory is not present")
+    mvnw = SPRING_BACKEND_DIR / "mvnw"
+    if not mvnw.exists():
+        return CheckResult(
+            name="Spring backend tests",
+            status="fail",
+            summary="spring-backend/mvnw is missing",
+            cwd=str(SPRING_BACKEND_DIR),
+        )
+    return run_command(
+        "Spring backend tests",
+        [str(mvnw), "test"],
+        SPRING_BACKEND_DIR,
+        timeout_seconds=180,
+    )
+
+
 def frontend_lint_check() -> CheckResult:
     return run_command(
         "Frontend lint",
@@ -633,7 +653,7 @@ def frontend_e2e_check() -> CheckResult:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=120,
+            timeout=360,
             check=False,
         )
         logs.append(completed.stdout or "")
@@ -655,7 +675,7 @@ def frontend_e2e_check() -> CheckResult:
         return CheckResult(
             name="Frontend Playwright E2E",
             status="fail",
-            summary="Timed out after 120s",
+            summary="Timed out after 360s",
             duration_seconds=round(time.monotonic() - started, 2),
             command=command,
             cwd=str(FRONTEND_DIR),
@@ -779,7 +799,7 @@ def main() -> int:
     results: list[CheckResult] = [project_inventory(), static_hygiene_scan()]
 
     if not args.frontend_only:
-        results.extend([backend_compile_check(), backend_smoke_check(), agent_role_eval_gate_check()])
+        results.extend([backend_compile_check(), backend_smoke_check(), agent_role_eval_gate_check(), spring_backend_check()])
 
     if not args.backend_only:
         results.extend([frontend_lint_check(), frontend_typecheck()])

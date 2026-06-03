@@ -43,6 +43,9 @@ export function CommandCenter() {
               <a href="/experience-studio" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-300">
                 Experience Studio
               </a>
+              <a href="/accessibility-journey" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-300">
+                Accessibility Journey
+              </a>
               <a href="/labs" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-400 transition hover:border-amber-400 hover:text-amber-100">
                 Labs
               </a>
@@ -105,6 +108,14 @@ export function CommandCenter() {
                 <h2 className="mt-1 text-xl font-black text-slate-100">Signals, features, predictors, optimizer, gate, execute or review, learn</h2>
               </div>
               <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void command.runLiveFeedAgent()}
+                  disabled={command.isRunning}
+                  className="w-fit rounded border border-emerald-300 bg-emerald-300 px-4 py-3 text-sm font-black text-slate-950 transition hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Live feed case
+                </button>
                 <button
                   type="button"
                   onClick={() => void command.runDepartmentNegotiationDemo()}

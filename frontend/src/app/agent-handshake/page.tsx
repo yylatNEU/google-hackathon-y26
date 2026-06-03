@@ -44,6 +44,30 @@ type CaseEvaluation = {
   criteria: Record<string, boolean>;
 };
 
+type ScenarioEvalResult = {
+  scenario_id: string;
+  mode: string;
+  session_id: string;
+  status: "passed" | "failed";
+  score: number;
+  evaluation: CaseEvaluation;
+  expected_handoffs: string[];
+  observed_handoffs: string[];
+  monitoring?: { event?: string; park_agent_revision?: string; policy_gate?: Record<string, string> };
+  commerce_decision?: { action?: string; status?: string; allowed?: boolean; requires_user_approval?: boolean };
+};
+
+type ScenarioEvalReport = {
+  status: "passed" | "failed";
+  mode: string;
+  protocol_version: string;
+  scenario_count: number;
+  passed: number;
+  average_score: number;
+  catalog_source: string;
+  results: ScenarioEvalResult[];
+};
+
 type InternalHandoff = {
   id: string;
   internal_agent_id: string;
@@ -1029,6 +1053,71 @@ function Simulator({ steps, running, scenario, onRun, onReject }: { steps: Simul
   );
 }
 
+function ScenarioEvalPanel({ report, running, onRun }: { report: ScenarioEvalReport | null; running: boolean; onRun: () => void }) {
+  const results = report?.results ?? [];
+  return (
+    <section className="mx-auto max-w-7xl px-4 pb-6 md:px-8">
+      <div className="rounded-lg border border-slate-800 bg-[#11161a] p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-[11px] font-black uppercase tracking-normal text-slate-500">Automatic protocol judge</div>
+            <h2 className="mt-1 text-xl font-black text-slate-100">All-mode extension eval</h2>
+            <p className="mt-2 max-w-3xl text-sm font-bold leading-6 text-slate-400">Runs every catalog mode through identity, capability, intent, negotiation, commit, monitor, commerce boundary, and queue reroute checks.</p>
+          </div>
+          <button type="button" onClick={onRun} disabled={running} className="rounded border border-emerald-300 bg-emerald-300 px-4 py-3 text-sm font-black text-slate-950 hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-50">
+            {running ? "Judging modes" : "Judge all modes"}
+          </button>
+        </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-4">
+          {[
+            ["Status", report?.status ?? "idle"],
+            ["Modes", report ? `${report.passed}/${report.scenario_count}` : "-"],
+            ["Average", report ? `${Math.round(report.average_score * 100)}%` : "-"],
+            ["Catalog", report?.catalog_source ?? "not loaded"],
+          ].map(([label, value]) => (
+            <div key={label} className="rounded border border-slate-800 bg-slate-950 p-3">
+              <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">{label}</div>
+              <div className="mt-1 text-lg font-black text-slate-100">{value}</div>
+            </div>
+          ))}
+        </div>
+        {results.length ? (
+          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            {results.map((result) => (
+              <article key={result.scenario_id} className="rounded border border-slate-800 bg-slate-950 p-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">{result.scenario_id}</div>
+                    <div className="mt-1 text-sm font-black text-slate-100">{result.mode}</div>
+                  </div>
+                  <span className={`rounded border px-2 py-1 text-[10px] font-black uppercase tracking-normal ${badgeClass(result.status)}`}>{result.status} · {Math.round(result.score * 100)}%</span>
+                </div>
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  <div className="rounded border border-slate-800 bg-[#0b1014] p-2">
+                    <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">Handoffs</div>
+                    <div className="mt-1 text-[11px] font-bold leading-5 text-cyan-100">{result.observed_handoffs.join(", ")}</div>
+                  </div>
+                  <div className="rounded border border-slate-800 bg-[#0b1014] p-2">
+                    <div className="text-[10px] font-black uppercase tracking-normal text-slate-500">Policy probe</div>
+                    <div className="mt-1 text-[11px] font-bold leading-5 text-amber-100">{result.commerce_decision?.action ?? "policy"} · {result.commerce_decision?.status ?? "checked"}</div>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  {Object.entries(result.evaluation.criteria ?? {}).map(([criterion, ok]) => (
+                    <div key={criterion} className="rounded border border-slate-800 bg-[#0b1014] px-2 py-1 text-[10px] font-bold text-slate-400">
+                      <span className={ok ? "text-emerald-200" : "text-rose-200"}>{ok ? "pass" : "fail"}</span> {titleize(criterion)}
+                    </div>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 function SessionPanels({ session }: { session: HandshakeSession }) {
   const proposal = session.proposal;
   const handoffs = [...(session.internal_handoffs ?? [])].slice(-10).reverse();
@@ -1136,6 +1225,8 @@ export default function AgentHandshakePage() {
   const [credentialVerification, setCredentialVerification] = useState<CredentialVerification | null>(null);
   const [trustAdminProbe, setTrustAdminProbe] = useState<TrustAdminProbe>({ status: "idle" });
   const [trustAdminRunning, setTrustAdminRunning] = useState(false);
+  const [scenarioEval, setScenarioEval] = useState<ScenarioEvalReport | null>(null);
+  const [scenarioEvalRunning, setScenarioEvalRunning] = useState(false);
   const [selectedScenarioId, setSelectedScenarioId] = useState(protocolScenarios[0].id);
   const [onboardingRunning, setOnboardingRunning] = useState(false);
   const [running, setRunning] = useState(false);
@@ -1305,6 +1396,32 @@ export default function AgentHandshakePage() {
     }
   }
 
+  async function runScenarioEval() {
+    setScenarioEvalRunning(true);
+    setError(null);
+    try {
+      const report = await readJson<ScenarioEvalReport>("/api/park/agent-handshake/scenario-eval", {
+        method: "POST",
+        headers: jsonHeaders,
+        timeoutMs: 90000,
+        body: JSON.stringify({ scenarios: protocolScenarios.map((scenario) => scenario.id) }),
+      } as RequestInit & { timeoutMs: number });
+      setScenarioEval(report);
+      const lastResult = report.results[report.results.length - 1];
+      if (lastResult?.session_id) {
+        const refreshed = await readJson<{ session: HandshakeSession }>(`/api/park/session/${lastResult.session_id}`);
+        setSession(refreshed.session);
+      }
+      setStatus(report.status === "passed" ? "ready" : "error");
+      if (report.status !== "passed") setError("One or more protocol scenario evals failed.");
+    } catch (apiError) {
+      setError(apiError instanceof Error ? apiError.message : "Unable to run protocol scenario eval.");
+      setStatus("error");
+    } finally {
+      setScenarioEvalRunning(false);
+    }
+  }
+
   async function runClientAgent() {
     setRunning(true);
     setError(null);
@@ -1429,6 +1546,7 @@ export default function AgentHandshakePage() {
       <ContractPanel contract={contract} />
       <AgentOnboardingPanel agent={onboardedAgent} running={onboardingRunning} credentialVerification={credentialVerification} onVerifyCredential={() => void verifyCredential()} onCertifyFull={() => void certifyAgent("full")} onCertifyUnderScoped={() => void certifyAgent("under_scoped")} />
       <TrustAdminGatePanel probe={trustAdminProbe} running={trustAdminRunning} onRun={() => void runTrustAdminGate()} />
+      <ScenarioEvalPanel report={scenarioEval} running={scenarioEvalRunning} onRun={() => void runScenarioEval()} />
       <Simulator steps={steps} running={running} scenario={selectedScenario} onRun={runClientAgent} onReject={runRejectionDemo} />
       {session ? <SessionPanels session={session} /> : null}
     </main>

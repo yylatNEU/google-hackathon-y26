@@ -11,6 +11,7 @@ from agent_role_skills import evaluate_agent_role_trace, route_agent_role
 
 
 ROLE_MODES = ("scan", "react", "proact", "customer", "qa")
+DEFAULT_MAX_SAMPLES = 500
 
 
 def _sample_log_path() -> Path:
@@ -27,6 +28,18 @@ def _now_iso() -> str:
 
 def _jsonable(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
+
+
+def _max_samples() -> int:
+    try:
+        return max(1, min(10000, int(os.getenv("PARKPULSE_AGENT_ROLE_TRACE_SAMPLE_MAX_ROWS", str(DEFAULT_MAX_SAMPLES)))))
+    except ValueError:
+        return DEFAULT_MAX_SAMPLES
+
+
+def _redact_text(value: Any, limit: int = 500) -> str:
+    text = str(value or "")[:limit]
+    return " ".join(word if "@" not in word and not any(char.isdigit() for char in word) else "[redacted]" for word in text.split())
 
 
 def _bounded_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -71,7 +84,7 @@ def record_agent_role_trace_sample(
         "id": f"role_trace_{int(time.time() * 1000)}_{role}",
         "created_at": _now_iso(),
         "source": source,
-        "message": message[:500],
+        "message": _redact_text(message),
         "mode": mode,
         "role": role,
         "trace_status": (trace.get("deliberate_eval", {}) if isinstance(trace.get("deliberate_eval"), dict) else {}).get("status"),
@@ -82,7 +95,20 @@ def record_agent_role_trace_sample(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(_jsonable(row), sort_keys=True, separators=(",", ":")) + "\n")
+    _trim_sample_log(path, max_rows=_max_samples())
     return {"status": "recorded", "path": str(path), "sample": row}
+
+
+def _trim_sample_log(path: Path, *, max_rows: int) -> None:
+    try:
+        if max_rows <= 0 or not path.exists():
+            return
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) <= max_rows:
+            return
+        path.write_text("\n".join(lines[-max_rows:]) + "\n", encoding="utf-8")
+    except OSError:
+        return
 
 
 def latest_agent_role_trace_samples(limit: int = 50) -> dict[str, Any]:

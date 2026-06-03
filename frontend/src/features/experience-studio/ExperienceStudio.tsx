@@ -71,6 +71,7 @@ type VenueDataPayload = {
   sourceIntegrity?: {
     usesSeedData?: boolean;
     usesSampleData?: boolean;
+    usesApprovedSyntheticProfile?: boolean;
     realVenueFeedConnected?: boolean;
     profileType?: string;
     customerValidationStatus?: string;
@@ -228,13 +229,8 @@ function collectIssues(payload: VenueDataPayload | null) {
 }
 
 export function ExperienceStudio() {
-  const [sourceName, setSourceName] = useState("");
-  const [jsonText, setJsonText] = useState("");
   const [readiness, setReadiness] = useState<VenueDataPayload | null>(null);
-  const [validation, setValidation] = useState<VenueDataPayload | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [isImporting, setIsImporting] = useState(false);
-  const [isActivatingSynthetic, setIsActivatingSynthetic] = useState(false);
   const [isDrafting, setIsDrafting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [templateId, setTemplateId] = useState<ExperienceTemplateId>("rainy-day");
@@ -252,16 +248,6 @@ export function ExperienceStudio() {
   const [isUpdatingDraft, setIsUpdatingDraft] = useState(false);
   const [isWorkflowBusy, setIsWorkflowBusy] = useState(false);
   const [isSendingHandoff, setIsSendingHandoff] = useState(false);
-
-  const parsedExport = useMemo(() => {
-    if (!jsonText.trim()) return null;
-    try {
-      const parsed = JSON.parse(jsonText) as unknown;
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
-    } catch {
-      return null;
-    }
-  }, [jsonText]);
 
   const refreshReadiness = async () => {
     setIsLoading(true);
@@ -299,83 +285,6 @@ export function ExperienceStudio() {
   useEffect(() => {
     void refreshSavedDrafts();
   }, []);
-
-  const handleFile = async (file: File | null) => {
-    if (!file) return;
-    setSourceName(file.name);
-    setJsonText(await file.text());
-    setValidation(null);
-    setMessage("File loaded for validation");
-  };
-
-  const validateExport = async () => {
-    if (!parsedExport) {
-      setMessage("Paste or upload a valid JSON object first");
-      return;
-    }
-    setIsLoading(true);
-    setMessage(null);
-    try {
-      const response = await fetchParkPulseApi("/api/park/venue-profile/validate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceName, export: parsedExport }),
-        timeoutMs: 7000,
-      });
-      setValidation(await response.json() as VenueDataPayload);
-      setMessage("Validation complete");
-    } catch {
-      setMessage("Validation request failed");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const importExport = async () => {
-    if (!parsedExport) {
-      setMessage("Paste or upload a valid JSON object first");
-      return;
-    }
-    setIsImporting(true);
-    setMessage(null);
-    try {
-      const response = await fetchParkPulseApi("/api/park/venue-profile/import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceName, export: parsedExport, actor: "venue_data_admin" }),
-        timeoutMs: 9000,
-      });
-      const payload = await response.json() as VenueDataPayload;
-      setValidation(payload);
-      setReadiness(payload.venueProfile ?? payload.venueExperienceData ?? null);
-      setMessage(payload.message ?? "Import complete");
-    } catch {
-      setMessage("Import blocked or failed. Validate the export and source name first.");
-    } finally {
-      setIsImporting(false);
-    }
-  };
-
-  const activateSyntheticPark = async () => {
-    setIsActivatingSynthetic(true);
-    setMessage(null);
-    try {
-      const response = await fetchParkPulseApi("/api/park/venue-profile/synthetic/activate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ actor: "experience_studio" }),
-        timeoutMs: 9000,
-      });
-      const payload = await response.json() as VenueDataPayload;
-      setValidation(payload);
-      setReadiness(payload.venueProfile ?? payload.venueExperienceData ?? payload);
-      setMessage(payload.message ?? "Synthetic park profile activated");
-    } catch {
-      setMessage("Synthetic park activation failed");
-    } finally {
-      setIsActivatingSynthetic(false);
-    }
-  };
 
   const selectDraftTemplate = (id: ExperienceTemplateId) => {
     const next = draftTemplates.find((item) => item.id === id) ?? selectedTemplate;
@@ -613,8 +522,12 @@ export function ExperienceStudio() {
 
   const readinessStatus = readiness?.readiness?.status;
   const venueIdentity = readiness?.venueIdentity ?? null;
-  const validationStatus = validation?.validation?.status ?? validation?.status;
   const readinessCounts = readiness?.readiness?.counts ?? {};
+  const profileSourceMode = readiness?.sourceIntegrity?.usesApprovedSyntheticProfile
+    ? "approved synthetic"
+    : readiness?.sourceIntegrity?.realVenueFeedConnected
+      ? "live real feed"
+      : "not connected";
   const locationDetails = useMemo(() => {
     const details = readiness?.realInputs?.locationDetails ?? {};
     return Object.values(details)
@@ -643,7 +556,7 @@ export function ExperienceStudio() {
   }, [locationDetails]);
   const channelOwnerEntries = Object.entries(readiness?.realInputs?.channelOwners ?? {});
   const safetyInstructions = readiness?.realInputs?.safetyInstructions ?? [];
-  const issues = collectIssues(validation) || collectIssues(readiness);
+  const issues = collectIssues(readiness);
   const draft = draftPayload?.draft;
   const draftMissing = draft?.sourceIntegrity?.missingRealInputs ?? [];
 
@@ -662,6 +575,7 @@ export function ExperienceStudio() {
             <nav className="flex flex-wrap gap-2">
               <a href="/" className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-black text-slate-200 transition hover:border-lime-300">Command Center</a>
               <a href="/venue-profile" className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-300">Venue Profile</a>
+              <a href="/accessibility-journey" className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-300">Accessibility Journey</a>
               <a href="/labs" className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-black text-slate-200 transition hover:border-lime-300">Labs</a>
             </nav>
           </div>
@@ -1111,7 +1025,7 @@ export function ExperienceStudio() {
                   ["Handoff", readiness?.readiness?.handoffReady ? "ready" : "blocked"],
                   ["Seed data", readiness?.sourceIntegrity?.usesSeedData ? "detected" : "not used"],
                   ["Sample data", readiness?.sourceIntegrity?.usesSampleData ? "blocked" : "not active"],
-                  ["Real feed", readiness?.sourceIntegrity?.realVenueFeedConnected ? "connected" : "not connected"],
+                  ["Source", profileSourceMode],
                   ["Profile", formatStatus(readiness?.sourceIntegrity?.profileType)],
                 ].map(([label, value]) => (
                   <div key={label} className="grid grid-cols-[7rem_1fr] gap-2 rounded border border-slate-800 bg-[#0d1115] px-3 py-2">
@@ -1130,24 +1044,22 @@ export function ExperienceStudio() {
             </div>
 
             <div className="rounded-lg border border-amber-300/25 bg-[#151914] p-4">
-              <div className="text-[10px] font-black uppercase tracking-widest text-amber-200">Import gate</div>
-              <h2 className="mt-1 text-lg font-black text-white">Required real data</h2>
+              <div className="text-[10px] font-black uppercase tracking-widest text-amber-200">Venue Profile gate</div>
+              <h2 className="mt-1 text-lg font-black text-white">Required profile data</h2>
               <div className="mt-3 grid gap-2 text-xs leading-relaxed text-slate-400">
                 {requiredFields.map((item) => <div key={item} className="rounded border border-slate-800 bg-[#0d1115] px-3 py-2">{item}</div>)}
               </div>
               <p className="mt-3 text-xs leading-relaxed text-slate-500">
-                Source names containing sample, demo, seed, test, or fake are blocked. The export must already be venue-approved and source-backed.
+                Venue Profile owns source validation, import preview, activation, and synthetic test loading. Studio only consumes the active approved profile.
               </p>
-              <button
-                type="button"
-                onClick={() => void activateSyntheticPark()}
-                disabled={isActivatingSynthetic}
-                className="mt-3 w-full rounded border border-amber-300 bg-amber-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-[#0d1115] disabled:text-slate-500"
+              <a
+                href="/venue-profile"
+                className="mt-3 flex w-full justify-center rounded border border-amber-300 bg-amber-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-amber-200"
               >
-                {isActivatingSynthetic ? "Activating" : "Activate synthetic park profile"}
-              </button>
+                Manage Venue Profile
+              </a>
               <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-                Uses the bundled approved synthetic profile for ParkPulse Adventure Park; it is labeled synthetic and is not a real-world customer venue.
+                Active source: {profileSourceMode}. Source names containing sample, demo, seed, test, or fake remain blocked in Venue Profile.
               </p>
             </div>
 
@@ -1195,73 +1107,50 @@ export function ExperienceStudio() {
           <section className="rounded-lg border border-slate-800 bg-[#151914] p-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
-                <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Venue export</div>
-                <h2 className="mt-1 text-2xl font-black text-white">Validate and import</h2>
+                <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Profile dependency</div>
+                <h2 className="mt-1 text-2xl font-black text-white">Experience Studio reads the active Venue Profile</h2>
                 <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-400">
-                  Paste a real `customer_venue_export_v1` JSON package or upload one from the venue source system. Passing imports are saved to the runtime venue export path.
+                  Park data changes now happen in the global profile layer. Draft generation, source-integrity gates, channel ownership, accessibility notes, and handoff checks all read from the same active profile.
                 </p>
               </div>
-              <div className={`w-fit rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${statusClass(validationStatus)}`}>
-                {formatStatus(validationStatus)}
+              <div className={`w-fit rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${statusClass(readinessStatus)}`}>
+                {formatStatus(readinessStatus)}
               </div>
             </div>
 
-            <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_16rem]">
-              <label className="block">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Real source name</span>
-                <input
-                  value={sourceName}
-                  onChange={(event) => setSourceName(event.target.value)}
-                  placeholder="venue-cms-approved-export-2026-06-02.json"
-                  className="mt-2 w-full rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-sm font-bold text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-lime-300"
-                />
-              </label>
-              <label className="block">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Upload JSON</span>
-                <input
-                  type="file"
-                  accept="application/json,.json"
-                  onChange={(event) => void handleFile(event.target.files?.[0] ?? null)}
-                  className="mt-2 w-full rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-bold text-slate-100 file:mr-3 file:rounded file:border-0 file:bg-lime-300 file:px-2 file:py-1 file:text-xs file:font-black file:text-slate-950"
-                />
-              </label>
+            <div className="mt-5 grid gap-3 lg:grid-cols-3">
+              {[
+                ["Active profile", venueIdentity?.name ?? "Not connected"],
+                ["Source mode", profileSourceMode],
+                ["Loaded from", readiness?.readiness?.loadedFrom ?? "not connected"],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded border border-slate-800 bg-[#0d1115] p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</div>
+                  <div className="mt-2 text-sm font-black text-slate-100">{value}</div>
+                </div>
+              ))}
             </div>
 
-            <label className="mt-4 block">
-              <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Venue export JSON</span>
-              <textarea
-                value={jsonText}
-                onChange={(event) => {
-                  setJsonText(event.target.value);
-                  setValidation(null);
-                }}
-                placeholder="{ ...real venue export JSON... }"
-                className="mt-2 h-[26rem] w-full resize-y rounded border border-slate-700 bg-[#0d1115] p-3 font-mono text-xs leading-relaxed text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-lime-300"
-              />
-            </label>
-
             <div className="mt-4 flex flex-wrap gap-2">
+              <a
+                href="/venue-profile"
+                className="rounded border border-lime-300 bg-lime-300 px-4 py-2 text-sm font-black text-slate-950 transition hover:bg-lime-200"
+              >
+                Open Venue Profile
+              </a>
               <button
                 type="button"
-                onClick={() => void validateExport()}
-                disabled={isLoading || !parsedExport}
-                className="rounded border border-lime-300 bg-lime-300 px-4 py-2 text-sm font-black text-slate-950 transition hover:bg-lime-200 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-[#0d1115] disabled:text-slate-500"
+                onClick={() => void refreshReadiness()}
+                disabled={isLoading}
+                className="rounded border border-slate-700 bg-[#0d1115] px-4 py-2 text-sm font-black text-slate-200 transition hover:border-lime-300 disabled:opacity-50"
               >
-                {isLoading ? "Validating" : "Validate export"}
-              </button>
-              <button
-                type="button"
-                onClick={() => void importExport()}
-                disabled={isImporting || !parsedExport || (validation?.validation?.status !== "studio_ready" && validation?.status !== "studio_ready")}
-                className="rounded border border-emerald-300 bg-emerald-300 px-4 py-2 text-sm font-black text-slate-950 transition hover:bg-emerald-200 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-[#0d1115] disabled:text-slate-500"
-              >
-                {isImporting ? "Importing" : "Import and activate"}
+                {isLoading ? "Refreshing" : "Refresh profile"}
               </button>
               {message ? <div className="rounded border border-slate-800 bg-[#0d1115] px-3 py-2 text-sm font-bold text-slate-300">{message}</div> : null}
             </div>
 
             <div className="mt-5 rounded border border-slate-800 bg-[#0d1115] p-3">
-              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Validation findings</div>
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Profile readiness findings</div>
               <div className="mt-3 grid gap-2">
                 {issues.length ? (
                   issues.map((issue) => (
@@ -1276,7 +1165,7 @@ export function ExperienceStudio() {
                     </div>
                   ))
                 ) : (
-                  <div className="text-sm text-slate-400">No validation findings yet.</div>
+                  <div className="text-sm text-slate-400">No readiness findings. Studio can generate from the active profile.</div>
                 )}
               </div>
             </div>

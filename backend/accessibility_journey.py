@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from venue_profile import build_venue_profile
+
 
 ACCESSIBILITY_JOURNEY_VERSION = "2026-06-01.mvp1"
 
@@ -66,170 +68,9 @@ ACCESSIBILITY_COPY_RULES = [
 ]
 
 
-LOCATION_ACCESSIBILITY: dict[str, dict[str, Any]] = {
-    "entrancePlaza": {
-        "name": "Entrance Plaza",
-        "type": "arrival",
-        "indoor": False,
-        "quietScore": 62,
-        "stepFree": True,
-        "strollerFriendly": True,
-        "restrooms": ["Restrooms West"],
-        "breakFeatures": ["guest services nearby", "wide paths"],
-        "sensoryNotes": ["arrival announcements", "moderate crowd movement"],
-    },
-    "coveredPlaza": {
-        "name": "Covered Plaza",
-        "type": "shelter",
-        "indoor": False,
-        "quietScore": 76,
-        "stepFree": True,
-        "strollerFriendly": True,
-        "restrooms": ["Restrooms West", "Restrooms East"],
-        "breakFeatures": ["covered seating", "rain-safe route", "shade"],
-        "sensoryNotes": ["mixed traffic", "lower ride noise than Coaster Plaza"],
-    },
-    "indoorHub": {
-        "name": "Indoor Ride Hub",
-        "type": "indoor_attraction",
-        "indoor": True,
-        "quietScore": 68,
-        "stepFree": True,
-        "strollerFriendly": True,
-        "restrooms": ["Restrooms West"],
-        "breakFeatures": ["air conditioning", "water refill nearby", "wide indoor corridors"],
-        "sensoryNotes": ["ride audio nearby", "avoid show doors during release"],
-    },
-    "arcadeZone": {
-        "name": "Arcade Zone",
-        "type": "indoor_break",
-        "indoor": True,
-        "quietScore": 82,
-        "stepFree": True,
-        "strollerFriendly": True,
-        "restrooms": ["Restrooms West"],
-        "breakFeatures": ["indoor seating edge", "short wait", "easy exit path"],
-        "sensoryNotes": ["some game audio", "best used along the calmer outer edge"],
-    },
-    "foodCourt1": {
-        "name": "Food Court A",
-        "type": "food",
-        "indoor": True,
-        "quietScore": 54,
-        "stepFree": True,
-        "strollerFriendly": True,
-        "restrooms": ["Restrooms East"],
-        "breakFeatures": ["indoor seating", "water refill route"],
-        "sensoryNotes": ["pickup announcements", "crowded at meal peaks"],
-    },
-    "foodCourtB": {
-        "name": "Food Court B",
-        "type": "food",
-        "indoor": True,
-        "quietScore": 73,
-        "stepFree": True,
-        "strollerFriendly": True,
-        "restrooms": ["Restrooms East"],
-        "breakFeatures": ["lower pickup pressure", "side seating", "staffed ordering counter"],
-        "sensoryNotes": ["moderate dining noise"],
-    },
-    "coasterPlaza": {
-        "name": "Coaster Plaza",
-        "type": "thrill_zone",
-        "indoor": False,
-        "quietScore": 28,
-        "stepFree": True,
-        "strollerFriendly": False,
-        "restrooms": ["Restrooms East"],
-        "breakFeatures": ["shade garden nearby"],
-        "sensoryNotes": ["thrill ride noise", "dense queues", "outdoor heat exposure"],
-    },
-    "firstAid": {
-        "name": "First Aid",
-        "type": "care",
-        "indoor": True,
-        "quietScore": 88,
-        "stepFree": True,
-        "strollerFriendly": True,
-        "restrooms": ["Restrooms East"],
-        "breakFeatures": ["staffed care location", "quiet waiting area"],
-        "sensoryNotes": ["staff handoff point"],
-    },
-}
-
-
-ATTRACTION_ACCESSIBILITY: dict[str, dict[str, Any]] = {
-    "indoorLaunch": {
-        "sensoryLoad": "medium",
-        "loud": True,
-        "stepFreeQueue": True,
-        "transferRequired": True,
-        "indoor": True,
-        "goodFor": ["mobility_if_transfer_ok", "indoor_break_after_queue"],
-        "cautions": ["ride audio and launch effects", "confirm transfer needs with staff"],
-    },
-    "arcade": {
-        "sensoryLoad": "medium",
-        "loud": False,
-        "stepFreeQueue": True,
-        "transferRequired": False,
-        "indoor": True,
-        "goodFor": ["low_sensory_edge_route", "family_care", "mobility"],
-        "cautions": ["some game audio and flashing screens"],
-    },
-    "theaterB": {
-        "sensoryLoad": "high",
-        "loud": True,
-        "stepFreeQueue": True,
-        "transferRequired": False,
-        "indoor": True,
-        "goodFor": ["indoor_seating"],
-        "cautions": ["scheduled show audio", "crowd release after show"],
-    },
-    "skyDrop": {
-        "sensoryLoad": "high",
-        "loud": True,
-        "stepFreeQueue": False,
-        "transferRequired": True,
-        "indoor": False,
-        "goodFor": ["thrill"],
-        "cautions": ["height/thrill effects", "outdoor queue"],
-    },
-    "dragonCoaster": {
-        "sensoryLoad": "high",
-        "loud": True,
-        "stepFreeQueue": False,
-        "transferRequired": True,
-        "indoor": False,
-        "goodFor": ["thrill"],
-        "cautions": ["do not recommend while down or awaiting clearance"],
-    },
-}
-
-
-DINING_ACCESSIBILITY: dict[str, dict[str, Any]] = {
-    "foodCourt1": {
-        "name": "Food Court A",
-        "zoneId": "foodCourt1",
-        "allergyProtocols": ["staff_allergy_binder", "manager_confirmation"],
-        "allergensHandled": ["dairy", "gluten", "soy"],
-        "lowCrowdSeating": False,
-        "nearbyRestrooms": ["Restrooms East"],
-        "cautions": ["high pickup pressure during meal rush", "peanut handling not verified in seed data"],
-    },
-    "foodCourtB": {
-        "name": "Food Court B",
-        "zoneId": "foodCourtB",
-        "allergyProtocols": ["staff_allergy_binder", "manager_confirmation", "separate_prep_request"],
-        "allergensHandled": ["peanut", "tree nut", "dairy", "gluten", "soy"],
-        "lowCrowdSeating": True,
-        "nearbyRestrooms": ["Restrooms East"],
-        "cautions": ["must confirm ingredients with trained staff before ordering"],
-    },
-}
-
-
 def build_accessibility_scope() -> dict[str, Any]:
+    venue_profile = build_venue_profile()
+    venue_readiness = venue_profile.get("readiness") or {}
     return {
         "version": ACCESSIBILITY_JOURNEY_VERSION,
         "domain": "amusement_park_accessible_journey_builder",
@@ -254,11 +95,62 @@ def build_accessibility_scope() -> dict[str, Any]:
         "prohibited_claims": list(ACCESSIBILITY_BOT_PROHIBITED_CLAIMS),
         "customer_copy_rules": list(ACCESSIBILITY_COPY_RULES),
         "default_safety_banner": "Plans use live park conditions and accessibility metadata, but allergies, medical needs, ride transfer help, and equipment availability must be confirmed with trained park staff.",
+        "venueProfile": {
+            "status": venue_readiness.get("status"),
+            "source": (venue_profile.get("realInputs") or {}).get("source"),
+            "venueIdentity": venue_profile.get("venueIdentity"),
+            "sourceIntegrity": venue_profile.get("sourceIntegrity"),
+            "counts": venue_readiness.get("counts") or {},
+            "issues": venue_readiness.get("issues") or [],
+        },
     }
 
 
 def build_accessibility_journey(payload: dict[str, Any], park_state: dict[str, Any]) -> dict[str, Any]:
     profile = _profile_from_payload(payload)
+    venue_profile = build_venue_profile()
+    venue_readiness = venue_profile.get("readiness") or {}
+    venue_catalog = _venue_accessibility_catalog(venue_profile)
+    if not venue_readiness.get("autofillAllowed"):
+        return {
+            "status": "blocked",
+            "mode": "accessible_journey_builder",
+            "version": ACCESSIBILITY_JOURNEY_VERSION,
+            "summary": {
+                "headline": "Accessibility Journey needs an active Venue Profile before it can build guest routes.",
+                "durationMinutes": profile["durationMinutes"],
+                "needs": profile["needs"],
+                "confidence": 0,
+                "requiresHumanReview": True,
+                "reviewReason": "Venue Profile is not ready.",
+            },
+            "profile": profile,
+            "planSteps": [],
+            "diningOptions": [],
+            "attractionOptions": [],
+            "breakPlan": {"cadenceMinutes": 0, "plannedBreakCount": 0, "preferredBreaks": []},
+            "staffHandoff": {
+                "recommended": True,
+                "owner": "Venue Profile owner",
+                "message": "Connect a studio-ready Venue Profile with accessibility, safety, location, and channel-owner data.",
+            },
+            "guardrails": list(ACCESSIBILITY_COPY_RULES),
+            "evidence": [
+                {
+                    "id": "venue_profile_blocked",
+                    "source": "venue_profile",
+                    "label": "Venue Profile readiness",
+                    "detail": "Accessibility Journey does not use local seed accessibility facts.",
+                }
+            ],
+            "venueProfile": _venue_profile_summary(venue_profile),
+            "readinessIssues": venue_readiness.get("issues") or [],
+            "runtime": {
+                "provider": "deterministic_accessibility_planner",
+                "liveParkState": bool(park_state),
+                "llmControlAuthority": False,
+            },
+        }
     flow = park_state.get("guestFlow", {}) if isinstance(park_state.get("guestFlow"), dict) else {}
     zones = flow.get("zones", []) if isinstance(flow.get("zones"), list) else []
     rides = flow.get("rides", []) if isinstance(flow.get("rides"), list) else []
@@ -266,10 +158,10 @@ def build_accessibility_journey(payload: dict[str, Any], park_state: dict[str, A
     weather = park_state.get("weather", {}) if isinstance(park_state.get("weather"), dict) else {}
     readiness = park_state.get("incidentReadiness", {}) if isinstance(park_state.get("incidentReadiness"), dict) else {}
 
-    evidence = _build_evidence(zones, rides, food_inventory, weather, readiness)
-    zone_scores = _score_zones(profile, zones, weather, readiness)
-    dining_options = _dining_options(profile, food_inventory, zone_scores)
-    attraction_options = _attraction_options(profile, rides, zone_scores)
+    evidence = _build_evidence(zones, rides, food_inventory, weather, readiness, venue_profile, venue_catalog)
+    zone_scores = _score_zones(profile, zones, weather, readiness, venue_catalog)
+    dining_options = _dining_options(profile, food_inventory, zone_scores, venue_catalog)
+    attraction_options = _attraction_options(profile, rides, zone_scores, venue_catalog)
     plan_steps = _build_steps(profile, zone_scores, dining_options, attraction_options)
     guardrails = _guardrails_for_profile(profile, readiness)
     requires_review = _requires_human_review(profile, readiness)
@@ -295,6 +187,7 @@ def build_accessibility_journey(payload: dict[str, Any], park_state: dict[str, A
         "staffHandoff": _staff_handoff(profile, requires_review),
         "guardrails": guardrails,
         "evidence": evidence,
+        "venueProfile": _venue_profile_summary(venue_profile),
         "runtime": {
             "provider": "deterministic_accessibility_planner",
             "liveParkState": bool(park_state),
@@ -370,12 +263,108 @@ def _zone_by_id(zones: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(zone.get("id")): zone for zone in zones if isinstance(zone, dict) and zone.get("id")}
 
 
-def _score_zones(profile: dict[str, Any], zones: list[dict[str, Any]], weather: dict[str, Any], readiness: dict[str, Any]) -> list[dict[str, Any]]:
+def _venue_profile_summary(venue_profile: dict[str, Any]) -> dict[str, Any]:
+    readiness = venue_profile.get("readiness") or {}
+    return {
+        "venueIdentity": venue_profile.get("venueIdentity"),
+        "readiness": {
+            "status": readiness.get("status"),
+            "autofillAllowed": readiness.get("autofillAllowed"),
+            "counts": readiness.get("counts") or {},
+            "issues": readiness.get("issues") or [],
+            "loadedFrom": readiness.get("loadedFrom"),
+        },
+        "sourceIntegrity": venue_profile.get("sourceIntegrity") or {},
+        "source": (venue_profile.get("realInputs") or {}).get("source"),
+    }
+
+
+def _location_id(name: str) -> str:
+    parts = "".join(ch if ch.isalnum() else " " for ch in name).strip().split()
+    if not parts:
+        return "venueLocation"
+    first, *rest = parts
+    return first[:1].lower() + first[1:] + "".join(part[:1].upper() + part[1:] for part in rest)
+
+
+def _normalize_profile_location(item: dict[str, Any], restrooms_by_zone: dict[str, list[str]]) -> dict[str, Any]:
+    kind = str(item.get("kind") or "location")
+    zone_id = str(item.get("zoneId") or "")
+    name = str(item.get("name") or "Venue location")
+    indoor = item.get("indoor") is True
+    covered = item.get("covered") is True
+    accessibility_note = str(item.get("accessibilityNote") or item.get("guestInstruction") or "").strip()
+    sensory_note = str(item.get("sensoryNote") or item.get("guestTip") or "").strip()
+    best_for = [str(value) for value in item.get("bestFor", []) if str(value).strip()] if isinstance(item.get("bestFor"), list) else []
+    services = [str(value) for value in item.get("services", []) if str(value).strip()] if isinstance(item.get("services"), list) else []
+    dietary_tags = [str(value) for value in item.get("dietaryTags", []) if str(value).strip()] if isinstance(item.get("dietaryTags"), list) else []
+    accessible = item.get("accessible") is True or bool(accessibility_note) or kind not in {"attraction", "show"}
+    caution_text = " ".join([sensory_note, str(item.get("category") or ""), str(item.get("thrillLevel") or "")]).lower()
+    quiet_score = 58
+    if kind == "quiet_or_cooling":
+        quiet_score += 28
+    if kind in {"first_aid", "guest_services", "family_service"}:
+        quiet_score += 18
+    if indoor:
+        quiet_score += 10
+    if covered:
+        quiet_score += 6
+    if any(token in caution_text for token in ("loud", "launch", "drop", "thrill", "flashing", "heights")):
+        quiet_score -= 22
+    if kind == "food":
+        quiet_score -= 6
+    break_features = [feature for feature in [*best_for, *services, "indoor" if indoor else "", "covered" if covered else "", "accessible public location" if accessible else ""] if feature]
+    return {
+        "id": _location_id(name),
+        "name": name,
+        "kind": kind,
+        "zoneId": zone_id,
+        "indoor": indoor,
+        "covered": covered,
+        "quietScore": max(20, min(95, quiet_score)),
+        "stepFree": accessible,
+        "strollerFriendly": accessible and kind != "thrill_zone",
+        "restrooms": restrooms_by_zone.get(zone_id, []),
+        "breakFeatures": list(dict.fromkeys(break_features)),
+        "sensoryNotes": [note for note in [sensory_note, accessibility_note] if note],
+        "accessibilityNote": accessibility_note,
+        "sensoryNote": sensory_note,
+        "dietaryTags": dietary_tags,
+        "cuisine": item.get("cuisine"),
+        "seating": item.get("seating"),
+        "mobileOrder": item.get("mobileOrder"),
+        "durationMinutes": item.get("durationMinutes"),
+        "heightRequirementInches": item.get("heightRequirementInches"),
+        "familyFit": item.get("familyFit"),
+        "category": item.get("category"),
+        "thrillLevel": item.get("thrillLevel"),
+    }
+
+
+def _venue_accessibility_catalog(venue_profile: dict[str, Any]) -> dict[str, Any]:
+    real_inputs = venue_profile.get("realInputs") or {}
+    details = real_inputs.get("locationDetails") if isinstance(real_inputs.get("locationDetails"), dict) else {}
+    restrooms_by_zone: dict[str, list[str]] = {}
+    for item in details.values():
+        if isinstance(item, dict) and str(item.get("kind") or "") == "restrooms":
+            restrooms_by_zone.setdefault(str(item.get("zoneId") or ""), []).append(str(item.get("name") or "Restroom"))
+    locations = [_normalize_profile_location(item, restrooms_by_zone) for item in details.values() if isinstance(item, dict)]
+    return {
+        "locations": locations,
+        "dining": [item for item in locations if item["kind"] == "food"],
+        "attractions": [item for item in locations if item["kind"] in {"attraction", "show"}],
+        "safetyInstructions": [str(item) for item in real_inputs.get("safetyInstructions", []) if str(item).strip()],
+        "source": real_inputs.get("source"),
+    }
+
+
+def _score_zones(profile: dict[str, Any], zones: list[dict[str, Any]], weather: dict[str, Any], readiness: dict[str, Any], venue_catalog: dict[str, Any]) -> list[dict[str, Any]]:
     live_zones = _zone_by_id(zones)
     heat_index = _safe_int(weather.get("heatIndexF"), 80)
     routes_open = readiness.get("accessibilityRoutesOpen", True) is not False
     scored: list[dict[str, Any]] = []
-    for zone_id, meta in LOCATION_ACCESSIBILITY.items():
+    for meta in venue_catalog["locations"]:
+        zone_id = str(meta.get("zoneId") or meta.get("id"))
         live = live_zones.get(zone_id, {})
         density = _safe_int(live.get("density"), 50)
         wait = _safe_int(live.get("waitMins"), 0)
@@ -423,21 +412,23 @@ def _score_zones(profile: dict[str, Any], zones: list[dict[str, Any]], weather: 
     return sorted(scored, key=lambda item: item["score"], reverse=True)
 
 
-def _dining_options(profile: dict[str, Any], food_inventory: dict[str, Any], zone_scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _dining_options(profile: dict[str, Any], food_inventory: dict[str, Any], zone_scores: list[dict[str, Any]], venue_catalog: dict[str, Any]) -> list[dict[str, Any]]:
     live_food = {str(item.get("id")): item for item in food_inventory.get("locations", []) if isinstance(item, dict) and item.get("id")}
     zone_score_by_id = {item["zoneId"]: item for item in zone_scores}
     options: list[dict[str, Any]] = []
-    for dining_id, meta in DINING_ACCESSIBILITY.items():
+    for meta in venue_catalog["dining"]:
+        dining_id = str(meta["id"])
         live = live_food.get(dining_id, {})
-        handled = set(meta["allergensHandled"])
+        handled = {tag.lower().replace(" option", "").replace(" available", "") for tag in meta.get("dietaryTags", [])}
         requested = set(profile["allergies"])
-        explicit_match = not requested or requested.issubset(handled)
+        explicit_match = not requested or requested.issubset(handled) or not handled
         if requested and not explicit_match:
             continue
         eta = _safe_int(live.get("pickupEtaMinutes"), 15)
         backlog = _safe_int(live.get("mobileOrderBacklog"), 40)
         zone = zone_score_by_id.get(meta["zoneId"], {})
-        score = int(zone.get("score", 50)) - eta - backlog // 8 + (20 if meta["lowCrowdSeating"] else 0)
+        low_crowd = "side" in str(meta.get("seating") or "").lower() or "covered" in str(meta.get("seating") or "").lower()
+        score = int(zone.get("score", 50)) - eta - backlog // 8 + (20 if low_crowd else 0)
         options.append(
             {
                 "id": dining_id,
@@ -446,68 +437,76 @@ def _dining_options(profile: dict[str, Any], food_inventory: dict[str, Any], zon
                 "pickupEtaMinutes": eta,
                 "mobileOrderBacklog": backlog,
                 "availableItems": list(live.get("availableItems", [])) if isinstance(live.get("availableItems"), list) else [],
-                "allergyProtocols": list(meta["allergyProtocols"]),
-                "allergensHandled": list(meta["allergensHandled"]),
-                "lowCrowdSeating": bool(meta["lowCrowdSeating"]),
-                "nearbyRestrooms": list(meta["nearbyRestrooms"]),
-                "cautions": list(meta["cautions"]),
+                "allergyProtocols": ["trained staff confirmation", "ingredient and cross-contact check"],
+                "allergensHandled": sorted(handled),
+                "lowCrowdSeating": bool(low_crowd),
+                "nearbyRestrooms": list(meta["restrooms"]),
+                "cautions": ["Confirm ingredients and cross-contact process with trained restaurant staff before ordering."],
                 "staffConfirmationRequired": bool(requested),
             }
         )
     return sorted(options, key=lambda item: item["score"], reverse=True)
 
 
-def _attraction_options(profile: dict[str, Any], rides: list[dict[str, Any]], zone_scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _sensory_load(meta: dict[str, Any]) -> str:
+    text = " ".join(str(meta.get(key) or "") for key in ("sensoryNote", "category", "thrillLevel")).lower()
+    if any(token in text for token in ("loud", "launch", "drop", "thrill", "flashing", "heights")):
+        return "high"
+    if meta.get("indoor") or meta.get("covered"):
+        return "medium"
+    return "medium"
+
+
+def _attraction_options(profile: dict[str, Any], rides: list[dict[str, Any]], zone_scores: list[dict[str, Any]], venue_catalog: dict[str, Any]) -> list[dict[str, Any]]:
     zone_score_by_id = {item["zoneId"]: item for item in zone_scores}
+    live_ride_by_name = {str(ride.get("name") or "").strip().lower(): ride for ride in rides if isinstance(ride, dict)}
     options: list[dict[str, Any]] = []
-    for ride in rides:
-        if not isinstance(ride, dict):
-            continue
-        ride_id = str(ride.get("id") or "")
-        meta = ATTRACTION_ACCESSIBILITY.get(ride_id)
-        if not meta:
-            continue
+    for meta in venue_catalog["attractions"]:
+        ride = live_ride_by_name.get(str(meta["name"]).strip().lower(), {})
+        ride_id = str(ride.get("id") or meta["id"])
         status = str(ride.get("status") or "unknown")
         if status == "down":
             continue
-        if profile["avoidLoudShows"] and meta["loud"]:
+        sensory_load = _sensory_load(meta)
+        if profile["avoidLoudShows"] and sensory_load == "high":
             continue
-        if profile["avoidStairs"] and not meta["stepFreeQueue"]:
+        if profile["avoidStairs"] and not meta["stepFree"]:
             continue
-        zone = zone_score_by_id.get(str(ride.get("zone") or ""))
+        zone = zone_score_by_id.get(str(meta.get("zoneId") or ride.get("zone") or ""))
         wait = _safe_int(ride.get("waitMins"), 30)
         score = int((zone or {}).get("score", 40)) - wait
-        if "low_sensory" in profile["needs"] and meta["sensoryLoad"] == "high":
+        if "low_sensory" in profile["needs"] and sensory_load == "high":
             score -= 50
         options.append(
             {
                 "id": ride_id,
-                "name": str(ride.get("name") or ride_id),
+                "name": str(meta.get("name") or ride.get("name") or ride_id),
                 "zoneName": str(ride.get("zoneName") or (zone or {}).get("name") or ""),
                 "score": score,
                 "waitMins": wait,
                 "status": status,
-                "sensoryLoad": meta["sensoryLoad"],
-                "stepFreeQueue": meta["stepFreeQueue"],
-                "transferRequired": meta["transferRequired"],
+                "sensoryLoad": sensory_load,
+                "stepFreeQueue": meta["stepFree"],
+                "transferRequired": bool(meta.get("heightRequirementInches")) or "transfer" in str(meta.get("accessibilityNote") or "").lower(),
                 "indoor": meta["indoor"],
-                "cautions": list(meta["cautions"]),
+                "cautions": [note for note in [meta.get("sensoryNote"), meta.get("accessibilityNote")] if note],
             }
         )
     if "low_sensory" in profile["needs"]:
+        quiet = next((location for location in zone_scores if location["score"] >= 70), zone_scores[0] if zone_scores else {})
         options.append(
             {
-                "id": "arcade_edge",
-                "name": "Arcade Zone outer edge",
-                "zoneName": "Arcade Zone",
-                "score": int(zone_score_by_id.get("arcadeZone", {}).get("score", 70)) + 10,
-                "waitMins": _safe_int(zone_score_by_id.get("arcadeZone", {}).get("waitMins"), 10),
+                "id": "profile_quiet_activity",
+                "name": f"{quiet.get('name', 'Quiet area')} reset activity",
+                "zoneName": str(quiet.get("name") or ""),
+                "score": int(quiet.get("score", 70)) + 10,
+                "waitMins": _safe_int(quiet.get("waitMins"), 10),
                 "status": "open",
-                "sensoryLoad": "low_to_medium",
+                "sensoryLoad": "low",
                 "stepFreeQueue": True,
                 "transferRequired": False,
-                "indoor": True,
-                "cautions": ["stay on the outer edge if screens or game audio become too much"],
+                "indoor": bool(quiet.get("indoor")),
+                "cautions": list(quiet.get("sensoryNotes") or []),
             }
         )
     return sorted(options, key=lambda item: item["score"], reverse=True)[:4]
@@ -522,6 +521,8 @@ def _build_steps(
     steps: list[dict[str, Any]] = []
     duration = profile["durationMinutes"]
     calm_zones = [zone for zone in zone_scores if zone["zoneId"] not in {"coasterPlaza"}]
+    if not calm_zones:
+        return []
     first_break = next((zone for zone in calm_zones if zone["indoor"]), calm_zones[0])
     steps.append(_zone_step("start", "Start with a calm check-in", first_break, 20, "Begin at the lowest-pressure area that still keeps restrooms and staff help nearby."))
 
@@ -543,7 +544,7 @@ def _build_steps(
                 ],
                 "nearby": [],
                 "risks": attraction["cautions"],
-                "evidenceIds": ["rides_live", "accessibility_metadata"],
+                "evidenceIds": ["rides_live", "venue_profile_accessibility_metadata"],
             }
         )
 
@@ -569,7 +570,7 @@ def _build_steps(
                 ],
                 "nearby": dining["nearbyRestrooms"],
                 "risks": dining["cautions"],
-                "evidenceIds": ["food_live", "accessibility_metadata"],
+                "evidenceIds": ["food_live", "venue_profile_accessibility_metadata"],
             }
         )
 
@@ -595,7 +596,7 @@ def _zone_step(step_id: str, title: str, zone: dict[str, Any], duration: int, wh
         ],
         "nearby": zone["restrooms"] + zone["breakFeatures"],
         "risks": zone["sensoryNotes"],
-        "evidenceIds": ["zones_live", "weather_live", "accessibility_metadata"],
+        "evidenceIds": ["zones_live", "weather_live", "venue_profile_accessibility_metadata"],
     }
 
 
@@ -666,16 +667,25 @@ def _build_evidence(
     food_inventory: dict[str, Any],
     weather: dict[str, Any],
     readiness: dict[str, Any],
+    venue_profile: dict[str, Any],
+    venue_catalog: dict[str, Any],
 ) -> list[dict[str, Any]]:
     max_density = max((_safe_int(zone.get("density"), 0) for zone in zones if isinstance(zone, dict)), default=0)
     open_rides = sum(1 for ride in rides if isinstance(ride, dict) and ride.get("status") != "down")
+    venue_identity = venue_profile.get("venueIdentity") or {}
+    venue_counts = (venue_profile.get("readiness") or {}).get("counts") or {}
     return [
         {"id": "zones_live", "source": "guestFlow.zones", "label": "Live crowd and comfort state", "detail": f"{len(zones)} zones read; highest density {max_density}%."},
         {"id": "rides_live", "source": "guestFlow.rides", "label": "Live ride status and waits", "detail": f"{open_rides} ride/activity options are currently usable after closure filtering."},
         {"id": "food_live", "source": "foodInventory.locations", "label": "Live dining pressure", "detail": f"{len(food_inventory.get('locations', []) if isinstance(food_inventory.get('locations'), list) else [])} dining locations read."},
         {"id": "weather_live", "source": "weather", "label": "Weather and heat context", "detail": f"Heat index {weather.get('heatIndexF', 'unknown')}F; storm risk {weather.get('stormRisk', 'unknown')}%."},
         {"id": "readiness_live", "source": "incidentReadiness", "label": "Accessibility route readiness", "detail": f"Accessibility routes open: {readiness.get('accessibilityRoutesOpen', 'unknown')}."},
-        {"id": "accessibility_metadata", "source": "accessibility_journey.metadata", "label": "Explicit accessibility metadata", "detail": "Planner used step-free, sensory, restroom, dining, and staff-confirmation metadata."},
+        {
+            "id": "venue_profile_accessibility_metadata",
+            "source": "venue_profile.realInputs.locationDetails",
+            "label": "Venue Profile accessibility metadata",
+            "detail": f"{venue_identity.get('name', 'Active venue')} supplied {len(venue_catalog.get('locations', []))} profile locations, {len(venue_catalog.get('dining', []))} dining records, and {venue_counts.get('safetyInstructions', 0)} safety instructions.",
+        },
     ]
 
 

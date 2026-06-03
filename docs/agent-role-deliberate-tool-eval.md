@@ -67,6 +67,14 @@ Default path:
 
 The gate replays the latest persisted samples when present. If no samples exist in a fresh environment, the sampled section is marked `skipped` and synthetic/constructed real traces still gate the release. Set `PARKPULSE_AGENT_ROLE_TRACE_SAMPLE_LOG_PATH` in CI or demo environments to keep the sampled ledger isolated.
 
+Retention and privacy controls:
+
+```text
+PARKPULSE_AGENT_ROLE_TRACE_SAMPLE_MAX_ROWS
+```
+
+Default retention is `500` rows. Sample messages are bounded and redact email-like/digit-bearing tokens before writing to JSONL. Trace samples intentionally store bounded role evidence, not raw full conversations.
+
 The gate also generates adversarial sample-shaped traces in memory. These traces must fail for the exact expected critical failures and are not written to the real sample ledger.
 
 `GET /api/park/agent-role-eval` returns:
@@ -127,7 +135,7 @@ Test command:
 python3 -m pytest backend/test_production_reliability_qa_agent.py backend/test_parkpulse_completion.py::test_agent_role_run_is_custom_and_persists_receipt backend/test_parkpulse_completion.py::test_agent_role_scan_never_dispatches_and_medical_stays_bounded backend/test_parkpulse_completion.py::test_agent_role_routes_vague_signals_to_proact backend/test_parkpulse_completion.py::test_park_gemini_agent_success_error_enterprise_and_helpers backend/test_park_understanding_benchmark.py backend/test_live_feedback_loop.py -q
 ```
 
-Latest focused result: `18 passed`.
+Latest focused result: `19 passed`.
 
 ## Real-Trace Release Gate
 

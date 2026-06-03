@@ -148,6 +148,26 @@ def test_parkpulse_api_role_run_persists_replayable_trace_samples(monkeypatch, t
     assert all(row["critical_failures"] == [] for row in report["samples"])
 
 
+def test_role_trace_sample_ledger_redacts_and_trims(monkeypatch, tmp_path):
+    sample_path = tmp_path / "trimmed_role_samples.jsonl"
+    monkeypatch.setenv("PARKPULSE_AGENT_ROLE_TRACE_SAMPLE_LOG_PATH", str(sample_path))
+    monkeypatch.setenv("PARKPULSE_AGENT_ROLE_TRACE_SAMPLE_MAX_ROWS", "2")
+
+    for index in range(3):
+        asyncio.run(
+            parkpulse_api.park_agent_role_run(
+                parkpulse_api.OperatorCommandRequest(message=f"guest{index}@example.com phone 5551234 where next", mode="customer")
+            )
+        )
+
+    ledger = latest_agent_role_trace_samples(limit=10)
+
+    assert ledger["count"] == 2
+    assert all("@example.com" not in row["message"] for row in ledger["samples"])
+    assert all("5551234" not in row["message"] for row in ledger["samples"])
+    assert all("[redacted]" in row["message"] for row in ledger["samples"])
+
+
 def test_lazy_main_role_run_persists_replayable_trace_sample(monkeypatch, tmp_path):
     monkeypatch.setenv("PARKPULSE_AGENT_ROLE_TRACE_SAMPLE_LOG_PATH", str(tmp_path / "lazy_role_samples.jsonl"))
 

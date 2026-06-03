@@ -58,6 +58,8 @@ The conformance runner proves:
 - durable trust registry status, audit history, and signing-key rotation
 - trust-admin authorization gates for unauthenticated, ops, and ml_ops_admin callers
 - production-style external admin identity headers when `--external-admin-email` is supplied
+- protocol scenario catalog discovery
+- automatic judge/eval across every configured protocol extension mode
 
 ## External-Agent Flow
 
@@ -91,6 +93,15 @@ Current extension modes:
 - `commerce_resolution`: credit, refund offer, priority access, settlement gate
 - `accessibility_support`: low-walking, sensory-safe, mobility-aware routing
 - `group_coordination`: multiple personal agents negotiating a shared plan
+
+Discovery and automatic eval endpoints:
+
+```bash
+curl http://127.0.0.1:8001/api/park/agent-handshake/scenarios
+curl -X POST http://127.0.0.1:8001/api/park/agent-handshake/scenario-eval -H 'content-type: application/json' -d '{}'
+```
+
+`/api/park/agent-handshake/scenario-eval` creates a real handshake session for every scenario and judges identity, capability, intent, proposal, counterproposal, commit, monitor, commerce-boundary, queue-reroute, policy, and internal-handoff evidence. Scenario behavior can be overridden with a JSON catalog file via `PARKPULSE_AHP_SCENARIO_CATALOG=/path/to/catalog.json`.
 
 Reusable negotiation primitives:
 

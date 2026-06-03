@@ -332,8 +332,8 @@ export function useCommandCenter() {
     setIsLiveFeedHealthLoading(true);
     try {
       const [healthResponse, ledgerResponse] = await Promise.all([
-        fetchParkPulseApi("/api/park/live-feed-health?limit=500", { headers: { "x-parkpulse-role": "ops_team" }, timeoutMs: 12000 }),
-        fetchParkPulseApi("/api/park/review-training-ledger?limit=80", { headers: { "x-parkpulse-role": "ops_team" }, timeoutMs: 12000 }),
+        fetchParkPulseApi("/api/park/live-feed-health?limit=500", { headers: { "x-parkpulse-role": "ops_team" }, timeoutMs: longRunningRequestTimeoutMs }),
+        fetchParkPulseApi("/api/park/review-training-ledger?limit=80", { headers: { "x-parkpulse-role": "ops_team" }, timeoutMs: longRunningRequestTimeoutMs }),
       ]);
       setLiveFeedHealth((await healthResponse.json()) as LiveFeedHealth);
       setReviewTrainingLedger((await ledgerResponse.json()) as ReviewTrainingLedger);
@@ -353,7 +353,7 @@ export function useCommandCenter() {
 
   const refreshLiveAgentsSmoke = useCallback(async () => {
     try {
-      const response = await fetchParkPulseApi("/api/park/live-agents-smoke/latest", { timeoutMs: 5000 });
+      const response = await fetchParkPulseApi("/api/park/live-agents-smoke/latest", { timeoutMs: longRunningRequestTimeoutMs });
       setLiveAgentsSmoke((await response.json()) as LiveAgentsSmokeReport);
     } catch (error) {
       setLiveAgentsSmoke({
@@ -468,10 +468,23 @@ export function useCommandCenter() {
   );
 
   useEffect(() => {
-    void refreshIntegrationStatus();
-    void refreshActualTraining();
-    void refreshLiveFeedHealth();
-    void refreshLiveAgentsSmoke();
+    let cancelled = false;
+
+    const refreshInitialCommandCenterState = async () => {
+      await refreshIntegrationStatus();
+      if (cancelled) return;
+      await refreshLiveFeedHealth();
+      if (cancelled) return;
+      void refreshActualTraining();
+      window.setTimeout(() => {
+        if (!cancelled) void refreshLiveAgentsSmoke();
+      }, 500);
+    };
+
+    void refreshInitialCommandCenterState();
+    return () => {
+      cancelled = true;
+    };
   }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshLiveFeedHealth]);
 
   const runAgent = useCallback(async () => {
@@ -539,6 +552,46 @@ export function useCommandCenter() {
       setIsRunning(false);
     }
   }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveAgentsSmoke]);
+
+  const runLiveFeedAgent = useCallback(async () => {
+    setIsRunning(true);
+    setErrorMessage(null);
+    setStatusMessage("Running live-feed case: current feed evidence, department proposals, judge checks, and tool-use trace.");
+    try {
+      const response = await fetchParkPulseApi("/api/park/live-feed-agent-run", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
+        body: JSON.stringify({
+          refresh_stale: true,
+          execute: false,
+          min_ready_feeds: 4,
+          require_persisted_events: true,
+        }),
+        timeoutMs: longRunningRequestTimeoutMs,
+      });
+      const payload = (await response.json()) as RunPayload;
+      const telemetry = normalizeRunTelemetry(payload);
+      if (telemetry.status === "blocked") {
+        setRunTelemetry(telemetry);
+        setErrorMessage(telemetry.readiness_issues?.[0] ?? "Live-feed case is blocked until feed evidence is ready.");
+        setStatusMessage(null);
+        await refreshLiveFeedHealth();
+        return;
+      }
+      setRunTelemetry(telemetry);
+      setStatusMessage("Live-feed case complete. Review feed evidence, department reasoning, and tool-use clarity.");
+      await park.refreshParkState();
+      await refreshLiveFeedHealth();
+      void refreshIntegrationStatus();
+      void refreshActualTraining();
+      void refreshLiveAgentsSmoke();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Unable to run the live-feed agent case.");
+      setStatusMessage(null);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [park, refreshActualTraining, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshLiveFeedHealth]);
 
   const executeSelectedAction = useCallback(async () => {
     setIsDispatching(true);
@@ -608,6 +661,7 @@ export function useCommandCenter() {
     ...park,
     runAgent,
     runDepartmentNegotiationDemo,
+    runLiveFeedAgent,
     executeSelectedAction,
     acknowledgeDispatch,
     runTelemetry,

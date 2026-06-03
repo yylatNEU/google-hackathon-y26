@@ -96,32 +96,38 @@ export function StaffTrainingAnalyticsPanel() {
     setIsLoading(true);
     setError("");
     try {
-      const [analyticsResponse, policyResponse, readinessResponse] = await Promise.all([
-        fetchParkPulseApi("/api/park/staff-training/analytics?limit=160", {
-          headers: { "x-parkpulse-role": "ops_team" },
-          timeoutMs: staffTrainingRequestTimeoutMs,
-        }),
-        fetchParkPulseApi("/api/park/staff-training/policy-pack", {
-          headers: { "x-parkpulse-role": "ops_team" },
-          timeoutMs: staffTrainingRequestTimeoutMs,
-        }),
-        fetchParkPulseApi("/api/park/staff-training/readiness?limit=160", {
-          headers: { "x-parkpulse-role": "ops_team" },
-          timeoutMs: staffTrainingRequestTimeoutMs,
-        }),
-      ]);
+      const analyticsResponse = await fetchParkPulseApi("/api/park/staff-training/analytics?limit=160", {
+        headers: { "x-parkpulse-role": "ops_team" },
+        timeoutMs: staffTrainingRequestTimeoutMs,
+      });
+      const policyResponse = await fetchParkPulseApi("/api/park/staff-training/policy-pack", {
+        headers: { "x-parkpulse-role": "ops_team" },
+        timeoutMs: staffTrainingRequestTimeoutMs,
+      });
+      const readinessResponse = await fetchParkPulseApi("/api/park/staff-training/readiness?limit=160", {
+        headers: { "x-parkpulse-role": "ops_team" },
+        timeoutMs: staffTrainingRequestTimeoutMs,
+      });
       setAnalytics((await analyticsResponse.json()) as TrainingAnalytics);
       setPolicyPack((await policyResponse.json()) as TrainingPolicyPack);
       setReadiness((await readinessResponse.json()) as TrainingReadiness);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Unable to read staff training analytics.");
+      const message = nextError instanceof Error ? nextError.message : "Unable to read staff training analytics.";
+      setError(
+        /ParkPulse API did not respond/i.test(message)
+          ? "Training analytics are still warming. Retry from this panel if metrics stay empty."
+          : message,
+      );
     } finally {
       setIsLoading(false);
     }
   }
 
   useEffect(() => {
-    void refresh();
+    const timeoutId = window.setTimeout(() => {
+      void refresh();
+    }, 800);
+    return () => window.clearTimeout(timeoutId);
   }, []);
 
   return (

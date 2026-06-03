@@ -15,11 +15,23 @@ import org.springframework.web.bind.annotation.RestController;
 public class ParkPulseMigrationController {
     private final PlatformStoreService platformStoreService;
     private final RoleAuthService roleAuthService;
+    private final RoleContractService roleContractService;
+    private final AuthorizationAuditService authorizationAuditService;
+    private final ReliabilityDiagnosticsService reliabilityDiagnosticsService;
     private final Instant startedAt = Instant.now();
 
-    public ParkPulseMigrationController(PlatformStoreService platformStoreService, RoleAuthService roleAuthService) {
+    public ParkPulseMigrationController(
+        PlatformStoreService platformStoreService,
+        RoleAuthService roleAuthService,
+        RoleContractService roleContractService,
+        AuthorizationAuditService authorizationAuditService,
+        ReliabilityDiagnosticsService reliabilityDiagnosticsService
+    ) {
         this.platformStoreService = platformStoreService;
         this.roleAuthService = roleAuthService;
+        this.roleContractService = roleContractService;
+        this.authorizationAuditService = authorizationAuditService;
+        this.reliabilityDiagnosticsService = reliabilityDiagnosticsService;
     }
 
     @GetMapping(value = {"/", "/healthz"}, produces = MediaType.APPLICATION_JSON_VALUE)
@@ -75,6 +87,53 @@ public class ParkPulseMigrationController {
         return platformStoreService.safeMigrate(actor);
     }
 
+    @GetMapping(value = "/api/park/auth/dev-session", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> getDevRoleSession(HttpServletRequest request) {
+        return roleAuthService.issueDevSession(request.getParameter("role"), request.getParameter("subject"));
+    }
+
+    @PostMapping(value = "/api/park/auth/dev-session", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> postDevRoleSession(@RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> payload = body == null ? Map.of() : body;
+        return roleAuthService.issueDevSession(
+            stringOrNull(payload.get("role")),
+            stringOrNull(payload.get("subject"))
+        );
+    }
+
+    @GetMapping(value = "/api/park/auth/status", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> authStatus(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_identity_status");
+        Map<String, Object> payload = orderedMap();
+        payload.putAll(roleContractService.identityReadiness());
+        payload.put("auth_contract", "Protected endpoints require a signed role session by default; role headers are ignored unless signed-token enforcement is explicitly disabled.");
+        return payload;
+    }
+
+    @GetMapping(value = "/api/park/role-access-contracts", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> roleAccessContracts(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_role_contracts");
+        return roleContractService.roleAccessContracts(request.getParameter("role"));
+    }
+
+    @GetMapping(value = "/api/park/reliability", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> reliability(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_reliability_status");
+        return reliabilityDiagnosticsService.reliabilityStatus();
+    }
+
+    @GetMapping(value = "/api/park/latency-diagnostics", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> latencyDiagnostics(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_ops_evidence");
+        return reliabilityDiagnosticsService.latencyDiagnostics("true".equalsIgnoreCase(request.getParameter("refresh")));
+    }
+
+    @GetMapping(value = "/api/park/authorization-audit", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> authorizationAudit(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_platform_status");
+        return authorizationAuditService.status();
+    }
+
     @GetMapping(value = "/api/park/migration/java-spring/status", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> javaSpringMigrationStatus(HttpServletRequest request) {
         roleAuthService.requireCapability(request, "read_platform_status");
@@ -83,5 +142,9 @@ public class ParkPulseMigrationController {
 
     private static LinkedHashMap<String, Object> orderedMap() {
         return new LinkedHashMap<>();
+    }
+
+    private static String stringOrNull(Object value) {
+        return value == null ? null : String.valueOf(value);
     }
 }

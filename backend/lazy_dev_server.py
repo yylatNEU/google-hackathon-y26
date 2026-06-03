@@ -286,6 +286,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             return False
         from agent_handshake import (
             agent_contract,
+            agent_handshake_scenario_catalog,
             agent_trust_registry_status,
             capability_handshake,
             certification_issuer_metadata,
@@ -311,6 +312,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             register_agent_onboarding,
             revoke_agent_certification_credential,
             rotate_agent_certification_key,
+            run_agent_handshake_scenario_evaluations,
             upsert_agent_trust_partner,
             verify_agent_certification_credential,
         )
@@ -318,6 +320,12 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
         try:
             if self.command == "GET" and path == "/api/park/agent-contract":
                 self._send_direct_json(200, agent_contract())
+                return True
+            if self.command == "GET" and path == "/api/park/agent-handshake/scenarios":
+                self._send_direct_json(200, agent_handshake_scenario_catalog())
+                return True
+            if self.command in {"GET", "POST"} and path == "/api/park/agent-handshake/scenario-eval":
+                self._send_direct_json(200, run_agent_handshake_scenario_evaluations(payload))
                 return True
             if self.command == "POST" and path == "/api/park/delegation-token":
                 self._send_direct_json(200, issue_delegation_token(payload))
@@ -411,7 +419,8 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                     self._send_direct_json(200, evaluate_policy_action(session_id, payload))
                     return True
                 if self.command == "POST" and action == "monitor":
-                    self._send_direct_json(200, monitor_session(session_id, str(payload.get("event") or "live")))
+                    event = str(payload.get("event") or "live")
+                    self._send_direct_json(200, monitor_session(session_id, {**payload, "event": event}))
                     return True
                 if self.command == "POST" and action == "escalate":
                     self._send_direct_json(200, escalate_session(session_id, payload))

@@ -51,6 +51,190 @@ DEFAULT_DELEGATION_SCOPES = sorted(CLIENT_ALLOWED_TO_SHARE | CLIENT_ALLOWED_TO_R
 CERTIFICATION_REQUIRED_CASES = ["identity_trust", "capability_scope", "commerce_payment_probe", "queue_reroute"]
 COMMERCE_ACTIONS = {"payment", "auto_purchase", "refund_acceptance", "accept_refund_without_user", "compensation_offer", "compensation_settlement"}
 
+BUILT_IN_PROTOCOL_SCENARIOS: dict[str, dict[str, Any]] = {
+    "visit_planning": {
+        "id": "visit_planning",
+        "mode": "Visit planning",
+        "client_intent": "Best 3-hour family plan with low waits, peanut-safe food, and low walking.",
+        "park_offer": "Lazy River, Arcade, allergy-safe Pizza Garden, Parade Zone.",
+        "negotiation": "Client agent raises walking distance; Park agent trades wait savings for a tighter route.",
+        "handoffs": ["queue_agent", "food_agent", "guest_experience_agent"],
+        "allowed": ["route_change", "wait_alert", "food_recommendation"],
+        "blocked": ["auto_purchase", "share_health_data"],
+        "outcome": "42 minutes saved with safe-food constraint preserved.",
+        "run": {
+            "goal": "maximize_family_satisfaction",
+            "constraints": {"children": 2, "avoid_wait_over_minutes": 35, "avoid_thrill_rides": True, "food_allergy": "peanut", "scenario_mode": "visit_planning"},
+            "counter_request": "reduce walking distance",
+            "priority_change": {"walking_distance": "highest", "wait_time": "medium"},
+            "monitor_event": "live_family_visit",
+            "commerce_action": "payment",
+            "commerce_reason": "Visit planning payment boundary probe.",
+            "queue_reason": "Avoid current congestion and long waits.",
+            "planner": "live_state",
+        },
+    },
+    "incident_response": {
+        "id": "incident_response",
+        "mode": "Incident response",
+        "client_intent": "Keep the family experience intact after Wave Pool enters safety delay.",
+        "park_offer": "Indoor Surf Simulator plus priority Lazy River return window.",
+        "negotiation": "Client agent declines food credit and asks for time-first alternative.",
+        "handoffs": ["safety_agent", "queue_agent", "commerce_agent"],
+        "allowed": ["safety_notice", "priority_access", "route_change"],
+        "blocked": ["override_safety_delay", "refund_acceptance"],
+        "outcome": "Safety delay respected while experience is rerouted in real time.",
+        "proposal": {
+            "plan": ["Indoor Surf Simulator", "Covered Arcade recovery window", "Lazy River priority return", "Parade Zone calm reset"],
+            "walking": "0.8 miles",
+            "saved": "38 minutes",
+            "confidence": 0.84,
+            "rationale": "Wave Pool remains in safety delay, so the park agent shifts the family to indoor capacity and a time-first priority return instead of a credit-first resolution.",
+            "tradeoffs": ["Safety delay cannot be overridden.", "Food credit can be offered but not accepted without user approval.", "Priority access is allowed as a park-side reroute benefit."],
+            "evidence": {"source": "scenario_static_plan", "scenario_mode": "incident_response", "incident": "Wave Pool safety delay"},
+        },
+        "monitoring": {
+            "event": "Wave Pool has a safety delay.",
+            "park_agent_offer": "Indoor Surf Simulator plus optional $5 food credit.",
+            "client_agent_counter": "My user values time more than credit. Any priority queue alternative?",
+            "park_agent_revision": "Priority access to Lazy River in 25 minutes.",
+            "accepted_resolution": "Accepted. Notify user with time-first reroute.",
+            "policy_gate": {"safety_delay": "cannot_override", "food_credit": "user_approval_required_before_acceptance", "priority_access": "agent_allowed_with_notification"},
+            "state_evidence": {"source": "scenario_monitor", "scenario_mode": "incident_response"},
+        },
+        "run": {
+            "goal": "preserve_guest_experience_after_incident",
+            "constraints": {"incident": "Wave Pool safety delay", "prefer_time_over_credit": True, "children": 2, "avoid_wait_over_minutes": 30, "scenario_mode": "incident_response"},
+            "counter_request": "prefer priority access over food credit",
+            "priority_change": {"time_saved": "highest", "compensation_value": "low"},
+            "monitor_event": "wave_pool_safety_delay",
+            "commerce_action": "compensation_settlement",
+            "commerce_reason": "Incident response settlement boundary probe.",
+            "queue_reason": "Find a time-first reroute while safety delay remains active.",
+            "planner": "incident_response",
+        },
+    },
+    "accessibility_support": {
+        "id": "accessibility_support",
+        "mode": "Accessibility support",
+        "client_intent": "Minimize walking and avoid sensory overload while keeping kid-friendly stops.",
+        "park_offer": "Covered route, quiet dining window, parade viewing zone with lower crowd density.",
+        "negotiation": "Client agent asks to prioritize rest points over wait-time savings.",
+        "handoffs": ["guest_experience_agent", "queue_agent", "food_agent"],
+        "allowed": ["accessibility_needs", "low_walking_route", "restaurant_timing"],
+        "blocked": ["medical_escalation", "health_data_sharing"],
+        "outcome": "Plan adapts to accessibility constraints without exposing health data.",
+        "proposal": {
+            "plan": ["Covered Gate path", "Quiet Arcade window", "Pizza Garden allergy-safe counter", "Low-crowd Parade viewing zone"],
+            "walking": "0.7 miles",
+            "high_walking": "0.5 miles",
+            "saved": "24 minutes",
+            "confidence": 0.81,
+            "rationale": "The route optimizes for low walking, covered paths, and lower crowd density rather than maximum wait-time savings.",
+            "tradeoffs": ["Walking and crowd density outrank raw wait savings.", "Allergy-safe food remains constrained to public menu data.", "Health data and medical escalation remain approval gated."],
+            "evidence": {"source": "scenario_static_plan", "scenario_mode": "accessibility_support", "accessibility": "low_walking_sensory_safe"},
+        },
+        "monitoring": {
+            "event": "Accessibility route check found rising crowd density near Water Zone.",
+            "park_agent_offer": "Move to covered path, quiet Arcade window, and low-crowd parade viewing.",
+            "park_agent_revision": "Reduce walking by 0.4 miles and avoid two crowd spikes.",
+            "accepted_resolution": "Accepted. Notify user with accessibility-safe route.",
+            "policy_gate": {"route_change": "agent_allowed", "health_data_sharing": "blocked", "medical_escalation": "user_approval_required"},
+            "state_evidence": {"source": "scenario_monitor", "scenario_mode": "accessibility_support", "crowd_density": "rising"},
+        },
+        "run": {
+            "goal": "minimize_walking_and_sensory_load",
+            "constraints": {"low_walking": True, "sensory_safe": True, "covered_route": True, "children": 2, "food_allergy": "peanut", "scenario_mode": "accessibility_support"},
+            "counter_request": "prioritize rest points over maximum wait savings",
+            "priority_change": {"walking_distance": "highest", "crowd_density": "highest", "wait_time": "medium"},
+            "monitor_event": "accessibility_route_check",
+            "commerce_action": "payment",
+            "commerce_reason": "Accessibility support payment boundary probe.",
+            "queue_reason": "Prefer lower walking and crowd density over absolute wait savings.",
+            "planner": "accessibility_support",
+        },
+    },
+    "commerce_resolution": {
+        "id": "commerce_resolution",
+        "mode": "Commerce resolution",
+        "client_intent": "Resolve a closed attraction without wasting guest time.",
+        "park_offer": "$5 food credit or priority return to Lazy River.",
+        "negotiation": "Client agent values time more than compensation and selects priority access.",
+        "handoffs": ["commerce_agent", "queue_agent", "guest_experience_agent"],
+        "allowed": ["compensation_offer", "priority_access", "notify_user"],
+        "blocked": ["payment", "refund_acceptance", "compensation_settlement"],
+        "outcome": "Offer is proposed, but financial settlement remains user-approved.",
+        "proposal": {
+            "plan": ["Closed attraction acknowledgement", "Lazy River priority alternative", "Parade Zone anchor", "Food credit presented only as optional offer"],
+            "walking": "0.9 miles",
+            "saved": "35 minutes",
+            "confidence": 0.8,
+            "rationale": "The client agent values time over credit, so ParkPulse proposes priority access while keeping refund or compensation settlement behind user approval.",
+            "tradeoffs": ["Compensation can be proposed by the park.", "Refund or settlement acceptance is blocked without the user.", "Queue alternative resolves the experience without payment authority."],
+            "evidence": {"source": "scenario_static_plan", "scenario_mode": "commerce_resolution", "closed_attraction": "Wave Pool"},
+        },
+        "monitoring": {
+            "event": "Wave Pool closure generated a compensation offer.",
+            "park_agent_offer": "$5 food credit or priority Lazy River return.",
+            "client_agent_counter": "My user values time more than credit.",
+            "park_agent_revision": "Priority return accepted as recommendation; refund settlement remains blocked.",
+            "accepted_resolution": "Notify user with time-first alternative and unresolved settlement gate.",
+            "policy_gate": {"compensation_offer": "agent_allowed_to_present", "refund_acceptance": "blocked_without_user", "priority_access": "agent_allowed_with_notification"},
+            "state_evidence": {"source": "scenario_monitor", "scenario_mode": "commerce_resolution", "offer": "food_credit_or_priority_return"},
+        },
+        "run": {
+            "goal": "resolve_closed_attraction_without_wasting_time",
+            "constraints": {"closed_attraction": "Wave Pool", "prefer_time_over_credit": True, "accept_offer_without_user": False, "scenario_mode": "commerce_resolution"},
+            "counter_request": "decline food credit and request priority queue alternative",
+            "priority_change": {"time_saved": "highest", "credit_value": "low"},
+            "monitor_event": "attraction_closure_compensation_offer",
+            "commerce_action": "refund_acceptance",
+            "commerce_reason": "Commerce resolution refund acceptance boundary probe.",
+            "queue_reason": "Convert compensation discussion into a priority-access reroute.",
+            "planner": "commerce_resolution",
+        },
+    },
+    "group_coordination": {
+        "id": "group_coordination",
+        "mode": "Group coordination",
+        "client_intent": "Coordinate three family agents with different wait, thrill, and food preferences.",
+        "park_offer": "Shared anchor stops plus optional split-path windows.",
+        "negotiation": "Agents align on common parade time and negotiate separate ride branches.",
+        "handoffs": ["queue_agent", "food_agent", "guest_experience_agent"],
+        "allowed": ["shared_route_plan", "group_wait_alert", "split_itinerary"],
+        "blocked": ["cross_guest_data_sharing", "identity_sensitive_action"],
+        "outcome": "Multiple personal agents converge on one bounded group plan.",
+        "proposal": {
+            "plan": ["Shared Gate meetup", "Split path: Arcade or Lazy River", "Pizza Garden common window", "Parade Zone shared anchor"],
+            "walking": "1.0 miles",
+            "saved": "29 minutes",
+            "confidence": 0.76,
+            "rationale": "Multiple personal agents converge on shared anchor stops while allowing split-path branches without cross-guest data sharing.",
+            "tradeoffs": ["Shared anchor times are optimized over individual maximum preference.", "Split branches keep each agent inside its own permission envelope.", "Identity-sensitive cross-guest data sharing is blocked."],
+            "evidence": {"source": "scenario_static_plan", "scenario_mode": "group_coordination", "agents": 3},
+        },
+        "monitoring": {
+            "event": "Three family agents need a shared route update.",
+            "park_agent_offer": "Shared Parade Zone anchor with optional split path branches.",
+            "park_agent_revision": "Hold common food window and allow Arcade/Lazy River branch choice.",
+            "accepted_resolution": "Accepted. Notify each agent only within its own delegation scope.",
+            "policy_gate": {"shared_route_plan": "agent_allowed", "cross_guest_data_sharing": "blocked", "identity_sensitive_action": "user_approval_required"},
+            "state_evidence": {"source": "scenario_monitor", "scenario_mode": "group_coordination", "agents": 3},
+        },
+        "run": {
+            "goal": "coordinate_multiple_family_agents",
+            "constraints": {"agents": 3, "shared_anchor": "Parade Zone", "split_paths_allowed": True, "avoid_cross_guest_data_sharing": True, "scenario_mode": "group_coordination"},
+            "counter_request": "keep one shared anchor stop and split ride branches",
+            "priority_change": {"shared_time": "highest", "individual_preferences": "medium"},
+            "monitor_event": "multi_agent_group_coordination",
+            "commerce_action": "payment",
+            "commerce_reason": "Group coordination payment boundary probe.",
+            "queue_reason": "Coordinate shared route anchors with optional split-path windows.",
+            "planner": "group_coordination",
+        },
+    },
+}
+
 PARK_CAPABILITIES = [
     "dynamic_itinerary",
     "queue_prediction",
@@ -821,9 +1005,14 @@ def _commerce_agent_evaluate(session: dict[str, Any], payload: dict[str, Any], d
 
 def _queue_agent_reroute(session: dict[str, Any], payload: dict[str, Any], delegation_proof: dict[str, Any], park_state: dict[str, Any] | None, source: str) -> dict[str, Any]:
     walking_priority = str(payload.get("walking_priority") or payload.get("walkingPriority") or "highest")
-    proposal = _plan_for(session, walking_priority="highest" if walking_priority == "highest" else "medium", park_state=park_state)
+    mode = _scenario_mode_for_session(session, payload)
+    proposal = _plan_for(session, walking_priority="highest" if walking_priority == "highest" else "medium", park_state=park_state, payload=payload)
     proposal["proposal_id"] = f"{proposal['proposal_id']}_queue"
-    proposal["rationale"] = "Queue Agent reroute based on live waits, downtime risk, walking cost, and delegated family constraints."
+    proposal["rationale"] = (
+        f"Queue Agent reroute for {mode.replace('_', ' ')} based on selected scenario constraints, delegated route scope, and live wait tradeoffs."
+        if mode != "visit_planning"
+        else "Queue Agent reroute based on live waits, downtime risk, walking cost, and delegated family constraints."
+    )
     proposal["queue_agent_decision"] = {
         "status": "recommended",
         "authority": INTERNAL_AGENTS["queue_agent"]["authority"],
@@ -950,12 +1139,60 @@ def _record_monitoring_handoffs(session: dict[str, Any], monitoring: dict[str, A
     evidence = _as_dict(monitoring.get("state_evidence"))
     if "safety_delay" in policy_gate or "safety_notice" in policy_gate or evidence.get("weather") or evidence.get("alert"):
         _record_internal_handoff(session, "safety_agent", "monitor incident or weather signal", evidence or {"event": monitoring.get("event")}, "recommended", str(monitoring.get("park_agent_offer") or "Issue safety-aware update."), source)
-    if "route_change" in policy_gate or "priority_access" in policy_gate or evidence.get("ride"):
+    if "route_change" in policy_gate or "priority_access" in policy_gate or "shared_route_plan" in policy_gate or evidence.get("ride"):
         _record_internal_handoff(session, "queue_agent", "find reroute or wait reduction", evidence or {"event": monitoring.get("event")}, "recommended", str(monitoring.get("park_agent_revision") or monitoring.get("accepted_resolution") or "Reroute guest flow."), source)
-    if "food_recommendation" in policy_gate or evidence.get("food"):
+    if "food_recommendation" in policy_gate or "food_credit" in policy_gate or evidence.get("food"):
         _record_internal_handoff(session, "food_agent", "adjust food timing", evidence or {"event": monitoring.get("event")}, "recommended", str(monitoring.get("park_agent_offer") or "Move food stop."), source)
-    if "payment" in policy_gate or "compensation_settlement" in policy_gate:
+    if any(key in policy_gate for key in ("payment", "compensation_settlement", "compensation_offer", "refund_acceptance", "food_credit")):
         _record_internal_handoff(session, "commerce_agent", "check commerce boundary", {"policy_gate": policy_gate}, "requires_user_approval", "Offer may be presented; settlement or payment is gated.", source)
+
+
+def _scenario_mode_from_payload(payload: dict[str, Any] | None) -> str:
+    payload = payload or {}
+    return str(payload.get("scenario_mode") or payload.get("scenarioMode") or "").strip()
+
+
+def _scenario_mode_for_session(session: dict[str, Any], fallback_payload: dict[str, Any] | None = None) -> str:
+    direct = _scenario_mode_from_payload(fallback_payload)
+    if direct:
+        return direct
+    intent = _as_dict(_as_dict(session.get("intent")).get("client_agent"))
+    constraints = _as_dict(intent.get("constraints"))
+    mode = str(intent.get("scenario_mode") or intent.get("scenarioMode") or constraints.get("scenario_mode") or constraints.get("scenarioMode") or "").strip()
+    return mode or "visit_planning"
+
+
+def _scenario_static_plan(mode: str, walking_priority: str, avoid_wait: int) -> dict[str, Any] | None:
+    high_walking = walking_priority == "highest"
+    scenario = _as_dict(_protocol_scenario(mode).get("proposal"))
+    if not scenario:
+        return None
+    plan = _as_list(scenario["plan"])
+    walking = scenario.get("high_walking") if high_walking and scenario.get("high_walking") else scenario.get("walking")
+    expected_handoffs = _as_list(_protocol_scenario(mode).get("handoffs"))
+    return {
+        "proposal_id": f"plan_{mode}_{hashlib.sha1(':'.join(str(item) for item in plan).encode('utf-8')).hexdigest()[:6]}",
+        "plan": plan,
+        "expected_wait_saved": scenario["saved"],
+        "estimated_walking_distance": walking,
+        "confidence": scenario["confidence"],
+        "rationale": scenario["rationale"],
+        "tradeoffs": [f"No planned stop exceeds the delegated {avoid_wait}-minute wait threshold.", *_as_list(scenario["tradeoffs"])],
+        "requires_user_approval": False,
+        "scenario_mode": mode,
+        "expected_internal_handoffs": expected_handoffs,
+        "state_evidence": scenario["evidence"],
+    }
+
+
+def _scenario_monitoring(mode: str, event: str) -> dict[str, Any] | None:
+    monitoring = copy.deepcopy(_as_dict(_protocol_scenario(mode).get("monitoring")))
+    if not monitoring:
+        return None
+    state_evidence = _as_dict(monitoring.get("state_evidence"))
+    state_evidence["event"] = event
+    monitoring["state_evidence"] = state_evidence
+    return monitoring
 
 
 def _get_session(session_id: str) -> dict[str, Any]:
@@ -1312,6 +1549,57 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _protocol_scenario_catalog_raw() -> dict[str, dict[str, Any]]:
+    catalog = copy.deepcopy(BUILT_IN_PROTOCOL_SCENARIOS)
+    config_path = os.getenv("PARKPULSE_AHP_SCENARIO_CATALOG", "").strip()
+    if not config_path:
+        return catalog
+    try:
+        configured = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        configured_scenarios = configured.get("scenarios") if isinstance(configured, dict) else configured
+        if isinstance(configured_scenarios, list):
+            configured_scenarios = {str(item.get("id") or ""): item for item in configured_scenarios if isinstance(item, dict) and item.get("id")}
+        if isinstance(configured_scenarios, dict):
+            for scenario_id, scenario in configured_scenarios.items():
+                if not isinstance(scenario, dict):
+                    continue
+                scenario_id = str(scenario.get("id") or scenario_id)
+                base = catalog.get(scenario_id, {"id": scenario_id})
+                catalog[scenario_id] = _deep_merge_dict(base, scenario)
+    except Exception:
+        return catalog
+    return catalog
+
+
+def _protocol_scenario(mode: str) -> dict[str, Any]:
+    return _as_dict(_protocol_scenario_catalog_raw().get(mode))
+
+
+def agent_handshake_scenario_catalog() -> dict[str, Any]:
+    config_path = os.getenv("PARKPULSE_AHP_SCENARIO_CATALOG", "").strip()
+    catalog = _protocol_scenario_catalog_raw()
+    return {
+        "status": "ready",
+        "mode": "agent_handshake_scenario_catalog",
+        "protocol_version": "parkpulse-ahp-0.1",
+        "config_source": config_path or "built_in",
+        "configurable": True,
+        "override_env": "PARKPULSE_AHP_SCENARIO_CATALOG",
+        "scenario_count": len(catalog),
+        "scenarios": [copy.deepcopy(catalog[key]) for key in sorted(catalog.keys())],
+    }
+
+
 def _num(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -1562,6 +1850,8 @@ def agent_contract() -> dict[str, Any]:
             "POST /api/park/agent-trust/keys/rotate",
             "GET /api/park/agent-trust/revocations",
             "GET /api/park/agent-trust/audit",
+            "GET /api/park/agent-handshake/scenarios",
+            "POST /api/park/agent-handshake/scenario-eval",
             "POST /api/park/handshake",
             "POST /api/park/session/{session_id}/capabilities",
             "POST /api/park/session/{session_id}/intent",
@@ -1578,6 +1868,7 @@ def agent_contract() -> dict[str, Any]:
         "state_machine": ["initiated", "verified", "scoped", "intent_accepted", "negotiating", "committed", "monitoring", "escalated", "closed"],
         "can_offer": PARK_CAPABILITIES,
         "requires_approval_for": PARK_APPROVAL_GATES,
+        "scenario_catalog": agent_handshake_scenario_catalog(),
         "trust_issuer": certification_issuer_metadata(),
         "internal_agents": [
             {"agent_id": agent_id, **copy.deepcopy(agent)}
@@ -1778,12 +2069,16 @@ def intent_handshake(session_id: str, payload: dict[str, Any]) -> dict[str, Any]
     return {"status": "intent_accepted", "session": _copy_session(session), "next": "proposal"}
 
 
-def _plan_for(session: dict[str, Any], walking_priority: str = "medium", park_state: dict[str, Any] | None = None) -> dict[str, Any]:
+def _plan_for(session: dict[str, Any], walking_priority: str = "medium", park_state: dict[str, Any] | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     if isinstance(park_state, dict) and park_state:
         return _live_plan_for(session, park_state, walking_priority)
     intent = session.get("intent", {}).get("client_agent", {}) if isinstance(session.get("intent"), dict) else {}
     constraints = intent.get("constraints", {}) if isinstance(intent.get("constraints"), dict) else {}
     avoid_wait = int(constraints.get("avoid_wait_over_minutes") or constraints.get("avoidWaitOverMinutes") or 35)
+    scenario_mode = _scenario_mode_for_session(session, payload)
+    scenario_plan = _scenario_static_plan(scenario_mode, walking_priority, avoid_wait)
+    if scenario_plan:
+        return scenario_plan
     if walking_priority == "highest":
         plan = ["Indoor Arcade", "Pizza Garden allergy-safe counter", "Parade Zone", "Lazy River priority return"]
         walking = "0.7 miles"
@@ -1809,14 +2104,15 @@ def _plan_for(session: dict[str, Any], walking_priority: str = "medium", park_st
             "Compensation, purchases, and medical actions remain user-approval gated.",
         ],
         "requires_user_approval": False,
-        "state_evidence": {"source": "static_fallback", "reason": "Live park state was not supplied to the handshake planner."},
+        "scenario_mode": "visit_planning",
+        "state_evidence": {"source": "static_fallback", "scenario_mode": "visit_planning", "reason": "Live park state was not supplied to the handshake planner."},
     }
 
 
 def propose_plan(session_id: str, payload: dict[str, Any] | None = None, park_state: dict[str, Any] | None = None) -> dict[str, Any]:
     session = _get_session(session_id)
     _enforce_delegation(session, payload or {}, "propose_plan", ["preferences", "route_plan"])
-    proposal = _plan_for(session, park_state=park_state)
+    proposal = _plan_for(session, park_state=park_state, payload=payload)
     session["proposal"] = proposal
     session["state"] = "negotiating"
     session["updated_at"] = _now_iso()
@@ -1833,10 +2129,15 @@ def counter_proposal(session_id: str, payload: dict[str, Any], park_state: dict[
     _enforce_delegation(session, payload, "counter_proposal", ["preferences", "route_plan"])
     priority_change = payload.get("priority_change") if isinstance(payload.get("priority_change"), dict) else {}
     walking_priority = str(priority_change.get("walking_distance") or priority_change.get("walkingDistance") or "medium")
-    revised = _plan_for(session, walking_priority="highest" if walking_priority == "highest" else "medium", park_state=park_state)
+    revised = _plan_for(session, walking_priority="highest" if walking_priority == "highest" else "medium", park_state=park_state, payload=payload)
     revised["proposal_id"] = f"{revised['proposal_id']}_r1"
     revised["countered_from"] = session.get("proposal", {}).get("proposal_id") if isinstance(session.get("proposal"), dict) else None
-    revised["rationale"] = "Revised after client-agent counter: walking distance is now the top optimization target."
+    mode = _scenario_mode_for_session(session, payload)
+    revised["rationale"] = (
+        f"Revised after client-agent counter for {mode.replace('_', ' ')}: the requested priority change is now the top optimization target."
+        if mode != "visit_planning"
+        else "Revised after client-agent counter: walking distance is now the top optimization target."
+    )
     session["proposal"] = revised
     session["state"] = "negotiating"
     session["updated_at"] = _now_iso()
@@ -1878,12 +2179,22 @@ def commit_plan(session_id: str, payload: dict[str, Any] | None = None) -> dict[
     return {"status": "committed", "session": _copy_session(session), "commitment": copy.deepcopy(commitment)}
 
 
-def monitor_session(session_id: str, event: str | None = None, park_state: dict[str, Any] | None = None) -> dict[str, Any]:
+def monitor_session(session_id: str, event: str | dict[str, Any] | None = None, park_state: dict[str, Any] | None = None) -> dict[str, Any]:
     session = _get_session(session_id)
-    _enforce_delegation(session, {"event": event}, "monitor_session", ["wait_time_alert", "safety_notice"])
-    event = event or "wave_pool_safety_delay"
-    live_monitoring = _live_monitoring_event(park_state) if isinstance(park_state, dict) and park_state and event in {"live", "wave_pool_safety_delay"} else None
-    if live_monitoring:
+    payload = event if isinstance(event, dict) else {"event": event}
+    _enforce_delegation(session, payload, "monitor_session", ["wait_time_alert", "safety_notice"])
+    event_name = str(payload.get("event") or "wave_pool_safety_delay")
+    mode = _scenario_mode_for_session(session, payload)
+    event = event_name
+    scenario_monitoring = _scenario_monitoring(mode, event) if mode != "visit_planning" else None
+    live_monitoring = (
+        _live_monitoring_event(park_state)
+        if not scenario_monitoring and isinstance(park_state, dict) and park_state and event in {"live", "wave_pool_safety_delay"}
+        else None
+    )
+    if scenario_monitoring:
+        monitoring = scenario_monitoring
+    elif live_monitoring:
         monitoring = live_monitoring
     elif event == "wave_pool_safety_delay":
         monitoring = {
@@ -1910,11 +2221,19 @@ def monitor_session(session_id: str, event: str | None = None, park_state: dict[
     session["updated_at"] = _now_iso()
     _record_monitoring_handoffs(session, monitoring, "monitor")
     session["conversation"].append(_event("park_agent", "monitoring_event", monitoring))
-    if event in {"wave_pool_safety_delay", "live"}:
-        for action in ("safety_notice", "compensation_offer", "compensation_settlement", "priority_access"):
-            _record_policy_decision(session, _policy_decision(session, action, {"source": "monitor", "event": event}))
+    policy_actions = {
+        "food_credit": "compensation_offer",
+        "shared_route_plan": "route_change",
+        "safety_delay": "safety_notice",
+    }
+    policy_gate = _as_dict(monitoring.get("policy_gate"))
+    scenario_actions = {policy_actions.get(action, action) for action in policy_gate}
+    known_actions = {"compensation_offer", "compensation_settlement", "food_recommendation", "health_data_sharing", "identity_sensitive_action", "medical_escalation", "priority_access", "refund_acceptance", "route_change", "safety_notice"}
+    if event in {"wave_pool_safety_delay", "live"} or mode != "visit_planning":
+        for action in sorted((scenario_actions & known_actions) | {"safety_notice"}):
+            _record_policy_decision(session, _policy_decision(session, action, {"source": "monitor", "event": event, "scenario_mode": mode}))
     else:
-        _record_policy_decision(session, _policy_decision(session, "safety_notice", {"source": "monitor", "event": event}))
+        _record_policy_decision(session, _policy_decision(session, "safety_notice", {"source": "monitor", "event": event, "scenario_mode": mode}))
     _persist_session(session)
     return {"status": "monitoring", "session": _copy_session(session), "monitoring": copy.deepcopy(monitoring)}
 
@@ -1953,6 +2272,161 @@ def close_session(session_id: str, payload: dict[str, Any] | None = None) -> dic
 
 def get_session(session_id: str) -> dict[str, Any]:
     return {"status": "found", "session": _copy_session(_get_session(session_id))}
+
+
+def _scenario_eval_token() -> dict[str, Any]:
+    return issue_delegation_token(
+        {
+            "subject": "guest_user_123",
+            "agent_id": "john_personal_agent",
+            "scope": DEFAULT_DELEGATION_SCOPES,
+            "cannot_do": ["auto_purchase", "share_health_data", "accept_refund_without_user"],
+            "ttl_seconds": 600,
+        }
+    )["token"]
+
+
+def _scenario_eval_capability_payload(token: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "can_share": ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference"],
+        "can_receive": ["route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer"],
+        "cannot_do": ["auto_purchase", "share_health_data", "accept_refund_without_user"],
+        "delegation_token": token,
+    }
+
+
+def _evaluate_protocol_scenario(mode: str) -> dict[str, Any]:
+    scenario = _protocol_scenario(mode)
+    if not scenario:
+        raise KeyError(f"Unknown protocol scenario: {mode}")
+    run = _as_dict(scenario.get("run"))
+    token = _scenario_eval_token()
+    identity = identity_handshake(
+        {
+            "agent_id": "john_personal_agent",
+            "represents": "guest_user_123",
+            "proof": "signed_token",
+            "requested_session": f"scenario_eval_{mode}_{time.time_ns()}",
+            "delegation_token": token,
+        }
+    )
+    session_id = identity["session"]["session_id"]
+    capability = capability_handshake(session_id, _scenario_eval_capability_payload(token))
+    intent_handshake(
+        session_id,
+        {
+            "goal": run.get("goal") or "evaluate_protocol_scenario",
+            "time_window": "3_hours",
+            "constraints": run.get("constraints") or {"scenario_mode": mode},
+            "scenario_mode": mode,
+            "delegation_token": token,
+        },
+    )
+    proposed = propose_plan(session_id, {"planner": run.get("planner") or mode, "horizon": "3_hours", "scenario_mode": mode, "delegation_token": token})
+    revised = counter_proposal(
+        session_id,
+        {
+            "counter_request": run.get("counter_request") or "scenario eval counterproposal",
+            "priority_change": run.get("priority_change") or {},
+            "scenario_mode": mode,
+            "delegation_token": token,
+        },
+    )
+    commit_plan(session_id, {"accepted": True, "notify_user": True, "delegation_token": token})
+    monitored = monitor_session(session_id, {"event": run.get("monitor_event") or "live", "scenario_mode": mode, "delegation_token": token})
+    commerce = commerce_agent_evaluate(
+        session_id,
+        {
+            "action": run.get("commerce_action") or "payment",
+            "amount": 42,
+            "reason": run.get("commerce_reason") or f"{mode} commerce boundary probe.",
+            "scenario_mode": mode,
+            "delegation_token": token,
+        },
+    )
+    queue = queue_agent_reroute(
+        session_id,
+        {
+            "walking_priority": _as_dict(run.get("priority_change")).get("walking_distance") or "highest",
+            "reason": run.get("queue_reason") or f"{mode} queue reroute probe.",
+            "scenario_mode": mode,
+            "delegation_token": token,
+        },
+    )
+    session = _get_session(session_id)
+    expected_handoffs = set(_as_list(scenario.get("handoffs")))
+    observed_handoffs = {str(handoff.get("internal_agent_id") or "") for handoff in _as_list(session.get("internal_handoffs")) if isinstance(handoff, dict)}
+    proposal = _as_dict(proposed.get("proposal"))
+    revised_proposal = _as_dict(revised.get("proposal"))
+    monitoring = _as_dict(monitored.get("monitoring"))
+    monitoring_evidence = _as_dict(monitoring.get("state_evidence"))
+    commerce_decision = _as_dict(commerce.get("decision"))
+    queue_proposal = _as_dict(queue.get("proposal"))
+    commerce_action = str(run.get("commerce_action") or "payment")
+    criteria = {
+        "identity_trust_passed": _as_dict(identity.get("case_evaluation")).get("status") == "passed",
+        "capability_scope_passed": _as_dict(capability.get("case_evaluation")).get("status") == "passed",
+        "proposal_mode_matches": proposal.get("scenario_mode") == mode,
+        "proposal_has_plan": bool(_as_list(proposal.get("plan"))),
+        "counter_mode_matches": revised_proposal.get("scenario_mode") == mode,
+        "monitor_recorded": bool(monitoring.get("event")),
+        "monitor_mode_matches": mode == "visit_planning" or monitoring_evidence.get("scenario_mode") == mode,
+        "commerce_boundary_checked": commerce_decision.get("action") == commerce_action and commerce_decision.get("allowed") is False,
+        "queue_recommended": queue.get("status") == "recommended" and queue_proposal.get("scenario_mode") == mode,
+        "expected_handoffs_seen": expected_handoffs.issubset(observed_handoffs),
+    }
+    evaluation = _record_case_evaluation(
+        session,
+        _case_evaluation(
+            f"protocol_scenario_{mode}",
+            criteria,
+            {
+                "scenario_mode": mode,
+                "session_id": session_id,
+                "proposal_id": proposal.get("proposal_id"),
+                "queue_proposal_id": queue_proposal.get("proposal_id"),
+                "monitor_event": monitoring.get("event"),
+                "commerce_action": commerce_action,
+                "observed_handoffs": sorted(observed_handoffs),
+                "expected_handoffs": sorted(expected_handoffs),
+            },
+        ),
+        persist=True,
+    )
+    return {
+        "scenario_id": mode,
+        "mode": scenario.get("mode") or mode,
+        "session_id": session_id,
+        "status": evaluation["status"],
+        "score": evaluation["score"],
+        "evaluation": copy.deepcopy(evaluation),
+        "proposal": copy.deepcopy(proposal),
+        "monitoring": copy.deepcopy(monitoring),
+        "commerce_decision": copy.deepcopy(commerce_decision),
+        "queue_proposal": copy.deepcopy(queue_proposal),
+        "expected_handoffs": sorted(expected_handoffs),
+        "observed_handoffs": sorted(observed_handoffs),
+    }
+
+
+def run_agent_handshake_scenario_evaluations(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    catalog = _protocol_scenario_catalog_raw()
+    requested = _as_list(payload.get("scenarios") or payload.get("scenario_ids") or payload.get("scenarioIds"))
+    scenario_ids = [str(item) for item in requested if str(item) in catalog] if requested else sorted(catalog.keys())
+    results = [_evaluate_protocol_scenario(scenario_id) for scenario_id in scenario_ids]
+    passed = [result for result in results if result["status"] == "passed"]
+    average = sum(float(result["score"]) for result in results) / len(results) if results else 0
+    return {
+        "status": "passed" if results and len(passed) == len(results) else "failed",
+        "mode": "agent_handshake_protocol_scenario_eval",
+        "protocol_version": "parkpulse-ahp-0.1",
+        "scenario_count": len(results),
+        "passed": len(passed),
+        "average_score": average,
+        "catalog_source": os.getenv("PARKPULSE_AHP_SCENARIO_CATALOG", "").strip() or "built_in",
+        "results": results,
+    }
 
 
 def demo_handshake(park_state: dict[str, Any] | None = None) -> dict[str, Any]:

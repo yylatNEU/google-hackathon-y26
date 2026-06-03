@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchParkPulseApi } from "@/lib/api";
+import { fetchParkPulseApi, longRunningRequestTimeoutMs } from "@/lib/api";
 import type { GuestFlow, ParkOps, ParkPath, ParkRide, ParkState, ParkZone } from "@/types/park";
 
 type ApiRecord = Record<string, unknown>;
@@ -162,7 +162,7 @@ export function useParkPulseState() {
   const refreshParkState = useCallback(async () => {
     setIsRefreshing(true);
     try {
-      const res = await fetchParkPulseApi("/api/park/state-lite");
+      const res = await fetchParkPulseApi("/api/park/state-lite", { timeoutMs: longRunningRequestTimeoutMs });
       const data = await res.json();
       applyParkState(data);
       return data;

@@ -360,9 +360,9 @@ async def build_proactive_operator_brief(
 ) -> dict[str, Any]:
     props = get_gemini_agent_properties()
     try:
-        provider_timeout = float(os.getenv("PARKPULSE_PROACTIVE_GEMINI_TIMEOUT_SECONDS", "8"))
+        provider_timeout = float(os.getenv("PARKPULSE_PROACTIVE_GEMINI_TIMEOUT_SECONDS", "4"))
     except ValueError:
-        provider_timeout = 8.0
+        provider_timeout = 4.0
     if not props.ready:
         return _fallback_brief(proactive, "deterministic_fallback", props.readiness_issues)
 

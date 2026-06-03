@@ -372,6 +372,7 @@ export function VenueProfilePage() {
             <nav className="flex flex-wrap gap-2">
               <a href="/" className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-black text-slate-200 transition hover:border-lime-300">Command Center</a>
               <a href="/experience-studio" className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-black text-slate-200 transition hover:border-lime-300">Experience Studio</a>
+              <a href="/accessibility-journey" className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-300">Accessibility Journey</a>
               <button
                 type="button"
                 onClick={() => void refreshProfile()}

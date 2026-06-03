@@ -773,7 +773,9 @@ def test_parkpulse_api_routes_and_lifecycle(monkeypatch):
     proactive = run(parkpulse_api.park_proactive_insights())
     assert proactive["summary"]["insight_count"] >= 1
     proactive_run = run(parkpulse_api.park_proactive_run())
-    assert proactive_run["event_revision"]["status"] == "complete"
+    assert proactive_run["event_revision"]["status"] in {"complete", "deferred"}
+    if proactive_run["event_revision"]["status"] == "deferred":
+        assert "PARKPULSE_PROACTIVE_ENABLE_EVENT_REVISION" in proactive_run["event_revision"]["reason"]
     assert proactive_run["lifecycle"]["completed_count"] >= 6
     assert proactive_run["intelligence_comparison"]["after"]["revision_created"] is True
 

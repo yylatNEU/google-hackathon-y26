@@ -9,7 +9,6 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -131,9 +130,28 @@ public class PlatformStoreService {
         Map<String, Object> result = orderedMap();
         result.put("status", "active");
         result.put("mode", "continuous_java_spring_migration");
-        result.put("current_slice", "platform_store_authority");
-        result.put("spring_owned_routes", List.of("/", "/healthz", "/readyz", "/api/park/platform-store", "/api/park/platform-store/migrate"));
-        result.put("python_owned_routes", "agent orchestration, Gemini/Vertex, Mongo memory, live feeds, delivery, simulation");
+        result.put("current_slice", "spring_backend_gateway_plus_platform_store_authority");
+        result.put("spring_owned_routes", List.of(
+            "/",
+            "/healthz",
+            "/readyz",
+            "/api/park/auth/dev-session",
+            "/api/park/auth/status",
+            "/api/park/role-access-contracts",
+            "/api/park/reliability",
+            "/api/park/latency-diagnostics",
+            "/api/park/authorization-audit",
+            "/api/park/delivery/contract",
+            "/api/park/delivery/outbox",
+            "/api/park/delivery/acknowledge",
+            "/api/park/delivery/approval-decision",
+            "/api/park/platform-store",
+            "/api/park/platform-store/migrate",
+            "/api/park/migration/java-spring/status",
+            "/api/park/backend-gateway/status"
+        ));
+        result.put("spring_gateway_routes", List.of("/api/**", "/readyz/deep"));
+        result.put("python_owned_routes", "agent orchestration, Gemini/Vertex, Mongo memory, live feeds, delivery, simulation are reached through the Spring gateway until each route group is migrated natively.");
         result.put("handoff_rule", "Move one bounded route group at a time only after parity tests and SQLite authority checks pass.");
         result.put("rollback", "Stop the Spring service and keep Python serving the same SQLite-backed authority.");
         result.put("platform_store", compactStatus());

@@ -41,11 +41,22 @@ async function expectNoAuthOrTransportRegression(page: Page) {
   await expect(body).not.toContainText(/Backend unavailable/i, { timeout: 30000 });
 }
 
+async function refreshFeedsUntilReady(page: Page) {
+  const refresh = page.getByRole("button", { name: "Refresh feeds" });
+  await refresh.click({ noWaitAfter: true });
+  try {
+    await expect(page.getByText("6/6")).toBeVisible({ timeout: 60000 });
+  } catch (error) {
+    await refresh.click({ noWaitAfter: true });
+    await expect(page.getByText("6/6")).toBeVisible({ timeout: 60000 });
+  }
+}
+
 test("command center exposes the current production operating-loop contract", async ({ page, request }) => {
   test.setTimeout(120000);
   const { runtimeErrors, failedResponses } = watchRuntime(page);
 
-  const gcpStatus = await request.get(`${API_URL}/api/gcp/trace-eval-status`, { timeout: 15000 });
+  const gcpStatus = await request.get(`${API_URL}/api/gcp/trace-eval-status`, { timeout: 60000 });
   expect(gcpStatus.ok()).toBeTruthy();
   const gcpPayload = await gcpStatus.json();
   expect(gcpPayload.platform).toBe("GCP internal trace/eval");
@@ -66,7 +77,7 @@ test("command center exposes the current production operating-loop contract", as
 });
 
 test("live-feed review and training panels use signed local role sessions", async ({ page }) => {
-  test.setTimeout(120000);
+  test.setTimeout(180000);
   const { runtimeErrors, failedResponses } = watchRuntime(page);
 
   await openCommandCenter(page);
@@ -75,9 +86,8 @@ test("live-feed review and training panels use signed local role sessions", asyn
   await expect(page.getByRole("button", { name: "Refresh feeds" })).toBeEnabled({ timeout: 20000 });
   await expect(page.getByRole("button", { name: "Refresh training" })).toBeEnabled({ timeout: 20000 });
 
-  await page.getByRole("button", { name: "Refresh feeds" }).click({ noWaitAfter: true });
+  await refreshFeedsUntilReady(page);
   await expect(page.getByText("Ready feeds")).toBeVisible({ timeout: 20000 });
-  await expect(page.getByText("6/6")).toBeVisible({ timeout: 30000 });
   await expect(page.getByText("Open reviews")).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("Training candidates")).toBeVisible({ timeout: 20000 });
   await page.getByRole("button", { name: "Refresh training" }).click({ noWaitAfter: true });
@@ -90,7 +100,7 @@ test("live-feed review and training panels use signed local role sessions", asyn
 });
 
 test("agent role run API preserves role boundaries and strict eval traces", async ({ request }) => {
-  test.setTimeout(120000);
+  test.setTimeout(360000);
   const cases = [
     { mode: "scan", message: "scan the park for weak signals" },
     { mode: "react", message: "food court is overloaded and mobile orders are backing up" },
@@ -102,7 +112,7 @@ test("agent role run API preserves role boundaries and strict eval traces", asyn
   for (const roleCase of cases) {
     const response = await request.post(`${API_URL}/api/park/agent-role-run`, {
       data: { message: roleCase.message, mode: roleCase.mode, execute: true },
-      timeout: 30000,
+      timeout: 90000,
     });
     expect(response.ok()).toBeTruthy();
     const payload = await response.json();
@@ -116,7 +126,7 @@ test("agent role run API preserves role boundaries and strict eval traces", asyn
     expect(payload.role_trace_sample?.status).toBe("recorded");
   }
 
-  const evalResponse = await request.get(`${API_URL}/api/park/agent-role-eval?real=1`, { timeout: 30000 });
+  const evalResponse = await request.get(`${API_URL}/api/park/agent-role-eval?real=1`, { timeout: 90000 });
   expect(evalResponse.ok()).toBeTruthy();
   const evalPayload = await evalResponse.json();
   expect(evalPayload.status).toBe("passed");

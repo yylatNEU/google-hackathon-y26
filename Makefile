@@ -4,7 +4,7 @@ PERF_CONCURRENCY ?= 50
 PERF_TARGET_P95_MS ?= 250
 TEST_PYTHON ?= /tmp/parkpulse_backend_venv/bin/python
 
-.PHONY: qa qa-quick qa-backend qa-frontend agent-role-eval-gate live-agents-smoke test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-deploy-private gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private
+.PHONY: qa qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate live-agents-smoke live-feed-agent-smoke test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-deploy-private gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private
 
 qa:
 	python3 scripts/qa_agent.py
@@ -18,11 +18,17 @@ qa-backend:
 qa-frontend:
 	python3 scripts/qa_agent.py --frontend-only
 
+qa-spring:
+	cd spring-backend && ./mvnw test
+
 agent-role-eval-gate:
 	python3 scripts/agent_role_eval_gate.py
 
 live-agents-smoke:
 	PYTHONPATH=backend python3 scripts/live_all_agents_smoke.py
+
+live-feed-agent-smoke:
+	PYTHONPATH=backend python3 scripts/live_feed_agent_smoke.py
 
 test-unit:
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=backend $(TEST_PYTHON) -m pytest backend/test_policy_engine.py backend/test_policy_loader.py -q

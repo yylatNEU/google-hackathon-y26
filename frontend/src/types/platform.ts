@@ -1662,6 +1662,7 @@ export type RoleOutcomeAttribution = {
 
 export type RunTelemetry = {
   status?: string;
+  readiness_issues?: string[];
   scenario_key?: string;
   run_receipt?: {
     id?: string;
@@ -1743,6 +1744,52 @@ export type RunTelemetry = {
   outcome?: ClosedLoopOutcome;
   analytics?: AnalyticsTelemetry;
   memory?: { mode?: string; connected?: boolean; retrieved_playbooks?: string[]; retrieved_incidents?: string[]; retrieved_learnings?: unknown[] };
+  live_feed_case?: {
+    mode?: string;
+    source?: string;
+    uses_seed_data?: boolean;
+    scripted_case?: boolean;
+    persisted_event_count?: number;
+    ready_feed_count?: number;
+    required_feed_count?: number;
+    missing_or_weak_feed_count?: number;
+    open_review_count?: number;
+    lead_source?: string;
+    lead_signal_type?: string;
+    operator_message?: string;
+    evidence?: Array<{
+      source?: string;
+      label?: string;
+      owner?: string;
+      status?: string;
+      signal_type?: string;
+      confidence?: number;
+      age_seconds?: number | null;
+      event_id?: string;
+      summary?: string;
+    }>;
+    feed_issues?: Array<{ source?: string; status?: string; readiness_issues?: string[] }>;
+    reasoning?: string[];
+  };
+  tool_use_clarity?: {
+    mode?: string;
+    proposal_count?: number;
+    tools?: Array<{
+      department?: string;
+      agent?: string;
+      tool?: string;
+      intent?: string;
+      evidence?: unknown[];
+      risk_level?: string;
+      policy_check?: string;
+      expected_outcome?: string;
+      rollback?: string;
+      executor_agent?: string;
+      executor_status?: string;
+    }>;
+    trace_steps?: Array<{ step?: string; phase?: string; evidence?: string; artifact_id?: string }>;
+    judge?: { eval_status?: string; policy_gate?: string; trace_contract_present?: boolean };
+  };
   unified_receipt?: UnifiedOperatingReceipt;
   revision?: OptimizationCandidate & { revision_reason?: string };
 };

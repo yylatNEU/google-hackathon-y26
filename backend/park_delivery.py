@@ -212,7 +212,7 @@ def _record(channel: str, target_system: str, endpoint: str, payload: dict[str, 
             _env_bool("PARKPULSE_ENABLE_LIVE_GCP_DELIVERY_ADAPTER")
             or _env_bool("ENABLE_PARKPULSE_FIRESTORE")
             or _env_bool("ENABLE_PARKPULSE_DATAFLOW")
-            or _env_bool("PARKPULSE_ENABLE_FIRESTORE_MIRROR", True)
+            or _env_bool("PARKPULSE_ENABLE_FIRESTORE_MIRROR", False)
         ):
             from gcp_operations import enrich_delivery_dispatch
 
@@ -439,7 +439,7 @@ def record_approval_decision(
                 _env_bool("PARKPULSE_ENABLE_LIVE_GCP_DELIVERY_ADAPTER")
                 or _env_bool("ENABLE_PARKPULSE_FIRESTORE")
                 or _env_bool("ENABLE_PARKPULSE_DATAFLOW")
-                or _env_bool("PARKPULSE_ENABLE_FIRESTORE_MIRROR", True)
+                or _env_bool("PARKPULSE_ENABLE_FIRESTORE_MIRROR", False)
             ):
                 from gcp_operations import publish_approval_decision
 
