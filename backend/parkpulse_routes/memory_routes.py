@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+
+from park_role_access import authorize_role_action, normalize_role, verify_role_session
 
 
 class MemoryOpsRepairRequest(BaseModel):
@@ -41,6 +44,65 @@ class CacheAccuracyReplayRequest(BaseModel):
     scenario_key: str | None = Field(default=None)
     agent_role: str = Field(default="react_agent")
     persist: bool = Field(default=True)
+
+
+def _truthy(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _role_auth_secret() -> str:
+    return os.getenv("PARKPULSE_ROLE_AUTH_SECRET") or "parkpulse-local-dev-secret-change-before-production"
+
+
+def _signed_role_required_for_mutation() -> bool:
+    return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION"), False)
+
+
+def _extract_role_token(request: Request) -> str | None:
+    explicit = request.headers.get("x-parkpulse-role-token")
+    if explicit:
+        return explicit
+    authorization = request.headers.get("authorization") or ""
+    if authorization.lower().startswith("bearer "):
+        return authorization.split(" ", 1)[1].strip()
+    return None
+
+
+def _role_identity_from_request(request: Request) -> dict[str, Any]:
+    token_status = verify_role_session(_extract_role_token(request), _role_auth_secret())
+    if token_status.get("authenticated"):
+        return {
+            "status": "authenticated",
+            "authenticated": True,
+            "auth_method": "signed_role_session",
+            "role": token_status.get("role"),
+            "subject": token_status.get("subject"),
+            "token_status": token_status.get("status"),
+        }
+    role_header = request.headers.get("x-parkpulse-role") or request.headers.get("x-role")
+    return {
+        "status": "unauthenticated",
+        "authenticated": False,
+        "auth_method": "role_header_fallback",
+        "role": normalize_role(role_header, default="ops_team"),
+        "token_status": token_status.get("status"),
+        "reason": token_status.get("reason"),
+    }
+
+
+def _enforce_role_capability(request: Request, capability: str, resource: str) -> dict[str, Any]:
+    identity = _role_identity_from_request(request)
+    authorization = authorize_role_action(str(identity.get("role") or "ops_team"), capability, resource=resource, default_role="ops_team")
+    authorization["identity"] = identity
+    if _signed_role_required_for_mutation() and not identity.get("authenticated"):
+        authorization["allowed"] = False
+        authorization["status"] = "blocked"
+        authorization["reason"] = "Signed ParkPulse role session is required for this mutation."
+    if authorization.get("allowed") is not True:
+        raise HTTPException(status_code=403, detail={"status": "blocked", "mode": "role_access_enforcement", "authorization": authorization})
+    return authorization
 
 
 def register_memory_routes(app: Any, deps: dict[str, Any]) -> None:
@@ -110,12 +172,16 @@ def register_memory_routes(app: Any, deps: dict[str, Any]) -> None:
         return run_memory_ops_repair(request.query, request.collections, request.limit)
 
     @router.post("/api/park/autodream/run")
-    async def park_autodream_run(request: AutoDreamRunRequest):
+    async def park_autodream_run(http_request: Request, request: AutoDreamRunRequest):
         from park_autodream_agent import run_autodream
 
+        role_authorization = _enforce_role_capability(http_request, "start_offline_training", "autodream.run")
         await current_state()
         deps["clear_hot_endpoint_cache"]()
-        return run_autodream(request.scenario_key, max_cases=request.max_cases, persist=request.persist)
+        result = run_autodream(request.scenario_key, max_cases=request.max_cases, persist=request.persist)
+        if isinstance(result, dict):
+            result.setdefault("role_authorization", role_authorization)
+        return result
 
     @router.get("/api/park/autodream/status")
     async def park_autodream_status(limit: int = 8):
@@ -124,18 +190,26 @@ def register_memory_routes(app: Any, deps: dict[str, Any]) -> None:
         return autodream_status(limit)
 
     @router.post("/api/park/autodream/promote")
-    async def park_autodream_promote(request: AutoDreamPromoteRequest):
+    async def park_autodream_promote(http_request: Request, request: AutoDreamPromoteRequest):
         from park_autodream_agent import promote_autodream_learning
 
+        role_authorization = _enforce_role_capability(http_request, "promote_learning", "autodream.promote")
         deps["clear_hot_endpoint_cache"]()
-        return promote_autodream_learning(request.dream_learning_id, request.target, request.reviewer)
+        result = promote_autodream_learning(request.dream_learning_id, request.target, request.reviewer)
+        if isinstance(result, dict):
+            result.setdefault("role_authorization", role_authorization)
+        return result
 
     @router.post("/api/park/autodream/review")
-    async def park_autodream_review(request: AutoDreamReviewRequest):
+    async def park_autodream_review(http_request: Request, request: AutoDreamReviewRequest):
         from park_autodream_agent import review_autodream_learning
 
+        role_authorization = _enforce_role_capability(http_request, "review_learning", "autodream.review")
         deps["clear_hot_endpoint_cache"]()
-        return review_autodream_learning(request.dream_learning_id, request.review_status, request.reviewer, request.reason)
+        result = review_autodream_learning(request.dream_learning_id, request.review_status, request.reviewer, request.reason)
+        if isinstance(result, dict):
+            result.setdefault("role_authorization", role_authorization)
+        return result
 
     @router.post("/api/park/autodream/benchmark")
     async def park_autodream_benchmark(request: AutoDreamBenchmarkRequest):

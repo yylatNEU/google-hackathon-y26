@@ -385,6 +385,10 @@ def _dev_role_issuer_enabled() -> bool:
     return _truthy(os.getenv("PARKPULSE_ENABLE_DEV_ROLE_ISSUER"), False)
 
 
+def _signed_role_required_for_mutation() -> bool:
+    return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION"), False)
+
+
 def _headers_from_scope(scope: dict[str, Any]) -> dict[str, str]:
     headers: dict[str, str] = {}
     for key, value in scope.get("headers") or []:
@@ -459,6 +463,34 @@ def _role_authorization_payload(payload: dict[str, Any], scope: dict[str, Any] |
         "loads_bigquery_per_tick": False,
         "llm_control_authority": False,
     }
+
+
+def _role_gate_payload(scope: dict[str, Any], capability: str, resource: str, detail: str = "") -> dict[str, Any]:
+    payload = _role_authorization_payload({"capability": capability, "resource": resource, "detail": detail}, scope)
+    authorization = payload.get("authorization") if isinstance(payload.get("authorization"), dict) else {}
+    identity = authorization.get("identity") if isinstance(authorization.get("identity"), dict) else {}
+    if _signed_role_required_for_mutation() and not identity.get("authenticated"):
+        authorization["allowed"] = False
+        authorization["status"] = "blocked"
+        authorization["reason"] = "Signed ParkPulse role session is required for this mutation."
+        payload["status"] = "blocked"
+    return payload
+
+
+async def _send_blocked_role(send, gate: dict[str, Any]) -> None:
+    await _send_json(
+        send,
+        403,
+        {
+            "status": "blocked",
+            "mode": "role_access_enforcement",
+            "authorization": gate.get("authorization", {}),
+            "readiness_issues": [(gate.get("authorization") or {}).get("reason") or "Role is not allowed for this capability."],
+            "uses_seed_data": False,
+            "loads_bigquery_per_tick": False,
+            "llm_control_authority": False,
+        },
+    )
 
 
 def _sse(event: str, payload: dict[str, Any]) -> bytes:
@@ -7223,6 +7255,10 @@ async def app(scope, receive, send):
         actor = str(request_payload.get("actor") or "operator")
         choice = str(request_payload.get("choice") or "acknowledged")
         channel = request_payload.get("channel")
+        gate = _role_gate_payload(scope, "acknowledge_dispatch", "delivery.acknowledge")
+        if (gate.get("authorization") or {}).get("allowed") is not True:
+            await _send_blocked_role(send, gate)
+            return
         try:
             from park_delivery import acknowledge_dispatch, delivery_summary, latest_dispatches, response_summary
             from park_simulation import park_simulation
@@ -7237,6 +7273,7 @@ async def app(scope, receive, send):
                 {
                     "status": dispatch.get("status", "acknowledged"),
                     "dispatch": dispatch,
+                    "role_authorization": gate.get("authorization", {}),
                     "application": application,
                     "state": state,
                     "delivery": {
@@ -7266,7 +7303,13 @@ async def app(scope, receive, send):
         message = str(payload.get("message") or payload.get("command") or "Custom park operating request.").strip()
         mode = str(payload.get("mode") or "auto")
         execute = str(payload.get("execute", "true")).lower() not in {"0", "false", "no"}
+        gate = _role_gate_payload(scope, "dispatch_live_action" if execute else "use_ops_chat", "operator_command")
+        if (gate.get("authorization") or {}).get("allowed") is not True:
+            await _send_blocked_role(send, gate)
+            return
         response_payload = await _build_operator_payload_with_runtime(message, mode, execute, "post_full_runtime")
+        if isinstance(response_payload, dict):
+            response_payload["role_authorization"] = gate.get("authorization", {})
         await _send_json(send, 200, response_payload)
         return
 
@@ -7401,7 +7444,13 @@ async def app(scope, receive, send):
 
     if method == "POST" and path == "/api/park/review-training-ledger":
         request_payload = await _read_json_body(receive)
+        gate = _role_gate_payload(scope, "record_supervised_label", "review_training_ledger")
+        if (gate.get("authorization") or {}).get("allowed") is not True:
+            await _send_blocked_role(send, gate)
+            return
         result = record_review_decision(request_payload)
+        if isinstance(result, dict):
+            result["role_authorization"] = gate.get("authorization", {})
         _invalidate_live_feed_health_cache()
         await _send_json(send, 200, result)
         return
@@ -7417,23 +7466,37 @@ async def app(scope, receive, send):
 
     if method == "POST" and path == "/api/park/review-label-pipeline/decision":
         request_payload = await _read_json_body(receive)
+        gate = _role_gate_payload(scope, "record_supervised_label", "review_label_pipeline.decision")
+        if (gate.get("authorization") or {}).get("allowed") is not True:
+            await _send_blocked_role(send, gate)
+            return
         try:
             from review_label_pipeline import record_review_label_decision
 
-            await _send_json(send, 200, record_review_label_decision(request_payload))
+            result = record_review_label_decision(request_payload)
+            if isinstance(result, dict):
+                result["role_authorization"] = gate.get("authorization", {})
+            await _send_json(send, 200, result)
         except Exception as error:
             await _send_json(send, 200, {"status": "error", "mode": "review_label_decision", "readiness_issues": [str(error)[:240]]})
         return
 
     if method == "POST" and path == "/api/park/review-label-pipeline/auto-label":
         request_payload = await _read_json_body(receive)
+        gate = _role_gate_payload(scope, "record_supervised_label", "review_label_pipeline.auto_label")
+        if (gate.get("authorization") or {}).get("allowed") is not True:
+            await _send_blocked_role(send, gate)
+            return
         try:
             from review_label_pipeline import auto_label_recommended_candidates
 
             threshold = float(request_payload.get("confidence_threshold") or request_payload.get("confidenceThreshold") or 0.70)
             reviewer = str(request_payload.get("reviewer") or "parkpulse-auto-labeler")
             pipeline = await _review_label_pipeline_payload(limit=200)
-            await _send_json(send, 200, auto_label_recommended_candidates(pipeline, reviewer=reviewer, confidence_threshold=threshold))
+            result = auto_label_recommended_candidates(pipeline, reviewer=reviewer, confidence_threshold=threshold)
+            if isinstance(result, dict):
+                result["role_authorization"] = gate.get("authorization", {})
+            await _send_json(send, 200, result)
         except Exception as error:
             await _send_json(send, 200, {"status": "error", "mode": "review_label_auto_label", "readiness_issues": [str(error)[:240]]})
         return
@@ -7477,8 +7540,8 @@ async def app(scope, receive, send):
                 "mode": "role_identity_status",
                 "identity": _role_identity_from_scope(scope),
                 "dev_issuer_enabled": _dev_role_issuer_enabled(),
-                "signed_role_required": False,
-                "boundary": "Role identity is observable in this release. Enforcement is added feature-by-feature so command-center flows do not break silently.",
+                "signed_role_required": _signed_role_required_for_mutation(),
+                "boundary": "High-risk mutation routes enforce role capabilities. Signed role sessions can be required by enabling PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION.",
             },
         )
         return
@@ -7599,8 +7662,15 @@ async def app(scope, receive, send):
         return
 
     if method == "POST" and path == "/api/park/proactive-run":
+        gate = _role_gate_payload(scope, "dispatch_live_action", "proactive_run")
+        if (gate.get("authorization") or {}).get("allowed") is not True:
+            await _send_blocked_role(send, gate)
+            return
         result = await _build_proactive_payload_with_runtime("post_fast_path")
-        await _send_json(send, 200, _store_run_receipt(result, message="proactive-run", mode="proact", kind="proactive_run"))
+        response_payload = _store_run_receipt(result, message="proactive-run", mode="proact", kind="proactive_run")
+        if isinstance(response_payload, dict):
+            response_payload["role_authorization"] = gate.get("authorization", {})
+        await _send_json(send, 200, response_payload)
         return
 
     if method == "GET" and path.startswith("/api/park/evals/"):

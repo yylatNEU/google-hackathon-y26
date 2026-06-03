@@ -38,6 +38,9 @@ CAPABILITY_MATRIX = {
     "dispatch_live_action": {"ops_team"},
     "acknowledge_dispatch": {"onsite_worker", "ops_team"},
     "run_live_outcome_cycle": {"ops_team", "ml_ops_admin"},
+    "record_supervised_label": {"ml_ops_admin"},
+    "review_learning": {"ml_ops_admin"},
+    "promote_learning": {"ml_ops_admin"},
     "start_offline_training": {"ml_ops_admin"},
     "refresh_policy_snapshot": {"ops_team", "ml_ops_admin"},
 }

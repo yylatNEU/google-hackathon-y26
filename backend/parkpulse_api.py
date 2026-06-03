@@ -308,6 +308,10 @@ def _dev_role_issuer_enabled() -> bool:
     return _truthy(os.getenv("PARKPULSE_ENABLE_DEV_ROLE_ISSUER"), False)
 
 
+def _signed_role_required_for_mutation() -> bool:
+    return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION"), False)
+
+
 def _extract_role_token(request: Request) -> str | None:
     explicit = request.headers.get("x-parkpulse-role-token")
     if explicit:
@@ -366,6 +370,20 @@ def _role_authorization_payload(payload: dict[str, Any], request: Request | None
         "loads_bigquery_per_tick": False,
         "llm_control_authority": False,
     }
+
+
+def _enforce_role_capability(request: Request, capability: str, resource: str, detail: str = "") -> dict[str, Any]:
+    payload = _role_authorization_payload({"capability": capability, "resource": resource, "detail": detail}, request)
+    authorization = payload.get("authorization") if isinstance(payload.get("authorization"), dict) else {}
+    identity = authorization.get("identity") if isinstance(authorization.get("identity"), dict) else {}
+    if _signed_role_required_for_mutation() and not identity.get("authenticated"):
+        authorization["allowed"] = False
+        authorization["status"] = "blocked"
+        authorization["reason"] = "Signed ParkPulse role session is required for this mutation."
+        payload["status"] = "blocked"
+    if authorization.get("allowed") is not True:
+        raise HTTPException(status_code=403, detail=payload)
+    return payload
 
 
 _memory_sync_min_interval_seconds = max(0.1, _float_env("PARKPULSE_MEMORY_SYNC_MIN_INTERVAL_SECONDS", 3.0))
@@ -523,25 +541,38 @@ async def park_delivery_outbox(limit: int = 20):
     }
 
 
-async def park_delivery_guest_promotion(request: DeliveryRequest):
+async def park_delivery_guest_promotion(request: DeliveryRequest, http_request: Request | None = None):
+    role_authorization = _enforce_role_capability(http_request, "dispatch_live_action", "delivery.guest_promotion") if http_request is not None else None
     dispatch = send_guest_promotion(request.payload)
     clear_hot_endpoint_cache()
-    return {"status": dispatch["status"], "dispatch": dispatch}
+    response = {"status": dispatch["status"], "dispatch": dispatch}
+    if role_authorization:
+        response["role_authorization"] = role_authorization["authorization"]
+    return response
 
 
-async def park_delivery_worker_notification(request: DeliveryRequest):
+async def park_delivery_worker_notification(request: DeliveryRequest, http_request: Request | None = None):
+    role_authorization = _enforce_role_capability(http_request, "dispatch_live_action", "delivery.worker_notification") if http_request is not None else None
     dispatch = send_worker_notification(request.payload)
     clear_hot_endpoint_cache()
-    return {"status": dispatch["status"], "dispatch": dispatch}
+    response = {"status": dispatch["status"], "dispatch": dispatch}
+    if role_authorization:
+        response["role_authorization"] = role_authorization["authorization"]
+    return response
 
 
-async def park_delivery_equipment_command(request: DeliveryRequest):
+async def park_delivery_equipment_command(request: DeliveryRequest, http_request: Request | None = None):
+    role_authorization = _enforce_role_capability(http_request, "dispatch_live_action", "delivery.equipment_command") if http_request is not None else None
     dispatch = send_equipment_command(request.payload)
     clear_hot_endpoint_cache()
-    return {"status": dispatch["status"], "dispatch": dispatch}
+    response = {"status": dispatch["status"], "dispatch": dispatch}
+    if role_authorization:
+        response["role_authorization"] = role_authorization["authorization"]
+    return response
 
 
-async def park_delivery_acknowledge(request: DeliveryAckRequest):
+async def park_delivery_acknowledge(request: DeliveryAckRequest, http_request: Request | None = None):
+    role_authorization = _enforce_role_capability(http_request, "acknowledge_dispatch", "delivery.acknowledge") if http_request is not None else None
     dispatch = acknowledge_dispatch(
         request.dispatch_id,
         actor=request.actor,
@@ -553,7 +584,7 @@ async def park_delivery_acknowledge(request: DeliveryAckRequest):
     state = await park_simulation.get_state()
     await sync_park_state_safe(state)
     clear_hot_endpoint_cache()
-    return {
+    response = {
         "status": dispatch.get("status", "acknowledged"),
         "dispatch": dispatch,
         "application": application,
@@ -564,9 +595,13 @@ async def park_delivery_acknowledge(request: DeliveryAckRequest):
             "dispatches": latest,
         },
     }
+    if role_authorization:
+        response["role_authorization"] = role_authorization["authorization"]
+    return response
 
 
-async def park_delivery_approval_decision(request: DeliveryApprovalDecisionRequest):
+async def park_delivery_approval_decision(request: DeliveryApprovalDecisionRequest, http_request: Request | None = None):
+    role_authorization = _enforce_role_capability(http_request, "dispatch_live_action", "delivery.approval_decision") if http_request is not None else None
     dispatch = record_approval_decision(
         request.dispatch_id,
         actor=request.actor,
@@ -579,7 +614,7 @@ async def park_delivery_approval_decision(request: DeliveryApprovalDecisionReque
     state = await park_simulation.get_state()
     await sync_park_state_safe(state)
     clear_hot_endpoint_cache()
-    return {
+    response = {
         "status": dispatch.get("status"),
         "dispatch": dispatch,
         "approval": dispatch.get("approvalDecision", {}),
@@ -592,6 +627,9 @@ async def park_delivery_approval_decision(request: DeliveryApprovalDecisionReque
             "dispatches": latest,
         },
     }
+    if role_authorization:
+        response["role_authorization"] = role_authorization["authorization"]
+    return response
 
 
 class GcpParkEventRequest(BaseModel):
@@ -667,7 +705,9 @@ class CacheAccuracyReplayRequest(BaseModel):
     persist: bool = Field(default=True)
 
 
-async def park_autodream_run(request: AutoDreamRunRequest):
+async def park_autodream_run(request: AutoDreamRunRequest, http_request: Request | None = None):
+    if http_request is not None:
+        _enforce_role_capability(http_request, "start_offline_training", "autodream.run")
     state = await park_simulation.get_state()
     await sync_park_state_safe(state)
     clear_hot_endpoint_cache()
@@ -678,14 +718,22 @@ async def park_autodream_status(limit: int = 8):
     return autodream_status(limit)
 
 
-async def park_autodream_promote(request: AutoDreamPromoteRequest):
+async def park_autodream_promote(request: AutoDreamPromoteRequest, http_request: Request | None = None):
+    role_authorization = _enforce_role_capability(http_request, "promote_learning", "autodream.promote") if http_request is not None else None
     clear_hot_endpoint_cache()
-    return promote_autodream_learning(request.dream_learning_id, request.target, request.reviewer)
+    result = promote_autodream_learning(request.dream_learning_id, request.target, request.reviewer)
+    if isinstance(result, dict) and role_authorization:
+        result.setdefault("role_authorization", role_authorization["authorization"])
+    return result
 
 
-async def park_autodream_review(request: AutoDreamReviewRequest):
+async def park_autodream_review(request: AutoDreamReviewRequest, http_request: Request | None = None):
+    role_authorization = _enforce_role_capability(http_request, "review_learning", "autodream.review") if http_request is not None else None
     clear_hot_endpoint_cache()
-    return review_autodream_learning(request.dream_learning_id, request.review_status, request.reviewer, request.reason)
+    result = review_autodream_learning(request.dream_learning_id, request.review_status, request.reviewer, request.reason)
+    if isinstance(result, dict) and role_authorization:
+        result.setdefault("role_authorization", role_authorization["authorization"])
+    return result
 
 
 async def park_autodream_benchmark(request: AutoDreamBenchmarkRequest):
@@ -8163,12 +8211,14 @@ async def park_review_label_pipeline(limit: int = 40):
 
 
 @app.post("/api/park/review-label-pipeline/decision")
-async def park_review_label_pipeline_decision(payload: dict[str, Any]):
+async def park_review_label_pipeline_decision(request: Request, payload: dict[str, Any]):
+    _enforce_role_capability(request, "record_supervised_label", "review_label_pipeline.decision")
     return record_review_label_decision(payload)
 
 
 @app.post("/api/park/review-label-pipeline/auto-label")
-async def park_review_label_pipeline_auto_label(payload: dict[str, Any] | None = None):
+async def park_review_label_pipeline_auto_label(request: Request, payload: dict[str, Any] | None = None):
+    _enforce_role_capability(request, "record_supervised_label", "review_label_pipeline.auto_label")
     request_payload = payload or {}
     threshold = float(request_payload.get("confidence_threshold") or request_payload.get("confidenceThreshold") or 0.70)
     reviewer = str(request_payload.get("reviewer") or "parkpulse-auto-labeler")
@@ -8198,8 +8248,8 @@ async def park_role_auth_status(request: Request):
         "mode": "role_identity_status",
         "identity": _role_identity_from_request(request),
         "dev_issuer_enabled": _dev_role_issuer_enabled(),
-        "signed_role_required": False,
-        "boundary": "Role identity is observable in this release. Enforcement is added feature-by-feature so command-center flows do not break silently.",
+        "signed_role_required": _signed_role_required_for_mutation(),
+        "boundary": "High-risk mutation routes enforce role capabilities. Signed role sessions can be required by enabling PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION.",
     }
 
 

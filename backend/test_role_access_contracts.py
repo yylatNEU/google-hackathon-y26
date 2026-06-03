@@ -60,13 +60,17 @@ def test_authorize_role_action_blocks_cross_role_authority():
     admin_dispatch = authorize_role_action("ml_ops_admin", "dispatch_live_action", resource="park_action")
     ops_training = authorize_role_action("ops_team", "start_offline_training", resource="review_label_pipeline")
     admin_training = authorize_role_action("ml_ops_admin", "start_offline_training", resource="review_label_pipeline")
+    ops_label = authorize_role_action("ops_team", "record_supervised_label", resource="review_label_pipeline")
+    admin_label = authorize_role_action("ml_ops_admin", "record_supervised_label", resource="review_label_pipeline")
 
     assert customer_ops["allowed"] is False
     assert ops_dispatch["allowed"] is True
     assert admin_dispatch["allowed"] is False
     assert ops_training["allowed"] is False
     assert admin_training["allowed"] is True
-    assert all(row["llm_control_authority"] is False for row in [customer_ops, ops_dispatch, admin_dispatch, ops_training, admin_training])
+    assert ops_label["allowed"] is False
+    assert admin_label["allowed"] is True
+    assert all(row["llm_control_authority"] is False for row in [customer_ops, ops_dispatch, admin_dispatch, ops_training, admin_training, ops_label, admin_label])
 
 
 def test_role_access_contract_and_authorize_routes():
@@ -90,6 +94,39 @@ def test_role_access_contract_and_authorize_routes():
     assert blocked["status"] == "blocked"
     assert blocked["authorization"]["role"] == "customer"
     assert blocked["authorization"]["loads_bigquery_per_tick"] is False
+
+
+def test_lazy_mutation_routes_enforce_role_boundary(monkeypatch):
+    monkeypatch.setenv("PARKPULSE_REVIEW_LABEL_DECISION_LOG_PATH", "/tmp/parkpulse-role-test-label-decisions.jsonl")
+
+    status, dispatch = run(call_app("POST", "/api/park/operator-command", {"message": "dispatch crowd staff", "execute": True}, headers=signed_headers("customer")))
+    assert status == 403
+    assert dispatch["status"] == "blocked"
+    assert dispatch["authorization"]["capability"] == "dispatch_live_action"
+    assert dispatch["authorization"]["role"] == "customer"
+
+    status, ack = run(call_app("POST", "/api/park/delivery/acknowledge", {"dispatch_id": "dispatch-1"}, headers=signed_headers("customer")))
+    assert status == 403
+    assert ack["authorization"]["capability"] == "acknowledge_dispatch"
+
+    status, label = run(call_app("POST", "/api/park/review-label-pipeline/decision", {"candidate_id": "candidate-1", "decision": "reject_label"}, headers=signed_headers("ops_team")))
+    assert status == 403
+    assert label["authorization"]["capability"] == "record_supervised_label"
+
+    status, admin_label = run(call_app("POST", "/api/park/review-label-pipeline/decision", {"decision": "reject_label"}, headers=signed_headers("ml_ops_admin")))
+    assert status == 200
+    assert admin_label["status"] == "error"
+    assert admin_label["role_authorization"]["role"] == "ml_ops_admin"
+
+
+def test_signed_role_can_be_required_for_mutations(monkeypatch):
+    monkeypatch.setenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION", "true")
+    status, blocked = run(call_app("POST", "/api/park/operator-command", {"message": "dispatch crowd staff", "execute": True}, headers={"x-parkpulse-role": "ops_team"}))
+
+    assert status == 403
+    assert blocked["authorization"]["role"] == "ops_team"
+    assert blocked["authorization"]["identity"]["authenticated"] is False
+    assert "Signed ParkPulse role session is required" in blocked["authorization"]["reason"]
 
 
 def test_signed_role_session_status_and_dev_issuer_boundary(monkeypatch):

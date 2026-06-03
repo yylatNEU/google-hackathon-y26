@@ -206,6 +206,59 @@ export type RoleAccessContracts = {
   readiness_issues?: string[];
 };
 
+const fallbackRoleAccessContracts: RoleAccessContracts = {
+  status: "fallback",
+  mode: "role_access_contracts",
+  principle: "Rigid authority boundaries with role-specific surfaces.",
+  roles: [
+    {
+      id: "customer",
+      label: "Customer / Guest",
+      surface: "guest_assistance",
+      can_read: ["guest-facing guidance", "route and venue status", "safety notices"],
+      can_do: ["ask for help", "view reroute guidance", "submit guest note"],
+      cannot_do: ["dispatch worker", "approve action", "set reward or label"],
+      llm_contract: "Guest surfaces receive public guidance only, not internal control authority.",
+    },
+    {
+      id: "onsite_worker",
+      label: "Onsite Worker",
+      surface: "task_execution",
+      can_read: ["assigned task", "target zone", "priority"],
+      can_do: ["acknowledge task", "mark blocked", "mark done"],
+      cannot_do: ["override policy gate", "query BigQuery", "promote model"],
+      llm_contract: "Worker surfaces can act on assigned tasks but cannot create or approve live work.",
+    },
+    {
+      id: "ops_team",
+      label: "Ops Team",
+      surface: "command_center",
+      can_read: ["live park state", "candidate actions", "policy gate status"],
+      can_do: ["review action", "hold for human review", "acknowledge dispatch receipt"],
+      cannot_do: ["bypass policy gate", "set reward or labels from chat", "load BigQuery per tick"],
+      llm_contract: "Ops receives evidence, uncertainty, and next checks; policy and eval gates keep control authority bounded.",
+    },
+    {
+      id: "ml_ops_admin",
+      label: "ML / Ops Admin",
+      surface: "learning_governance",
+      can_read: ["training status", "promotion blockers", "BigQuery governed summary"],
+      can_do: ["start offline training job", "inspect promotion readiness", "review rollback evidence"],
+      cannot_do: ["dispatch live action", "run arbitrary SQL from chat", "promote deteriorating slice"],
+      llm_contract: "Learning authority stays governed outside chat and cannot dispatch live park actions.",
+    },
+  ],
+  role_count: 4,
+  global_boundaries: [
+    "No role can bypass policy gates.",
+    "Chat/LLM cannot dispatch, set rewards, write labels, promote models, roll back policies, or run arbitrary BigQuery SQL.",
+    "BigQuery is batch/offline evidence; it is not loaded every heartbeat tick.",
+  ],
+  uses_seed_data: false,
+  loads_bigquery_per_tick: false,
+  llm_control_authority: false,
+};
+
 export type LiveWeatherLoadResult = {
   status?: string;
   mode?: string;
@@ -425,13 +478,8 @@ export function useCommandCenter() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Role access contracts failed.";
       setRoleAccess({
-        status: "error",
-        mode: "role_access_contracts",
-        roles: [],
+        ...fallbackRoleAccessContracts,
         readiness_issues: [message],
-        uses_seed_data: false,
-        loads_bigquery_per_tick: false,
-        llm_control_authority: false,
       });
     } finally {
       setIsRoleAccessLoading(false);
