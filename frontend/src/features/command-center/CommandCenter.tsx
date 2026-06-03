@@ -6,6 +6,7 @@ import { EvalReceiptPanel } from "./EvalReceiptPanel";
 import { LiveFeedReviewPanel } from "./LiveFeedReviewPanel";
 import { ParkStateStrip } from "./ParkStateStrip";
 import { ProductLoopPanel } from "./ProductLoopPanel";
+import { StaffTrainingAnalyticsPanel } from "./StaffTrainingAnalyticsPanel";
 import { useCommandCenter } from "./useCommandCenter";
 
 export function CommandCenter() {
@@ -27,11 +28,20 @@ export function CommandCenter() {
               <a href="/human" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
                 Human view
               </a>
+              <a href="/staff-training" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-teal-100 transition hover:border-teal-300">
+                Staff trainer
+              </a>
               <a href="/monitor" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
                 Monitor
               </a>
               <a href="/executive" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
                 Executive
+              </a>
+              <a href="/venue-profile" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-300">
+                Venue Profile
+              </a>
+              <a href="/experience-studio" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-300">
+                Experience Studio
               </a>
               <a href="/labs" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-400 transition hover:border-amber-400 hover:text-amber-100">
                 Labs
@@ -77,6 +87,8 @@ export function CommandCenter() {
           onLoadOperatorSignal={() => void command.loadLiveOperatorSignalFeed()}
           onReviewDecision={(caseId, decision) => void command.recordReviewDecision(caseId, decision)}
         />
+
+        <StaffTrainingAnalyticsPanel />
 
         {(command.statusMessage || command.errorMessage || command.connectionError) && (
           <section className="rounded-lg border border-slate-800 bg-slate-950 p-3">

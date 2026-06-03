@@ -192,6 +192,66 @@ def wait_for_http(url: str, timeout_seconds: float = 30.0) -> bool:
     return False
 
 
+def http_json(
+    url: str,
+    method: str = "GET",
+    payload: dict | None = None,
+    headers: dict[str, str] | None = None,
+    timeout_seconds: float = 20.0,
+) -> dict:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request_headers = dict(headers or {})
+    if payload is not None:
+        request_headers.setdefault("content-type", "application/json")
+    request = urllib.request.Request(url, data=data, method=method, headers=request_headers)
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        return json.loads(response.read().decode("utf-8") or "{}")
+
+
+def warm_backend_for_e2e(backend_url: str) -> list[str]:
+    warnings: list[str] = []
+    for path in ("/api/park/state-lite", "/api/gcp/trace-eval-status"):
+        try:
+            http_json(f"{backend_url}{path}", timeout_seconds=45)
+        except Exception as error:
+            warnings.append(f"Warmup failed for {path}: {error}")
+
+    role_tokens: dict[str, str] = {}
+    for role in ("ops_team", "ml_ops_admin"):
+        try:
+            payload = http_json(
+                f"{backend_url}/api/park/auth/dev-session",
+                method="POST",
+                payload={"role": role, "subject": "parkpulse-local-qa"},
+                timeout_seconds=10,
+            )
+            token = payload.get("token")
+            if isinstance(token, str) and token:
+                role_tokens[role] = token
+            else:
+                warnings.append(f"Warmup role session missing token for {role}")
+        except Exception as error:
+            warnings.append(f"Warmup role session failed for {role}: {error}")
+
+    protected_paths = [
+        ("ops_team", "/api/park/live-feed-health?limit=500"),
+        ("ops_team", "/api/park/review-training-ledger?limit=80"),
+        ("ops_team", "/api/park/staff-training/analytics?limit=160"),
+        ("ops_team", "/api/park/staff-training/policy-pack"),
+        ("ops_team", "/api/park/staff-training/readiness?limit=160"),
+        ("ml_ops_admin", "/api/park/actual-training"),
+    ]
+    for role, path in protected_paths:
+        token = role_tokens.get(role)
+        if not token:
+            continue
+        try:
+            http_json(f"{backend_url}{path}", headers={"authorization": f"Bearer {token}"}, timeout_seconds=30)
+        except Exception as error:
+            warnings.append(f"Warmup failed for {path}: {error}")
+    return warnings
+
+
 def stop_process(process: subprocess.Popen[str] | None) -> str:
     if process is None:
         return ""
@@ -505,6 +565,7 @@ def frontend_e2e_check() -> CheckResult:
         backend_env = os.environ.copy()
         backend_env["PYTHONPATH"] = str(BACKEND_DIR)
         backend_env["PARKPULSE_ALLOWED_ORIGINS"] = frontend_url
+        backend_env["PARKPULSE_ENABLE_DEV_ROLE_ISSUER"] = "true"
         backend = subprocess.Popen(
             [python_executable(), "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", str(backend_port)],
             cwd=BACKEND_DIR,
@@ -526,6 +587,9 @@ def frontend_e2e_check() -> CheckResult:
                 output_tail=tail("\n".join(logs)),
                 details={"backend_port": backend_port, "frontend_port": frontend_port},
             )
+
+        for warning in warm_backend_for_e2e(backend_url):
+            logs.append(warning)
 
         frontend = subprocess.Popen(
             ["npm", "exec", "vite", "preview", "--", "--host", "127.0.0.1", "--port", str(frontend_port)],
