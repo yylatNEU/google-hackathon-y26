@@ -74,7 +74,11 @@ if [[ -n "$ACTIVE_ACCOUNT" ]]; then
     --quiet >/dev/null
 fi
 
+if [[ "${PARKPULSE_SKIP_DEPLOY_VERIFY:-false}" != "true" ]]; then
+  scripts/verify_private_cloud_run_deploy.sh "$PROJECT_ID" "$REGION" "$SERVICE"
+fi
+
 echo "Private Cloud Run service deployed:"
 echo "$SERVICE_URL"
 echo "Test with:"
-echo "scripts/cloud_run_private_curl.sh ${PROJECT_ID} ${REGION} ${SERVICE} /readyz"
+echo "scripts/verify_private_cloud_run_deploy.sh ${PROJECT_ID} ${REGION} ${SERVICE}"
