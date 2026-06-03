@@ -6,6 +6,9 @@ type ParkPulseRequestInit = RequestInit & {
   timeoutMs?: number;
 };
 
+const roleTokenCache = new Map<string, { token: string; expiresAt: number }>();
+const roleTokenInflight = new Map<string, Promise<string>>();
+
 export function getApiUrls() {
   const urlOverride =
     typeof globalThis.location !== "undefined"
@@ -25,6 +28,47 @@ function headersToEntries(headers?: HeadersInit): Array<[string, string]> {
   if (typeof Headers !== "undefined" && headers instanceof Headers) return Array.from(headers.entries());
   if (Array.isArray(headers)) return headers.map(([key, value]) => [key, value]);
   return Object.entries(headers).map(([key, value]) => [key, String(value)]);
+}
+
+function headerValue(entries: Array<[string, string]>, name: string) {
+  const lowered = name.toLowerCase();
+  return entries.find(([key]) => key.toLowerCase() === lowered)?.[1];
+}
+
+async function getSignedRoleToken(apiUrl: string, role: string, timeoutMs: number) {
+  const cacheKey = `${apiUrl}:${role}`;
+  const cached = roleTokenCache.get(cacheKey);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (cached && cached.expiresAt - 30 > nowSeconds) return cached.token;
+
+  const inflight = roleTokenInflight.get(cacheKey);
+  if (inflight) return inflight;
+
+  const tokenPromise = (async () => {
+    const response = await request(
+      `${apiUrl}/api/park/auth/dev-session`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ role, subject: "parkpulse-browser-command-center" }),
+      },
+      Math.min(timeoutMs, 5000),
+    );
+    if (!response.ok) throw new Error(`${apiUrl}/api/park/auth/dev-session returned ${response.status}`);
+    const payload = (await response.json()) as { token?: string; expires_at?: number };
+    if (!payload.token) throw new Error("ParkPulse role session issuer did not return a token.");
+    roleTokenCache.set(cacheKey, {
+      token: payload.token,
+      expiresAt: Number(payload.expires_at ?? Math.floor(Date.now() / 1000) + 300),
+    });
+    return payload.token;
+  })();
+  roleTokenInflight.set(cacheKey, tokenPromise);
+  try {
+    return await tokenPromise;
+  } finally {
+    roleTokenInflight.delete(cacheKey);
+  }
 }
 
 function requestWithXhr(url: string, init?: RequestInit, timeoutMs = defaultRequestTimeoutMs): Promise<Response> {
@@ -102,7 +146,14 @@ export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestIni
 
   for (const apiUrl of getApiUrls()) {
     try {
-      const response = await request(`${apiUrl}${path}`, requestInit, timeoutMs);
+      const headerEntries = headersToEntries(requestInit.headers);
+      const requestedRole = headerValue(headerEntries, "x-parkpulse-role");
+      const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
+      const signedHeaders =
+        requestedRole && !hasAuthorization && path !== "/api/park/auth/dev-session"
+          ? { ...Object.fromEntries(headerEntries), authorization: `Bearer ${await getSignedRoleToken(apiUrl, requestedRole, timeoutMs)}` }
+          : requestInit.headers;
+      const response = await request(`${apiUrl}${path}`, { ...requestInit, headers: signedHeaders }, timeoutMs);
       if (response.ok) {
         return response;
       }

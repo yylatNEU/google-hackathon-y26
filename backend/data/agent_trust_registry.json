@@ -1,0 +1,136 @@
+{
+  "partners": {
+    "conformance_partner": {
+      "allowed_scopes": [
+        "accessibility_needs",
+        "budget",
+        "compensation_offer",
+        "food_recommendation",
+        "location",
+        "party_size",
+        "policy_check",
+        "preferences",
+        "ride_preference",
+        "route_plan",
+        "safety_notice",
+        "session_commit",
+        "wait_time_alert"
+      ],
+      "contact": "",
+      "partner_id": "conformance_partner",
+      "partner_name": "Conformance Partner",
+      "status": "active",
+      "trust_tier": "sandbox"
+    },
+    "demo_external_partner": {
+      "allowed_scopes": [
+        "accessibility_needs",
+        "budget",
+        "compensation_offer",
+        "food_recommendation",
+        "location",
+        "party_size",
+        "policy_check",
+        "preferences",
+        "ride_preference",
+        "route_plan",
+        "safety_notice",
+        "session_commit",
+        "wait_time_alert"
+      ],
+      "contact": "",
+      "partner_id": "demo_external_partner",
+      "partner_name": "Demo External Partner",
+      "status": "active",
+      "trust_tier": "sandbox"
+    },
+    "external_family_os": {
+      "allowed_scopes": [
+        "accessibility_needs",
+        "budget",
+        "compensation_offer",
+        "food_recommendation",
+        "location",
+        "party_size",
+        "policy_check",
+        "preferences",
+        "ride_preference",
+        "route_plan",
+        "safety_notice",
+        "session_commit",
+        "wait_time_alert"
+      ],
+      "contact": "",
+      "partner_id": "external_family_os",
+      "partner_name": "External Family OS",
+      "status": "active",
+      "trust_tier": "sandbox"
+    },
+    "john_family_os": {
+      "allowed_scopes": [
+        "accessibility_needs",
+        "budget",
+        "compensation_offer",
+        "food_recommendation",
+        "location",
+        "party_size",
+        "policy_check",
+        "preferences",
+        "ride_preference",
+        "route_plan",
+        "safety_notice",
+        "session_commit",
+        "wait_time_alert"
+      ],
+      "partner_id": "john_family_os",
+      "partner_name": "John Family OS",
+      "status": "active",
+      "trust_tier": "sandbox"
+    },
+    "partner_family_os": {
+      "allowed_scopes": [
+        "accessibility_needs",
+        "budget",
+        "compensation_offer",
+        "food_recommendation",
+        "location",
+        "party_size",
+        "policy_check",
+        "preferences",
+        "ride_preference",
+        "route_plan",
+        "safety_notice",
+        "session_commit",
+        "wait_time_alert"
+      ],
+      "contact": "",
+      "partner_id": "partner_family_os",
+      "partner_name": "Family OS",
+      "status": "active",
+      "trust_tier": "sandbox"
+    },
+    "restricted_partner": {
+      "allowed_scopes": [
+        "location",
+        "party_size",
+        "preferences"
+      ],
+      "contact": "",
+      "partner_id": "restricted_partner",
+      "partner_name": "Restricted Partner",
+      "status": "active",
+      "trust_tier": "sandbox"
+    }
+  },
+  "revocations": {
+    "cert_1556b4b3380b": {
+      "agent_id": "conformance_certified_agent_1780497947",
+      "certification_id": "cert_1556b4b3380b",
+      "reason": "conformance_revocation_probe",
+      "revoked_at": "2026-06-03T14:45:48.371957Z",
+      "revoked_by": "parkpulse_agent_onboarding_authority"
+    }
+  },
+  "updated_at": "2026-06-03T14:46:12.122505Z",
+  "version": "parkpulse-agent-trust-registry-0.1"
+}

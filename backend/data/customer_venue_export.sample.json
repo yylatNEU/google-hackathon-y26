@@ -1,0 +1,235 @@
+{
+  "version": "customer_venue_export_v1",
+  "approved_for_production": true,
+  "approved_by": "venue_content_ops",
+  "approved_at": "2026-06-01T00:00:00Z",
+  "source_catalog": {
+    "version": "customer_public_source_catalog_v1",
+    "catalog_status": "venue_verified",
+    "real_venue_feed_connected": true,
+    "sources": {
+      "venue_attraction_rules": {
+        "label": "Venue-approved attraction rules",
+        "source_type": "venue_export.attractions",
+        "confidence": 0.96,
+        "review_status": "venue_approved",
+        "last_verified_at": "2026-06-01T00:00:00Z",
+        "max_age_seconds": 86400
+      },
+      "venue_menu_catalog": {
+        "label": "Venue-approved menu and dietary catalog",
+        "source_type": "venue_export.food",
+        "confidence": 0.94,
+        "review_status": "venue_approved",
+        "last_verified_at": "2026-06-01T00:00:00Z",
+        "max_age_seconds": 3600
+      },
+      "venue_public_map": {
+        "label": "Venue-approved public map",
+        "source_type": "venue_export.venue_map",
+        "confidence": 0.95,
+        "review_status": "venue_approved",
+        "last_verified_at": "2026-06-01T00:00:00Z",
+        "max_age_seconds": 86400
+      },
+      "venue_event_schedule": {
+        "label": "Venue event schedule feed",
+        "source_type": "venue_export.event_schedule",
+        "confidence": 0.9,
+        "review_status": "venue_approved",
+        "last_verified_at": "2026-06-01T00:00:00Z",
+        "max_age_seconds": 300
+      },
+      "venue_guest_copy": {
+        "label": "Venue-approved guest copy",
+        "source_type": "venue_export.copy_variants",
+        "confidence": 0.92,
+        "review_status": "venue_approved",
+        "last_verified_at": "2026-06-01T00:00:00Z",
+        "max_age_seconds": 604800
+      }
+    },
+    "field_sources": {
+      "rides": ["venue_attraction_rules", "venue_public_map"],
+      "food": ["venue_menu_catalog", "venue_public_map"],
+      "venue_map": ["venue_public_map"],
+      "event_schedule": ["venue_event_schedule"],
+      "landmarks": ["venue_public_map"],
+      "shows": ["venue_event_schedule", "venue_attraction_rules"],
+      "family_services": ["venue_public_map"],
+      "copy_variants": ["venue_guest_copy"]
+    },
+    "review_queue": [],
+    "publish_gates": [
+      "Every public fact has a venue source id.",
+      "Accessibility, attraction requirements, first aid, and menu/dietary data are venue-approved.",
+      "Backstage, staffing, policy, model, training, and private guest data are excluded."
+    ]
+  },
+  "attractions": [
+    {
+      "id": "theaterB",
+      "aliases": ["theater", "theater b"],
+      "name": "Theater B",
+      "zone_id": "indoorHub",
+      "category": "indoor show",
+      "thrill_level": "low",
+      "duration_minutes": 18,
+      "height_requirement_inches": null,
+      "indoor": true,
+      "outdoor": false,
+      "family_fit": "venue-approved cooling and seated show option",
+      "accessibility_note": "Wheelchair seating is available on the entry level.",
+      "sensory_note": "Moderate show audio with seated viewing.",
+      "source_ids": ["venue_attraction_rules", "venue_public_map"]
+    }
+  ],
+  "food": [
+    {
+      "id": "foodCourtB",
+      "aliases": ["main street snacks", "snack"],
+      "name": "Food Court B",
+      "zone_id": "foodCourt2",
+      "cuisine": "snacks, drinks, grab-and-go",
+      "dietary_tags": ["vegetarian options", "quick pickup"],
+      "mobile_order": true,
+      "seating": "covered compact seating",
+      "source_ids": ["venue_menu_catalog", "venue_public_map"]
+    }
+  ],
+  "menus": {
+    "foodCourtB": [
+      {
+        "name": "Main Street Pretzel",
+        "tags": ["vegetarian option"],
+        "mobile_order": true,
+        "source_ids": ["venue_menu_catalog"]
+      },
+      {
+        "name": "Cold Drinks",
+        "tags": ["quick pickup"],
+        "mobile_order": true,
+        "source_ids": ["venue_menu_catalog"]
+      }
+    ]
+  },
+  "landmarks": {
+    "restrooms": [
+      {
+        "id": "restroomIndoorHub",
+        "name": "Indoor Hub Restrooms",
+        "zone_id": "indoorHub",
+        "accessible": true,
+        "family_room": true,
+        "source_ids": ["venue_public_map"]
+      }
+    ],
+    "first_aid": [
+      {
+        "id": "careLagoon",
+        "name": "Care Lagoon First Aid",
+        "zone_id": "careLagoon",
+        "guest_instruction": "For urgent issues, contact nearby staff immediately.",
+        "source_ids": ["venue_public_map"]
+      }
+    ],
+    "guest_services": [
+      {
+        "id": "guestServicesEntrance",
+        "name": "Guest Services",
+        "zone_id": "entrancePlaza",
+        "services": ["lost and found", "accessibility help"],
+        "source_ids": ["venue_public_map"]
+      }
+    ],
+    "water_refill": [
+      {
+        "id": "waterIndoorHub",
+        "name": "Indoor Hub Water Refill",
+        "zone_id": "indoorHub",
+        "source_ids": ["venue_public_map"]
+      }
+    ],
+    "quiet_or_cooling": [
+      {
+        "id": "indoorHub",
+        "name": "Indoor Hub",
+        "zone_id": "indoorHub",
+        "best_for": ["cooling", "mobility-friendly routing"],
+        "source_ids": ["venue_public_map"]
+      }
+    ]
+  },
+  "shows": [
+    {
+      "id": "theaterB_show",
+      "name": "Theater B Cooling Show",
+      "zone_id": "indoorHub",
+      "typical_duration_minutes": 18,
+      "source_ids": ["venue_event_schedule"]
+    }
+  ],
+  "family_services": [
+    {
+      "id": "strollerRental",
+      "name": "Stroller Rental",
+      "zone_id": "entrancePlaza",
+      "source_ids": ["venue_public_map"]
+    }
+  ],
+  "venue_map": {
+    "source": "venue_public_map",
+    "scale": {
+      "width_meters": 820,
+      "height_meters": 540,
+      "north": "top"
+    },
+    "nodes": [
+      {
+        "id": "theaterB",
+        "name": "Theater B",
+        "type": "show",
+        "zone_id": "indoorHub",
+        "x": 188,
+        "y": 300,
+        "width": 220,
+        "height": 102,
+        "source_ids": ["venue_public_map"]
+      },
+      {
+        "id": "foodCourtB",
+        "name": "Food Court B",
+        "type": "food",
+        "zone_id": "foodCourt2",
+        "x": 245,
+        "y": 454,
+        "width": 180,
+        "height": 56,
+        "source_ids": ["venue_public_map"]
+      },
+      {
+        "id": "careLagoon",
+        "name": "Care Lagoon First Aid",
+        "type": "first_aid",
+        "zone_id": "careLagoon",
+        "x": 486,
+        "y": 500,
+        "width": 58,
+        "height": 42,
+        "source_ids": ["venue_public_map"]
+      }
+    ]
+  },
+  "copy_variants": {
+    "en": {
+      "route_help": "I can show the best public route from here.",
+      "service_help": "Guest Services and First Aid are available on the public map.",
+      "weather_help": "For heat or rain, prefer indoor or covered options."
+    },
+    "es": {
+      "route_help": "Puedo mostrar la mejor ruta publica desde aqui.",
+      "service_help": "Servicios al visitante y primeros auxilios aparecen en el mapa publico.",
+      "weather_help": "Con calor o lluvia, use opciones interiores o cubiertas."
+    }
+  }
+}

@@ -33,6 +33,246 @@ def _get_tracer(name: str):
 _tracer = _get_tracer("parkpulse.multi_agent")
 
 
+DEPARTMENT_AGENT_LOOP: list[str] = ["observe", "interpret", "predict", "recommend", "justify", "trace"]
+
+
+DEPARTMENT_TOOL_CONTRACT_FIELDS: list[str] = [
+    "department",
+    "tool",
+    "intent",
+    "evidence",
+    "risk_level",
+    "policy_check",
+    "expected_outcome",
+    "rollback",
+]
+
+
+REAL_ACTION_TOOLS: set[str] = {
+    "dispatch_guest_message",
+    "dispatch_worker_task",
+    "dispatch_equipment_command",
+    "dispatch_receiver_payload",
+    "execute_approved_action",
+}
+
+
+JUDGE_TRACE_EVAL_CONTRACT: dict[str, Any] = {
+    "owner_agent": "gcp_eval_judge_agent",
+    "owner_department": "qa_judge",
+    "owner_department_agent": "Eval Agent",
+    "trace_read_tools": ["get_full_trace", "get_tool_calls", "get_outcomes", "get_policy_references"],
+    "eval_write_tools": ["score_decision", "flag_failure", "create_regression_test"],
+    "inspection_tools": ["score_decision_quality", "inspect_observability_contract", "inspect_delivery_receipts"],
+    "runtime_status_tools": [
+        "gcp_trace_eval.get_gcp_trace_eval_status",
+        "gcp_trace_eval.build_gcp_eval_trace",
+        "gcp_trace_eval.verify_gcp_trace_export",
+        "evaluator_loop.evaluator_loop_status",
+        "evaluator_loop.build_hosted_evaluator_loop",
+    ],
+    "api_surfaces": [
+        "GET /api/gcp/trace-eval-status",
+        "GET /api/gcp/trace-export-verify",
+        "GET /api/gcp/evaluator-loop",
+        "POST /api/gcp/evaluator-loop/verify",
+        "GET /api/park/agent-role-eval",
+        "GET /api/park/agent-role-eval?real=1",
+    ],
+    "required_regression_tests": [
+        "backend/test_trace_context.py",
+        "backend/test_gcp_operations.py::test_gcp_trace_eval_public_dict_configured_uninitialized_sink",
+        "backend/test_coverage_low_hanging.py::test_evaluator_loop_vertex_metric_and_transport_branches",
+        "backend/test_coverage_low_hanging.py::test_evaluator_loop_rest_success_http_error_and_summary",
+        "backend/test_coverage_low_hanging.py::test_multi_agent_boundary_helpers_and_conflict_branches",
+        "backend/test_production_reliability_qa_agent.py",
+    ],
+    "routing_rule": "Trace/eval evidence is read by the QA/Eval Judge, scored or flagged by the QA/Eval Judge, then returned to Decision Bridge and Tool Executor as a gate result.",
+}
+
+
+JUDGE_TRACE_EVAL_EXCLUSIVE_TOOLS: set[str] = set(JUDGE_TRACE_EVAL_CONTRACT["trace_read_tools"]) | set(
+    JUDGE_TRACE_EVAL_CONTRACT["eval_write_tools"]
+)
+
+
+DEPARTMENT_TOOL_ACCESS_MAP: dict[str, dict[str, list[str]]] = {
+    "operations": {
+        "read_tools": ["ride_status", "queue_length", "park_map", "weather", "event_schedule"],
+        "write_action_tools": ["create_ops_alert", "recommend_route_change", "request_staffing_move"],
+    },
+    "safety": {
+        "read_tools": ["incident_reports", "ride_inspection_status", "crowd_density", "weather", "policy_book"],
+        "write_action_tools": ["safety_alert", "close_reopen_recommendation", "require_human_approval"],
+    },
+    "maintenance": {
+        "read_tools": ["asset_history", "sensor_health", "inspection_logs", "spare_parts_inventory"],
+        "write_action_tools": ["create_work_order", "assign_technician", "update_repair_status"],
+    },
+    "guest_experience": {
+        "read_tools": ["guest_complaints", "app_feedback", "sentiment", "notification_history"],
+        "write_action_tools": ["draft_guest_message", "issue_recovery_offer", "create_support_ticket"],
+    },
+    "food_retail": {
+        "read_tools": ["pos_sales", "inventory", "queue_near_shops", "event_schedule", "weather"],
+        "write_action_tools": ["inventory_alert", "restock_request", "pause_launch_promo"],
+    },
+    "finance": {
+        "read_tools": ["ticket_sales", "refund_data", "labor_cost", "pos_revenue", "outage_impact"],
+        "write_action_tools": ["revenue_impact_report", "refund_recommendation", "budget_alert"],
+    },
+    "hr_labor": {
+        "read_tools": ["staff_schedule", "attendance", "overtime", "fatigue_risk", "skill_matrix"],
+        "write_action_tools": ["shift_adjustment_recommendation", "overtime_warning", "break_reminder"],
+    },
+    "marketing": {
+        "read_tools": ["campaign_calendar", "guest_segments", "demand_forecast", "weather_events", "crowd_density"],
+        "write_action_tools": ["draft_campaign", "launch_pause_promo", "redirect_offer"],
+    },
+    "security": {
+        "read_tools": ["crowd_density", "incident_reports", "access_logs", "lost_child_reports"],
+        "write_action_tools": ["dispatch_alert", "escalation_request", "zone_control_recommendation"],
+    },
+    "compliance": {
+        "read_tools": ["policy_books", "privacy_rules", "safety_rules", "labor_rules", "audit_logs"],
+        "write_action_tools": ["block_action", "require_approval", "generate_compliance_note"],
+    },
+    "executive": {
+        "read_tools": ["department_summaries", "risk_scores", "financial_impact", "guest_impact"],
+        "write_action_tools": ["approve_action", "reject_action", "set_priority", "choose_tradeoff"],
+    },
+    "qa_judge": {
+        "read_tools": ["full_trace", "tool_calls", "outcomes", "policy_references"],
+        "write_action_tools": ["score_decision", "flag_failure", "create_regression_test"],
+    },
+}
+
+
+DEPARTMENT_AGENT_MAP: list[dict[str, Any]] = [
+    {
+        "department": "operations",
+        "label": "Operations",
+        "canonical_agent": "Ops Agent",
+        "implementation_agents": ["ride_ops_agent", "guest_flow_agent", "traffic_flow_agent", "planning_agent"],
+        "main_job": "ride flow, queues, downtime, and staffing pressure",
+        "tool_families": ["queue tools", "ride status tools", "simulation tools"],
+    },
+    {
+        "department": "safety",
+        "label": "Safety",
+        "canonical_agent": "Safety Agent",
+        "implementation_agents": ["safety_policy_agent"],
+        "main_job": "incident risk, ride reopening constraints, and crowd hazard",
+        "tool_families": ["policy tools", "runtime inspection tools", "approval-gate tools"],
+    },
+    {
+        "department": "maintenance",
+        "label": "Maintenance",
+        "canonical_agent": "Maintenance Agent",
+        "implementation_agents": ["facilities_energy_agent", "memory_ops_agent"],
+        "main_job": "work orders, asset health, energy posture, and inspection history",
+        "tool_families": ["asset status tools", "equipment command tools", "memory inspection tools"],
+    },
+    {
+        "department": "guest_experience",
+        "label": "Guest Experience",
+        "canonical_agent": "Guest Agent",
+        "implementation_agents": ["guest_flow_agent", "customer_support_agent"],
+        "main_job": "complaints, sentiment, notifications, routing, and recovery offers",
+        "tool_families": ["guest messaging tools", "CRM/customer tools", "public route tools"],
+    },
+    {
+        "department": "food_retail",
+        "label": "Food & Retail",
+        "canonical_agent": "Commerce Agent",
+        "implementation_agents": ["food_demand_agent"],
+        "main_job": "demand forecast, inventory, staffing, and promotions",
+        "tool_families": ["POS tools", "inventory tools", "menu/promo tools"],
+    },
+    {
+        "department": "finance",
+        "label": "Finance",
+        "canonical_agent": "Finance Agent",
+        "implementation_agents": ["finance_agent"],
+        "main_job": "revenue impact, labor cost, refunds, and compensation decisions",
+        "tool_families": ["revenue tools", "refund/comp tools", "scorecard tools"],
+    },
+    {
+        "department": "hr_labor",
+        "label": "HR / Labor",
+        "canonical_agent": "Labor Agent",
+        "implementation_agents": ["staffing_agent"],
+        "main_job": "shift coverage, overtime, fatigue, and labor rules",
+        "tool_families": ["schedule tools", "overtime tools", "worker-task tools"],
+    },
+    {
+        "department": "marketing",
+        "label": "Marketing",
+        "canonical_agent": "Marketing Agent",
+        "implementation_agents": ["event_creative_agent"],
+        "main_job": "campaigns, event demand, offers, and guest segmentation",
+        "tool_families": ["campaign tools", "segment tools", "offer tools"],
+    },
+    {
+        "department": "security",
+        "label": "Security",
+        "canonical_agent": "Security Agent",
+        "implementation_agents": ["safety_policy_agent", "staffing_agent"],
+        "main_job": "crowd control, lost child, access control, and escalation",
+        "tool_families": ["incident tools", "access-control tools", "escalation tools"],
+    },
+    {
+        "department": "compliance",
+        "label": "Compliance",
+        "canonical_agent": "Compliance Agent",
+        "implementation_agents": ["safety_policy_agent", "logic_audit_agent"],
+        "main_job": "privacy, safety regulation, and policy constraints",
+        "tool_families": ["privacy tools", "policy/risk tools", "audit tools"],
+    },
+    {
+        "department": "executive",
+        "label": "Executive",
+        "canonical_agent": "Executive Agent",
+        "implementation_agents": ["decision_bridge_agent"],
+        "main_job": "cross-department tradeoff and final recommendation",
+        "tool_families": ["approval tools", "routing tools", "candidate-comparison tools"],
+    },
+    {
+        "department": "qa_judge",
+        "label": "QA Judge",
+        "canonical_agent": "Eval Agent",
+        "implementation_agents": ["gcp_eval_judge_agent", "logic_audit_agent", "delivery_proof_agent"],
+        "main_job": "trace quality, tool use, delivery proof, and failure-mode review",
+        "tool_families": ["eval tools", "trace tools", "delivery-proof tools"],
+    },
+]
+
+
+AGENT_DEPARTMENT_OVERRIDES: dict[str, str] = {
+    "park_understanding_agent": "executive",
+    "ride_ops_agent": "operations",
+    "guest_flow_agent": "guest_experience",
+    "customer_support_agent": "guest_experience",
+    "staffing_agent": "hr_labor",
+    "food_demand_agent": "food_retail",
+    "facilities_energy_agent": "maintenance",
+    "event_setup_agent": "operations",
+    "event_creative_agent": "marketing",
+    "traffic_flow_agent": "operations",
+    "planning_agent": "operations",
+    "placement_agent": "operations",
+    "safety_policy_agent": "safety",
+    "finance_agent": "finance",
+    "decision_bridge_agent": "executive",
+    "logic_audit_agent": "compliance",
+    "memory_ops_agent": "maintenance",
+    "delivery_proof_agent": "qa_judge",
+    "autodream_agent": "qa_judge",
+    "gcp_eval_judge_agent": "qa_judge",
+    "tool_executor_agent": "tool_executor",
+}
+
+
 AGENT_REGISTRY: list[dict[str, Any]] = [
     {
         "agent_id": "park_understanding_agent",
@@ -222,12 +462,42 @@ AGENT_REGISTRY: list[dict[str, Any]] = [
         "blocked": ["silent failures", "unscored decisions"],
         "policy_refs": ["PARK-EVAL-001", "PARK-EVAL-002", "PARK-EVAL-003", "PARK-EVAL-004", "PARK-EVAL-005", "PARK-EVAL-006"],
     },
+    {
+        "agent_id": "tool_executor_agent",
+        "name": "Tool Executor Agent",
+        "role": "Executes approved receiver actions after department proposal, compliance/judge checks, and executive approval when required.",
+        "mode": ["reactive", "proactive", "event_planning"],
+        "owns": ["receiver action execution", "idempotency key", "delivery receipt", "rollback handoff"],
+        "blocked": ["executing unapproved proposals", "changing recommendation rationale", "skipping trace outcome recording"],
+        "policy_refs": ["PARK-OPS-001", "PARK-EVAL-003", "PARK-EVAL-006"],
+    },
 ]
 
 
 AGENT_TOPOLOGY: dict[str, Any] = {
-    "name": "EventOps hierarchical multi-agent topology",
-    "pattern": "pre_event_during_event_post_event_agent_groups",
+    "name": "Park enterprise nervous system",
+    "pattern": "department_systematic_enterprise_nervous_system",
+    "lifecycle_pattern": "pre_event_during_event_post_event_agent_groups",
+    "department_system": {
+        "loop": DEPARTMENT_AGENT_LOOP,
+        "layers": [
+            "department_agents",
+            "shared_context_memory_trace",
+            "risk_policy_judge",
+            "action_router_tool_executor",
+        ],
+        "tool_contract_required_fields": DEPARTMENT_TOOL_CONTRACT_FIELDS,
+        "departments": DEPARTMENT_AGENT_MAP,
+        "conflict_resolution": [
+            "Department agents detect local problems.",
+            "Shared trace stores observations, evidence, confidence, policy refs, and proposed actions.",
+            "Cross-agent coordinator detects conflicts between department recommendations.",
+            "Policy judge checks safety, privacy, labor, and compliance constraints.",
+            "Executive agent selects the tradeoff or rejects unsafe actions.",
+            "Tool executor acts only with policy and delivery receipts.",
+            "Eval judge reviews outcome quality and writes learning memory.",
+        ],
+    },
     "agent_groups": [
         {
             "id": "pre_event",
@@ -273,6 +543,7 @@ AGENT_TOPOLOGY: dict[str, Any] = {
                 "facilities_energy_agent",
                 "safety_policy_agent",
                 "decision_bridge_agent",
+                "tool_executor_agent",
                 "logic_audit_agent",
             ],
             "primary_outputs": [
@@ -399,6 +670,8 @@ AGENT_TOPOLOGY: dict[str, Any] = {
         {"from": "safety_policy_agent", "to": "decision_bridge_agent", "artifact": "blocked actions and approval requirements"},
         {"from": "decision_bridge_agent", "to": "logic_audit_agent", "artifact": "layered decision graph and selected action path"},
         {"from": "logic_audit_agent", "to": "decision_bridge_agent", "artifact": "graph audit, missing-node updates, and animation markers"},
+        {"from": "decision_bridge_agent", "to": "tool_executor_agent", "artifact": "approved action envelope and idempotency key"},
+        {"from": "tool_executor_agent", "to": "delivery_proof_agent", "artifact": "receiver dispatch receipt and rollback handle"},
         {"from": "decision_bridge_agent", "to": "gcp_eval_judge_agent", "artifact": "final recommendation and dispatch payloads"},
         {"from": "gcp_eval_judge_agent", "to": "decision_bridge_agent", "artifact": "judge critique and revision prompt"},
         {"from": "decision_bridge_agent", "to": "park_understanding_agent", "artifact": "observed outcome and learned take-rate signal"},
@@ -506,13 +779,14 @@ AGENT_POLICY_SCOPES: dict[str, list[dict[str, str]]] = {
     "logic_audit_agent": [{"target": "scenario", "action": ""}],
     "memory_ops_agent": [{"target": "scenario", "action": ""}],
     "autodream_agent": [{"target": "scenario", "action": "revise_overlay_after_outcome"}],
+    "tool_executor_agent": [{"target": "scenario", "action": "proactive_commit"}],
 }
 
 
 AGENT_BUILDER_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "park_understanding_agent": ["get_park_state", "retrieve_similar_incidents", "get_noisy_observation"],
-    "ride_ops_agent": ["get_ride_status", "simulate_action", "validate_policy"],
-    "guest_flow_agent": ["get_zone_density", "simulate_action", "dispatch_guest_message", "score_outcome"],
+    "ride_ops_agent": ["get_ride_status", "get_queue_length", "get_park_map", "get_weather", "get_event_schedule", "simulate_action", "validate_policy", "create_ops_alert", "recommend_route_change", "request_staffing_move"],
+    "guest_flow_agent": ["get_zone_density", "get_guest_complaints", "get_app_feedback", "get_sentiment", "get_notification_history", "simulate_action", "draft_guest_message", "issue_recovery_offer", "create_support_ticket", "score_outcome"],
     "customer_support_agent": [
         "get_park_state",
         "get_public_wait_times",
@@ -521,28 +795,33 @@ AGENT_BUILDER_TOOL_ALLOWLIST: dict[str, list[str]] = {
         "customer_show_route",
         "customer_send_to_phone",
     ],
-    "staffing_agent": ["get_staff_constraints", "dispatch_worker_task", "validate_policy"],
-    "food_demand_agent": ["get_food_capacity", "dispatch_guest_message", "dispatch_equipment_command", "validate_policy"],
-    "facilities_energy_agent": ["get_park_state", "dispatch_equipment_command", "validate_policy"],
+    "staffing_agent": ["get_staff_constraints", "get_staff_schedule", "get_attendance", "get_overtime", "get_fatigue_risk", "get_skill_matrix", "validate_policy", "shift_adjustment_recommendation", "overtime_warning", "break_reminder"],
+    "food_demand_agent": ["get_food_capacity", "get_pos_sales", "get_inventory", "get_queue_near_shops", "get_event_schedule", "get_weather", "validate_policy", "inventory_alert", "restock_request", "pause_launch_promo"],
+    "facilities_energy_agent": ["get_park_state", "get_asset_history", "get_sensor_health", "get_inspection_logs", "get_spare_parts_inventory", "validate_policy", "create_work_order", "assign_technician", "update_repair_status"],
     "event_setup_agent": ["get_park_state", "simulate_action", "write_decision_memory"],
-    "event_creative_agent": ["get_park_state", "retrieve_similar_incidents"],
+    "event_creative_agent": ["get_park_state", "retrieve_similar_incidents", "get_campaign_calendar", "get_guest_segments", "get_demand_forecast", "get_weather_events", "get_zone_density", "draft_campaign", "launch_pause_promo", "redirect_offer"],
     "traffic_flow_agent": ["get_zone_density", "simulate_action", "score_outcome"],
     "planning_agent": ["get_park_state", "retrieve_similar_incidents", "simulate_action", "score_outcome", "validate_policy", "write_decision_memory"],
     "placement_agent": ["get_park_state", "simulate_action", "validate_policy"],
-    "safety_policy_agent": ["policy_gate", "validate_policy", "inspect_runtime_status", "inspect_delivery_receipts"],
-    "finance_agent": ["score_decision_quality", "score_outcome"],
-    "decision_bridge_agent": ["compare_action_candidates", "policy_gate", "validate_policy", "write_decision_memory"],
-    "logic_audit_agent": ["inspect_runtime_status", "inspect_observability_contract", "score_decision_quality"],
+    "safety_policy_agent": ["get_incident_reports", "get_ride_inspection_status", "get_zone_density", "get_weather", "get_policy_book", "policy_gate", "validate_policy", "inspect_runtime_status", "inspect_delivery_receipts", "safety_alert", "close_reopen_recommendation", "require_human_approval"],
+    "finance_agent": ["get_ticket_sales", "get_refund_data", "get_labor_cost", "get_pos_revenue", "get_outage_impact", "score_decision_quality", "score_outcome", "revenue_impact_report", "refund_recommendation", "budget_alert"],
+    "decision_bridge_agent": ["get_department_summaries", "get_risk_scores", "get_financial_impact", "get_guest_impact", "compare_action_candidates", "policy_gate", "validate_policy", "write_decision_memory", "approve_action", "reject_action", "set_priority", "choose_tradeoff"],
+    "logic_audit_agent": ["get_policy_books", "get_privacy_rules", "get_safety_rules", "get_labor_rules", "get_audit_logs", "inspect_runtime_status", "inspect_observability_contract", "score_decision_quality", "block_action", "require_approval", "generate_compliance_note"],
     "memory_ops_agent": ["retrieve_similar_incidents", "inspect_runtime_status"],
     "delivery_proof_agent": ["inspect_delivery_receipts", "inspect_runtime_status", "inspect_observability_contract"],
     "autodream_agent": ["retrieve_similar_incidents", "tick_simulation", "simulate_action", "score_outcome", "write_decision_memory"],
-    "gcp_eval_judge_agent": ["score_decision_quality", "inspect_observability_contract", "inspect_delivery_receipts"],
+    "gcp_eval_judge_agent": ["get_full_trace", "get_tool_calls", "get_outcomes", "get_policy_references", "score_decision_quality", "inspect_observability_contract", "inspect_delivery_receipts", "score_decision", "flag_failure", "create_regression_test"],
+    "tool_executor_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "dispatch_receiver_payload", "execute_approved_action"],
 }
 
 
 AGENT_BUILDER_BLOCKED_TOOLS: dict[str, list[str]] = {
     "park_understanding_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "write_decision_memory"],
-    "ride_ops_agent": ["dispatch_equipment_command"],
+    "ride_ops_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "draft_guest_message"],
+    "guest_flow_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "recommend_route_change"],
+    "staffing_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command"],
+    "food_demand_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "recommend_route_change"],
+    "facilities_energy_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command"],
     "customer_support_agent": [
         "dispatch_guest_message",
         "dispatch_worker_task",
@@ -560,7 +839,117 @@ AGENT_BUILDER_BLOCKED_TOOLS: dict[str, list[str]] = {
     "delivery_proof_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "write_decision_memory"],
     "autodream_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command"],
     "gcp_eval_judge_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command"],
+    "tool_executor_agent": ["policy_gate", "validate_policy", "score_decision_quality"],
 }
+
+
+def get_department_agent_map() -> list[dict[str, Any]]:
+    departments = []
+    for department in DEPARTMENT_AGENT_MAP:
+        item = deepcopy(department)
+        item.update(deepcopy(DEPARTMENT_TOOL_ACCESS_MAP.get(str(department["department"]), {})))
+        item["loop"] = [step.title() for step in DEPARTMENT_AGENT_LOOP]
+        item["tool_contract_required_fields"] = list(DEPARTMENT_TOOL_CONTRACT_FIELDS)
+        departments.append(item)
+    return departments
+
+
+def get_judge_trace_eval_contract() -> dict[str, Any]:
+    contract = deepcopy(JUDGE_TRACE_EVAL_CONTRACT)
+    contract["owned_tools"] = sorted(
+        set(contract["trace_read_tools"])
+        | set(contract["eval_write_tools"])
+        | set(contract["inspection_tools"])
+    )
+    contract["exclusive_tools"] = sorted(JUDGE_TRACE_EVAL_EXCLUSIVE_TOOLS)
+    return contract
+
+
+def active_departments_for_agents(agent_ids: list[str] | tuple[str, ...] | set[str]) -> list[str]:
+    return sorted(
+        {
+            _department_for_agent(str(agent_id))["department"]
+            for agent_id in agent_ids
+            if str(agent_id or "").strip()
+        }
+    )
+
+
+def _department_record(department_id: str | None) -> dict[str, Any]:
+    wanted = str(department_id or "").strip()
+    for department in DEPARTMENT_AGENT_MAP:
+        if department["department"] == wanted:
+            item = deepcopy(department)
+            item.update(deepcopy(DEPARTMENT_TOOL_ACCESS_MAP.get(wanted, {})))
+            return item
+    if wanted == "tool_executor":
+        return {
+            "department": "tool_executor",
+            "label": "Tool Executor",
+            "canonical_agent": "Tool Executor Agent",
+            "implementation_agents": ["tool_executor_agent"],
+            "main_job": "execute approved receiver actions and record delivery outcomes",
+            "tool_families": ["receiver dispatch tools", "idempotency tools", "rollback tools"],
+            "read_tools": ["approved_action_envelope", "policy_gate_receipt", "executive_approval", "delivery_target"],
+            "write_action_tools": sorted(REAL_ACTION_TOOLS),
+        }
+    return {
+        "department": wanted or "executive",
+        "label": wanted.replace("_", " ").title() if wanted else "Executive",
+        "canonical_agent": "Executive Agent",
+        "implementation_agents": ["decision_bridge_agent"],
+        "main_job": "cross-department tradeoff and final recommendation",
+        "tool_families": ["approval tools", "routing tools"],
+    }
+
+
+def _department_for_agent(agent_id: str) -> dict[str, Any]:
+    return _department_record(AGENT_DEPARTMENT_OVERRIDES.get(agent_id, "executive"))
+
+
+def _tool_contract_status(agent_id: str, tool_name: str, action_context: dict[str, Any]) -> dict[str, Any]:
+    department = _department_for_agent(agent_id)
+    normalized = {
+        "department": action_context.get("department") or department["department"],
+        "tool": action_context.get("tool") or tool_name,
+        "intent": action_context.get("intent") or action_context.get("reason") or action_context.get("action") or "",
+        "evidence": action_context.get("evidence") or action_context.get("input_signals") or action_context.get("signals") or [],
+        "risk_level": action_context.get("risk_level") or action_context.get("riskLevel") or "",
+        "policy_check": action_context.get("policy_check") or action_context.get("policyCheck") or action_context.get("policyGateStatus") or action_context.get("policyGate") or "",
+        "expected_outcome": action_context.get("expected_outcome") or action_context.get("expectedOutcome") or action_context.get("expectedImpact") or "",
+        "rollback": action_context.get("rollback") or action_context.get("rollbackPlan") or "",
+    }
+    if action_context.get("proposed_by") or action_context.get("proposedBy"):
+        normalized["proposed_by"] = action_context.get("proposed_by") or action_context.get("proposedBy")
+    missing = [
+        field
+        for field in DEPARTMENT_TOOL_CONTRACT_FIELDS
+        if normalized.get(field) in (None, "", []) or normalized.get(field) == {}
+    ]
+    return {
+        "status": "complete" if not missing else "incomplete",
+        "required_fields": list(DEPARTMENT_TOOL_CONTRACT_FIELDS),
+        "missing_fields": missing,
+        "normalized": normalized,
+        "loop": [step.title() for step in DEPARTMENT_AGENT_LOOP],
+    }
+
+
+def _judge_trace_eval_tool_status(agent_id: str, tool_name: str) -> dict[str, Any] | None:
+    contract = get_judge_trace_eval_contract()
+    if tool_name not in set(contract["owned_tools"]):
+        return None
+    owner = str(contract["owner_agent"])
+    is_owner = agent_id == owner
+    return {
+        "owner_agent": owner,
+        "owner_department": contract["owner_department"],
+        "owned_by_judge": True,
+        "requesting_agent_is_owner": is_owner,
+        "exclusive": tool_name in set(contract["exclusive_tools"]),
+        "status": "judge_owned" if is_owner else "shared_inspection" if tool_name in set(contract["inspection_tools"]) else "requires_judge_handoff",
+        "routing_rule": contract["routing_rule"],
+    }
 
 
 def build_agent_builder_boundary_contract() -> dict[str, Any]:
@@ -570,10 +959,17 @@ def build_agent_builder_boundary_contract() -> dict[str, Any]:
     for agent in get_agent_registry():
         agent_id = str(agent["agent_id"])
         can_dispatch = any(tool.startswith("dispatch_") for tool in AGENT_BUILDER_TOOL_ALLOWLIST.get(agent_id, []))
+        department = _department_for_agent(agent_id)
         agents.append(
             {
                 "id": agent_id,
                 "name": agent["name"],
+                "department": department["department"],
+                "department_label": department["label"],
+                "department_agent": department["canonical_agent"],
+                "department_loop": [step.title() for step in DEPARTMENT_AGENT_LOOP],
+                "read_tools": department.get("read_tools", []),
+                "write_action_tools": department.get("write_action_tools", []),
                 "mode": agent.get("mode", []),
                 "role": agent["role"],
                 "responsibilities": agent.get("owns", []),
@@ -586,12 +982,19 @@ def build_agent_builder_boundary_contract() -> dict[str, Any]:
                 "execution_boundary": _agent_builder_execution_boundary(agent_id, can_dispatch),
                 "requires_human_approval_when": _agent_builder_human_approval_rules(agent_id),
                 "agent_builder_fit": _agent_builder_fit(agent_id),
+                **({"judge_trace_eval_contract": get_judge_trace_eval_contract()} if agent_id == JUDGE_TRACE_EVAL_CONTRACT["owner_agent"] else {}),
             }
         )
     return {
         "platform": "Vertex AI Agent Builder / Agent Engine",
-        "contract_version": "parkpulse-agent-boundaries-v1",
-        "principle": "Each agent gets explicit tools, responsibilities, blocked scopes, policy refs, and handoff targets before it can affect receivers.",
+        "contract_version": "parkpulse-department-agent-boundaries-v2",
+        "principle": "Each department agent gets explicit tools, responsibilities, blocked scopes, policy refs, handoff targets, and a traceable tool-call contract before it can affect receivers.",
+        "department_system": {
+            "loop": [step.title() for step in DEPARTMENT_AGENT_LOOP],
+            "departments": get_department_agent_map(),
+            "tool_contract_required_fields": list(DEPARTMENT_TOOL_CONTRACT_FIELDS),
+            "judge_trace_eval_contract": get_judge_trace_eval_contract(),
+        },
         "agents": agents,
         "tool_registry": sorted({tool for agent in agents for tool in agent["allowed_tools"]}),
         "blocked_tool_registry": sorted({tool for agent in agents for tool in agent["blocked_tools"]}),
@@ -599,12 +1002,14 @@ def build_agent_builder_boundary_contract() -> dict[str, Any]:
             "Read-only agents can gather evidence and recommend next roles but cannot dispatch.",
             "Specialist agents hand proposals to Decision Bridge before final action selection.",
             "Safety/Policy and Logic Audit can block or require approval but cannot silently execute.",
+            "Trace/eval reads and score/flag/regression-test writes are owned by GCP Trace/Eval Judge.",
             "Receiver dispatch tools require a policy gate receipt and delivery proof receipt.",
             "Offline learning agents cannot affect live park state without human promotion.",
         ],
         "runtime_enforcement": {
-            "pre_tool_call": "Check requested tool against allowed_tools and blocked_tools.",
+            "pre_tool_call": "Check requested tool against allowed_tools, blocked_tools, and judge-exclusive trace/eval ownership.",
             "pre_dispatch": "Require validate_policy plus approval when the agent boundary says review is needed.",
+            "post_eval": "GCP Trace/Eval Judge records score, failure flags, and regression-test recommendations from full trace evidence.",
             "post_dispatch": "Delivery Proof records Pub/Sub, Firestore, Dataflow, and receiver acknowledgement receipts.",
         },
     }
@@ -655,13 +1060,25 @@ def enforce_agent_tool_boundary(agent_id: str | None, tool_name: str, action_con
     if requested_tool.startswith("dispatch_") and not policy_gate_checked:
         allowed = False
         reasons.append("dispatch tools require policy_gate_checked, a decision receipt, or pending operator approval")
+    if requested_tool in REAL_ACTION_TOOLS and normalized_agent_id != "tool_executor_agent":
+        allowed = False
+        reasons.append("real action tools can only be executed by tool_executor_agent")
+    if requested_tool in JUDGE_TRACE_EVAL_EXCLUSIVE_TOOLS and normalized_agent_id != JUDGE_TRACE_EVAL_CONTRACT["owner_agent"]:
+        allowed = False
+        reasons.append("trace/eval read and score/flag/regression tools require gcp_eval_judge_agent")
+    tool_contract = _tool_contract_status(normalized_agent_id, requested_tool, context)
+    judge_contract = _judge_trace_eval_tool_status(normalized_agent_id, requested_tool)
 
-    return {
+    result = {
         "status": "allowed" if allowed else "blocked",
         "allowed": allowed,
         "agent_id": normalized_agent_id,
         "agent_name": agent["name"],
+        "department": _department_for_agent(normalized_agent_id)["department"],
+        "department_label": _department_for_agent(normalized_agent_id)["label"],
+        "department_agent": _department_for_agent(normalized_agent_id)["canonical_agent"],
         "tool": requested_tool,
+        "tool_contract": tool_contract,
         "allowed_tools_checked": requested_tool in allowed_tools,
         "blocked_tools_checked": requested_tool not in blocked_tools,
         "policy_gate_checked": policy_gate_checked,
@@ -671,6 +1088,81 @@ def enforce_agent_tool_boundary(agent_id: str | None, tool_name: str, action_con
         "requires_human_approval_when": _agent_builder_human_approval_rules(normalized_agent_id),
         "reason": "; ".join(reasons) if reasons else "Tool is allowed by Agent Builder boundary contract.",
         "checked_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+    if judge_contract:
+        result["judge_contract"] = judge_contract
+    return result
+
+
+def build_department_tool_proposal(
+    agent_id: str,
+    requested_tool: str,
+    *,
+    intent: str,
+    evidence: list[str] | None = None,
+    risk_level: str = "medium",
+    expected_outcome: str = "department recommendation reviewed",
+    rollback: str = "withdraw proposal before execution",
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the auditable envelope department agents submit before execution."""
+
+    payload = payload or {}
+    department = _department_for_agent(agent_id)
+    normalized_risk = str(risk_level or "medium").strip().lower()
+    compliance_required = _proposal_requires_compliance(requested_tool, normalized_risk, payload)
+    executive_required = _proposal_requires_executive(requested_tool, normalized_risk, payload, compliance_required)
+    context = {
+        "department": department["department"],
+        "tool": requested_tool,
+        "intent": intent,
+        "evidence": evidence or [],
+        "risk_level": normalized_risk,
+        "policy_check": "pending_compliance" if compliance_required else "not_required_before_proposal",
+        "expected_outcome": expected_outcome,
+        "rollback": rollback,
+        "proposal_payload": payload,
+    }
+    boundary = enforce_agent_tool_boundary(agent_id, requested_tool, context)
+    proposal_status = "proposed" if boundary["allowed"] else "blocked"
+    approval_status = (
+        "blocked"
+        if not boundary["allowed"]
+        else "requires_executive"
+        if executive_required
+        else "requires_compliance"
+        if compliance_required
+        else "department_approved"
+    )
+    executor_status = (
+        "blocked"
+        if not boundary["allowed"]
+        else "executor_only"
+        if requested_tool in REAL_ACTION_TOOLS
+        else "awaiting_executive"
+        if executive_required
+        else "awaiting_compliance"
+        if compliance_required
+        else "ready_for_executor"
+    )
+    return {
+        "proposal_status": proposal_status,
+        "proposed_by": agent_id,
+        "department": department["department"],
+        "department_label": department["label"],
+        "department_agent": department["canonical_agent"],
+        "requested_tool": requested_tool,
+        "intent": intent,
+        "evidence": (evidence or [])[:5],
+        "risk_level": normalized_risk,
+        "requires_compliance": compliance_required,
+        "requires_executive": executive_required,
+        "approval_status": approval_status,
+        "executor_agent": "tool_executor_agent",
+        "executor_status": executor_status,
+        "expected_outcome": expected_outcome,
+        "rollback": rollback,
+        "boundary": boundary,
     }
 
 
@@ -709,7 +1201,89 @@ def jsonish_context(context: dict[str, Any]) -> str:
         return ""
 
 
+def _proposal_requires_compliance(requested_tool: str, risk_level: str, payload: dict[str, Any]) -> bool:
+    tool = str(requested_tool or "").lower()
+    context = jsonish_context(payload)
+    if risk_level in {"high", "critical"}:
+        return True
+    if tool in REAL_ACTION_TOOLS:
+        return True
+    sensitive_terms = [
+        "guest_message",
+        "recovery_offer",
+        "refund",
+        "safety",
+        "close_reopen",
+        "human_approval",
+        "zone_control",
+        "dispatch_alert",
+        "escalation",
+        "overtime",
+        "break_reminder",
+        "promo",
+    ]
+    return any(term in tool or term in context for term in sensitive_terms)
+
+
+def _proposal_requires_executive(requested_tool: str, risk_level: str, payload: dict[str, Any], compliance_required: bool) -> bool:
+    tool = str(requested_tool or "").lower()
+    context = jsonish_context(payload)
+    if risk_level in {"high", "critical"}:
+        return True
+    if tool in REAL_ACTION_TOOLS:
+        return True
+    executive_terms = ["refund", "recovery_offer", "close_reopen", "launch_pause_promo", "redirect_offer", "budget", "revenue", "zone_control"]
+    return compliance_required and any(term in tool or term in context for term in executive_terms)
+
+
+def _proposal_tool_for_action(agent_id: str, proposed_action: dict[str, Any]) -> str:
+    department = _department_for_agent(agent_id)
+    target = str(proposed_action.get("target", "")).lower()
+    action = str(proposed_action.get("action", "")).lower()
+    if agent_id == "ride_ops_agent" or target == "ride":
+        if "route" in action or "reroute" in action or "traffic" in target:
+            return "recommend_route_change"
+        return "recommend_route_change" if "reroute" in action or "hold" in action else "create_ops_alert"
+    if agent_id == "guest_flow_agent" or target == "guest":
+        return "draft_guest_message" if "message" in action or "routing" in proposed_action else "create_support_ticket"
+    if agent_id == "staffing_agent" or target == "staff":
+        return "shift_adjustment_recommendation"
+    if agent_id == "food_demand_agent" or target == "food":
+        return "pause_launch_promo" if "promo" in action or "redirect" in action else "inventory_alert"
+    if agent_id == "facilities_energy_agent" or target == "energy":
+        return "create_work_order"
+    if agent_id == "event_creative_agent":
+        if "redirect" in action:
+            return "redirect_offer"
+        if "promo" in action or "launch" in action or "pause" in action:
+            return "launch_pause_promo"
+        return "draft_campaign"
+    if agent_id == "safety_policy_agent":
+        return "require_human_approval" if proposed_action.get("requires_human_review") else "safety_alert"
+    if agent_id == "finance_agent":
+        return "revenue_impact_report"
+    if agent_id == "logic_audit_agent":
+        return "generate_compliance_note"
+    if agent_id == "gcp_eval_judge_agent":
+        return "score_decision"
+    if agent_id == "decision_bridge_agent":
+        return "choose_tradeoff"
+    tools = department.get("write_action_tools") or []
+    return str(tools[0]) if tools else "choose_tradeoff"
+
+
+def _risk_for_proposal(proposal_type: str, proposed_action: dict[str, Any], constraints: list[str]) -> str:
+    context = jsonish_context({"proposal_type": proposal_type, "proposed_action": proposed_action, "constraints": constraints})
+    if any(term in context for term in ["safety", "emergency", "medical", "lost child", "evacuation", "close", "reopen"]):
+        return "high"
+    if proposal_type in {"gate", "constraint"}:
+        return "medium"
+    return "low" if proposal_type in {"context", "tradeoff"} else "medium"
+
+
 def _agent_builder_decision_rights(agent_id: str, can_dispatch: bool) -> list[str]:
+    if agent_id == "tool_executor_agent":
+        return ["execute_approved_action", "record_delivery_receipt", "emit_rollback_handle"]
     if agent_id == "customer_support_agent":
         return ["answer_customer", "recommend_public_next_stop", "show_route", "send_to_customer_phone"]
     if agent_id in {"safety_policy_agent", "logic_audit_agent", "gcp_eval_judge_agent"}:
@@ -728,6 +1302,8 @@ def _agent_builder_decision_rights(agent_id: str, can_dispatch: bool) -> list[st
 
 
 def _agent_builder_handoff(agent_id: str) -> str:
+    if agent_id == "tool_executor_agent":
+        return "delivery_proof_agent"
     if agent_id == "customer_support_agent":
         return "customer_kiosk_ui"
     if agent_id in {"safety_policy_agent", "logic_audit_agent", "gcp_eval_judge_agent"}:
@@ -744,6 +1320,8 @@ def _agent_builder_handoff(agent_id: str) -> str:
 
 
 def _agent_builder_execution_boundary(agent_id: str, can_dispatch: bool) -> str:
+    if agent_id == "tool_executor_agent":
+        return "executes real receiver actions only from approved action envelopes; cannot create recommendations or skip trace outcome recording"
     if agent_id == "customer_support_agent":
         return "customer self-service only; no operator dispatch, staff tasking, equipment control, policy disclosure, or private data access"
     if agent_id in {"memory_ops_agent", "autodream_agent"}:
@@ -763,6 +1341,13 @@ def _agent_builder_execution_boundary(agent_id: str, can_dispatch: bool) -> str:
 
 def _agent_builder_human_approval_rules(agent_id: str) -> list[str]:
     rules = ["policy gate returns requires_human_review"]
+    if agent_id == "tool_executor_agent":
+        return [
+            "approved action envelope is missing",
+            "compliance block, policy failure, or judge failure is present",
+            "executive approval is required but missing",
+            "payload affects safety, security, labor, customer-care commitments, equipment, refunds, or public messaging",
+        ]
     if agent_id == "customer_support_agent":
         return [
             "guest reports medical, security, missing child, accessibility emergency, harassment, or evacuation concern",
@@ -783,6 +1368,8 @@ def _agent_builder_human_approval_rules(agent_id: str) -> list[str]:
 
 
 def _agent_builder_fit(agent_id: str) -> str:
+    if agent_id == "tool_executor_agent":
+        return "Dedicated action runner that receives approved envelopes from Decision Bridge and emits idempotent delivery receipts."
     if agent_id == "customer_support_agent":
         return "Customer-facing Agent Builder kiosk agent with read-only public context and two customer-only UI actions."
     if agent_id in {"safety_policy_agent", "logic_audit_agent", "gcp_eval_judge_agent"}:
@@ -802,6 +1389,11 @@ def get_agent_registry() -> list[dict[str, Any]]:
     registry = []
     for agent in AGENT_REGISTRY:
         item = deepcopy(agent)
+        department = _department_for_agent(str(agent["agent_id"]))
+        item["department"] = department["department"]
+        item["department_label"] = department["label"]
+        item["department_agent"] = department["canonical_agent"]
+        item["department_loop"] = [step.title() for step in DEPARTMENT_AGENT_LOOP]
         item["policy_refs"] = _policy_refs_for_agent(agent)
         registry.append(item)
     return registry
@@ -824,14 +1416,21 @@ def role_alignment_report() -> dict[str, Any]:
     return {
         "status": "aligned",
         "agent_count": len(AGENT_REGISTRY),
+        "department_count": len(DEPARTMENT_AGENT_MAP),
         "agent_group_count": len(AGENT_TOPOLOGY["agent_groups"]),
         "phase_count": len(AGENT_TOPOLOGY["phases"]),
         "handoff_count": len(AGENT_TOPOLOGY["handoffs"]),
-        "runtime_contract": "Every active ParkPulse run can emit per-agent findings with input signals, recommendation, confidence, policy refs, and trace span.",
+        "runtime_contract": "Every active ParkPulse run can emit per-department findings with input signals, recommendation, confidence, policy refs, trace span, and department tool contract.",
         "coverage": coverage,
         "group_coverage": group_coverage,
+        "department_coverage": {
+            department["department"]: department["implementation_agents"]
+            for department in DEPARTMENT_AGENT_MAP
+        },
         "topology": {
             "pattern": AGENT_TOPOLOGY["pattern"],
+            "lifecycle_pattern": AGENT_TOPOLOGY["lifecycle_pattern"],
+            "department_system": AGENT_TOPOLOGY["department_system"],
             "agent_groups": [group["id"] for group in AGENT_TOPOLOGY["agent_groups"]],
             "phases": [phase["id"] for phase in AGENT_TOPOLOGY["phases"]],
             "eval_dimensions": AGENT_TOPOLOGY["eval_dimensions"],
@@ -881,7 +1480,78 @@ def build_role_agent_proposals(
             "context",
         )
     ]
-    if scenario_key == "food_spike":
+    if scenario_key == "marketing_promo_conflict":
+        proposals.extend(
+            [
+                _role_proposal(
+                    "event_creative_agent",
+                    "Push the offer, but redirect it away from the overcrowded indoor food court",
+                    {"target": "marketing", "action": "redirect_offer", "from_zone": "zone_b", "to_zone": "zone_c", "offer": "indoor_food_discount"},
+                    [
+                        "campaign=indoor_food_discount",
+                        f"crowded_zone={crowded_zone.get('name', 'Zone B')} {crowded_zone.get('density', 0)}%",
+                        f"weather={weather.get('condition', 'active')}",
+                    ],
+                    ["Marketing can read crowd pressure but cannot change guest routing."],
+                    0.82,
+                    "tradeoff",
+                ),
+                _role_proposal(
+                    "ride_ops_agent",
+                    "Do not increase traffic into the already constrained indoor court",
+                    {"target": "traffic", "action": "recommend_route_change", "blocked_zone": "zone_b", "preferred_zone": "zone_c"},
+                    [
+                        f"zone_b_density={crowded_zone.get('density', 0)}%",
+                        f"path_pressure={congested_path.get('congestionLevel', 0)}%",
+                        "queue_migration=ride_outage_to_food",
+                    ],
+                    ["Ops may recommend routing changes, but Tool Executor must perform real receiver actions."],
+                    0.88,
+                    "constraint",
+                ),
+                _role_proposal(
+                    "safety_policy_agent",
+                    "Block any promotion that increases Zone B crowd density",
+                    {"target": "safety", "action": "require_human_approval", "blocked_zone": "zone_b", "reason": "crowd_density"},
+                    [
+                        f"zone_b_density={crowded_zone.get('density', 0)}%",
+                        "policy=PARK-SAFE crowd hazard",
+                        "promotion_increases_traffic=true",
+                    ],
+                    ["Safety can block unsafe demand creation even when revenue impact is positive."],
+                    0.94,
+                    "gate",
+                ),
+                _role_proposal(
+                    "finance_agent",
+                    "Keep the revenue upside by moving the discount to Zone C instead of cancelling it",
+                    {"target": "finance", "action": "revenue_impact_report", "blocked_offer": "zone_b_discount", "replacement_offer": "zone_c_discount"},
+                    [
+                        "discount_revenue_upside=positive",
+                        "refund_exposure=lower_if_crowding_avoided",
+                        "zone_c_capacity=available",
+                    ],
+                    ["Revenue upside does not override safety or crowd-flow constraints."],
+                    0.8,
+                    "tradeoff",
+                ),
+                _role_proposal(
+                    "decision_bridge_agent",
+                    "Reject the Zone B promotion and choose the Zone C redirected offer",
+                    {"target": "scenario", "action": "choose_tradeoff", "decision": "reject_zone_b_redirect_to_zone_c"},
+                    [
+                        "marketing_offer=redirectable",
+                        "ops_zone_b_block=active",
+                        "safety_zone_b_block=active",
+                        "finance_zone_c_upside=positive",
+                    ],
+                    ["Executive tradeoff chooses the safe alternative; Tool Executor runs only the approved Zone C action."],
+                    0.91,
+                    "bridge",
+                ),
+            ]
+        )
+    elif scenario_key == "food_spike":
         proposals.extend(
             [
                 _role_proposal(
@@ -1049,13 +1719,18 @@ def build_role_agent_proposals(
     )
     conflicts = _role_proposal_conflicts(proposals, scenario_key, open_callouts, crowded_zone, route)
     active_roles = list(dict.fromkeys(item["agent_id"] for item in proposals))
+    active_departments = active_departments_for_agents(active_roles)
+    envelope_summary = _proposal_envelope_summary(proposals)
     return {
         "mode": "hybrid_role_proposals",
         "route": route or {"route": "scenario_run", "scenario_key": scenario_key},
         "scenario_key": scenario_key,
         "execution_model": "specialist_role_agents_propose_central_optimizer_disposes",
         "active_roles": active_roles,
+        "active_departments": active_departments,
+        "active_department_count": len(active_departments),
         "proposal_count": len(proposals),
+        "proposal_envelope_summary": envelope_summary,
         "proposals": proposals,
         "conflicts": conflicts,
         "mediator_summary": (
@@ -1108,10 +1783,21 @@ def build_orchestration_run(
         )
     conflicts = _orchestration_conflicts(findings, response_metrics or {}, bool(event_revision))
     lifecycle_artifact = _build_lifecycle_artifact(mode, findings, response_metrics or {}, event_revision, active_groups)
+    active_departments = active_departments_for_agents({str(agent_id) for agent_id in finding_ids if isinstance(agent_id, str)})
     return {
         "mode": mode,
         "pattern": AGENT_TOPOLOGY["pattern"],
+        "lifecycle_pattern": AGENT_TOPOLOGY["lifecycle_pattern"],
         "supervisor": "decision_bridge_agent",
+        "department_system": {
+            "loop": [step.title() for step in DEPARTMENT_AGENT_LOOP],
+            "active_departments": active_departments,
+            "active_department_count": len(active_departments),
+            "conflict_resolver": "decision_bridge_agent",
+            "policy_judge": "safety_policy_agent",
+            "eval_judge": "gcp_eval_judge_agent",
+            "tool_contract_required_fields": list(DEPARTMENT_TOOL_CONTRACT_FIELDS),
+        },
         "agent_groups": active_groups,
         "lifecycle_artifact": lifecycle_artifact,
         "phase_count": len(phases),
@@ -1514,10 +2200,32 @@ def _role_proposal(
 ) -> dict[str, Any]:
     registry = {agent["agent_id"]: agent for agent in AGENT_REGISTRY}
     agent = registry.get(agent_id, registry["decision_bridge_agent"])
+    department = _department_for_agent(str(agent["agent_id"]))
+    normalized_agent_id = str(agent["agent_id"])
+    requested_tool = _proposal_tool_for_action(normalized_agent_id, proposed_action)
+    proposal_envelope = build_department_tool_proposal(
+        normalized_agent_id,
+        requested_tool,
+        intent=recommendation,
+        evidence=evidence,
+        risk_level=_risk_for_proposal(proposal_type, proposed_action, constraints),
+        expected_outcome=str(proposed_action.get("expected_outcome") or recommendation),
+        rollback=str(proposed_action.get("rollback") or "withdraw proposal before Tool Executor receives it"),
+        payload=proposed_action,
+    )
     return {
         "agent_id": agent["agent_id"],
         "role": agent["name"],
+        "department": department["department"],
+        "department_label": department["label"],
+        "department_agent": department["canonical_agent"],
+        "loop": [step.title() for step in DEPARTMENT_AGENT_LOOP],
         "proposal_type": proposal_type,
+        "proposal_envelope": proposal_envelope,
+        "requested_tool": requested_tool,
+        "requires_compliance": proposal_envelope["requires_compliance"],
+        "requires_executive": proposal_envelope["requires_executive"],
+        "executor_status": proposal_envelope["executor_status"],
         "recommendation": recommendation,
         "proposed_action": proposed_action,
         "evidence": evidence[:5],
@@ -1525,6 +2233,20 @@ def _role_proposal(
         "confidence": round(max(0.0, min(1.0, confidence)), 2),
         "policy_refs": _policy_refs_for_agent(agent),
         "handoff_to": "decision_bridge_agent" if agent_id != "decision_bridge_agent" else "central_optimizer",
+    }
+
+
+def _proposal_envelope_summary(proposals: list[dict[str, Any]]) -> dict[str, Any]:
+    envelopes = [item.get("proposal_envelope", {}) for item in proposals if isinstance(item.get("proposal_envelope"), dict)]
+    return {
+        "total": len(envelopes),
+        "proposed": sum(1 for envelope in envelopes if envelope.get("proposal_status") == "proposed"),
+        "blocked": sum(1 for envelope in envelopes if envelope.get("proposal_status") == "blocked"),
+        "requires_compliance": sum(1 for envelope in envelopes if envelope.get("requires_compliance")),
+        "requires_executive": sum(1 for envelope in envelopes if envelope.get("requires_executive")),
+        "ready_for_executor": sum(1 for envelope in envelopes if envelope.get("executor_status") == "ready_for_executor"),
+        "awaiting_compliance": sum(1 for envelope in envelopes if envelope.get("executor_status") == "awaiting_compliance"),
+        "awaiting_executive": sum(1 for envelope in envelopes if envelope.get("executor_status") == "awaiting_executive"),
     }
 
 
@@ -1565,6 +2287,15 @@ def _role_proposal_conflicts(
                 "status": "resolved",
             }
         )
+    if scenario_key == "marketing_promo_conflict" and {"event_creative_agent", "ride_ops_agent", "safety_policy_agent", "finance_agent", "decision_bridge_agent"} <= agent_ids:
+        conflicts.append(
+            {
+                "conflict": "Marketing wants to push a discount to Zone B, but Ops and Safety show Zone B is already overcrowded.",
+                "agents": ["event_creative_agent", "ride_ops_agent", "safety_policy_agent", "finance_agent", "decision_bridge_agent"],
+                "resolution": "Executive rejects the Zone B action and chooses a redirected Zone C offer that preserves revenue without increasing the crowd hazard.",
+                "status": "resolved",
+            }
+        )
     if bool(route.get("requires_human_review")):
         conflicts.append(
             {
@@ -1598,9 +2329,14 @@ def _finding(
 ) -> dict[str, Any]:
     registry = {agent["agent_id"]: agent for agent in AGENT_REGISTRY}
     agent = registry.get(agent_id, registry["decision_bridge_agent"])
+    department = _department_for_agent(str(agent["agent_id"]))
     return {
         "agent_id": agent["agent_id"],
         "name": agent["name"],
+        "department": department["department"],
+        "department_label": department["label"],
+        "department_agent": department["canonical_agent"],
+        "loop": [step.title() for step in DEPARTMENT_AGENT_LOOP],
         "role": agent["role"],
         "mode": mode,
         "input_signals": input_signals,
@@ -1637,6 +2373,7 @@ def _trace_findings(findings: list[dict[str, Any]], mode: str) -> list[dict[str,
             with _tracer.start_as_current_span(item["trace_span"]) as span:
                 span.set_attribute("parkpulse.agent.id", item["agent_id"])
                 span.set_attribute("parkpulse.agent.name", item["name"])
+                span.set_attribute("parkpulse.agent.department", item.get("department", ""))
                 span.set_attribute("parkpulse.agent.mode", item["mode"])
                 span.set_attribute("parkpulse.agent.urgency", item["urgency"])
                 span.set_attribute("parkpulse.agent.confidence", item["confidence"])

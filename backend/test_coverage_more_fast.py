@@ -216,6 +216,7 @@ def test_gemini_hard_timeout_worker_error_payloads(monkeypatch):
         async def fake_create(*_args, **_kwargs):
             return process
 
+        monkeypatch.setenv("PARKPULSE_DISABLE_GEMINI_REST_FAST_PATH", "1")
         monkeypatch.setattr(gemini_hard_timeout.asyncio, "create_subprocess_exec", fake_create)
         return await gemini_hard_timeout.generate_gemini_json_hard_timeout({"x": 1}, timeout_seconds=1)
 
@@ -254,14 +255,14 @@ def test_gemini_hard_timeout_main_rest_success_and_errors(monkeypatch, capsys):
             return json.dumps({"candidates": [{"content": {"parts": [{"text": '{"ok":true}'}, {"text": ""}]}}]}).encode()
 
     monkeypatch.setattr(gemini_hard_timeout.sys, "stdin", io.StringIO('{"prompt":{"task":"x"},"temperature":0.1,"max_output_tokens":10}'))
-    monkeypatch.setattr(gemini_hard_timeout.urllib_request, "urlopen", lambda request, timeout: Response())
+    monkeypatch.setattr(gemini_hard_timeout.urllib_request, "urlopen", lambda request, timeout, context=None: Response())
     assert gemini_hard_timeout._main() == 0
     assert json.loads(capsys.readouterr().out)["transport"] == "gemini_rest_api_key"
 
     class ErrorBody(io.BytesIO):
         pass
 
-    def raise_http(_request, timeout=None):
+    def raise_http(_request, timeout=None, context=None):
         raise urllib.error.HTTPError("url", 400, "bad", {}, ErrorBody(b"bad request"))
 
     monkeypatch.setattr(gemini_hard_timeout.sys, "stdin", io.StringIO("{}"))

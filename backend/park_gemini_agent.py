@@ -37,6 +37,10 @@ You are ParkPulse AI, a multi-agent operations copilot for amusement parks.
 Use only the supplied park_state and retrieved MongoDB memory. Make a balanced operational
 recommendation across guest satisfaction, ride wait times, staff stress, food/inventory pressure,
 energy cost, and safety. Safety and maintenance clearance override throughput.
+Use tools deliberately. A high-accuracy answer must first ground itself in live state, retrieve
+similar incidents or playbooks, simulate or score candidate impact when selecting an action, and
+validate policy before recommending dispatch. If a required tool result is not present in the
+supplied context, mark it as needed instead of pretending it ran.
 When operator_request is supplied, treat it as the live human intent. Preserve the requested
 constraints, explain tradeoffs, ask for clarification only if an executable action would be unsafe
 without missing facts, and make the candidate actions specific to that request.
@@ -70,9 +74,29 @@ mix explicitly explains why that risk is acceptable.
 For operator_request, the custom_action_mixes must be uniquely shaped by that exact text. Do not
 reuse the standard ride-down/weather/food templates unless the request genuinely asks for them.
 
+Every answer must cite concrete evidence from park_state or memory in evidence_citations and must
+include a tool_use_plan. Cite ride, zone, food, staff, weather, alert, policy, memory, or simulator
+facts by field/name. Do not cite facts that are not in the supplied inputs.
 Use amusement park operations language only. Avoid unrelated transportation, travel, or identity-data framing.
 Return JSON only.
 """.strip()
+
+
+TOOL_USE_SEQUENCE = [
+    "get_park_state",
+    "retrieve_similar_incidents",
+    "simulate_action",
+    "validate_policy",
+    "inspect_observability_contract",
+]
+
+SCENARIO_EVIDENCE_TERMS = {
+    "ride_down": ["dragon", "coaster", "queue", "wait", "coaster plaza", "maintenance", "clearance"],
+    "food_spike": ["food", "mobile", "pickup", "eta", "backlog", "court"],
+    "staff_shortage": ["staff", "break", "callout", "operator", "crowd", "greeter"],
+    "storm_response": ["storm", "weather", "indoor", "shelter", "hvac", "cooling", "comfort"],
+    "guest_care": ["first aid", "guest services", "privacy", "medical", "family reunification"],
+}
 
 
 class _NoopSpan:
@@ -201,6 +225,8 @@ class ParkAgentResponse(BaseModel):
     recommended_action: str = Field(description="Recommended operational change.")
     guest_message: str = Field(description="Draft park-app message for operator review.")
     confidence_score: int = Field(description="Confidence score from 0 to 100.")
+    evidence_citations: list[str] = Field(default_factory=list, description="Concrete input facts from park_state or memory that support the answer.")
+    tool_use_plan: list[dict[str, str]] = Field(default_factory=list, description="Tools used or required before dispatch, with status and reason.")
     candidate_actions: list[ParkCandidateAction] = Field(description="Two to four compared candidate actions.")
     custom_action_mixes: list[ParkCustomActionMix] = Field(description="Exactly three parameterized operating mixes for optimizer scoring.")
     selected_action: ParkCandidateAction = Field(description="Selected action to execute.")
@@ -264,6 +290,8 @@ FAST_REACTION_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "guest_message": {"type": "string"},
         "confidence_score": {"type": "integer"},
+        "evidence_citations": {"type": "array", "items": {"type": "string"}},
+        "tool_use_plan": {"type": "array", "items": {"type": "object"}},
         "tradeoffs": {"type": "object"},
     },
     "required": [
@@ -274,6 +302,8 @@ FAST_REACTION_RESPONSE_SCHEMA: dict[str, Any] = {
         "candidate_actions",
         "guest_message",
         "confidence_score",
+        "evidence_citations",
+        "tool_use_plan",
         "tradeoffs",
     ],
 }
@@ -442,6 +472,146 @@ def _normalize_candidate(candidate: dict[str, Any] | None, fallback: dict[str, A
     }
 
 
+def _text_blob(*values: Any) -> str:
+    return " ".join(str(value or "").lower().replace("_", " ") for value in values)
+
+
+def _scenario_terms(scenario_key: str, retrieved_context: dict[str, Any] | None = None) -> list[str]:
+    terms = list(SCENARIO_EVIDENCE_TERMS.get(str(scenario_key), []))
+    route = (retrieved_context or {}).get("operator_route") if isinstance(retrieved_context, dict) else {}
+    if isinstance(route, dict):
+        route_scenario = str(route.get("scenario_key") or "")
+        terms.extend(SCENARIO_EVIDENCE_TERMS.get(route_scenario, []))
+    return sorted(set(term for term in terms if term))
+
+
+def _has_memory_evidence(retrieved_context: dict[str, Any] | None) -> bool:
+    compact = _compact_context(retrieved_context or {})
+    return bool(compact.get("playbooks") or compact.get("incidents") or compact.get("learnings") or compact.get("bigquery_priors", {}).get("best_prior"))
+
+
+def _tool_use_plan(raw_tools: Any, *, selected_action: dict[str, Any], has_memory: bool) -> list[dict[str, str]]:
+    provided = raw_tools if isinstance(raw_tools, list) else []
+    by_tool = {
+        str(item.get("tool") or item.get("name") or ""): item
+        for item in provided
+        if isinstance(item, dict)
+    }
+    selected_pair = f"{selected_action.get('target', 'unknown')}/{selected_action.get('action', 'unknown')}"
+    defaults = {
+        "get_park_state": ("used", "Ground selected action in the latest compact park_state."),
+        "retrieve_similar_incidents": ("used" if has_memory else "needed", "Use playbooks, incidents, learnings, or priors before trusting a recommendation."),
+        "simulate_action": ("needed", f"Project impact and secondary risk before dispatching {selected_pair}."),
+        "validate_policy": ("needed", f"Policy gate must validate {selected_pair} before execution."),
+        "inspect_observability_contract": ("needed", "Attach trace, evidence, fallback, and delivery receipt data before release."),
+    }
+    plan: list[dict[str, str]] = []
+    for tool in TOOL_USE_SEQUENCE:
+        supplied = by_tool.get(tool, {}) if isinstance(by_tool.get(tool), dict) else {}
+        status, reason = defaults[tool]
+        plan.append(
+            {
+                "tool": tool,
+                "status": str(supplied.get("status") or status),
+                "reason": str(supplied.get("reason") or supplied.get("rationale") or reason),
+            }
+        )
+    return plan
+
+
+def _evidence_citations(raw_citations: Any, *, state: dict[str, Any], retrieved_context: dict[str, Any]) -> list[str]:
+    citations = [str(item).strip() for item in raw_citations if isinstance(item, str) and item.strip()] if isinstance(raw_citations, list) else []
+    flow = state.get("guestFlow", {}) if isinstance(state, dict) else {}
+    active = flow.get("activeScenario", {}) if isinstance(flow.get("activeScenario"), dict) else {}
+    if active.get("key"):
+        citations.append(f"activeScenario:{active.get('key')}")
+    rides = [ride for ride in flow.get("rides", []) if isinstance(ride, dict)]
+    abnormal_ride = next((ride for ride in rides if ride.get("status") != "normal" or int(ride.get("waitMins", 0) or 0) >= 35), None)
+    if abnormal_ride:
+        citations.append(
+            f"ride:{abnormal_ride.get('name') or abnormal_ride.get('id')} status={abnormal_ride.get('status')} wait={abnormal_ride.get('waitMins')}"
+        )
+    alerts = state.get("alerts", []) if isinstance(state.get("alerts"), list) else []
+    if alerts:
+        first_alert = alerts[0] if isinstance(alerts[0], dict) else {"message": alerts[0]}
+        citations.append(f"alert:{str(first_alert.get('message') or first_alert.get('title') or first_alert)[:120]}")
+    compact = _compact_context(retrieved_context)
+    for key in ("playbooks", "incidents", "learnings"):
+        rows = compact.get(key, []) if isinstance(compact.get(key), list) else []
+        if rows:
+            citations.append(f"memory:{key}:{rows[0].get('_id') or rows[0].get('title') or rows[0].get('scenarioKey')}")
+    unique: list[str] = []
+    for citation in citations:
+        if citation and citation not in unique:
+            unique.append(citation)
+    return unique[:8]
+
+
+def _answer_accuracy_audit(plan: dict[str, Any], state: dict[str, Any], scenario_key: str, retrieved_context: dict[str, Any]) -> dict[str, Any]:
+    selected = plan.get("selected_action", {}) if isinstance(plan.get("selected_action"), dict) else {}
+    citations = plan.get("evidence_citations", []) if isinstance(plan.get("evidence_citations"), list) else []
+    tools = plan.get("tool_use_plan", []) if isinstance(plan.get("tool_use_plan"), list) else []
+    text = _text_blob(
+        plan.get("analysis"),
+        plan.get("recommended_action"),
+        plan.get("guest_message"),
+        plan.get("root_cause_classification"),
+        plan.get("operator_understanding"),
+        citations,
+    )
+    scenario_hits = [term for term in _scenario_terms(scenario_key, retrieved_context) if term in text]
+    selected_pair = (selected.get("target"), selected.get("action"))
+    checks = {
+        "has_live_state_evidence": any(str(item).startswith(("activeScenario:", "ride:", "alert:")) for item in citations),
+        "has_memory_evidence": any(str(item).startswith("memory:") for item in citations) or _has_memory_evidence(retrieved_context),
+        "scenario_terms_hit": len(scenario_hits),
+        "has_selected_action": selected_pair in ALLOWED_PARK_ACTIONS,
+        "has_policy_tool_plan": any(item.get("tool") == "validate_policy" for item in tools if isinstance(item, dict)),
+        "has_simulation_tool_plan": any(item.get("tool") == "simulate_action" for item in tools if isinstance(item, dict)),
+    }
+    score = 54
+    score += 12 if checks["has_live_state_evidence"] else 0
+    score += 8 if checks["has_memory_evidence"] else 0
+    score += min(18, checks["scenario_terms_hit"] * 6)
+    score += 5 if checks["has_selected_action"] else 0
+    score += 8 if checks["has_policy_tool_plan"] else 0
+    score += 7 if checks["has_simulation_tool_plan"] else 0
+    score = max(0, min(100, score))
+    missing = [name for name, passed in checks.items() if not passed and name != "scenario_terms_hit"]
+    if checks["scenario_terms_hit"] < 2:
+        missing.append("scenario_specific_evidence")
+    return {
+        "status": "verified" if score >= 82 and not missing else "needs_evidence",
+        "score": score,
+        "checks": checks,
+        "scenario_terms": scenario_hits[:8],
+        "missing": sorted(set(missing)),
+        "confidence_cap_applied": score < int(plan.get("confidence_score") or 0),
+    }
+
+
+def _apply_answer_accuracy_controls(
+    plan: dict[str, Any],
+    state: dict[str, Any],
+    scenario_key: str,
+    retrieved_context: dict[str, Any],
+    raw: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    raw = raw or {}
+    plan["evidence_citations"] = _evidence_citations(raw.get("evidence_citations") or plan.get("evidence_citations"), state=state, retrieved_context=retrieved_context)
+    plan["tool_use_plan"] = _tool_use_plan(raw.get("tool_use_plan") or plan.get("tool_use_plan"), selected_action=plan.get("selected_action", {}), has_memory=_has_memory_evidence(retrieved_context))
+    audit = _answer_accuracy_audit(plan, state, scenario_key, retrieved_context)
+    plan["answer_accuracy"] = audit
+    if audit["confidence_cap_applied"]:
+        plan["confidence_score"] = min(int(plan.get("confidence_score") or 0), audit["score"])
+    plan.setdefault("tradeoffs", {})["answer_accuracy"] = (
+        "Verified against live-state evidence, memory, selected action, and required tool plan."
+        if audit["status"] == "verified"
+        else f"Needs stronger evidence before execution: {', '.join(audit['missing'])}."
+    )
+    return plan
+
+
 def _fallback_plan(state: dict[str, Any], runtime: str, errors: list[str] | None = None) -> dict[str, Any]:
     native = build_park_action_plan(state)
     props = get_gemini_agent_properties()
@@ -460,7 +630,7 @@ def _fallback_plan(state: dict[str, Any], runtime: str, errors: list[str] | None
         if isinstance(item, dict)
     ]
     selected = _normalize_candidate(native_selected, fallback_action)
-    return {
+    plan = {
         "runtime": runtime,
         "gemini_ready": props.ready,
         "model": props.model,
@@ -478,9 +648,10 @@ def _fallback_plan(state: dict[str, Any], runtime: str, errors: list[str] | None
         "errors": errors or [],
         "source_plan": native,
     }
+    return _apply_answer_accuracy_controls(plan, state, str(plan.get("root_cause_classification") or ""), {}, {})
 
 
-def _normalize_gemini_plan(raw: dict[str, Any], state: dict[str, Any], runtime: str) -> dict[str, Any]:
+def _normalize_gemini_plan(raw: dict[str, Any], state: dict[str, Any], runtime: str, scenario_key: str = "", retrieved_context: dict[str, Any] | None = None) -> dict[str, Any]:
     fallback = _fallback_plan(state, "deterministic_fallback")
     fallback_selected = fallback["selected_action"]
     selected = _normalize_candidate(raw.get("selected_action"), fallback_selected)
@@ -495,7 +666,7 @@ def _normalize_gemini_plan(raw: dict[str, Any], state: dict[str, Any], runtime: 
         candidates.insert(0, selected)
     custom_mixes = raw.get("custom_action_mixes") if isinstance(raw.get("custom_action_mixes"), list) else []
 
-    return {
+    plan = {
         "runtime": runtime,
         "gemini_ready": True,
         "attempted_gemini": True,
@@ -506,12 +677,15 @@ def _normalize_gemini_plan(raw: dict[str, Any], state: dict[str, Any], runtime: 
         "recommended_action": str(raw.get("recommended_action") or selected["label"]),
         "guest_message": str(raw.get("guest_message") or fallback["guest_message"]),
         "confidence_score": int(raw.get("confidence_score") or fallback["confidence_score"]),
+        "evidence_citations": raw.get("evidence_citations") if isinstance(raw.get("evidence_citations"), list) else [],
+        "tool_use_plan": raw.get("tool_use_plan") if isinstance(raw.get("tool_use_plan"), list) else [],
         "candidate_actions": candidates,
         "custom_action_mixes": custom_mixes[:4],
         "selected_action": selected,
         "tradeoffs": raw.get("tradeoffs") if isinstance(raw.get("tradeoffs"), dict) else fallback["tradeoffs"],
         "errors": [],
     }
+    return _apply_answer_accuracy_controls(plan, state, scenario_key or str(plan.get("root_cause_classification") or ""), retrieved_context or {}, raw)
 
 
 def _attach_performance(plan: dict[str, Any], started_at: float, timeout_seconds: float, status: str) -> dict[str, Any]:
@@ -576,12 +750,24 @@ def _prompt(state: dict[str, Any], scenario_key: str, retrieved_context: dict[st
         "operator_mode": retrieved_context.get("operator_mode"),
         "park_state": _compact_state(state),
         "mongodb_memory": _compact_context(retrieved_context),
+        "tool_use_contract": {
+            "required_sequence": TOOL_USE_SEQUENCE,
+            "rules": [
+                "Mark get_park_state as used only when the answer cites live park_state facts.",
+                "Mark retrieve_similar_incidents as used only when memory playbooks, incidents, learnings, or priors are cited.",
+                "Mark simulate_action as needed unless supplied context includes simulator or optimizer evidence.",
+                "Mark validate_policy as needed before dispatch unless supplied context includes policy validation evidence.",
+                "Never claim a tool was used when the result is not in the supplied context.",
+            ],
+        },
         "output_contract": {
             "schema": "ParkAgentResponse",
             "requirements": [
                 "Return JSON only.",
                 "Follow the response_schema supplied in GenerateContentConfig.",
                 "Include exactly 3 custom_action_mixes for full planning runs.",
+                "Include evidence_citations with concrete state or memory facts.",
+                "Include tool_use_plan with tool, status, and reason for each required tool.",
             ],
         },
     }
@@ -603,6 +789,10 @@ def _reaction_prompt(state: dict[str, Any], scenario_key: str, retrieved_context
         "park_state": _reaction_state(state, route),
         "memory": _compact_context(retrieved_context),
         "local_operator_constraints": retrieved_context.get("operator_constraints", {}),
+        "tool_use_contract": {
+            "required_sequence": TOOL_USE_SEQUENCE,
+            "react_first_rule": "Use get_park_state and retrieve_similar_incidents evidence when present; mark simulate_action and validate_policy as needed before dispatch if not present.",
+        },
         "output_contract": {
             "schema": "ParkFastReactionResponse",
             "requirements": [
@@ -610,6 +800,8 @@ def _reaction_prompt(state: dict[str, Any], scenario_key: str, retrieved_context
                 "Include exactly one selected_action.",
                 "Include at most three candidate_actions.",
                 "Include one custom_action_mix only when it helps dispatch, routing, staffing, food, signage, or queue control.",
+                "Include evidence_citations with concrete state or memory facts.",
+                "Include tool_use_plan with tool, status, and reason.",
                 "Keep analysis and tradeoffs brief.",
             ],
         },
@@ -617,7 +809,7 @@ def _reaction_prompt(state: dict[str, Any], scenario_key: str, retrieved_context
     return f"{PARKPULSE_AGENT_CONTEXT}\n\n{json.dumps(payload, separators=(',', ':'), sort_keys=True)}"
 
 
-def _normalize_fast_reaction_plan(raw: dict[str, Any], state: dict[str, Any], runtime: str) -> dict[str, Any]:
+def _normalize_fast_reaction_plan(raw: dict[str, Any], state: dict[str, Any], runtime: str, scenario_key: str = "", retrieved_context: dict[str, Any] | None = None) -> dict[str, Any]:
     fallback = _fallback_plan(state, "deterministic_fallback")
     fallback_selected = fallback["selected_action"]
     selected = _normalize_candidate(raw.get("selected_action"), fallback_selected)
@@ -632,7 +824,7 @@ def _normalize_fast_reaction_plan(raw: dict[str, Any], state: dict[str, Any], ru
         candidates.insert(0, selected)
     custom_mix = raw.get("custom_action_mix") if isinstance(raw.get("custom_action_mix"), dict) else None
     custom_mixes = [custom_mix] if custom_mix else []
-    return {
+    plan = {
         "runtime": f"{runtime}_fast_reaction",
         "gemini_ready": True,
         "attempted_gemini": True,
@@ -643,6 +835,8 @@ def _normalize_fast_reaction_plan(raw: dict[str, Any], state: dict[str, Any], ru
         "recommended_action": selected["label"],
         "guest_message": str(raw.get("guest_message") or fallback["guest_message"]),
         "confidence_score": int(raw.get("confidence_score") or fallback["confidence_score"]),
+        "evidence_citations": raw.get("evidence_citations") if isinstance(raw.get("evidence_citations"), list) else [],
+        "tool_use_plan": raw.get("tool_use_plan") if isinstance(raw.get("tool_use_plan"), list) else [],
         "candidate_actions": candidates[:3],
         "custom_action_mixes": custom_mixes,
         "selected_action": selected,
@@ -650,6 +844,7 @@ def _normalize_fast_reaction_plan(raw: dict[str, Any], state: dict[str, Any], ru
         "errors": [],
         "workflow": "react_first_operator_command",
     }
+    return _apply_answer_accuracy_controls(plan, state, scenario_key or str(plan.get("root_cause_classification") or ""), retrieved_context or {}, raw)
 
 
 async def build_park_gemini_plan(
@@ -735,11 +930,14 @@ async def build_park_gemini_plan(
                 raw = _first_json_object(getattr(response, "text", "") or "") or {}
                 runtime = props.platform
 
-            plan = _normalize_gemini_plan(raw, park_state, runtime)
+            plan = _normalize_gemini_plan(raw, park_state, runtime, scenario_key, retrieved_context)
             if enforce_scenario_alignment:
                 plan = _align_selected_action_to_scenario(plan, park_state, scenario_key)
+                plan = _apply_answer_accuracy_controls(plan, park_state, scenario_key, retrieved_context, raw)
             span.set_attribute("parkpulse.gemini.runtime", plan["runtime"])
             span.set_attribute("parkpulse.gemini.custom_mix_count", len(plan.get("custom_action_mixes", [])))
+            span.set_attribute("parkpulse.answer_accuracy.score", plan.get("answer_accuracy", {}).get("score", 0))
+            span.set_attribute("parkpulse.answer_accuracy.status", plan.get("answer_accuracy", {}).get("status", "unknown"))
             span.set_attribute("parkpulse.selected_action", f"{plan['selected_action']['target']}/{plan['selected_action']['action']}")
             span.set_attribute("parkpulse.confidence_score", plan["confidence_score"])
             _attach_performance(plan, started_at, provider_timeout, "success")
@@ -832,10 +1030,12 @@ async def build_park_gemini_reaction_plan(
                 raw = _first_json_object(str(result.get("text") or "")) or {}
                 runtime = props.platform
 
-            plan = _normalize_fast_reaction_plan(raw, park_state, runtime)
+            plan = _normalize_fast_reaction_plan(raw, park_state, runtime, scenario_key, retrieved_context)
             _attach_performance(plan, started_at, provider_timeout, "success")
             span.set_attribute("parkpulse.gemini.runtime", plan["runtime"])
             span.set_attribute("parkpulse.gemini.response_latency_ms", plan["response_latency_ms"])
+            span.set_attribute("parkpulse.answer_accuracy.score", plan.get("answer_accuracy", {}).get("score", 0))
+            span.set_attribute("parkpulse.answer_accuracy.status", plan.get("answer_accuracy", {}).get("status", "unknown"))
             span.set_attribute("parkpulse.selected_action", f"{plan['selected_action']['target']}/{plan['selected_action']['action']}")
             return plan
         except Exception as error:

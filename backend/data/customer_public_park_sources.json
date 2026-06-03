@@ -1,0 +1,89 @@
+{
+  "version": "customer_public_source_catalog_v1",
+  "catalog_status": "seeded_needs_real_venue_review",
+  "real_venue_feed_connected": false,
+  "sources": {
+    "demo_venue_static_seed": {
+      "label": "Demo venue public seed catalog",
+      "source_type": "seed_catalog",
+      "confidence": 0.62,
+      "review_status": "needs_real_venue_review",
+      "last_verified_at": null,
+      "max_age_seconds": null
+    },
+    "live_physical_map": {
+      "label": "Live guest-visible physical map",
+      "source_type": "live_state.physicalMap",
+      "confidence": 0.78,
+      "review_status": "system_filtered_public_view",
+      "last_verified_at": null,
+      "max_age_seconds": 180
+    },
+    "live_event_schedule": {
+      "label": "Live operating-clock event schedule",
+      "source_type": "live_state.operatingClock.eventSchedule",
+      "confidence": 0.76,
+      "review_status": "system_filtered_public_view",
+      "last_verified_at": null,
+      "max_age_seconds": 300
+    },
+    "live_guest_flow": {
+      "label": "Live public wait and crowd state",
+      "source_type": "live_state.guestFlow",
+      "confidence": 0.8,
+      "review_status": "system_filtered_public_view",
+      "last_verified_at": null,
+      "max_age_seconds": 180
+    },
+    "live_food_ops": {
+      "label": "Live public food pickup state",
+      "source_type": "live_state.foodInventory",
+      "confidence": 0.74,
+      "review_status": "system_filtered_public_view",
+      "last_verified_at": null,
+      "max_age_seconds": 240
+    }
+  },
+  "field_sources": {
+    "rides": ["live_guest_flow", "demo_venue_static_seed", "live_physical_map"],
+    "food": ["live_food_ops", "demo_venue_static_seed", "live_physical_map"],
+    "venue_map": ["live_physical_map", "demo_venue_static_seed"],
+    "event_schedule": ["live_event_schedule"],
+    "landmarks": ["demo_venue_static_seed"],
+    "shows": ["demo_venue_static_seed", "live_event_schedule"],
+    "family_services": ["demo_venue_static_seed"],
+    "copy_variants": ["demo_venue_static_seed"]
+  },
+  "review_queue": [
+    {
+      "id": "replace_demo_attraction_rules",
+      "severity": "high",
+      "owner": "venue_content_ops",
+      "item": "Replace seed attraction height, accessibility, sensory, and family-fit facts with venue-approved source data."
+    },
+    {
+      "id": "replace_demo_menu_data",
+      "severity": "high",
+      "owner": "food_and_beverage",
+      "item": "Connect real menu, allergen, dietary, mobile-order, and availability source data."
+    },
+    {
+      "id": "approve_public_map_nodes",
+      "severity": "medium",
+      "owner": "park_operations",
+      "item": "Approve guest-visible map nodes, restroom/service coordinates, and emergency-access public wording."
+    },
+    {
+      "id": "approve_multilingual_copy",
+      "severity": "medium",
+      "owner": "guest_experience",
+      "item": "Review translated guest-facing copy for supported languages."
+    }
+  ],
+  "publish_gates": [
+    "Every public fact must have at least one source id.",
+    "Seed facts are allowed in demo mode but must stay marked needs_real_venue_review.",
+    "Backstage, staffing, policy, model, training, and private guest data must not be present.",
+    "High-impact changes to accessibility, first aid, attraction requirements, and allergen/menu information require human approval before production publishing."
+  ]
+}

@@ -211,6 +211,9 @@ export default function HumanEnhancementPage() {
               <a href="/" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
                 Operating loop
               </a>
+              <a href="/staff-training" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-teal-100 transition hover:border-teal-300">
+                Staff trainer
+              </a>
               <a href="/monitor" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
                 Monitor
               </a>

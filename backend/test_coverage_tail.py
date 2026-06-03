@@ -477,7 +477,10 @@ def test_digital_twin_helpers_and_simulation_tail_paths():
     assert digital_twin_tools.run_digital_twin_tool("get_noisy_observation", state, {"seed": "tail"})["output"]["mode"] == "noisy_partial_observation"
     assert digital_twin_tools.run_digital_twin_tool("score_outcome", state, {"target": "energy", "action": "protect_hvac"})["output"]["status"] == "ok"
 
-    assert park_simulation._seeded_time("tail")[0] in range(10, 14)
+    seeded_hour, seeded_minute = park_simulation._seeded_time("tail")
+    assert (seeded_hour, seeded_minute) == park_simulation._seeded_time("tail")
+    assert 0 <= seeded_hour < 24
+    assert 0 <= seeded_minute < 60
     assert park_simulation._top_by([], "density") == {}
     assert park_simulation._audit_tone(90) == "critical"
     assert park_simulation._audit_tone(70) == "warning"

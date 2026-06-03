@@ -91,6 +91,8 @@ def test_scenario_eval_sweep_edges_and_async_outcomes():
 
 
 def test_gemini_hard_timeout_subprocess_success_errors_and_worker(monkeypatch, capsys):
+    monkeypatch.setenv("PARKPULSE_DISABLE_GEMINI_REST_FAST_PATH", "1")
+
     class FakeProcess:
         def __init__(self, stdout=b'{"ok":true,"text":"{}"}', stderr=b"", returncode=0, delay=0):
             self.stdout = stdout
@@ -224,6 +226,7 @@ def test_gcp_trace_eval_exporter_and_flush_paths(monkeypatch):
 
 
 def test_main_lazy_entrypoint_helpers_and_http_routes(monkeypatch):
+    monkeypatch.setenv("PARKPULSE_REQUIRE_SIGNED_ROLE_TOKEN", "0")
     monkeypatch.setenv("PARKPULSE_HOT_PATH_TIMEOUT_SECONDS", "bad")
     assert main._timeout_tiers()["hot_path_seconds"] == 3
     assert main._api_capability_registry()["entrypoint"] == "lazy-main"

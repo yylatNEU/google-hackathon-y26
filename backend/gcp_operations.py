@@ -462,6 +462,7 @@ def vertex_agent_builder_registry() -> dict[str, Any]:
         "platform": "Vertex AI Agent Builder / Agent Engine",
         "contract_version": contract["contract_version"],
         "principle": contract["principle"],
+        "department_system": contract.get("department_system"),
         "resource": os.getenv("VERTEX_AGENT_BUILDER_AGENT_RESOURCE", os.getenv("VERTEX_AI_AGENT_ENGINE_RESOURCE", "")).strip() or None,
         "location": os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
         "agents": agents,

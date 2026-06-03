@@ -6,6 +6,9 @@ export type EvalScore = {
 
 export type AgentBrief = {
   name: string;
+  department?: string;
+  departmentLabel?: string;
+  departmentAgent?: string;
   signal: string;
   finding: string;
   recommendation?: string;
@@ -21,6 +24,10 @@ export type RuntimeAgentFinding = {
   agent?: string;
   agent_id?: string;
   name?: string;
+  department?: string;
+  department_label?: string;
+  department_agent?: string;
+  loop?: string[];
   role?: string;
   mode?: string;
   input_signals?: string[];
@@ -35,6 +42,28 @@ export type RuntimeAgentFinding = {
 export type AgentTopology = {
   name?: string;
   pattern?: string;
+  lifecycle_pattern?: string;
+  department_system?: {
+    loop?: string[];
+    active_departments?: string[];
+    active_department_count?: number;
+    conflict_resolver?: string;
+    policy_judge?: string;
+    eval_judge?: string;
+    tool_contract_required_fields?: string[];
+    departments?: Array<{
+      department?: string;
+      label?: string;
+      canonical_agent?: string;
+      implementation_agents?: string[];
+      main_job?: string;
+      tool_families?: string[];
+      read_tools?: string[];
+      write_action_tools?: string[];
+    }>;
+    layers?: string[];
+    conflict_resolution?: string[];
+  };
   groups?: unknown[];
   specialists?: unknown[];
   agent_groups?: Array<{
@@ -1515,6 +1544,32 @@ export type RoleQualityPriors = {
 export type RoleAgentProposal = {
   agent_id?: string;
   role?: string;
+  department?: string;
+  department_label?: string;
+  department_agent?: string;
+  requested_tool?: string;
+  requires_compliance?: boolean;
+  requires_executive?: boolean;
+  executor_status?: string;
+  proposal_envelope?: {
+    proposal_status?: string;
+    proposed_by?: string;
+    department?: string;
+    department_label?: string;
+    department_agent?: string;
+    requested_tool?: string;
+    intent?: string;
+    evidence?: string[];
+    risk_level?: string;
+    requires_compliance?: boolean;
+    requires_executive?: boolean;
+    approval_status?: string;
+    executor_agent?: string;
+    executor_status?: string;
+    expected_outcome?: string;
+    rollback?: string;
+    boundary?: Record<string, unknown>;
+  };
   proposal_type?: string;
   recommendation?: string;
   proposed_action?: { target?: string; action?: string; [key: string]: unknown };
@@ -1547,6 +1602,16 @@ export type RoleAgentProposalArtifact = {
   execution_model?: string;
   active_roles?: string[];
   proposal_count?: number;
+  proposal_envelope_summary?: {
+    total?: number;
+    proposed?: number;
+    blocked?: number;
+    requires_compliance?: number;
+    requires_executive?: number;
+    ready_for_executor?: number;
+    awaiting_compliance?: number;
+    awaiting_executive?: number;
+  };
   proposals?: RoleAgentProposal[];
   conflicts?: RoleAgentProposalConflict[];
   mediator_summary?: string;

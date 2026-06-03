@@ -77,8 +77,18 @@ COLLECTION_PURPOSES = {
     "cache_events": "Audit trail for derived memory refreshes, cache reads, and role-cache invalidation causes.",
     "agent_performance_scorecards": "Per-role proof metrics for cache hit rate, retrieval latency, quality, rollback, and outcome lift.",
     "cache_accuracy_replays": "Replay evidence comparing fresh retrieval, fresh cache, stale cache, and dangerous drift behavior.",
-    "live_feed_events": "Normalized live operating feed events shared across Cloud Run instances.",
-    "live_review_ledger": "Human review cases and dispositions for live feed trust and training eligibility.",
+    "customer_emergency_incidents": "Customer-submitted emergency incidents with redacted report text, lifecycle state, and operator ownership.",
+    "customer_emergency_audit": "Append-style audit events for customer emergency report intake, classification, dispatch, and resolution.",
+    "agent_handshake_sessions": "Persisted agent-to-agent handshake sessions, permissions, intent, proposals, commitments, and session lifecycle.",
+    "agent_handshake_policy_events": "Append-style policy enforcement decisions for delegated client-agent actions.",
+    "executive_guest_feedback_monthly": "Curated aggregate monthly guest feedback for executive experience intelligence.",
+    "executive_event_sentiment": "Curated before/after event sentiment windows for executive experience intelligence.",
+    "executive_refund_reason_rollup": "Curated aggregate refund and recovery reason rollups for executive experience intelligence.",
+    "executive_guest_recovery_actions": "Curated recovery-message and offer-action history for executive experience intelligence.",
+    "executive_policy_exception_rollup": "Curated aggregate policy exception and inconsistency rollups for executive experience intelligence.",
+    "executive_competitor_review_themes": "Curated public competitor review themes for executive experience intelligence.",
+    "executive_staff_training_outcomes": "Curated aggregate staff training outcome rows linked to guest-experience themes.",
+    "executive_brief_artifacts": "Generated executive intelligence artifacts with source coverage and human-review status.",
 }
 
 AGENT_ROLE_CONFIGS = {
@@ -143,6 +153,17 @@ ROLE_ALIASES = {
     "autodream": "autodream_agent",
     "dream": "autodream_agent",
     "autodream_agent": "autodream_agent",
+}
+
+EXECUTIVE_EXPERIENCE_COLLECTIONS = {
+    "executive_guest_feedback_monthly",
+    "executive_event_sentiment",
+    "executive_refund_reason_rollup",
+    "executive_guest_recovery_actions",
+    "executive_policy_exception_rollup",
+    "executive_competitor_review_themes",
+    "executive_staff_training_outcomes",
+    "executive_brief_artifacts",
 }
 
 PLAYBOOK_SEEDS = [
@@ -462,6 +483,60 @@ def _normalized_mongodb_uri(uri: str) -> str:
             host = f"{host}:{parts.port}"
     netloc = f"{auth}@{host}" if auth else host
     return urlunsplit((parts.scheme, netloc, parts.path or "/", urlencode(query), parts.fragment))
+
+
+def _mongodb_uri_summary(uri: str) -> dict[str, Any]:
+    if not uri:
+        return {"configured": False}
+    parts = urlsplit(uri)
+    query_keys = sorted(key for key, _ in parse_qsl(parts.query, keep_blank_values=True))
+    return {
+        "configured": True,
+        "scheme": parts.scheme,
+        "host": parts.hostname,
+        "hasUsername": bool(parts.username),
+        "hasPassword": bool(parts.password),
+        "queryKeys": query_keys,
+    }
+
+
+def _mongo_connectivity_diagnosis(errors: list[str]) -> dict[str, Any]:
+    latest_error = errors[-1] if errors else ""
+    normalized = latest_error.lower()
+    probable_cause = "not_configured"
+    next_action = "Set MONGODB_URI in backend/.env or disable Mongo-dependent demo assertions."
+    severity = "warning"
+
+    if "tlsv1 alert internal error" in normalized or "ssl handshake failed" in normalized:
+        probable_cause = "atlas_ip_access_list_or_network_tls_interception"
+        next_action = "Add this machine's public egress IP to the MongoDB Atlas Network Access list, then rerun scripts/repair_mongodb_memory.py."
+        severity = "critical"
+    elif "authentication failed" in normalized or "bad auth" in normalized:
+        probable_cause = "invalid_credentials"
+        next_action = "Verify the MongoDB username/password in MONGODB_URI."
+        severity = "critical"
+    elif "all nameservers failed" in normalized or "temporary failure in name resolution" in normalized:
+        probable_cause = "dns_unavailable"
+        next_action = "Allow DNS/network access for the runtime or configure MONGODB_DIRECT_URI."
+        severity = "critical"
+    elif "serverselectiontimeouterror" in normalized or "timed out" in normalized:
+        probable_cause = "network_unreachable_or_cluster_paused"
+        next_action = "Verify Atlas cluster status, network access, and outbound connectivity to port 27017."
+        severity = "critical"
+    elif "pymongo is not installed" in normalized:
+        probable_cause = "driver_missing"
+        next_action = "Install backend requirements so pymongo is available."
+        severity = "critical"
+    elif errors:
+        probable_cause = "connection_failed"
+        next_action = "Inspect the sanitized Mongo error and rerun the MemoryOps repair script after fixing connectivity."
+        severity = "critical"
+
+    return {
+        "severity": severity,
+        "probableCause": probable_cause,
+        "nextAction": next_action,
+    }
 
 
 def _stable_json(value: Any) -> str:
@@ -896,8 +971,19 @@ class OperationalMemory:
             "cache_events": [],
             "agent_performance_scorecards": [],
             "cache_accuracy_replays": [],
-            "live_feed_events": [],
-            "live_review_ledger": [],
+            "customer_emergency_incidents": [],
+            "customer_emergency_audit": [],
+            "evidence_refresh_jobs": [],
+            "agent_handshake_sessions": [],
+            "agent_handshake_policy_events": [],
+            "executive_guest_feedback_monthly": [],
+            "executive_event_sentiment": [],
+            "executive_refund_reason_rollup": [],
+            "executive_guest_recovery_actions": [],
+            "executive_policy_exception_rollup": [],
+            "executive_competitor_review_themes": [],
+            "executive_staff_training_outcomes": [],
+            "executive_brief_artifacts": [],
         }
 
     def initialize(self) -> dict[str, Any]:
@@ -967,6 +1053,10 @@ class OperationalMemory:
         self._create_index(self.db.agent_decisions, [("createdAt", DESCENDING)])
         self._create_index(self.db.agent_role_proposals, [("createdAt", DESCENDING), ("decisionId", ASCENDING)])
         self._create_index(self.db.agent_role_proposals, [("agentId", ASCENDING), ("scenarioKey", ASCENDING), ("createdAt", DESCENDING)])
+        self._create_index(self.db.agent_handshake_sessions, [("updatedAt", DESCENDING), ("state", ASCENDING)])
+        self._create_index(self.db.agent_handshake_sessions, [("clientAgentId", ASCENDING), ("representedUserId", ASCENDING), ("updatedAt", DESCENDING)])
+        self._create_index(self.db.agent_handshake_policy_events, [("createdAt", DESCENDING), ("sessionId", ASCENDING)])
+        self._create_index(self.db.agent_handshake_policy_events, [("action", ASCENDING), ("status", ASCENDING), ("createdAt", DESCENDING)])
         self._create_index(self.db.guest_messages, [("createdAt", DESCENDING), ("scenarioKey", ASCENDING)])
         self._create_index(self.db.eval_results, [("createdAt", DESCENDING), ("decisionId", ASCENDING)])
         self._create_index(self.db.event_plans, [("createdAt", DESCENDING), ("eventId", ASCENDING)])
@@ -995,10 +1085,12 @@ class OperationalMemory:
         self._create_index(self.db.cache_events, [("createdAt", DESCENDING), ("scenarioKey", ASCENDING), ("agentRole", ASCENDING)])
         self._create_index(self.db.agent_performance_scorecards, [("agentRole", ASCENDING), ("scenarioKey", ASCENDING), ("updatedAt", DESCENDING)])
         self._create_index(self.db.cache_accuracy_replays, [("createdAt", DESCENDING), ("scenarioKey", ASCENDING), ("agentRole", ASCENDING)])
-        self._create_index(self.db.live_feed_events, [("createdAt", DESCENDING), ("source", ASCENDING)])
-        self._create_index(self.db.live_feed_events, [("source", ASCENDING), ("signal_type", ASCENDING), ("createdAt", DESCENDING)])
-        self._create_index(self.db.live_review_ledger, [("createdAt", DESCENDING), ("status", ASCENDING)])
-        self._create_index(self.db.live_review_ledger, [("case_id", ASCENDING), ("source_event_id", ASCENDING), ("createdAt", DESCENDING)])
+        self._create_index(self.db.customer_emergency_incidents, [("createdAt", DESCENDING), ("status", ASCENDING), ("severity", ASCENDING)])
+        self._create_index(self.db.customer_emergency_incidents, [("idempotencyKey", ASCENDING)])
+        self._create_index(self.db.customer_emergency_incidents, [("customer_report.text", TEXT), ("customer_report.location", TEXT), ("recommended_owner", TEXT)])
+        self._create_index(self.db.customer_emergency_audit, [("createdAt", DESCENDING), ("incidentId", ASCENDING), ("eventType", ASCENDING)])
+        self._create_index(self.db.evidence_refresh_jobs, [("kind", ASCENDING), ("status", ASCENDING), ("updatedAt", DESCENDING)])
+        self._create_index(self.db.evidence_refresh_jobs, [("cacheKey", ASCENDING), ("updatedAt", DESCENDING)])
 
     def seed_defaults(self) -> None:
         self._invalidate_dashboard_cache()
@@ -1045,10 +1137,22 @@ class OperationalMemory:
         self._fallback["food_inventory"] = _default_food_inventory(now)
 
     def status(self) -> dict[str, Any]:
+        configured_uri = (os.getenv("MONGODB_DIRECT_URI") or os.getenv("MONGODB_URI", "")).strip()
         return {
             "mode": self.mode,
             "connected": self.connected,
             "database": self.database_name,
+            "connectivity": {
+                "uri": _mongodb_uri_summary(configured_uri),
+                "directUriConfigured": bool(os.getenv("MONGODB_DIRECT_URI", "").strip()),
+                "driverImportDisabled": _truthy(os.getenv("MONGODB_DISABLE_DRIVER_IMPORT")),
+                "operationTimeoutMs": self.operation_timeout_ms,
+                **(
+                    {"severity": "clear", "probableCause": "connected", "nextAction": "MongoDB is reachable."}
+                    if self.connected
+                    else _mongo_connectivity_diagnosis(self.errors)
+                ),
+            },
             "collections": list(COLLECTION_PURPOSES.keys()),
             "vectorSearch": {
                 "enabled": self.connected,
@@ -2561,6 +2665,168 @@ class OperationalMemory:
             self._refresh_operational_intelligence(scenario_key)
         return document_id
 
+    def record_customer_emergency_incident(self, incident: dict[str, Any]) -> str:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        incident_id = str(incident.get("id") or incident.get("_id") or f"customer_emergency_{hashlib.sha1(_stable_json(incident).encode('utf-8')).hexdigest()[:12]}")
+        document = _clean_for_bson(
+            {
+                **incident,
+                "_id": incident_id,
+                "id": incident_id,
+                "documentType": "customer_emergency_incident",
+                "updatedAt": incident.get("updatedAt") or now,
+                "createdAt": incident.get("createdAt") or now,
+            }
+        )
+        collection = self._collection("customer_emergency_incidents")
+        if collection is not None:
+            collection.replace_one({"_id": incident_id}, document, upsert=True)
+        else:
+            self._fallback["customer_emergency_incidents"] = [
+                row for row in self._fallback["customer_emergency_incidents"] if row.get("_id") != incident_id
+            ]
+            self._fallback["customer_emergency_incidents"].insert(0, document)
+            self._fallback["customer_emergency_incidents"] = self._fallback["customer_emergency_incidents"][:100]
+        return incident_id
+
+    def record_customer_emergency_audit_event(self, event: dict[str, Any]) -> str:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        event_id = str(
+            event.get("id")
+            or event.get("_id")
+            or f"customer_emergency_audit_{hashlib.sha1(_stable_json({**event, 'createdAt': now}).encode('utf-8')).hexdigest()[:16]}"
+        )
+        document = _clean_for_bson(
+            {
+                **event,
+                "_id": event_id,
+                "id": event_id,
+                "documentType": "customer_emergency_audit",
+                "createdAt": event.get("createdAt") or now,
+            }
+        )
+        collection = self._collection("customer_emergency_audit")
+        if collection is not None:
+            collection.replace_one({"_id": event_id}, document, upsert=True)
+        else:
+            self._fallback["customer_emergency_audit"] = [
+                row for row in self._fallback["customer_emergency_audit"] if row.get("_id") != event_id
+            ]
+            self._fallback["customer_emergency_audit"].insert(0, document)
+            self._fallback["customer_emergency_audit"] = self._fallback["customer_emergency_audit"][:250]
+        return event_id
+
+    def record_evidence_refresh_job(self, job: dict[str, Any]) -> str:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        job_id = str(job.get("id") or job.get("_id") or f"evidence_refresh_{hashlib.sha1(_stable_json(job).encode('utf-8')).hexdigest()[:12]}")
+        document = _clean_for_bson(
+            {
+                **job,
+                "_id": job_id,
+                "id": job_id,
+                "documentType": "evidence_refresh_job",
+                "cacheKey": job.get("cache_key") or job.get("cacheKey"),
+                "createdAt": job.get("created_at") or job.get("createdAt") or now,
+                "updatedAt": job.get("updated_at") or job.get("updatedAt") or now,
+            }
+        )
+        collection = self._collection("evidence_refresh_jobs")
+        if collection is not None:
+            collection.replace_one({"_id": job_id}, document, upsert=True)
+        else:
+            self._fallback["evidence_refresh_jobs"] = [
+                row for row in self._fallback["evidence_refresh_jobs"] if row.get("_id") != job_id
+            ]
+            self._fallback["evidence_refresh_jobs"].insert(0, document)
+            self._fallback["evidence_refresh_jobs"] = self._fallback["evidence_refresh_jobs"][:200]
+        return job_id
+
+    def get_evidence_refresh_job(self, job_id: str) -> dict[str, Any] | None:
+        safe_id = str(job_id or "").strip()
+        if not safe_id:
+            return None
+        collection = self._collection("evidence_refresh_jobs")
+        if collection is not None:
+            row = collection.find_one({"_id": safe_id}, {"embedding": 0, "embeddingText": 0})
+            return _public_doc(row) if row else None
+        row = next((item for item in self._fallback["evidence_refresh_jobs"] if item.get("_id") == safe_id or item.get("id") == safe_id), None)
+        return _public_doc(deepcopy(row)) if row else None
+
+    def record_agent_handshake_session(self, session: dict[str, Any]) -> str:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        session_id = str(session.get("session_id") or session.get("sessionId") or session.get("id") or "")
+        if not session_id:
+            session_id = f"ahs_{hashlib.sha1(_stable_json(session).encode('utf-8')).hexdigest()[:12]}"
+        client_agent = session.get("client_agent", {}) if isinstance(session.get("client_agent"), dict) else {}
+        document = _clean_for_bson(
+            {
+                **session,
+                "_id": session_id,
+                "id": session_id,
+                "sessionId": session_id,
+                "documentType": "agent_handshake_session",
+                "state": session.get("state") or "unknown",
+                "clientAgentId": client_agent.get("agent_id"),
+                "representedUserId": client_agent.get("represents"),
+                "createdAt": session.get("created_at") or session.get("createdAt") or now,
+                "updatedAt": session.get("updated_at") or session.get("updatedAt") or now,
+            }
+        )
+        collection = self._collection("agent_handshake_sessions")
+        if collection is not None:
+            collection.replace_one({"_id": session_id}, document, upsert=True)
+        else:
+            self._fallback["agent_handshake_sessions"] = [
+                row for row in self._fallback["agent_handshake_sessions"] if row.get("_id") != session_id
+            ]
+            self._fallback["agent_handshake_sessions"].insert(0, document)
+            self._fallback["agent_handshake_sessions"] = self._fallback["agent_handshake_sessions"][:250]
+        return session_id
+
+    def get_agent_handshake_session(self, session_id: str) -> dict[str, Any] | None:
+        safe_id = str(session_id or "").strip()
+        if not safe_id:
+            return None
+        collection = self._collection("agent_handshake_sessions")
+        if collection is not None:
+            row = collection.find_one({"_id": safe_id}, {"embedding": 0, "embeddingText": 0})
+            return _public_doc(row) if row else None
+        row = next((item for item in self._fallback["agent_handshake_sessions"] if item.get("_id") == safe_id or item.get("id") == safe_id), None)
+        return _public_doc(deepcopy(row)) if row else None
+
+    def record_agent_handshake_policy_event(self, event: dict[str, Any]) -> str:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        event_id = str(event.get("id") or event.get("_id") or f"ahp_policy_{hashlib.sha1(_stable_json(event).encode('utf-8')).hexdigest()[:12]}")
+        document = _clean_for_bson(
+            {
+                **event,
+                "_id": event_id,
+                "id": event_id,
+                "documentType": "agent_handshake_policy_event",
+                "sessionId": event.get("session_id") or event.get("sessionId"),
+                "action": event.get("action"),
+                "status": event.get("status"),
+                "allowed": event.get("allowed"),
+                "requiresUserApproval": event.get("requires_user_approval") or event.get("requiresUserApproval"),
+                "createdAt": event.get("created_at") or event.get("createdAt") or now,
+            }
+        )
+        collection = self._collection("agent_handshake_policy_events")
+        if collection is not None:
+            collection.replace_one({"_id": event_id}, document, upsert=True)
+        else:
+            self._fallback["agent_handshake_policy_events"] = [
+                row for row in self._fallback["agent_handshake_policy_events"] if row.get("_id") != event_id
+            ]
+            self._fallback["agent_handshake_policy_events"].insert(0, document)
+            self._fallback["agent_handshake_policy_events"] = self._fallback["agent_handshake_policy_events"][:500]
+        return event_id
+
     def record_incident_analytics(self, analytics: dict[str, Any]) -> dict[str, Any]:
         self._invalidate_dashboard_cache()
         now = _utc_now()
@@ -3895,37 +4161,76 @@ class OperationalMemory:
             return [_public_doc(row) for row in rows]
         return [_public_doc(row) for row in deepcopy(self._fallback[collection_name][:limit])]
 
-    def record_live_feed_document(self, collection_name: str, row: dict[str, Any]) -> dict[str, Any]:
-        if collection_name not in {"live_feed_events", "live_review_ledger"}:
-            raise ValueError(f"Unsupported live feed collection: {collection_name}")
-        now = _utc_now()
-        document = _clean_for_bson(deepcopy(row))
-        document_id = str(document.get("_id") or document.get("id") or hashlib.sha1(json.dumps(document, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16])
-        document["_id"] = document_id
-        document.setdefault("id", document_id)
-        document.setdefault("createdAt", document.get("created_at") or document.get("received_at") or document.get("observed_at") or now)
-        document["updatedAt"] = now
-        document["documentType"] = collection_name.rstrip("s")
-        collection = self._collection(collection_name)
-        if collection is not None:
-            collection.update_one({"_id": document_id}, {"$set": document}, upsert=True)
-        else:
-            rows = self._fallback.setdefault(collection_name, [])
-            rows[:] = [existing for existing in rows if existing.get("_id") != document_id and existing.get("id") != document_id]
-            rows.insert(0, document)
-            del rows[500:]
-        return {"status": "stored", "mode": self.mode, "collection": collection_name, "id": document_id}
+    def record_executive_experience_documents(self, collection_name: str, documents: list[dict[str, Any]]) -> dict[str, Any]:
+        self._invalidate_dashboard_cache()
+        if collection_name not in EXECUTIVE_EXPERIENCE_COLLECTIONS:
+            return {
+                "status": "blocked",
+                "mode": self.mode,
+                "collection": collection_name,
+                "storedCount": 0,
+                "documentIds": [],
+                "reason": "Collection is not approved for Executive Experience Intelligence writes.",
+            }
+        from executive_experience_evidence import validate_executive_experience_documents
 
-    def latest_live_feed_documents(self, collection_name: str, limit: int = 500) -> list[dict[str, Any]]:
-        if collection_name not in {"live_feed_events", "live_review_ledger"}:
-            raise ValueError(f"Unsupported live feed collection: {collection_name}")
-        bounded_limit = max(1, min(5000, int(limit or 500)))
+        validation = validate_executive_experience_documents(collection_name, documents)
+        if not validation.get("valid"):
+            return {
+                "status": "blocked",
+                "mode": self.mode,
+                "collection": collection_name,
+                "storedCount": 0,
+                "documentIds": [],
+                "validation": validation,
+                "reason": "Executive evidence failed schema or privacy validation.",
+            }
+        now = _utc_now()
+        cleaned_documents: list[dict[str, Any]] = []
+        for index, document in enumerate(documents):
+            if not isinstance(document, dict):
+                continue
+            source_id = str(document.get("_id") or document.get("id") or f"{collection_name}_{index}")
+            document_id = source_id if source_id.startswith("exec_") else f"exec_{hashlib.sha1(f'{collection_name}:{source_id}'.encode('utf-8')).hexdigest()[:16]}"
+            cleaned_documents.append(
+                _clean_for_bson(
+                    {
+                        **document,
+                        "_id": document_id,
+                        "id": document_id,
+                        "documentType": collection_name,
+                        "createdAt": document.get("createdAt") or now,
+                        "updatedAt": now,
+                    }
+                )
+            )
+
         collection = self._collection(collection_name)
         if collection is not None:
-            rows = list(collection.find({}, {"embedding": 0, "embeddingText": 0}).sort("createdAt", DESCENDING).limit(bounded_limit))
-            return [_public_doc(row) for row in rows]
-        rows = deepcopy(self._fallback.setdefault(collection_name, [])[:bounded_limit])
-        return [_public_doc(row) for row in rows]
+            if UpdateOne is not None and cleaned_documents:
+                collection.bulk_write([UpdateOne({"_id": document["_id"]}, {"$set": document}, upsert=True) for document in cleaned_documents])
+            else:
+                for document in cleaned_documents:
+                    collection.replace_one({"_id": document["_id"]}, document, upsert=True)
+        else:
+            existing = {row.get("_id"): row for row in self._fallback.setdefault(collection_name, [])}
+            for document in cleaned_documents:
+                existing[document["_id"]] = document
+            self._fallback[collection_name] = sorted(
+                existing.values(),
+                key=lambda row: str(row.get("updatedAt") or row.get("createdAt") or ""),
+                reverse=True,
+            )[:250]
+
+        return {
+            "status": "stored",
+            "mode": self.mode,
+            "connected": self.connected,
+            "collection": collection_name,
+            "storedCount": len(cleaned_documents),
+            "documentIds": [str(document["_id"]) for document in cleaned_documents],
+            "readinessIssues": list(self.errors[-3:]),
+        }
 
     def backfill_embeddings(self, collection_names: list[str] | None = None, limit: int = 250) -> dict[str, Any]:
         self._invalidate_dashboard_cache()
@@ -4482,6 +4787,62 @@ def record_raw_signal(signal: dict[str, Any]) -> str:
     )
 
 
+def record_customer_emergency_incident(incident: dict[str, Any]) -> str:
+    return _safe_memory_call(
+        "mongo.customer_emergency_incident.record",
+        lambda: _memory.record_customer_emergency_incident(incident),
+        lambda error: f"skipped_customer_emergency_memory_{hashlib.sha1(str(error).encode('utf-8')).hexdigest()[:12]}",
+    )
+
+
+def record_customer_emergency_audit_event(event: dict[str, Any]) -> str:
+    return _safe_memory_call(
+        "mongo.customer_emergency_audit.record",
+        lambda: _memory.record_customer_emergency_audit_event(event),
+        lambda error: f"skipped_customer_emergency_audit_{hashlib.sha1(str(error).encode('utf-8')).hexdigest()[:12]}",
+    )
+
+
+def record_evidence_refresh_job(job: dict[str, Any]) -> str:
+    return _safe_memory_call(
+        "mongo.evidence_refresh_job.record",
+        lambda: _memory.record_evidence_refresh_job(job),
+        lambda error: str(job.get("id") or f"skipped_evidence_refresh_{hashlib.sha1(str(error).encode('utf-8')).hexdigest()[:12]}"),
+    )
+
+
+def get_evidence_refresh_job(job_id: str) -> dict[str, Any] | None:
+    return _safe_memory_call(
+        "mongo.evidence_refresh_job.get",
+        lambda: _memory.get_evidence_refresh_job(job_id),
+        lambda error: None,
+    )
+
+
+def record_agent_handshake_session(session: dict[str, Any]) -> str:
+    return _safe_memory_call(
+        "mongo.agent_handshake_session.record",
+        lambda: _memory.record_agent_handshake_session(session),
+        lambda error: str(session.get("session_id") or f"skipped_agent_handshake_session_{hashlib.sha1(str(error).encode('utf-8')).hexdigest()[:12]}"),
+    )
+
+
+def get_agent_handshake_session(session_id: str) -> dict[str, Any] | None:
+    return _safe_memory_call(
+        "mongo.agent_handshake_session.get",
+        lambda: _memory.get_agent_handshake_session(session_id),
+        lambda error: None,
+    )
+
+
+def record_agent_handshake_policy_event(event: dict[str, Any]) -> str:
+    return _safe_memory_call(
+        "mongo.agent_handshake_policy_event.record",
+        lambda: _memory.record_agent_handshake_policy_event(event),
+        lambda error: str(event.get("id") or f"skipped_agent_handshake_policy_{hashlib.sha1(str(error).encode('utf-8')).hexdigest()[:12]}"),
+    )
+
+
 def record_incident_analytics(analytics: dict[str, Any]) -> dict[str, Any]:
     return _safe_memory_call(
         "mongo.incident_analytics.record",
@@ -4584,21 +4945,20 @@ def get_latest_memory_documents_fast(collection_name: str, limit: int = 5) -> li
         return []
 
 
-def record_live_feed_document(collection_name: str, row: dict[str, Any]) -> dict[str, Any]:
+def record_executive_experience_documents(collection_name: str, documents: list[dict[str, Any]]) -> dict[str, Any]:
     return _safe_memory_call(
-        f"mongo.{collection_name}.record",
-        lambda: _memory.record_live_feed_document(collection_name, row),
-        lambda error: {"status": "skipped", "mode": _memory.mode, "collection": collection_name, "error": str(error)[:300]},
-        retry_operation_on_fallback=False,
-    )
-
-
-def get_latest_live_feed_documents(collection_name: str, limit: int = 500) -> list[dict[str, Any]]:
-    return _safe_memory_call(
-        f"mongo.{collection_name}.latest",
-        lambda: _memory.latest_live_feed_documents(collection_name, limit),
-        lambda error: [],
-        retry_operation_on_fallback=False,
+        "mongo.executive_experience.record",
+        lambda: _memory.record_executive_experience_documents(collection_name, documents),
+        lambda error: {
+            "status": "skipped",
+            "mode": _memory.mode,
+            "connected": _memory.connected,
+            "collection": collection_name,
+            "storedCount": 0,
+            "documentIds": [],
+            "error": str(error)[:300],
+            "readinessIssues": list(_memory.errors[-3:]),
+        },
     )
 
 

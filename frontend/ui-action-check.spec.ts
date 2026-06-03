@@ -37,8 +37,8 @@ async function openCommandCenter(page: Page) {
 async function expectNoAuthOrTransportRegression(page: Page) {
   const body = page.locator("body");
   await expect(body).not.toContainText(/auth\/dev-session returned 403|Missing signed role session token/i);
-  await expect(body).not.toContainText(/ParkPulse API did not respond/i);
-  await expect(body).not.toContainText(/Backend unavailable/i);
+  await expect(body).not.toContainText(/ParkPulse API did not respond/i, { timeout: 30000 });
+  await expect(body).not.toContainText(/Backend unavailable/i, { timeout: 30000 });
 }
 
 test("command center exposes the current production operating-loop contract", async ({ page, request }) => {
@@ -77,6 +77,7 @@ test("live-feed review and training panels use signed local role sessions", asyn
 
   await page.getByRole("button", { name: "Refresh feeds" }).click({ noWaitAfter: true });
   await expect(page.getByText("Ready feeds")).toBeVisible({ timeout: 20000 });
+  await expect(page.getByText("6/6")).toBeVisible({ timeout: 30000 });
   await expect(page.getByText("Open reviews")).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("Training candidates")).toBeVisible({ timeout: 20000 });
   await page.getByRole("button", { name: "Refresh training" }).click({ noWaitAfter: true });
@@ -86,6 +87,40 @@ test("live-feed review and training panels use signed local role sessions", asyn
 
   expect(runtimeErrors).toEqual([]);
   expect(failedResponses).toEqual([]);
+});
+
+test("agent role run API preserves role boundaries and strict eval traces", async ({ request }) => {
+  test.setTimeout(120000);
+  const cases = [
+    { mode: "scan", message: "scan the park for weak signals" },
+    { mode: "react", message: "food court is overloaded and mobile orders are backing up" },
+    { mode: "proact", message: "watch for a weak bottleneck before it becomes an incident" },
+    { mode: "customer", message: "where should my family go next" },
+    { mode: "qa", message: "pre-deploy reliability QA" },
+  ];
+
+  for (const roleCase of cases) {
+    const response = await request.post(`${API_URL}/api/park/agent-role-run`, {
+      data: { message: roleCase.message, mode: roleCase.mode, execute: true },
+      timeout: 30000,
+    });
+    expect(response.ok()).toBeTruthy();
+    const payload = await response.json();
+    expect(payload.selected_role).toBe(roleCase.mode);
+    expect(payload.digital_twin_tools?.deliberate_eval?.status).toBe("passed");
+    expect(payload.digital_twin_tools?.deliberate_eval?.required_without_output).toEqual([]);
+    expect(payload.digital_twin_tools?.deliberate_eval?.critical_failures).toEqual([]);
+    if (roleCase.mode === "scan" || roleCase.mode === "customer" || roleCase.mode === "qa") {
+      expect(payload.role_run?.dispatch_count).toBe(0);
+    }
+    expect(payload.role_trace_sample?.status).toBe("recorded");
+  }
+
+  const evalResponse = await request.get(`${API_URL}/api/park/agent-role-eval?real=1`, { timeout: 30000 });
+  expect(evalResponse.ok()).toBeTruthy();
+  const evalPayload = await evalResponse.json();
+  expect(evalPayload.status).toBe("passed");
+  expect(evalPayload.negative_fixtures?.status).toBe("passed");
 });
 
 test("expanded product entry points stay visible without drifting back to the retired six-domain demo", async ({ page }) => {

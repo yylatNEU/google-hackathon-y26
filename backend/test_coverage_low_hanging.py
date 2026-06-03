@@ -262,7 +262,36 @@ def test_multi_agent_boundary_helpers_and_conflict_branches(monkeypatch):
 
     contract = multi.build_agent_builder_boundary_contract()
     by_id = {agent["id"]: agent for agent in contract["agents"]}
+    assert contract["contract_version"] == "parkpulse-department-agent-boundaries-v2"
+    assert contract["department_system"]["tool_contract_required_fields"] == [
+        "department",
+        "tool",
+        "intent",
+        "evidence",
+        "risk_level",
+        "policy_check",
+        "expected_outcome",
+        "rollback",
+    ]
+    judge_contract = contract["department_system"]["judge_trace_eval_contract"]
+    assert judge_contract["owner_agent"] == "gcp_eval_judge_agent"
+    assert judge_contract["owner_department"] == "qa_judge"
+    assert {"get_full_trace", "score_decision", "flag_failure", "create_regression_test"} <= set(judge_contract["owned_tools"])
+    assert {"get_full_trace", "score_decision", "create_regression_test"} <= set(judge_contract["exclusive_tools"])
+    assert "gcp_trace_eval.build_gcp_eval_trace" in judge_contract["runtime_status_tools"]
+    assert "evaluator_loop.evaluator_loop_status" in judge_contract["runtime_status_tools"]
+    assert "GET /api/gcp/trace-eval-status" in judge_contract["api_surfaces"]
+    assert "backend/test_trace_context.py" in judge_contract["required_regression_tests"]
     assert by_id["decision_bridge_agent"]["handoff_to"] == "delivery_proof_agent"
+    assert by_id["decision_bridge_agent"]["department"] == "executive"
+    assert by_id["food_demand_agent"]["department_agent"] == "Commerce Agent"
+    assert "pos_sales" in contract["department_system"]["departments"][4]["read_tools"]
+    assert "restock_request" in by_id["food_demand_agent"]["write_action_tools"]
+    assert by_id["food_demand_agent"]["department_loop"] == ["Observe", "Interpret", "Predict", "Recommend", "Justify", "Trace"]
+    assert by_id["gcp_eval_judge_agent"]["department_agent"] == "Eval Agent"
+    assert by_id["gcp_eval_judge_agent"]["judge_trace_eval_contract"]["owner_agent"] == "gcp_eval_judge_agent"
+    assert by_id["tool_executor_agent"]["decision_rights"] == ["execute_approved_action", "record_delivery_receipt", "emit_rollback_handle"]
+    assert "dispatch_worker_task" in by_id["tool_executor_agent"]["allowed_tools"]
     assert by_id["memory_ops_agent"]["execution_boundary"] == "offline only; no live dispatch"
     assert "review" in by_id["safety_policy_agent"]["decision_rights"]
     assert by_id["customer_support_agent"]["handoff_to"] == "customer_kiosk_ui"
@@ -271,6 +300,67 @@ def test_multi_agent_boundary_helpers_and_conflict_branches(monkeypatch):
     assert "no operator dispatch" in by_id["customer_support_agent"]["execution_boundary"]
     assert multi.enforce_agent_tool_boundary("customer_support_agent", "customer_send_to_phone")["allowed"] is True
     assert multi.enforce_agent_tool_boundary("customer_support_agent", "dispatch_worker_task")["allowed"] is False
+    assert multi.enforce_agent_tool_boundary("guest_flow_agent", "draft_guest_message")["allowed"] is True
+    assert multi.enforce_agent_tool_boundary("guest_flow_agent", "recommend_route_change")["allowed"] is False
+    assert multi.enforce_agent_tool_boundary("event_creative_agent", "get_zone_density")["allowed"] is True
+    assert multi.enforce_agent_tool_boundary("event_creative_agent", "recommend_route_change")["allowed"] is False
+    assert multi.enforce_agent_tool_boundary("ride_ops_agent", "recommend_route_change")["allowed"] is True
+    assert multi.enforce_agent_tool_boundary("ride_ops_agent", "draft_guest_message")["allowed"] is False
+    judge_score = multi.enforce_agent_tool_boundary(
+        "gcp_eval_judge_agent",
+        "score_decision",
+        {
+            "department": "qa_judge",
+            "intent": "score cross-department decision quality",
+            "evidence": ["full trace", "tool call list", "policy references"],
+            "risk_level": "medium",
+            "policy_check": "passed",
+            "expected_outcome": "decision receives eval gate result",
+            "rollback": "flag failure and create regression test",
+        },
+    )
+    assert judge_score["allowed"] is True
+    assert judge_score["judge_contract"]["status"] == "judge_owned"
+    assert judge_score["tool_contract"]["status"] == "complete"
+    blocked_trace = multi.enforce_agent_tool_boundary("ride_ops_agent", "get_full_trace")
+    assert blocked_trace["allowed"] is False
+    assert "gcp_eval_judge_agent" in blocked_trace["reason"]
+    blocked_regression = multi.enforce_agent_tool_boundary("logic_audit_agent", "create_regression_test")
+    assert blocked_regression["allowed"] is False
+    assert blocked_regression["judge_contract"]["status"] == "requires_judge_handoff"
+    shared_inspection = multi.enforce_agent_tool_boundary("logic_audit_agent", "inspect_observability_contract")
+    assert shared_inspection["allowed"] is True
+    assert shared_inspection["judge_contract"]["status"] == "shared_inspection"
+    assert multi.enforce_agent_tool_boundary("tool_executor_agent", "dispatch_guest_message", {"policy_gate_checked": True})["allowed"] is True
+    assert multi.enforce_agent_tool_boundary("guest_flow_agent", "dispatch_guest_message", {"policy_gate_checked": True})["allowed"] is False
+    guest_message = multi.build_department_tool_proposal(
+        "guest_flow_agent",
+        "draft_guest_message",
+        intent="draft high-risk evacuation-adjacent guest message",
+        evidence=["crowd density 91%", "weather alert"],
+        risk_level="high",
+        expected_outcome="guest message reviewed before public send",
+        rollback="delete draft if compliance blocks it",
+        payload={"message_class": "high_risk_public_message"},
+    )
+    assert guest_message["proposal_status"] == "proposed"
+    assert guest_message["requires_compliance"] is True
+    assert guest_message["requires_executive"] is True
+    assert guest_message["executor_status"] == "awaiting_executive"
+    complete_contract = multi.enforce_agent_tool_boundary(
+        "food_demand_agent",
+        "validate_policy",
+        {
+            "department": "food_retail",
+            "intent": "prevent_stockout",
+            "evidence": ["POS spike", "queue migration"],
+            "risk_level": "low",
+            "policy_check": "passed",
+            "expected_outcome": "avoid food shortage within 45 minutes",
+            "rollback": "cancel alert if demand normalizes",
+        },
+    )
+    assert complete_contract["tool_contract"]["status"] == "complete"
 
     proposal = multi._role_proposal(
         "unknown_agent",
@@ -283,6 +373,8 @@ def test_multi_agent_boundary_helpers_and_conflict_branches(monkeypatch):
     )
     assert proposal["agent_id"] == "decision_bridge_agent"
     assert proposal["confidence"] == 1.0
+    assert proposal["proposal_envelope"]["proposed_by"] == "decision_bridge_agent"
+    assert proposal["proposal_envelope"]["requested_tool"] == "choose_tradeoff"
 
     conflicts = multi._role_proposal_conflicts(
         [
@@ -306,6 +398,32 @@ def test_multi_agent_boundary_helpers_and_conflict_branches(monkeypatch):
         {},
     )
     assert any("Food demand" in item["conflict"] for item in food_conflicts)
+
+
+def test_agent_run_orchestration_merges_role_proposal_departments():
+    import parkpulse_api
+
+    orchestration = parkpulse_api._orchestration_with_role_departments(
+        {"department_system": {"active_departments": ["qa_judge"]}},
+        {"active_roles": ["event_creative_agent", "ride_ops_agent"], "active_departments": ["marketing", "operations"]},
+    )
+
+    assert orchestration["department_system"]["active_departments"] == ["marketing", "operations", "qa_judge"]
+    assert orchestration["department_system"]["active_department_count"] == 3
+    assert orchestration["active_roles"] == ["event_creative_agent", "ride_ops_agent"]
+
+
+def test_agent_run_explicit_scenario_overrides_inferred_operator_route():
+    import parkpulse_api
+
+    route = parkpulse_api._role_proposal_route_for_agent_run(
+        "marketing_promo_conflict",
+        {"route": "react", "scenario_key": "crowd_safety", "requires_human_review": True},
+    )
+
+    assert route["scenario_key"] == "marketing_promo_conflict"
+    assert route["route"] == "react"
+    assert route["requires_human_review"] is True
 
 
 def test_multi_agent_findings_logic_and_name_mapping():

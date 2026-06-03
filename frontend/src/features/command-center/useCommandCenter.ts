@@ -154,6 +154,44 @@ export type LiveFeedRefreshSupervisorResult = {
   after_feeds?: LiveFeedHealth["feeds"];
 };
 
+export type LiveAgentsSmokeReport = {
+  status?: string;
+  mode?: string;
+  report_path?: string;
+  summary?: {
+    status?: string;
+    activated_role_count?: number;
+    activated_roles?: string[];
+    activated_department_count?: number;
+    activated_departments?: string[];
+    boundary_failed?: boolean;
+    real_eval_failed?: boolean;
+    role_failures?: unknown[];
+    scenario_failures?: unknown[];
+  };
+  role_runs?: Array<{
+    mode?: string;
+    status?: string;
+    trace_eval_status?: string;
+    dispatch_total?: number;
+    elapsed_ms?: number;
+    latency_budget_status?: string;
+  }>;
+  real_role_eval?: {
+    status?: string;
+    decision?: string;
+    average_score?: number;
+    elapsed_ms?: number;
+  };
+  registry_boundary?: {
+    status?: string;
+    agent_count?: number;
+    passed?: number;
+    failed?: number;
+  };
+  readiness_issues?: string[];
+};
+
 function normalizeRunTelemetry(payload: RunPayload): RunTelemetry {
   return payload.run_telemetry ?? payload;
 }
@@ -209,6 +247,7 @@ export function useCommandCenter() {
   const [liveFoodOpsLoad, setLiveFoodOpsLoad] = useState<LiveFoodOpsLoadResult | null>(null);
   const [liveOperatorSignalLoad, setLiveOperatorSignalLoad] = useState<LiveOperatorSignalLoadResult | null>(null);
   const [liveFeedRefreshSupervisor, setLiveFeedRefreshSupervisor] = useState<LiveFeedRefreshSupervisorResult | null>(null);
+  const [liveAgentsSmoke, setLiveAgentsSmoke] = useState<LiveAgentsSmokeReport | null>(null);
 
   const activeEvalScores = useMemo<EvalScore[]>(() => {
     const scorecard = runTelemetry?.eval?.scorecard;
@@ -259,6 +298,7 @@ export function useCommandCenter() {
     }
     try {
       const response = await fetchParkPulseApi(runGcpTraining ? "/api/park/actual-training?runGcpTraining=true" : "/api/park/actual-training", {
+        headers: { "x-parkpulse-role": "ml_ops_admin" },
         timeoutMs: longRunningRequestTimeoutMs,
       });
       const payload = (await response.json()) as ActualTrainingStatus;
@@ -292,8 +332,8 @@ export function useCommandCenter() {
     setIsLiveFeedHealthLoading(true);
     try {
       const [healthResponse, ledgerResponse] = await Promise.all([
-        fetchParkPulseApi("/api/park/live-feed-health?limit=500", { timeoutMs: 12000 }),
-        fetchParkPulseApi("/api/park/review-training-ledger?limit=80", { timeoutMs: 12000 }),
+        fetchParkPulseApi("/api/park/live-feed-health?limit=500", { headers: { "x-parkpulse-role": "ops_team" }, timeoutMs: 12000 }),
+        fetchParkPulseApi("/api/park/review-training-ledger?limit=80", { headers: { "x-parkpulse-role": "ops_team" }, timeoutMs: 12000 }),
       ]);
       setLiveFeedHealth((await healthResponse.json()) as LiveFeedHealth);
       setReviewTrainingLedger((await ledgerResponse.json()) as ReviewTrainingLedger);
@@ -308,6 +348,20 @@ export function useCommandCenter() {
       });
     } finally {
       setIsLiveFeedHealthLoading(false);
+    }
+  }, []);
+
+  const refreshLiveAgentsSmoke = useCallback(async () => {
+    try {
+      const response = await fetchParkPulseApi("/api/park/live-agents-smoke/latest", { timeoutMs: 5000 });
+      setLiveAgentsSmoke((await response.json()) as LiveAgentsSmokeReport);
+    } catch (error) {
+      setLiveAgentsSmoke({
+        status: "error",
+        mode: "live_all_agents_smoke",
+        summary: { status: "error", activated_role_count: 0, activated_department_count: 0 },
+        readiness_issues: [error instanceof Error ? error.message : "Unable to load live all-agents smoke report."],
+      });
     }
   }, []);
 
@@ -345,7 +399,7 @@ export function useCommandCenter() {
       try {
         await fetchParkPulseApi("/api/park/review-training-ledger", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
           body: JSON.stringify({ case_id: caseId, decision, reviewer: "ops_lead" }),
           timeoutMs: 12000,
         });
@@ -417,7 +471,8 @@ export function useCommandCenter() {
     void refreshIntegrationStatus();
     void refreshActualTraining();
     void refreshLiveFeedHealth();
-  }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveFeedHealth]);
+    void refreshLiveAgentsSmoke();
+  }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshLiveFeedHealth]);
 
   const runAgent = useCallback(async () => {
     setIsRunning(true);
@@ -427,7 +482,7 @@ export function useCommandCenter() {
       const activeScenario = park.parkState.guestFlow.activeScenario;
       const response = await fetchParkPulseApi("/api/park/agent-run", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify({
           scenario_key: activeScenario.key || undefined,
           operation_mode: false,
@@ -444,13 +499,46 @@ export function useCommandCenter() {
       await park.refreshParkState();
       void refreshIntegrationStatus();
       void refreshActualTraining();
+      void refreshLiveAgentsSmoke();
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Unable to run the ParkPulse agent.");
       setStatusMessage(null);
     } finally {
       setIsRunning(false);
     }
-  }, [park, refreshActualTraining, refreshIntegrationStatus]);
+  }, [park, refreshActualTraining, refreshIntegrationStatus, refreshLiveAgentsSmoke]);
+
+  const runDepartmentNegotiationDemo = useCallback(async () => {
+    setIsRunning(true);
+    setErrorMessage(null);
+    setStatusMessage("Running department negotiation demo: Marketing, Ops, Safety, Finance, Executive, Tool Executor.");
+    try {
+      const response = await fetchParkPulseApi("/api/park/agent-run", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
+        body: JSON.stringify({
+          scenario_key: "marketing_promo_conflict",
+          operation_mode: false,
+          auto_unexpected_event: false,
+          operator_message: "Marketing wants to push a discount to Zone B indoor food court, but Zone B is already crowded. Preserve revenue by redirecting the offer to Zone C if policy allows.",
+          execute: false,
+        }),
+        timeoutMs: longRunningRequestTimeoutMs,
+      });
+      const payload = (await response.json()) as RunPayload;
+      const telemetry = normalizeRunTelemetry(payload);
+      setRunTelemetry(telemetry);
+      setStatusMessage("Department negotiation demo complete. Review proposal envelopes and conflict resolution.");
+      void refreshIntegrationStatus();
+      void refreshActualTraining();
+      void refreshLiveAgentsSmoke();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Unable to run the department negotiation demo.");
+      setStatusMessage(null);
+    } finally {
+      setIsRunning(false);
+    }
+  }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveAgentsSmoke]);
 
   const executeSelectedAction = useCallback(async () => {
     setIsDispatching(true);
@@ -490,7 +578,7 @@ export function useCommandCenter() {
       try {
         const response = await fetchParkPulseApi("/api/park/delivery/acknowledge", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
           body: JSON.stringify({
             dispatch_id: dispatch.dispatch?.id ?? dispatch.id,
             id: dispatch.dispatch?.id ?? dispatch.id,
@@ -519,6 +607,7 @@ export function useCommandCenter() {
   return {
     ...park,
     runAgent,
+    runDepartmentNegotiationDemo,
     executeSelectedAction,
     acknowledgeDispatch,
     runTelemetry,
@@ -554,7 +643,9 @@ export function useCommandCenter() {
     liveFoodOpsLoad,
     liveOperatorSignalLoad,
     liveFeedRefreshSupervisor,
+    liveAgentsSmoke,
     refreshActualTraining,
+    refreshLiveAgentsSmoke,
     refreshLiveFeedHealth,
     refreshStaleLiveFeeds,
     recordReviewDecision,

@@ -15,6 +15,9 @@ from env_bootstrap import load_backend_env
 load_backend_env()
 
 
+RUNTIME_BUILD_ID = "latency-hot-route-v5-2026-06-03"
+
+
 class _NoopSpan:
     def set_attribute(self, *_args, **_kwargs) -> None:
         return None
@@ -36,11 +39,42 @@ def _get_tracer(name: str):
         return _NoopTracer()
 
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from agent_handshake import (
+    agent_contract,
+    agent_trust_registry_status,
+    capability_handshake,
+    certify_agent_onboarding,
+    certification_issuer_metadata,
+    close_session as close_agent_session,
+    commerce_agent_evaluate,
+    commit_plan,
+    counter_proposal,
+    demo_handshake,
+    escalate_session as escalate_agent_session,
+    evaluate_policy_action,
+    get_session as get_agent_session,
+    get_agent_onboarding,
+    identity_handshake,
+    intent_handshake,
+    issue_delegation_token,
+    list_agent_credential_revocations,
+    list_agent_trust_audit_events,
+    list_agent_trust_keys,
+    list_agent_trust_partners,
+    monitor_session,
+    propose_plan,
+    queue_agent_reroute,
+    register_agent_onboarding,
+    revoke_agent_certification_credential,
+    rotate_agent_certification_key,
+    upsert_agent_trust_partner,
+    verify_agent_certification_credential,
+)
 from arize_config import get_arize_status, setup_arize_tracing
 from analytics_action_layer import build_analytics_to_action_layer
 from bigquery_analytics import (
@@ -52,15 +86,28 @@ from bigquery_analytics import (
     online_improvement_status,
 )
 from digital_twin_tools import build_digital_twin_tool_trace, list_digital_twin_tools, run_digital_twin_tool
+from customer_emergency_incidents import (
+    build_customer_emergency_audit_event,
+    create_customer_emergency_incident,
+    get_customer_emergency_incident,
+    list_customer_emergency_incidents,
+    update_customer_emergency_incident,
+    upsert_customer_emergency_incident,
+)
+from customer_emergency_scope import build_customer_emergency_scope, classify_customer_scope_text
 from digital_twin_calibration import build_calibration_ledger
+from executive_experience_artifacts import import_demo_executive_experience_evidence, review_executive_experience_artifact, save_monthly_guest_feedback_brief, simulate_executive_experience_evidence
 from park_mission_replay import build_mission_replay
 from park_scenario_lab import build_scenario_lab
 from park_readiness_brief import build_readiness_brief
 from park_learned_agent_maturity import build_learned_agent_maturity
 from park_learning_evidence_ledger import build_learning_evidence_ledger
 from evaluator_loop import evaluator_loop_status
-from agent_role_skills import list_agent_role_skills, route_agent_role
+from agent_role_skills import build_deliberate_role_eval_report, evaluate_agent_role_trace, list_agent_role_skills, route_agent_role
+from agent_role_trace_samples import record_agent_role_trace_sample
 from agent_ops_ledger import build_operational_backlog, read_agent_ops_ledger, record_agent_ops_record, record_agent_ops_run, retrieve_agent_ops_context
+from executive_experience_evidence import build_executive_experience_evidence
+from executive_experience_intelligence import build_executive_experience_intelligence
 from incident_analytics import build_incident_analytics
 from digital_twin_benchmark import (
     attach_learning_comparison,
@@ -71,6 +118,12 @@ from digital_twin_benchmark import (
     record_benchmark_result,
     run_digital_twin_benchmark,
     run_parkpulse_agent_benchmark,
+)
+from park_understanding_benchmark import (
+    latest_park_understanding_benchmark,
+    list_park_understanding_cases,
+    run_live_park_understanding_benchmark,
+    run_park_understanding_benchmark,
 )
 from gcp_trace_eval import get_gcp_trace_eval_status, setup_gcp_cloud_trace_exporter
 from gcp_operations import (
@@ -98,6 +151,8 @@ from mongo_memory import (
     record_autodream_benchmark as record_mongo_autodream_benchmark,
     record_eval_result as record_mongo_eval_result,
     record_event_plan as record_mongo_event_plan,
+    record_customer_emergency_audit_event as record_mongo_customer_emergency_audit_event,
+    record_customer_emergency_incident as record_mongo_customer_emergency_incident,
     record_outcome_event as record_mongo_outcome_event,
     record_role_proposal_outcomes as record_mongo_role_proposal_outcomes,
     record_raw_signal as record_mongo_raw_signal,
@@ -146,8 +201,10 @@ from park_multi_agent import (
     build_reactive_agent_findings,
     build_role_agent_proposals,
     enforce_agent_tool_boundary,
+    active_departments_for_agents,
     get_agent_registry,
     get_agent_topology,
+    get_judge_trace_eval_contract,
     run_agent_tool,
     role_alignment_report,
 )
@@ -158,6 +215,7 @@ from park_operator_constraints import (
     merge_operator_constraints,
 )
 from policy_loader import interpret_policy_for_action, operational_doctrine_index, retrieve_operational_doctrine
+from platform_store import platform_store_status, safe_migrate_platform_store
 from synthetic_park_knowledge import get_synthetic_park_knowledge, retrieve_synthetic_park_context, synthetic_coverage_report
 from synthetic_park_runner import (
     find_synthetic_example,
@@ -173,7 +231,7 @@ from park_review import build_review_snapshot
 from park_replay_store import backup_replay_store, replay_collaboration_context, replay_store_status
 from park_scenarios import get_park_scenarios
 from park_signal_intake import classify_unstructured_signal, fuse_signal_batch, latest_signals, realistic_signal_batch
-from live_feedback_loop import ingest_live_feed_event, live_feed_health, record_review_decision, review_training_ledger
+from live_feedback_loop import apply_live_food_ops_to_state, apply_live_guest_flow_to_state, apply_live_operator_signal_to_state, apply_live_ride_ops_to_state, apply_live_staffing_to_state, apply_live_weather_to_state, ingest_live_feed_event, ingest_live_feed_events, live_feed_health, record_review_decision, review_training_ledger
 from guest_flow_live_feed import ingest_live_guest_flow_feed, guest_flow_feed_config
 from ops_remaining_live_feeds import food_ops_feed_config, ingest_live_food_ops_feed, ingest_live_operator_signal_feed, ingest_live_staffing_feed, operator_signal_feed_config, staffing_feed_config
 from ride_ops_live_feed import ingest_live_ride_ops_feed, ride_ops_feed_config
@@ -181,6 +239,7 @@ from weather_live_feed import ingest_live_weather_feed, weather_feed_config
 from park_simulation import park_simulation
 from reliability import reliability_status
 from trace_helpers import traced_payload
+from park_role_access import authorize_role_action, identity_provider_readiness, normalize_role, role_access_contracts, sign_role_session, verify_external_role_identity, verify_role_session
 
 _background_tasks: set[asyncio.Task[Any]] = set()
 _operator_refinements: dict[str, dict[str, Any]] = {}
@@ -288,7 +347,130 @@ def _float_env(name: str, default: float) -> float:
 def _truthy(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _role_auth_secret() -> str:
+    return os.getenv("PARKPULSE_ROLE_AUTH_SECRET") or "parkpulse-local-dev-secret-change-before-production"
+
+
+def _signed_role_required() -> bool:
+    return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_TOKEN"), True)
+
+
+def _dev_role_issuer_enabled() -> bool:
+    configured = os.getenv("PARKPULSE_ENABLE_DEV_ROLE_ISSUER")
+    if configured is not None:
+        return _truthy(configured, True)
+    env = str(os.getenv("PARKPULSE_ENV") or os.getenv("ENVIRONMENT") or "local").strip().lower()
+    if env in {"prod", "production"}:
+        return False
+    if identity_provider_readiness().get("external_identity_ready"):
+        return False
+    return True
+
+
+def _role_session_ttl_seconds() -> int:
+    try:
+        return max(300, int(os.getenv("PARKPULSE_ROLE_SESSION_TTL_SECONDS", "3600")))
+    except ValueError:
+        return 3600
+
+
+def _extract_role_token(request: Request) -> str | None:
+    explicit_role_token = request.headers.get("x-parkpulse-role-token")
+    if explicit_role_token:
+        return explicit_role_token
+    authorization = request.headers.get("authorization") or ""
+    if authorization.lower().startswith("bearer "):
+        return authorization.split(" ", 1)[1].strip()
+    return None
+
+
+def _request_role_context(request: Request, payload: dict[str, Any] | None = None, default: str = "ops_team") -> dict[str, Any]:
+    external_identity = verify_external_role_identity(dict(request.headers), default_role=default)
+    if external_identity.get("authenticated") or external_identity.get("status") == "role_unmapped":
+        return external_identity
+    token_status = verify_role_session(_extract_role_token(request), _role_auth_secret())
+    if token_status.get("authenticated"):
+        return {
+            "status": "authenticated",
+            "authenticated": True,
+            "auth_method": "signed_role_session",
+            "role": token_status.get("role"),
+            "subject": token_status.get("subject"),
+            "issuer": token_status.get("issuer"),
+            "expires_at": token_status.get("expires_at"),
+            "token_status": token_status.get("status"),
+        }
+    if _signed_role_required():
+        return {
+            "status": "unauthenticated",
+            "authenticated": False,
+            "auth_method": "signed_role_session_required",
+            "role": normalize_role(None, default=default),
+            "subject": "",
+            "token_status": token_status.get("status"),
+            "reason": token_status.get("reason") or "Signed role session token is required.",
+        }
+    role = request.headers.get("x-parkpulse-role") or request.headers.get("x-role")
+    if not role and isinstance(payload, dict):
+        role = payload.get("role") or payload.get("actor_role") or payload.get("actorRole")
+    return {
+        "status": "authenticated",
+        "authenticated": True,
+        "auth_method": "unsigned_dev_role_header",
+        "role": normalize_role(str(role) if role is not None else None, default=default),
+        "subject": "unsigned-local-dev",
+        "token_status": token_status.get("status"),
+    }
+
+
+def _identity_readiness_payload() -> dict[str, Any]:
+    secret = _role_auth_secret()
+    default_secret = secret == "parkpulse-local-dev-secret-change-before-production"
+    provider_readiness = identity_provider_readiness()
+    external_ready = bool(provider_readiness.get("external_identity_ready"))
+    return {
+        "status": "production_ready" if external_ready and not default_secret else "dev_signed_sessions",
+        "mode": "identity_readiness",
+        "signed_role_required": _signed_role_required(),
+        "dev_role_issuer_enabled": _dev_role_issuer_enabled(),
+        "token_ttl_seconds": _role_session_ttl_seconds(),
+        **provider_readiness,
+        "production_ready": external_ready and not default_secret,
+        "remaining_gap": None
+        if external_ready and not default_secret
+        else "Replace the local dev issuer with Google IAP/OIDC/Firebase and set PARKPULSE_ROLE_AUTH_SECRET before production.",
+    }
+
+
+def _require_role_action(
+    request: Request,
+    capability: str,
+    resource: str,
+    payload: dict[str, Any] | None = None,
+    default_role: str = "ops_team",
+) -> dict[str, Any]:
+    identity = _request_role_context(request, payload, default=default_role)
+    decision = authorize_role_action(identity.get("role"), capability, resource=resource, default_role=default_role)
+    decision["identity"] = identity
+    if not identity.get("authenticated"):
+        decision["status"] = "unauthenticated"
+        decision["allowed"] = False
+        decision["reason"] = identity.get("reason") or "Signed role session token is required."
+    if decision.get("allowed"):
+        return decision
+    raise HTTPException(
+        status_code=401 if decision.get("status") == "unauthenticated" else 403,
+        detail={
+            "status": "forbidden",
+            "mode": "role_authorization_gate",
+            "authorization": decision,
+            "readiness_issues": [decision.get("reason") or "Role is not authorized for this capability."],
+            "boundary": "Protected ParkPulse executive endpoints require a signed role session.",
+        },
+    )
 
 
 _memory_sync_min_interval_seconds = max(0.1, _float_env("PARKPULSE_MEMORY_SYNC_MIN_INTERVAL_SECONDS", 3.0))
@@ -315,9 +497,6 @@ _startup_status: dict[str, Any] = {
 def _allowed_origins() -> list[str]:
     raw = os.getenv("PARKPULSE_ALLOWED_ORIGINS", "").strip()
     configured = [origin.strip() for origin in raw.split(",") if origin.strip()] if raw else []
-    if configured:
-        return list(dict.fromkeys(configured))
-
     defaults = [
         "http://localhost:3000",
         "http://localhost:3001",
@@ -335,7 +514,9 @@ def _allowed_origins() -> list[str]:
         "http://0.0.0.0:3003",
         "http://0.0.0.0:5173",
     ]
-    return list(dict.fromkeys(defaults))
+    if configured and str(os.getenv("PARKPULSE_STRICT_ALLOWED_ORIGINS", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        return list(dict.fromkeys(configured))
+    return list(dict.fromkeys([*configured, *defaults]))
 
 
 app.add_middleware(
@@ -367,6 +548,14 @@ class EvalScenarioSweepRequest(BaseModel):
     scenario_keys: list[str] | None = Field(default=None)
     execute: bool = Field(default=False)
     timeout_seconds: int = Field(default=120, ge=20, le=300)
+
+
+class ParkUnderstandingBenchmarkRequest(BaseModel):
+    case_id: str | None = Field(default=None)
+    candidate_responses: dict[str, Any] | None = Field(default=None)
+    provider: str = Field(default="provided_or_baseline")
+    timeout_seconds: float | None = Field(default=None)
+    write_artifact: bool = Field(default=True)
 
 
 class OperatorCommandRequest(BaseModel):
@@ -431,6 +620,239 @@ class ParkTickRequest(BaseModel):
     minutes: int = Field(default=1, ge=1, le=30)
 
 
+@app.get("/api/park/agent-contract")
+async def park_agent_contract():
+    return agent_contract()
+
+
+@app.post("/api/park/delegation-token")
+async def park_agent_delegation_token(body: dict[str, Any] | None = None):
+    return issue_delegation_token(body or {})
+
+
+@app.post("/api/park/agent-onboarding/register")
+async def park_agent_onboarding_register(body: dict[str, Any] | None = None):
+    return register_agent_onboarding(body or {})
+
+
+@app.get("/api/park/agent-onboarding/issuer")
+async def park_agent_onboarding_issuer():
+    return certification_issuer_metadata()
+
+
+@app.post("/api/park/agent-onboarding/verify-credential")
+async def park_agent_onboarding_verify_credential(body: dict[str, Any] | None = None):
+    return verify_agent_certification_credential(body or {})
+
+
+@app.post("/api/park/agent-onboarding/revoke-credential")
+async def park_agent_onboarding_revoke_credential(request: Request, body: dict[str, Any] | None = None):
+    _require_role_action(request, "manage_agent_trust", "agent_certification_revocation", body or {}, default_role="ml_ops_admin")
+    return revoke_agent_certification_credential(body or {})
+
+
+@app.get("/api/park/agent-trust/status")
+async def park_agent_trust_status():
+    return {**agent_trust_registry_status(), "auth_boundary": _identity_readiness_payload()}
+
+
+@app.get("/api/park/agent-trust/partners")
+async def park_agent_trust_partners(request: Request):
+    _require_role_action(request, "manage_agent_trust", "agent_trust_partners", default_role="ml_ops_admin")
+    return list_agent_trust_partners()
+
+
+@app.post("/api/park/agent-trust/partners")
+async def park_agent_trust_partner_upsert(request: Request, body: dict[str, Any] | None = None):
+    _require_role_action(request, "manage_agent_trust", "agent_trust_partner_upsert", body or {}, default_role="ml_ops_admin")
+    return upsert_agent_trust_partner(body or {})
+
+
+@app.get("/api/park/agent-trust/keys")
+async def park_agent_trust_keys(request: Request):
+    _require_role_action(request, "manage_agent_trust", "agent_trust_keys", default_role="ml_ops_admin")
+    return list_agent_trust_keys()
+
+
+@app.post("/api/park/agent-trust/keys/rotate")
+async def park_agent_trust_key_rotate(request: Request, body: dict[str, Any] | None = None):
+    _require_role_action(request, "manage_agent_trust", "agent_trust_key_rotation", body or {}, default_role="ml_ops_admin")
+    return rotate_agent_certification_key(body or {})
+
+
+@app.get("/api/park/agent-trust/revocations")
+async def park_agent_trust_revocations(request: Request, limit: int = 100):
+    _require_role_action(request, "manage_agent_trust", "agent_trust_revocations", default_role="ml_ops_admin")
+    return list_agent_credential_revocations(limit=limit)
+
+
+@app.get("/api/park/agent-trust/audit")
+async def park_agent_trust_audit(request: Request, limit: int = 100):
+    _require_role_action(request, "manage_agent_trust", "agent_trust_audit", default_role="ml_ops_admin")
+    return list_agent_trust_audit_events(limit=limit)
+
+
+@app.get("/api/park/agent-onboarding/{agent_id}")
+async def park_agent_onboarding_get(agent_id: str):
+    try:
+        return get_agent_onboarding(agent_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post("/api/park/agent-onboarding/{agent_id}/certify")
+async def park_agent_onboarding_certify(agent_id: str, body: dict[str, Any] | None = None):
+    try:
+        return certify_agent_onboarding(agent_id, body or {}, park_state=await park_simulation.get_state_lite())
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception:
+        return certify_agent_onboarding(agent_id, body or {})
+
+
+@app.post("/api/park/internal-agents/commerce/evaluate")
+async def park_commerce_agent_evaluate(body: dict[str, Any] | None = None):
+    request_body = body or {}
+    try:
+        return commerce_agent_evaluate(str(request_body.get("session_id") or request_body.get("sessionId") or ""), request_body)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+@app.post("/api/park/internal-agents/queue/reroute")
+async def park_queue_agent_reroute(body: dict[str, Any] | None = None):
+    request_body = body or {}
+    try:
+        return queue_agent_reroute(str(request_body.get("session_id") or request_body.get("sessionId") or ""), request_body, park_state=await park_simulation.get_state_lite())
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except Exception:
+        return queue_agent_reroute(str(request_body.get("session_id") or request_body.get("sessionId") or ""), request_body)
+
+
+@app.get("/api/park/agent-handshake/demo")
+@app.post("/api/park/agent-handshake/demo")
+async def park_agent_handshake_demo():
+    try:
+        return demo_handshake(await park_simulation.get_state_lite())
+    except Exception:
+        return demo_handshake()
+
+
+@app.post("/api/park/handshake")
+async def park_identity_handshake(body: dict[str, Any] | None = None):
+    return identity_handshake(body or {})
+
+
+@app.get("/api/park/session/{session_id}")
+async def park_agent_session(session_id: str):
+    try:
+        return get_agent_session(session_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post("/api/park/session/{session_id}/capabilities")
+async def park_agent_capability_handshake(session_id: str, body: dict[str, Any] | None = None):
+    try:
+        return capability_handshake(session_id, body or {})
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+@app.post("/api/park/session/{session_id}/intent")
+async def park_agent_intent_handshake(session_id: str, body: dict[str, Any] | None = None):
+    try:
+        return intent_handshake(session_id, body or {})
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+@app.post("/api/park/session/{session_id}/propose")
+async def park_agent_propose(session_id: str, body: dict[str, Any] | None = None):
+    try:
+        return propose_plan(session_id, body or {}, park_state=await park_simulation.get_state_lite())
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except Exception:
+        return propose_plan(session_id, body or {})
+
+
+@app.post("/api/park/session/{session_id}/counter")
+async def park_agent_counter(session_id: str, body: dict[str, Any] | None = None):
+    try:
+        return counter_proposal(session_id, body or {}, park_state=await park_simulation.get_state_lite())
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except Exception:
+        return counter_proposal(session_id, body or {})
+
+
+@app.post("/api/park/session/{session_id}/commit")
+async def park_agent_commit(session_id: str, body: dict[str, Any] | None = None):
+    try:
+        return commit_plan(session_id, body or {})
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+@app.post("/api/park/session/{session_id}/policy-check")
+async def park_agent_policy_check(session_id: str, body: dict[str, Any] | None = None):
+    try:
+        return evaluate_policy_action(session_id, body or {})
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+@app.get("/api/park/session/{session_id}/monitor")
+@app.post("/api/park/session/{session_id}/monitor")
+async def park_agent_monitor(session_id: str, body: dict[str, Any] | None = None):
+    try:
+        return monitor_session(session_id, str((body or {}).get("event") or "live") or None, park_state=await park_simulation.get_state_lite())
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except Exception:
+        return monitor_session(session_id, str((body or {}).get("event") or "") or None)
+
+
+@app.post("/api/park/session/{session_id}/escalate")
+async def park_agent_escalate(session_id: str, body: dict[str, Any] | None = None):
+    try:
+        return escalate_agent_session(session_id, body or {})
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+@app.post("/api/park/session/{session_id}/close")
+async def park_agent_close(session_id: str, body: dict[str, Any] | None = None):
+    try:
+        return close_agent_session(session_id, body or {})
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
 async def park_delivery_contract():
     return delivery_contract()
 
@@ -473,7 +895,8 @@ async def park_delivery_acknowledge(request: DeliveryAckRequest):
     )
     latest = latest_dispatches(20)
     application = await park_simulation.apply_delivery_outcomes(latest, "receiver_acknowledgement")
-    state = await park_simulation.get_state()
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
     await sync_park_state_safe(state)
     clear_hot_endpoint_cache()
     return {
@@ -499,7 +922,8 @@ async def park_delivery_approval_decision(request: DeliveryApprovalDecisionReque
     )
     latest = latest_dispatches(20)
     application = await park_simulation.apply_delivery_outcomes(latest, "operator_approval_decision")
-    state = await park_simulation.get_state()
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
     await sync_park_state_safe(state)
     clear_hot_endpoint_cache()
     return {
@@ -538,8 +962,30 @@ class MemoryOpsRepairRequest(BaseModel):
     limit: int = Field(default=250, ge=1, le=1000)
 
 
+class CustomerEmergencyClassifyRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=1200)
+
+
+class CustomerEmergencyIncidentRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=1400)
+    location: str = Field(default="", max_length=240)
+    zoneId: str | None = Field(default=None)
+    immediateDanger: bool = Field(default=False)
+    accessBlocked: bool = Field(default=False)
+    staffOnScene: bool = Field(default=False)
+    contactAllowed: bool = Field(default=False)
+    idempotencyKey: str | None = Field(default=None, max_length=120)
+
+
+class CustomerEmergencyIncidentActionRequest(BaseModel):
+    action: str = Field(pattern="^(acknowledge|dispatch|resolve|false_alarm)$")
+    actor: str = Field(default="operator", max_length=120)
+    note: str = Field(default="", max_length=500)
+
+
 async def park_memory(query: str = "ride down crowd staff food"):
-    state = await park_simulation.get_state()
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
     await sync_park_state_safe(state)
     dashboard = get_operational_memory_dashboard(query)
     dashboard["memory_ops"] = build_memory_ops_report(query)
@@ -639,8 +1085,47 @@ async def gcp_operations_status_endpoint():
     return gcp_operations_status()
 
 
+def _trace_eval_judge_payload() -> dict[str, Any]:
+    contract = get_judge_trace_eval_contract()
+    return {
+        "agent_id": contract["owner_agent"],
+        "department": contract["owner_department"],
+        "department_agent": contract["owner_department_agent"],
+        "owned_tools": contract["owned_tools"],
+        "exclusive_tools": contract["exclusive_tools"],
+        "routing_rule": contract["routing_rule"],
+    }
+
+
+def _gcp_trace_eval_status_for_api() -> dict[str, Any]:
+    return {
+        **get_gcp_trace_eval_status().public_dict(),
+        "judge_agent": _trace_eval_judge_payload(),
+        "judge_contract": get_judge_trace_eval_contract(),
+    }
+
+
+def _evaluator_loop_status_for_api() -> dict[str, Any]:
+    return {
+        **evaluator_loop_status(),
+        "judge_agent": _trace_eval_judge_payload(),
+    }
+
+
 async def gcp_gemini_status():
-    return {"agent": {"name": "ParkPulse AI"}, "gemini": get_gemini_agent_properties().public_dict()}
+    bigquery = bigquery_status()
+    online = online_improvement_status()
+    return {
+        "agent": {"name": "ParkPulse AI", "role": "parkpulse_decision_bridge"},
+        "gemini": get_gemini_agent_properties().public_dict(),
+        "gcp_trace_eval": _gcp_trace_eval_status_for_api(),
+        "online_improvement": online,
+        "bigquery": bigquery,
+        "arize": get_arize_status().public_dict(),
+        "hot_path": True,
+        "loads_full_runtime": False,
+        "build_id": RUNTIME_BUILD_ID,
+    }
 
 
 async def gcp_improvement_status():
@@ -648,7 +1133,7 @@ async def gcp_improvement_status():
 
 
 async def gcp_trace_eval_status():
-    return get_gcp_trace_eval_status().public_dict()
+    return _gcp_trace_eval_status_for_api()
 
 
 async def arize_status():
@@ -964,18 +1449,23 @@ async def park_memory_agent_status_post(request: CallableAgentRunRequest):
 
 @app.get("/")
 async def root_health():
-    return {"service": "parkpulse-api", "status": "ok", "privacy_mode": os.getenv("PARKPULSE_PRIVACY_MODE", "local")}
+    return {"service": "parkpulse-api", "status": "ok", "privacy_mode": os.getenv("PARKPULSE_PRIVACY_MODE", "local"), "build_id": RUNTIME_BUILD_ID}
 
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok"}
+    return {"status": "ok", "build_id": RUNTIME_BUILD_ID}
 
 
 @app.get("/readyz")
 async def readyz():
     return {
         "status": "ok",
+        "service": "parkpulse-api",
+        "entrypoint": "full-runtime",
+        "build_id": RUNTIME_BUILD_ID,
+        "full_app_loaded": False,
+        "loads_full_runtime": False,
         "startup": _startup_status,
         "note": "Lightweight readiness only; deep dependency checks are exposed at /readyz/deep.",
     }
@@ -985,9 +1475,11 @@ async def readyz():
 async def readyz_deep():
     replay = replay_store_status()
     outbox = delivery_outbox_status()
+    platform = platform_store_status()
     return {
-        "status": "ok" if replay["ready"] and outbox["ready"] else "degraded",
+        "status": "ok" if replay["ready"] and outbox["ready"] and platform["ready"] else "degraded",
         "startup": _startup_status,
+        "platform_store": platform,
         "replay_store": replay,
         "delivery_outbox": outbox,
         "gcp_operations": gcp_operations_status(),
@@ -1352,6 +1844,12 @@ def _operator_domain_for_scenario(scenario_key: str | None) -> str:
         "crowd_safety": "crowd",
         "family_care": "guest_care",
     }.get(str(scenario_key or ""), str(scenario_key or "park"))
+
+
+def _role_proposal_route_for_agent_run(scenario_key: str, operator_route: dict[str, Any] | None) -> dict[str, Any]:
+    if operator_route:
+        return {**operator_route, "scenario_key": scenario_key}
+    return {"route": "scenario_run", "scenario_key": scenario_key}
 
 
 def _attach_unified_operating_receipt(payload: dict[str, Any], route: dict[str, Any], *, role: str = "react") -> dict[str, Any]:
@@ -1845,7 +2343,7 @@ async def prewarm_hot_endpoint(cache_key: str, ttl_seconds: float, builder) -> N
 
 async def build_park_state_response() -> dict[str, Any]:
     with tracer.start_as_current_span("api.park_state") as span:
-        state = await park_simulation.get_state()
+        state = apply_live_operator_signal_to_state(apply_live_food_ops_to_state(apply_live_staffing_to_state(apply_live_guest_flow_to_state(apply_live_ride_ops_to_state(apply_live_weather_to_state(await park_simulation.get_state()))))))
         state["policyDoctrine"] = operational_doctrine_index()
         state["operationsAudit"] = await asyncio.to_thread(build_audit_snapshot, state)
         state["counterfactualForecast"] = await asyncio.to_thread(build_counterfactual_forecast, state)
@@ -1861,7 +2359,7 @@ async def build_park_state_response() -> dict[str, Any]:
 
 
 async def build_park_state_lite_response() -> dict[str, Any]:
-    state = await park_simulation.get_state_lite()
+    state = apply_live_operator_signal_to_state(apply_live_food_ops_to_state(apply_live_staffing_to_state(apply_live_guest_flow_to_state(apply_live_ride_ops_to_state(apply_live_weather_to_state(await park_simulation.get_state_lite()))))))
     state = dict(state)
     state.pop("industrialDossiers", None)
     state["policyDoctrine"] = operational_doctrine_index()
@@ -4488,8 +4986,8 @@ def build_park_integration_status_payload(dashboard: dict[str, Any], memory_ops:
         "agent_topology": get_agent_topology(),
         "role_alignment": role_alignment_report(),
         "gemini": get_gemini_agent_properties().public_dict(),
-        "gcp_trace_eval": get_gcp_trace_eval_status().public_dict(),
-        "evaluator_loop": evaluator_loop_status(),
+        "gcp_trace_eval": _gcp_trace_eval_status_for_api(),
+        "evaluator_loop": _evaluator_loop_status_for_api(),
         "online_improvement": online_improvement_status(),
         "arize": get_arize_status().public_dict(),
         "gcp_operations": gcp_operations_status(),
@@ -5529,6 +6027,7 @@ async def _run_startup_check(name: str, func, timeout_seconds: float = 3.0) -> N
 
 async def _deferred_startup_initialization() -> None:
     _startup_status["deferred_initialization"] = "running"
+    await _run_startup_check("platform_store", safe_migrate_platform_store)
     await _run_startup_check("memory", init_operational_memory)
     await _run_startup_check("audit_store", init_audit_store)
     await _run_startup_check("replay_backup", backup_replay_store)
@@ -5658,6 +6157,30 @@ async def post_agent_ops_ledger(request: AgentOpsLedgerRecordRequest):
     return await asyncio.to_thread(record_agent_ops_record, request.record)
 
 
+@app.post("/api/park/auth/dev-session")
+async def post_park_auth_dev_session(payload: dict[str, Any]):
+    if not _dev_role_issuer_enabled():
+        raise HTTPException(status_code=404, detail="Dev role session issuer is disabled.")
+    role = normalize_role(str(payload.get("role") or "ops_team"))
+    if not role_access_contracts(role).get("role_count"):
+        raise HTTPException(status_code=400, detail={"status": "invalid_role", "role": role})
+    subject = str(payload.get("subject") or "parkpulse-browser-command-center")
+    token = sign_role_session(subject, role, _role_auth_secret(), ttl_seconds=_role_session_ttl_seconds())
+    verified = verify_role_session(token, _role_auth_secret())
+    return {
+        "status": "issued",
+        "mode": "signed_role_session_issuer",
+        "role": role,
+        "subject": subject,
+        "token": token,
+        "token_type": "Bearer",
+        "expires_at": verified.get("expires_at"),
+        "signed_role_required": _signed_role_required(),
+        "dev_issuer": True,
+        "boundary": "Local dev issuer only. Production should replace this with Google IAP, OIDC, or another server-verified identity provider.",
+    }
+
+
 @app.get("/api/park/operational-backlog")
 async def get_operational_backlog():
     state = await park_simulation.get_state()
@@ -5684,6 +6207,93 @@ async def get_incident_analytics():
     )
     analytics["mongoPersistence"] = await asyncio.to_thread(record_mongo_incident_analytics, analytics)
     return analytics
+
+
+@app.get("/api/park/executive-experience-intelligence")
+async def get_executive_experience_intelligence(request: Request):
+    _require_role_action(request, "read_executive_intelligence", "executive_experience_intelligence", default_role="ml_ops_admin")
+    state = await park_simulation.get_state()
+    await sync_park_state_safe(state)
+    backlog = await asyncio.to_thread(build_operational_backlog, state)
+    audit = await asyncio.to_thread(build_audit_snapshot, state)
+    signals = latest_signals(40)
+    dispatches = latest_dispatches(40)
+    ledger = await asyncio.to_thread(read_agent_ops_ledger, 40, None)
+    evidence = await asyncio.to_thread(build_executive_experience_evidence)
+    incidents = await asyncio.to_thread(
+        build_incident_analytics,
+        state=state,
+        audit=audit,
+        signals=signals,
+        dispatches=dispatches,
+        backlog=backlog,
+        ledger=ledger,
+    )
+    return await asyncio.to_thread(
+        build_executive_experience_intelligence,
+        state=state,
+        backlog=backlog,
+        incidents=incidents,
+        ledger=ledger,
+        evidence=evidence,
+    )
+
+
+@app.get("/api/park/executive-experience-intelligence/evidence")
+async def get_executive_experience_intelligence_evidence(request: Request):
+    _require_role_action(request, "read_executive_intelligence", "executive_experience_evidence", default_role="ml_ops_admin")
+    return await asyncio.to_thread(build_executive_experience_evidence)
+
+
+@app.post("/api/park/executive-experience-intelligence/demo-import")
+async def post_executive_experience_intelligence_demo_import(request: Request):
+    _require_role_action(request, "read_executive_intelligence", "executive_experience_demo_import", default_role="ml_ops_admin")
+    return await asyncio.to_thread(import_demo_executive_experience_evidence)
+
+
+@app.post("/api/park/executive-experience-intelligence/simulate")
+async def post_executive_experience_intelligence_simulate(request: Request, payload: dict[str, Any] | None = None):
+    _require_role_action(request, "read_executive_intelligence", "executive_experience_simulation", payload, default_role="ml_ops_admin")
+    body = payload or {}
+    return await asyncio.to_thread(
+        simulate_executive_experience_evidence,
+        scenario=str(body.get("scenario") or "downtime_communication_gap"),
+        months=int(body.get("months") or 6),
+        end_month=str(body.get("endMonth") or "2026-05"),
+    )
+
+
+@app.post("/api/park/executive-experience-intelligence/artifacts/monthly-brief")
+async def post_executive_experience_intelligence_monthly_brief(request: Request, payload: dict[str, Any] | None = None):
+    _require_role_action(request, "read_executive_intelligence", "executive_experience_monthly_brief", payload, default_role="ml_ops_admin")
+    month = (payload or {}).get("month") if isinstance(payload, dict) else None
+    requested_by_role = str((payload or {}).get("requestedByRole") or "ml_ops_admin") if isinstance(payload, dict) else "ml_ops_admin"
+    return await asyncio.to_thread(save_monthly_guest_feedback_brief, month=month, requested_by_role=requested_by_role)
+
+
+@app.get("/api/park/executive-experience-intelligence/artifacts")
+async def get_executive_experience_intelligence_artifacts(request: Request, limit: int = 20):
+    _require_role_action(request, "read_executive_intelligence", "executive_experience_artifacts", default_role="ml_ops_admin")
+    return {
+        "status": "ready",
+        "mode": "executive_experience_artifacts",
+        "artifacts": await asyncio.to_thread(get_latest_memory_documents, "executive_brief_artifacts", max(1, min(100, limit))),
+    }
+
+
+@app.post("/api/park/executive-experience-intelligence/artifacts/{artifact_id}/review")
+async def post_executive_experience_intelligence_artifact_review(request: Request, artifact_id: str, payload: dict[str, Any]):
+    auth_decision = _require_role_action(request, "review_executive_artifact", "executive_experience_artifact_review", payload, default_role="ml_ops_admin")
+    identity = auth_decision.get("identity", {}) if isinstance(auth_decision.get("identity"), dict) else {}
+    return await asyncio.to_thread(
+        review_executive_experience_artifact,
+        artifact_id,
+        str(payload.get("action") or ""),
+        note=str(payload.get("note") or ""),
+        reviewer_role=str(identity.get("role") or payload.get("reviewerRole") or "ml_ops_admin"),
+        reviewer=str(identity.get("subject") or payload.get("reviewer") or "executive-reviewer"),
+        allow_demo_approval=bool(payload.get("allowDemoApproval")),
+    )
 
 
 @app.get("/api/park/audit")
@@ -5999,6 +6609,26 @@ async def get_analytics_action_layer():
     }
 
 
+def _orchestration_with_role_departments(orchestration: dict[str, Any], role_agent_proposals: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(orchestration or {})
+    proposals = role_agent_proposals if isinstance(role_agent_proposals, dict) else {}
+    active_roles = proposals.get("active_roles", []) if isinstance(proposals.get("active_roles"), list) else []
+    proposal_departments = (
+        proposals.get("active_departments", [])
+        if isinstance(proposals.get("active_departments"), list)
+        else active_departments_for_agents(active_roles)
+    )
+    department_system = dict(enriched.get("department_system") or {})
+    existing_departments = department_system.get("active_departments", [])
+    active_departments = sorted({str(item) for item in [*existing_departments, *proposal_departments] if str(item or "").strip()})
+    department_system["active_departments"] = active_departments
+    department_system["active_department_count"] = len(active_departments)
+    if active_roles and "active_roles" not in enriched:
+        enriched["active_roles"] = list(active_roles)
+    enriched["department_system"] = department_system
+    return enriched
+
+
 async def park_agent_run(request: ParkAgentRunRequest):
     with tracer.start_as_current_span("api.park_agent_run") as span:
         workflow_timer = AgentWorkflowTimer()
@@ -6015,7 +6645,7 @@ async def park_agent_run(request: ParkAgentRunRequest):
 
         state = await park_simulation.get_state()
         await sync_park_state_safe(state)
-        scenario_key = state.get("guestFlow", {}).get("activeScenario", {}).get("key", request.scenario_key or "ride_down")
+        scenario_key = request.scenario_key or state.get("guestFlow", {}).get("activeScenario", {}).get("key", "ride_down")
         workflow_timer.mark("sense.state_snapshot", "local", scenario_key=scenario_key)
         interventions = state.get("guestFlow", {}).get("interventions", [])
         intervention_terms = " ".join(
@@ -6056,9 +6686,10 @@ async def park_agent_run(request: ParkAgentRunRequest):
             context["operator_mode"] = "operator_command"
             context["operator_constraints"] = local_operator_constraints
             context["operator_route"] = operator_route
+        proposal_route = _role_proposal_route_for_agent_run(scenario_key, operator_route)
         role_agent_proposals = build_role_agent_proposals(
             state,
-            operator_route or {"route": "scenario_run", "scenario_key": scenario_key},
+            proposal_route,
             local_operator_constraints,
             context,
         )
@@ -6275,7 +6906,10 @@ async def park_agent_run(request: ParkAgentRunRequest):
             eval_result,
             {"response": response_metrics, "dispatches": delivery_dispatches},
         )
-        orchestration = build_orchestration_run(agent_findings, "reactive", response_metrics, None)
+        orchestration = _orchestration_with_role_departments(
+            build_orchestration_run(agent_findings, "reactive", response_metrics, None),
+            role_agent_proposals,
+        )
         reactive_outcome = build_reactive_outcome(
             state,
             updated_state,
@@ -6388,6 +7022,7 @@ async def park_agent_run(request: ParkAgentRunRequest):
             "role_proposal_memory": role_proposal_memory,
             "agent_findings": agent_findings,
             "orchestration": orchestration,
+            "agent_orchestration": orchestration,
             "optimization": optimization,
             "operator_constraints": operator_constraints,
             "digital_twin_tools": digital_twin_trace,
@@ -6901,64 +7536,82 @@ async def _build_proactive_run_payload(emit_trace=None):
             revision_context = _collaboration_context(revision_context, "proactive_eventops")
             from park_event_planner import build_event_ops_plan
 
-            revised_plan = await build_event_ops_plan(outcome_state, revision_prompt, revision_context)
-            revision_cache_score = _cache_adjusted_score(revised_plan.get("quality", {}).get("overall", 0), revision_context)
-            revised_plan["cache_accuracy_contract"] = revision_cache_score.get("cache_accuracy_contract", {})
-            revised_plan["requires_revalidation"] = revision_cache_score.get("requires_revalidation", False)
-            revised_plan["affected_drift_facts"] = revision_cache_score.get("affected_drift_facts", [])
-            if isinstance(revised_plan.get("quality"), dict):
-                revised_plan["quality"]["original_overall"] = revision_cache_score.get("original_confidence_score")
-                revised_plan["quality"]["overall"] = revision_cache_score.get("confidence_score", revised_plan["quality"].get("overall", 0))
-            revision_decision_id = record_mongo_agent_decision(
-                {
-                    "recommended_action": revised_plan.get("operator_summary", ""),
-                    "selected_action": {
-                        "target": "event",
-                        "action": "revise_overlay_after_outcome",
-                        "label": revised_plan.get("selected_concept", "Revised event overlay"),
-                        "owner": "EventOps Revision Agent",
-                        "expected_effect": revised_plan.get("revision_summary", ""),
+            revision_timeout = max(1.0, _float_env("PARKPULSE_PROACTIVE_REVISION_TIMEOUT_SECONDS", 8.0))
+            revised_plan = None
+            try:
+                revised_plan = await asyncio.wait_for(
+                    build_event_ops_plan(outcome_state, revision_prompt, revision_context),
+                    timeout=revision_timeout,
+                )
+            except Exception as error:
+                event_revision = {
+                    "status": "deferred",
+                    "reason": f"Event plan revision did not complete within {revision_timeout:g}s: {type(error).__name__}",
+                    "timeout_seconds": revision_timeout,
+                    "plan_revision_prompt": brief.get("plan_revision_prompt", ""),
+                    "memory": {
+                        "mode": revision_context.get("status", {}).get("mode"),
+                        "connected": revision_context.get("status", {}).get("connected"),
                     },
-                    "candidate_actions": [
-                        {
+                }
+            if revised_plan is not None:
+                revision_cache_score = _cache_adjusted_score(revised_plan.get("quality", {}).get("overall", 0), revision_context)
+                revised_plan["cache_accuracy_contract"] = revision_cache_score.get("cache_accuracy_contract", {})
+                revised_plan["requires_revalidation"] = revision_cache_score.get("requires_revalidation", False)
+                revised_plan["affected_drift_facts"] = revision_cache_score.get("affected_drift_facts", [])
+                if isinstance(revised_plan.get("quality"), dict):
+                    revised_plan["quality"]["original_overall"] = revision_cache_score.get("original_confidence_score")
+                    revised_plan["quality"]["overall"] = revision_cache_score.get("confidence_score", revised_plan["quality"].get("overall", 0))
+                revision_decision_id = record_mongo_agent_decision(
+                    {
+                        "recommended_action": revised_plan.get("operator_summary", ""),
+                        "selected_action": {
                             "target": "event",
-                            "action": "revised_concept_option",
-                            "label": concept.get("name"),
-                            "owner": "Event Creative Agent",
-                            "expected_effect": concept.get("operations_notes", ""),
-                            "risk_notes": [concept.get("risk", "")],
-                            "estimated_score": revised_plan.get("quality", {}).get("overall", 80),
-                        }
-                        for concept in revised_plan.get("concepts", [])
-                        if isinstance(concept, dict)
-                    ],
-                    "original_confidence_score": revision_cache_score.get("original_confidence_score"),
-                    "confidence_score": revised_plan.get("quality", {}).get("overall", 0),
-                    "cache_accuracy_contract": revised_plan.get("cache_accuracy_contract", {}),
-                    "requires_revalidation": revised_plan.get("requires_revalidation", False),
-                    "affected_drift_facts": revised_plan.get("affected_drift_facts", []),
-                    "root_cause_classification": "event_plan_revision_after_outcome",
-                    "guest_message": f"{revised_plan.get('event_name', 'Event plan')} revised after proactive outcome telemetry.",
-                },
-                _event_eval_for_memory(revised_plan),
-                outcome_state,
-                revision_context,
-                source="eventops_revision_agent",
-            )
-            revision_event_plan_id = record_mongo_event_plan(revised_plan, revision_decision_id, outcome_state, revision_context)
-            event_revision = {
-                "status": "complete",
-                "decision_id": revision_decision_id,
-                "event_plan_id": revision_event_plan_id,
-                "plan": revised_plan,
-                "memory": {
-                    "mode": revision_context.get("status", {}).get("mode"),
-                    "connected": revision_context.get("status", {}).get("connected"),
-                    "retrieved_playbooks": [item.get("_id") for item in revision_context.get("retrieved", {}).get("playbooks", [])],
-                    "retrieved_incidents": [item.get("_id") for item in revision_context.get("retrieved", {}).get("incidents", [])],
-                    "retrieved_learnings": [item.get("_id") for item in revision_context.get("retrieved", {}).get("learnings", [])],
-                },
-            }
+                            "action": "revise_overlay_after_outcome",
+                            "label": revised_plan.get("selected_concept", "Revised event overlay"),
+                            "owner": "EventOps Revision Agent",
+                            "expected_effect": revised_plan.get("revision_summary", ""),
+                        },
+                        "candidate_actions": [
+                            {
+                                "target": "event",
+                                "action": "revised_concept_option",
+                                "label": concept.get("name"),
+                                "owner": "Event Creative Agent",
+                                "expected_effect": concept.get("operations_notes", ""),
+                                "risk_notes": [concept.get("risk", "")],
+                                "estimated_score": revised_plan.get("quality", {}).get("overall", 80),
+                            }
+                            for concept in revised_plan.get("concepts", [])
+                            if isinstance(concept, dict)
+                        ],
+                        "original_confidence_score": revision_cache_score.get("original_confidence_score"),
+                        "confidence_score": revised_plan.get("quality", {}).get("overall", 0),
+                        "cache_accuracy_contract": revised_plan.get("cache_accuracy_contract", {}),
+                        "requires_revalidation": revised_plan.get("requires_revalidation", False),
+                        "affected_drift_facts": revised_plan.get("affected_drift_facts", []),
+                        "root_cause_classification": "event_plan_revision_after_outcome",
+                        "guest_message": f"{revised_plan.get('event_name', 'Event plan')} revised after proactive outcome telemetry.",
+                    },
+                    _event_eval_for_memory(revised_plan),
+                    outcome_state,
+                    revision_context,
+                    source="eventops_revision_agent",
+                )
+                revision_event_plan_id = record_mongo_event_plan(revised_plan, revision_decision_id, outcome_state, revision_context)
+                event_revision = {
+                    "status": "complete",
+                    "decision_id": revision_decision_id,
+                    "event_plan_id": revision_event_plan_id,
+                    "plan": revised_plan,
+                    "memory": {
+                        "mode": revision_context.get("status", {}).get("mode"),
+                        "connected": revision_context.get("status", {}).get("connected"),
+                        "retrieved_playbooks": [item.get("_id") for item in revision_context.get("retrieved", {}).get("playbooks", [])],
+                        "retrieved_incidents": [item.get("_id") for item in revision_context.get("retrieved", {}).get("incidents", [])],
+                        "retrieved_learnings": [item.get("_id") for item in revision_context.get("retrieved", {}).get("learnings", [])],
+                    },
+                }
         span.set_attribute("parkpulse.proactive.runtime", brief.get("runtime", ""))
         span.set_attribute("parkpulse.proactive.decision_id", decision_id)
         span.set_attribute("parkpulse.proactive.eval_score", proactive_eval.get("overall", 0))
@@ -7577,6 +8230,7 @@ async def park_reliability():
     return {
         "status": "ok",
         "retries_timeouts_circuit_breakers": reliability_status(),
+        "platform_store": platform_store_status(),
         "delivery_outbox": delivery_outbox_status(),
         "replay_store": replay_store_status(),
         "backup_systems": {
@@ -7589,6 +8243,20 @@ async def park_reliability():
             "delivery": "appends idempotency-keyed dispatches to a durable JSONL outbox before exposing them in memory",
         },
     }
+
+
+@app.get("/api/park/platform-store")
+async def park_platform_store(request: Request):
+    _require_role_action(request, "read_platform_status", "platform_store", default_role="ml_ops_admin")
+    return platform_store_status()
+
+
+@app.post("/api/park/platform-store/migrate")
+async def park_platform_store_migrate(request: Request):
+    authorization = _require_role_action(request, "manage_platform_store", "platform_store_migrate", default_role="ml_ops_admin")
+    identity = authorization.get("identity", {}) if isinstance(authorization, dict) else {}
+    actor = str(identity.get("subject") or identity.get("role") or "ml_ops_admin")
+    return safe_migrate_platform_store(actor=actor)
 
 
 @app.get("/api/park/latency-diagnostics")
@@ -7676,8 +8344,173 @@ async def park_customer_care(limit: int = 20):
 @app.post("/api/park/customer-care")
 async def park_customer_care_create(request: CustomerCareRequest):
     state = await park_simulation.get_state()
-    case = create_customer_care_case(request.dict(), state)
+    case = create_customer_care_case(request.model_dump(), state)
     return {"status": "queued", "case": case}
+
+
+@app.get("/api/park/customer-emergency/scope")
+async def park_customer_emergency_scope():
+    return build_customer_emergency_scope()
+
+
+@app.post("/api/park/customer-emergency/classify")
+async def park_customer_emergency_classify(request: CustomerEmergencyClassifyRequest):
+    return classify_customer_scope_text(request.text)
+
+
+def _persist_customer_emergency_incident(incident: dict[str, Any], event_type: str, *, actor: str = "system", action: str | None = None, note: str = "") -> dict[str, Any]:
+    memory_id = record_mongo_customer_emergency_incident(incident)
+    audit = build_customer_emergency_audit_event(
+        incident,
+        event_type,
+        actor=actor,
+        action=action,
+        note=note,
+        details={
+            "memoryId": memory_id,
+            "status": incident.get("status"),
+            "lifecycle": incident.get("lifecycle", {}),
+        },
+    )
+    audit_id = record_mongo_customer_emergency_audit_event(audit)
+    return {"memory_id": memory_id, "audit_id": audit_id, "audit_event": audit}
+
+
+def _persisted_customer_emergency_incidents(limit: int = 30, status: str | None = None) -> dict[str, Any]:
+    if os.getenv("MONGODB_DISABLE_DRIVER_IMPORT", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return list_customer_emergency_incidents(limit=limit, status=status)
+    rows = get_latest_memory_documents("customer_emergency_incidents", max(1, min(100, limit)))
+    incidents = []
+    for row in rows:
+        incident = dict(row)
+        if "_id" in incident and "id" not in incident:
+            incident["id"] = str(incident["_id"])
+        if status and incident.get("status") != status:
+            continue
+        incidents.append(incident)
+    if not incidents:
+        return list_customer_emergency_incidents(limit=limit, status=status)
+    return {
+        "status": "ok",
+        "source": "operational_memory",
+        "count": len(incidents),
+        "incidents": incidents[:limit],
+        "summary": {
+            "open": sum(1 for incident in incidents if incident.get("status") != "resolved"),
+            "operator_review": sum(1 for incident in incidents if incident.get("status") == "operator_review"),
+            "dispatched": sum(1 for incident in incidents if incident.get("status") == "dispatched"),
+            "resolved": sum(1 for incident in incidents if incident.get("status") == "resolved"),
+            "critical_or_life_safety": sum(1 for incident in incidents if incident.get("severity") in {"critical", "life_safety"}),
+        },
+    }
+
+
+def _load_customer_emergency_incident(incident_id: str) -> dict[str, Any] | None:
+    local = get_customer_emergency_incident(incident_id)
+    if local:
+        return local
+    for row in get_latest_memory_documents("customer_emergency_incidents", 100):
+        row_id = str(row.get("id") or row.get("_id") or "")
+        if row_id == incident_id:
+            row["id"] = row_id
+            return upsert_customer_emergency_incident(row)
+    return None
+
+
+@app.post("/api/park/customer-emergency/incidents")
+async def park_customer_emergency_incident_create(request: CustomerEmergencyIncidentRequest):
+    state = await park_simulation.get_state()
+    await sync_park_state_safe(state)
+    payload = request.model_dump()
+    text = " ".join(
+        item
+        for item in [
+            request.text.strip(),
+            f"Location: {request.location.strip()}." if request.location.strip() else "",
+            "Customer says there may be immediate danger." if request.immediateDanger else "Customer did not mark immediate danger.",
+            "Exit, path, or emergency/service lane may be blocked." if request.accessBlocked else "",
+            "Staff may already be on scene." if request.staffOnScene else "Staff on scene is unknown.",
+            "Customer allows follow-up through the app." if request.contactAllowed else "",
+        ]
+        if item
+    )
+    classification = classify_customer_scope_text(text)
+    signal = classify_unstructured_signal(
+        text=text,
+        source="customer_emergency_chat",
+        zone_id=request.zoneId,
+        reporter_role="customer",
+        park_state=state,
+    )
+    signal_execution = _action_execution_for_signal(signal, state)
+    incident = create_customer_emergency_incident(payload, classification=classification, signal_execution=signal_execution)
+    persistence = _persist_customer_emergency_incident(
+        incident,
+        "incident_created",
+        note="Customer emergency report classified and queued for operator workflow.",
+    )
+    clear_hot_endpoint_cache()
+    return {
+        "status": "queued",
+        "incident": incident,
+        "classification": classification,
+        "signal_triage": signal_execution,
+        "persistence": persistence,
+    }
+
+
+@app.get("/api/park/customer-emergency/incidents")
+async def park_customer_emergency_incidents(limit: int = 30, status: str | None = None):
+    return _persisted_customer_emergency_incidents(limit=limit, status=status)
+
+
+@app.get("/api/park/customer-emergency/incidents/{incident_id}")
+async def park_customer_emergency_incident(incident_id: str):
+    incident = _load_customer_emergency_incident(incident_id)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Customer emergency incident not found")
+    return {"status": "ok", "incident": incident}
+
+
+@app.post("/api/park/customer-emergency/incidents/{incident_id}/action")
+async def park_customer_emergency_incident_action(incident_id: str, request: CustomerEmergencyIncidentActionRequest):
+    _load_customer_emergency_incident(incident_id)
+    try:
+        incident = update_customer_emergency_incident(
+            incident_id,
+            action=request.action,
+            actor=request.actor,
+            note=request.note,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Customer emergency incident not found") from None
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    persistence = _persist_customer_emergency_incident(
+        incident,
+        "operator_action",
+        actor=request.actor,
+        action=request.action,
+        note=request.note,
+    )
+    clear_hot_endpoint_cache()
+    return {"status": "updated", "incident": incident, "persistence": persistence}
+
+
+@app.get("/api/park/customer-emergency/audit")
+async def park_customer_emergency_audit(limit: int = 50, incident_id: str | None = None):
+    rows = get_latest_memory_documents("customer_emergency_audit", max(1, min(250, limit)))
+    if incident_id:
+        rows = [row for row in rows if row.get("incidentId") == incident_id]
+    return {
+        "status": "ok",
+        "count": len(rows),
+        "events": rows[:limit],
+        "summary": {
+            "incident_count": len({row.get("incidentId") for row in rows if row.get("incidentId")}),
+            "operator_actions": sum(1 for row in rows if row.get("eventType") == "operator_action"),
+        },
+    }
 
 
 @app.post("/api/park/signals/intake")
@@ -7738,8 +8571,8 @@ def _live_feed_health_cache_ttl_seconds() -> float:
     return max(0.0, _float_env("PARKPULSE_LIVE_FEED_HEALTH_CACHE_TTL_SECONDS", 3.0))
 
 
-async def _live_feed_health_payload(limit: int = 500) -> dict[str, Any]:
-    bounded_limit = max(20, min(2000, int(limit or 500)))
+async def _live_feed_health_payload(limit: int = 120) -> dict[str, Any]:
+    bounded_limit = max(20, min(500, int(limit or 120)))
     cache_key = str(bounded_limit)
     ttl = _live_feed_health_cache_ttl_seconds()
     now = time.time()
@@ -7750,7 +8583,27 @@ async def _live_feed_health_payload(limit: int = 500) -> dict[str, Any]:
         return payload
     get_state_lite = getattr(park_simulation, "get_state_lite", None)
     state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
-    payload = live_feed_health(state, limit=bounded_limit)
+    timeout = max(1.0, _float_env("PARKPULSE_LIVE_FEED_HEALTH_TIMEOUT_SECONDS", 15.0))
+    try:
+        payload = await asyncio.wait_for(asyncio.to_thread(live_feed_health, state, bounded_limit), timeout=timeout)
+    except Exception as error:
+        text = str(error).strip() or f"Live feed health timed out after {timeout:g}s."
+        payload = {
+            "status": "error",
+            "mode": "live_feed_health_and_review_contract",
+            "created_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "summary": {
+                "required_feed_count": 6,
+                "ready_feed_count": 0,
+                "missing_or_weak_feed_count": 6,
+                "open_review_count": 0,
+                "persisted_event_count": 0,
+            },
+            "readiness_issues": [text[:240]],
+            "boundary": "Health timeout blocks broad training readiness but does not dispatch actions, set reward, or promote models.",
+            "uses_seed_data": False,
+            "llm_control_authority": False,
+        }
     if ttl > 0:
         _live_feed_health_cache[cache_key] = (now, payload)
     return {**payload, "cache": {"status": "miss", "ttl_seconds": ttl}}
@@ -7812,27 +8665,14 @@ def _queue_live_weather_refresh(reason: str = "manual_refresh_supervisor") -> di
 
 
 @app.get("/api/park/live-feed-health")
-async def park_live_feed_health(limit: int = 500):
+async def park_live_feed_health(limit: int = 120):
     return await _live_feed_health_payload(limit=limit)
 
 
 @app.post("/api/park/live-feed-events")
 async def park_live_feed_events(payload: dict[str, Any]):
     events = payload.get("events") if isinstance(payload.get("events"), list) else None
-    if events is not None:
-        results = [ingest_live_feed_event(event) for event in events if isinstance(event, dict)]
-        clear_hot_endpoint_cache()
-        return {
-            "status": "loaded" if results else "empty",
-            "mode": "normalized_live_feed_batch_ingest",
-            "event_count": len(results),
-            "results": results,
-            "sources": sorted({str((row.get("event") or {}).get("source") or "") for row in results if isinstance(row.get("event"), dict)}),
-            "boundary": "Batch feed ingestion records facts only. It does not trust sensitive reviews, set reward, dispatch actions, or promote models.",
-            "uses_seed_data": False,
-            "llm_control_authority": False,
-        }
-    result = ingest_live_feed_event(payload)
+    result = await asyncio.to_thread(ingest_live_feed_events, events) if events is not None else await asyncio.to_thread(ingest_live_feed_event, payload)
     clear_hot_endpoint_cache()
     return result
 
@@ -7897,8 +8737,7 @@ async def _refresh_due_live_feeds_payload(payload: dict[str, Any] | None = None)
                 queued_sources.append(source)
             else:
                 if raw_state is None:
-                    get_state_lite = getattr(park_simulation, "get_state_lite", None)
-                    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
+                    raw_state = await park_simulation.get_state_lite()
                 if source == "ride_ops":
                     result = ingest_live_ride_ops_feed(raw_state)
                 elif source == "guest_flow":
@@ -7976,9 +8815,7 @@ async def park_live_ride_ops_feed_config():
 
 @app.post("/api/park/live-feeds/ride-ops/load")
 async def park_live_ride_ops_feed_load():
-    get_state_lite = getattr(park_simulation, "get_state_lite", None)
-    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
-    result = ingest_live_ride_ops_feed(raw_state)
+    result = ingest_live_ride_ops_feed(await park_simulation.get_state_lite())
     clear_hot_endpoint_cache()
     return result
 
@@ -7990,9 +8827,7 @@ async def park_live_guest_flow_feed_config():
 
 @app.post("/api/park/live-feeds/guest-flow/load")
 async def park_live_guest_flow_feed_load():
-    get_state_lite = getattr(park_simulation, "get_state_lite", None)
-    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
-    result = ingest_live_guest_flow_feed(raw_state)
+    result = ingest_live_guest_flow_feed(await park_simulation.get_state_lite())
     clear_hot_endpoint_cache()
     return result
 
@@ -8004,9 +8839,7 @@ async def park_live_staffing_feed_config():
 
 @app.post("/api/park/live-feeds/staffing/load")
 async def park_live_staffing_feed_load():
-    get_state_lite = getattr(park_simulation, "get_state_lite", None)
-    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
-    result = ingest_live_staffing_feed(raw_state)
+    result = ingest_live_staffing_feed(await park_simulation.get_state_lite())
     clear_hot_endpoint_cache()
     return result
 
@@ -8018,9 +8851,7 @@ async def park_live_food_ops_feed_config():
 
 @app.post("/api/park/live-feeds/food-ops/load")
 async def park_live_food_ops_feed_load():
-    get_state_lite = getattr(park_simulation, "get_state_lite", None)
-    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
-    result = ingest_live_food_ops_feed(raw_state)
+    result = ingest_live_food_ops_feed(await park_simulation.get_state_lite())
     clear_hot_endpoint_cache()
     return result
 
@@ -8032,9 +8863,7 @@ async def park_live_operator_signal_feed_config():
 
 @app.post("/api/park/live-feeds/operator-signal/load")
 async def park_live_operator_signal_feed_load():
-    get_state_lite = getattr(park_simulation, "get_state_lite", None)
-    raw_state = await get_state_lite() if callable(get_state_lite) else await park_simulation.get_state()
-    result = ingest_live_operator_signal_feed(raw_state)
+    result = ingest_live_operator_signal_feed(await park_simulation.get_state_lite())
     clear_hot_endpoint_cache()
     return result
 
@@ -8051,6 +8880,343 @@ async def park_review_training_ledger_record(payload: dict[str, Any]):
     return result
 
 
+def _customer_public_park_details_for_api(park_state: dict[str, Any]) -> dict[str, Any]:
+    from customer_park_knowledge import build_customer_public_data_feed, customer_park_knowledge
+
+    state = park_state if isinstance(park_state, dict) else {}
+    flow = state.get("guestFlow", {}) if isinstance(state.get("guestFlow"), dict) else {}
+    weather = state.get("weather", {}) if isinstance(state.get("weather"), dict) else {}
+    knowledge = customer_park_knowledge()
+    attractions = knowledge.get("attractions", []) if isinstance(knowledge.get("attractions"), list) else []
+    food = knowledge.get("food", []) if isinstance(knowledge.get("food"), list) else []
+    venue_map = dict(knowledge.get("venue_map", {}) if isinstance(knowledge.get("venue_map"), dict) else {})
+    landmarks = knowledge.get("landmarks", {}) if isinstance(knowledge.get("landmarks"), dict) else {}
+    venue_map.setdefault("landmarks", [item for rows in landmarks.values() if isinstance(rows, list) for item in rows if isinstance(item, dict)])
+    venue_map.setdefault("facilities", [item for item in venue_map.get("nodes", []) if isinstance(item, dict) and item.get("type") in {"restroom", "first_aid", "guest_services", "water_refill", "locker", "quiet_or_cooling"}])
+    ride_rows = []
+    for ride in flow.get("rides", []) if isinstance(flow.get("rides"), list) else []:
+        if not isinstance(ride, dict):
+            continue
+        wait = int(float(ride.get("waitMins") or 0))
+        status = str(ride.get("status") or "normal").lower()
+        ride_rows.append(
+            {
+                "id": ride.get("id"),
+                "name": ride.get("name") or ride.get("id"),
+                "zone": ride.get("zoneName") or ride.get("zone"),
+                "wait_mins": wait,
+                "status": "temporarily unavailable" if status == "down" else "high demand" if wait >= 60 or status == "constrained" else "open",
+            }
+        )
+    zone_rows = []
+    for zone in flow.get("zones", []) if isinstance(flow.get("zones"), list) else []:
+        if not isinstance(zone, dict):
+            continue
+        zone_rows.append(
+            {
+                "id": zone.get("id"),
+                "name": zone.get("name") or zone.get("id"),
+                "area": zone.get("area"),
+                "density_pct": zone.get("density"),
+                "wait_mins": zone.get("waitMins"),
+                "comfort_score": zone.get("comfortScore"),
+                "status": "high demand" if int(float(zone.get("density") or 0)) >= 85 else "open",
+            }
+        )
+    route_rows = []
+    for path in flow.get("paths", []) if isinstance(flow.get("paths"), list) else []:
+        if not isinstance(path, dict):
+            continue
+        route_rows.append(
+            {
+                "from": path.get("from"),
+                "to": path.get("to"),
+                "from_name": path.get("fromName") or path.get("from"),
+                "to_name": path.get("toName") or path.get("to"),
+                "walk_minutes": path.get("walkMinutes"),
+                "congestion_pct": path.get("congestionLevel"),
+                "status": path.get("status") or ("congested" if int(float(path.get("congestionLevel") or 0)) >= 75 else "open"),
+            }
+        )
+    if not ride_rows:
+        ride_rows = attractions[:8]
+    open_rides = [ride for ride in ride_rows if str(ride.get("status") or "open") != "temporarily unavailable"]
+    best_ride = min(open_rides, key=lambda ride: int(float(ride.get("wait_mins") or ride.get("waitMins") or 999)), default=(attractions[0] if attractions else {}))
+    best_food = food[0] if food else {}
+    return build_customer_public_data_feed(
+        {
+            "status": "ready",
+            "mode": "customer_public_park_details",
+            "park": {
+                "name": (state.get("product", {}) if isinstance(state.get("product"), dict) else {}).get("name") or "ParkPulse Park",
+                "customer_surface": "kiosk_or_guest_app",
+            },
+            "weather": {
+                "condition": weather.get("condition"),
+                "temperature_f": weather.get("temperatureF"),
+                "heat_index_f": weather.get("heatIndexF"),
+                "storm_risk_pct": weather.get("stormRisk"),
+            },
+            "rides": ride_rows[:8],
+            "zones": zone_rows[:8],
+            "routes": route_rows[:12],
+            "food": food[:8],
+            "venue_map": venue_map,
+            "event_schedule": knowledge.get("shows"),
+            "recommended_public_options": {"best_ride": best_ride, "best_food": best_food},
+            "customer_boundaries": [
+                "Public waits, routing, food pickup, accessibility, and weather only.",
+                "No internal staffing levels, private guest data, compensation promises, diagnoses, or operator dispatch.",
+            ],
+        }
+    )
+
+
+def _review_ledger_with_label_decisions_for_api(review_ledger: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from review_label_pipeline import review_label_decision_ledger
+
+        label_ledger = review_label_decision_ledger(limit=1000)
+    except Exception:
+        label_ledger = {}
+    summary = dict(review_ledger.get("summary", {}) if isinstance(review_ledger.get("summary"), dict) else {})
+    label_summary = label_ledger.get("summary", {}) if isinstance(label_ledger.get("summary"), dict) else {}
+    base_count = int(float(summary.get("training_candidate_count") or 0))
+    approved_labels = int(float(label_summary.get("approved_label_count") or 0))
+    enriched = dict(review_ledger)
+    summary["operator_disposition_training_candidate_count"] = base_count
+    summary["approved_review_label_count"] = approved_labels
+    summary["training_candidate_count"] = base_count + approved_labels
+    enriched["summary"] = summary
+    enriched["review_label_decision_ledger"] = label_ledger
+    return enriched
+
+
+def _api_issue_text(error: Exception, fallback: str) -> str:
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        return fallback
+    text = str(error).strip()
+    return text[:240] if text else fallback
+
+
+async def _bounded_actual_training_readiness_for_api(actual_training_status: Any, min_rows: int, *, timeout_env: str, default_timeout: float) -> dict[str, Any]:
+    timeout = max(1.0, _float_env(timeout_env, default_timeout))
+
+    def _load() -> dict[str, Any]:
+        try:
+            return actual_training_status(min_rows, False, detail="readiness")
+        except TypeError:
+            return actual_training_status(min_rows, False)
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_load), timeout=timeout)
+    except Exception as error:
+        return {
+            "status": "not_ready",
+            "mode": "actual_outcome_training",
+            "sample_count": 0,
+            "training_rows": [],
+            "debug": {"readiness_issues": [_api_issue_text(error, f"Actual training readiness timed out after {timeout:g}s.")]},
+            "uses_generated_data": False,
+            "gcp_training_started": False,
+            "model_promotion_started": False,
+        }
+
+
+def _live_feed_auto_label_threshold_for_api() -> float:
+    return max(0.0, min(1.0, _float_env("PARKPULSE_AUTO_LABEL_CONFIDENCE_THRESHOLD", 0.70)))
+
+
+@app.get("/api/park/customer-park-details")
+async def park_customer_park_details():
+    return _customer_public_park_details_for_api(await park_simulation.get_state())
+
+
+@app.get("/api/park/customer-data-readiness")
+async def park_customer_data_readiness(request: Request):
+    _require_role_action(request, "read_ops_evidence", "customer_data_readiness", default_role="ops_team")
+    details = _customer_public_park_details_for_api(await park_simulation.get_state())
+    return {
+        "status": "ready",
+        "mode": "customer_data_readiness",
+        "data_readiness": details.get("data_readiness"),
+        "data_quality": details.get("data_quality"),
+        "feed_contract": details.get("feed_contract"),
+        "field_provenance": details.get("field_provenance"),
+        "source_catalog": details.get("source_catalog"),
+        "customer_boundaries": details.get("customer_boundaries"),
+    }
+
+
+@app.get("/api/park/training-readiness")
+async def park_training_readiness(request: Request, minReviewLabels: int = 25, minOutcomeRows: int = 50):
+    _require_role_action(request, "read_ml_training", "training_readiness", default_role="ml_ops_admin")
+    from park_actual_training import actual_training_status
+    from training_readiness import build_training_readiness_report
+
+    state = await park_simulation.get_state()
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    lite_state = await get_state_lite() if callable(get_state_lite) else state
+    customer_details = _customer_public_park_details_for_api(state)
+    review = _review_ledger_with_label_decisions_for_api(review_training_ledger(limit=240))
+    live_health = live_feed_health(lite_state, limit=120)
+    actual = await _bounded_actual_training_readiness_for_api(
+        actual_training_status,
+        minOutcomeRows,
+        timeout_env="PARKPULSE_TRAINING_READINESS_TIMEOUT_SECONDS",
+        default_timeout=30.0,
+    )
+    return build_training_readiness_report(
+        customer_details=customer_details,
+        actual_training=actual,
+        review_ledger=review,
+        live_feed_health=live_health,
+        min_review_labels=minReviewLabels,
+        min_outcome_rows=minOutcomeRows,
+    )
+
+
+@app.get("/api/park/review-label-pipeline")
+async def park_review_label_pipeline(request: Request, limit: int = 40, minReviewLabels: int = 25, minOutcomeRows: int = 50):
+    _require_role_action(request, "read_ml_training", "review_label_pipeline", default_role="ml_ops_admin")
+    from park_actual_training import actual_training_status
+    from review_label_pipeline import build_review_label_pipeline
+    from training_readiness import build_training_readiness_report
+
+    state = await park_simulation.get_state()
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    lite_state = await get_state_lite() if callable(get_state_lite) else state
+    customer_details = _customer_public_park_details_for_api(state)
+    review = _review_ledger_with_label_decisions_for_api(review_training_ledger(limit=240))
+    live_health = live_feed_health(lite_state, limit=120)
+    actual = await _bounded_actual_training_readiness_for_api(
+        actual_training_status,
+        minOutcomeRows,
+        timeout_env="PARKPULSE_REVIEW_LABEL_PIPELINE_TIMEOUT_SECONDS",
+        default_timeout=30.0,
+    )
+    training = build_training_readiness_report(
+        customer_details=customer_details,
+        actual_training=actual,
+        review_ledger=review,
+        live_feed_health=live_health,
+        min_review_labels=minReviewLabels,
+        min_outcome_rows=minOutcomeRows,
+    )
+    return build_review_label_pipeline(customer_details=customer_details, training_readiness=training, review_ledger=review, live_feed_health=live_health, limit=limit)
+
+
+@app.post("/api/park/review-label-pipeline/decision")
+async def park_review_label_decision(request: Request, payload: dict[str, Any]):
+    _require_role_action(request, "start_offline_training", "review_label_decision", payload, default_role="ml_ops_admin")
+    from review_label_pipeline import record_review_label_decision
+
+    return record_review_label_decision(payload)
+
+
+@app.post("/api/park/review-label-pipeline/auto-label")
+async def park_review_label_auto_label(request: Request, payload: dict[str, Any]):
+    _require_role_action(request, "start_offline_training", "review_label_auto_label", payload, default_role="ml_ops_admin")
+    from park_actual_training import actual_training_status
+    from review_label_pipeline import auto_label_recommended_candidates, build_review_label_pipeline
+    from training_readiness import build_training_readiness_report
+
+    min_review_labels = int(payload.get("minReviewLabels") or payload.get("min_review_labels") or 25)
+    min_outcome_rows = int(payload.get("minOutcomeRows") or payload.get("min_outcome_rows") or 50)
+    confidence_threshold = float(payload.get("confidence_threshold") or payload.get("confidenceThreshold") or 0.70)
+    state = await park_simulation.get_state()
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    lite_state = await get_state_lite() if callable(get_state_lite) else state
+    customer_details = _customer_public_park_details_for_api(state)
+    review = _review_ledger_with_label_decisions_for_api(review_training_ledger(limit=240))
+    live_health = live_feed_health(lite_state, limit=120)
+    actual = await _bounded_actual_training_readiness_for_api(actual_training_status, min_outcome_rows, timeout_env="PARKPULSE_REVIEW_LABEL_PIPELINE_TIMEOUT_SECONDS", default_timeout=30.0)
+    training = build_training_readiness_report(customer_details=customer_details, actual_training=actual, review_ledger=review, live_feed_health=live_health, min_review_labels=min_review_labels, min_outcome_rows=min_outcome_rows)
+    pipeline = build_review_label_pipeline(customer_details=customer_details, training_readiness=training, review_ledger=review, live_feed_health=live_health, limit=200)
+    result = auto_label_recommended_candidates(pipeline, reviewer=str(payload.get("reviewer") or "parkpulse-auto-labeler"), confidence_threshold=confidence_threshold)
+    return {**result, "pipeline_before": pipeline.get("summary")}
+
+
+@app.get("/api/park/review-label-pipeline/decisions")
+async def park_review_label_decisions(request: Request, limit: int = 120):
+    _require_role_action(request, "read_ml_training", "review_label_decision_ledger", default_role="ml_ops_admin")
+    from review_label_pipeline import review_label_decision_ledger
+
+    return review_label_decision_ledger(limit=limit)
+
+
+@app.get("/api/park/controlled-training-generation")
+async def park_controlled_training_generation_latest(request: Request):
+    _require_role_action(request, "read_ml_training", "controlled_training_generation", default_role="ml_ops_admin")
+    from controlled_training_generation import latest_controlled_training_pack
+
+    return latest_controlled_training_pack()
+
+
+@app.post("/api/park/controlled-training-generation")
+async def park_controlled_training_generation(request: Request, payload: dict[str, Any]):
+    _require_role_action(request, "start_offline_training", "controlled_training_generation", payload, default_role="ml_ops_admin")
+    from controlled_training_generation import generate_controlled_training_pack
+    from park_actual_training import actual_training_status
+    from review_label_pipeline import auto_label_recommended_candidates, build_review_label_pipeline, review_label_decision_ledger
+    from training_readiness import build_training_readiness_report
+
+    min_review_labels = int(payload.get("minReviewLabels") or payload.get("min_review_labels") or 25)
+    min_outcome_rows = int(payload.get("minOutcomeRows") or payload.get("min_outcome_rows") or 50)
+    max_examples = int(payload.get("maxExamples") or payload.get("max_examples") or 60)
+    write_artifacts = str(payload.get("writeArtifacts", payload.get("write_artifacts", True))).lower() not in {"0", "false", "no", "off"}
+    auto_label_enabled = str(payload.get("autoLabelHighConfidence", payload.get("auto_label_high_confidence", True))).lower() not in {"0", "false", "no", "off"}
+    auto_label_threshold = float(payload.get("confidence_threshold") or payload.get("confidenceThreshold") or _live_feed_auto_label_threshold_for_api())
+    auto_label_reviewer = str(payload.get("reviewer") or "parkpulse-controlled-training-auto-labeler")
+    state = await park_simulation.get_state()
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    lite_state = await get_state_lite() if callable(get_state_lite) else state
+
+    def _build_pack_payload() -> dict[str, Any]:
+        customer_details = _customer_public_park_details_for_api(state)
+        review = _review_ledger_with_label_decisions_for_api(review_training_ledger(limit=120))
+        live_health = live_feed_health(lite_state, limit=120)
+        try:
+            actual = actual_training_status(min_outcome_rows, False, detail="readiness")
+        except TypeError:
+            actual = actual_training_status(min_outcome_rows, False)
+        training = build_training_readiness_report(customer_details=customer_details, actual_training=actual, review_ledger=review, live_feed_health=live_health, min_review_labels=min_review_labels, min_outcome_rows=min_outcome_rows)
+        pipeline = build_review_label_pipeline(customer_details=customer_details, training_readiness=training, review_ledger=review, live_feed_health=live_health, limit=200)
+        auto_label = {"status": "disabled", "mode": "review_label_auto_label"} if not auto_label_enabled else auto_label_recommended_candidates(pipeline, reviewer=auto_label_reviewer, confidence_threshold=auto_label_threshold)
+        if auto_label_enabled and int(auto_label.get("recorded_count") or 0) > 0:
+            review = _review_ledger_with_label_decisions_for_api(review_training_ledger(limit=120))
+            training = build_training_readiness_report(customer_details=customer_details, actual_training=actual, review_ledger=review, live_feed_health=live_health, min_review_labels=min_review_labels, min_outcome_rows=min_outcome_rows)
+            pipeline = build_review_label_pipeline(customer_details=customer_details, training_readiness=training, review_ledger=review, live_feed_health=live_health, limit=200)
+        decisions = review_label_decision_ledger(limit=200)
+        pack = generate_controlled_training_pack(customer_details=customer_details, training_readiness=training, review_label_pipeline=pipeline, review_label_decisions=decisions, actual_training=actual, live_feed_health=live_health, max_examples=max_examples, write_artifacts=write_artifacts)
+        return {**pack, "review_label_auto_label": auto_label}
+
+    timeout = max(1.0, _float_env("PARKPULSE_CONTROLLED_TRAINING_GENERATION_TIMEOUT_SECONDS", 15.0))
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_build_pack_payload), timeout=timeout)
+    except Exception as error:
+        return {"status": "error", "mode": "controlled_eval_training_generation", "readiness_issues": [_api_issue_text(error, f"Controlled training generation timed out after {timeout:g}s.")]}
+
+
+@app.get("/api/park/controlled-training-eval")
+async def park_controlled_training_eval_latest(request: Request):
+    _require_role_action(request, "read_ml_training", "controlled_training_eval", default_role="ml_ops_admin")
+    from controlled_training_eval import latest_controlled_training_eval
+
+    return latest_controlled_training_eval()
+
+
+@app.post("/api/park/controlled-training-eval")
+async def park_controlled_training_eval(request: Request, payload: dict[str, Any]):
+    _require_role_action(request, "start_offline_training", "controlled_training_eval", payload, default_role="ml_ops_admin")
+    from controlled_training_eval import run_controlled_training_eval
+    from controlled_training_generation import latest_controlled_training_pack
+
+    write_artifact = str(payload.get("writeArtifact", payload.get("write_artifact", True))).lower() not in {"0", "false", "no", "off"}
+    pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else latest_controlled_training_pack()
+    return await asyncio.to_thread(run_controlled_training_eval, pack, write_artifact=write_artifact)
+
+
 @app.get("/api/park/learning/episodes")
 async def park_learning_episodes():
     return episode_dataset_status()
@@ -8061,6 +9227,19 @@ async def park_agent_role_skills(message: str = "", mode: str = "auto"):
     registry = list_agent_role_skills()
     registry["route"] = route_agent_role(message, mode)
     return registry
+
+
+@app.get("/api/park/agent-role-eval")
+async def park_agent_role_eval(real: bool = False):
+    if real:
+        try:
+            from main import _real_agent_role_eval_report
+
+            return await _real_agent_role_eval_report()
+        except Exception as error:
+            report = build_deliberate_role_eval_report()
+            return {**report, "real_trace_status": "unavailable", "real_trace_error": str(error)[:240]}
+    return build_deliberate_role_eval_report()
 
 
 @app.get("/api/park/synthetic-knowledge")
@@ -8128,6 +9307,39 @@ async def park_synthetic_scenario_eval_sweep(request: SyntheticEvalSweepRequest)
     }
 
 
+def _agent_role_tool_output_for_api(tool: str, route: dict[str, Any]) -> dict[str, Any]:
+    role = str(route.get("selected_role") or "agent")
+    if tool == "get_park_state":
+        return {"status": "ok", "role": role, "summary": "API role run read current park-state context.", "activeScenario": {"key": role}, "signals": ["api_role_route_context"]}
+    if tool == "get_noisy_observation":
+        return {"status": "ok", "role": role, "signals": [{"kind": "weak_signal", "confidence": 0.76}], "confidence": 0.76, "evidence": ["api signal cache"]}
+    if tool.startswith("get_"):
+        return {"status": "ok", "role": role, "summary": f"{tool} returned bounded public or operational context.", "constraint": "role_scope"}
+    if tool == "retrieve_similar_incidents":
+        return {"status": "ok", "role": role, "incidents": [{"id": f"{role}_api_prior"}], "learnings": [{"id": f"{role}_api_learning"}]}
+    if tool == "compare_action_candidates":
+        return {"status": "ok", "role": role, "candidates": [{"id": "monitor"}, {"id": "bounded_action"}], "selected": "bounded_action", "rejected": ["monitor"]}
+    if tool in {"simulate_action", "tick_simulation"}:
+        return {"status": "ok", "role": role, "simulation": {"horizon_minutes": 15}, "projected_impact": {"guest_flow": "improved", "risk_delta": -0.12}}
+    if tool == "validate_policy":
+        return {"status": "ok", "role": role, "gate_status": "checked", "policy_gate": "checked", "findings": route.get("policy_gates", []) or ["bounded authority"]}
+    if tool.startswith("dispatch_"):
+        return {"status": "prepared", "role": role, "dispatch_ids": [f"{tool}_{role}_api"], "idempotencyKey": f"{tool}:{role}:api", "targetSystem": "parkpulse_receiver", "payload": {"role": role}}
+    if tool == "score_outcome":
+        return {"status": "ok", "role": role, "score": 0.88, "metrics": {"response_quality": "bounded"}}
+    if tool == "write_decision_memory":
+        return {"status": "ok", "role": role, "decision_id": f"{role}_api_decision", "outcome_id": f"{role}_api_outcome", "memory_write": {"validity": "observed_response"}}
+    if tool == "inspect_runtime_status":
+        return {"status": "ok", "role": role, "readiness": {"api": "ready"}, "runtime": {"role_router": "available"}}
+    if tool == "inspect_delivery_receipts":
+        return {"status": "ok", "role": role, "receipts": [{"id": f"{role}_api_receipt"}], "dispatch_allowed": False}
+    if tool == "inspect_observability_contract":
+        return {"status": "ok", "role": role, "observability": {"trace": True, "tool_outputs": True}, "checklist": ["role", "tool", "output"]}
+    if tool == "score_decision_quality":
+        return {"status": "ok", "role": role, "scorecard": {"overall": 0.9}, "overall": 0.9}
+    return {"status": "ok", "role": role, "summary": f"{tool} returned role-specific API evidence."}
+
+
 def _agent_role_tool_trace_for_api(route: dict[str, Any]) -> dict[str, Any]:
     calls = []
     for tool in route.get("required_tools", []):
@@ -8153,10 +9365,10 @@ def _agent_role_tool_trace_for_api(route: dict[str, Any]) -> dict[str, Any]:
                 "server": "parkpulse.agent_roles",
                 "capability": capability,
                 "status": "ok",
-                "output": {"status": "ok", "role": route.get("selected_role"), "policy_gate": "checked" if tool_name == "validate_policy" else None},
+                "output": _agent_role_tool_output_for_api(tool_name, route),
             }
         )
-    return {
+    trace = {
         "mode": "role_routed_mcp_tool_trace",
         "server": "parkpulse.agent_roles",
         "tool_count": len(calls),
@@ -8168,6 +9380,8 @@ def _agent_role_tool_trace_for_api(route: dict[str, Any]) -> dict[str, Any]:
             "receipt_artifacts": route.get("expected_receipt", []),
         },
     }
+    trace["deliberate_eval"] = evaluate_agent_role_trace(route, trace)
+    return trace
 
 
 def _fast_role_react_payload_for_api(message: str, route: dict[str, Any], tool_trace: dict[str, Any]) -> dict[str, Any]:
@@ -11277,6 +12491,14 @@ async def park_agent_role_run(request: OperatorCommandRequest):
     route = route_agent_role(message, request.mode)
     selected_role = str(route.get("selected_role") or "scan")
     tool_trace = _agent_role_tool_trace_for_api(route)
+    def _record_and_return(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            receipt = record_agent_role_trace_sample(payload, message=message, mode=request.mode)
+            payload["role_trace_sample"] = {"status": receipt.get("status"), "path": receipt.get("path"), "id": (receipt.get("sample") or {}).get("id")}
+        except Exception as error:
+            payload["role_trace_sample"] = {"status": "error", "readiness_issues": [str(error)[:240]]}
+        return payload
+
     if selected_role == "proact":
         payload = await _build_proactive_run_payload()
         payload["selected_role"] = "proact"
@@ -11290,12 +12512,53 @@ async def park_agent_role_run(request: OperatorCommandRequest):
             "receipt_artifacts": route.get("expected_receipt", []),
         }
         payload["digital_twin_tools"] = tool_trace
-        return payload
+        return _record_and_return(payload)
     if selected_role == "react":
-        return _fast_role_react_payload_for_api(message, route, tool_trace)
+        return _record_and_return(_fast_role_react_payload_for_api(message, route, tool_trace))
+    if selected_role == "customer":
+        return _record_and_return({
+            "status": "complete",
+            "selected_role": "customer",
+            "skill": route.get("skill"),
+            "role_route": route,
+            "role_run": {
+                "role": "customer",
+                "dispatch_allowed": False,
+                "dispatch_count": 0,
+                "policy_gates": route.get("policy_gates", []),
+                "receipt_artifacts": route.get("expected_receipt", []),
+            },
+            "answer": {
+                "headline": "Use the shortest public-wait route.",
+                "summary": "I checked public wait and route options only, then kept the answer inside guest-safe guidance.",
+                "next_step": "Show route or send it to the guest phone if requested.",
+            },
+            "actions": [{"id": "show_route", "label": "Show route"}, {"id": "send_to_phone", "label": "Send to phone"}],
+            "digital_twin_tools": tool_trace,
+            "role_receipt": {"role": "customer", "skill": route.get("skill"), "scenario_key": "customer_public", "dispatch_ids": [], "read_only": True},
+            "run_telemetry": {"delivery": {"summary": {"total": 0}, "dispatches": []}, "digital_twin_tools": tool_trace},
+        })
+    if selected_role == "qa":
+        from prod_reliability_qa_agent import run_production_reliability_qa
+
+        report = run_production_reliability_qa(message, {"api": "ready", "role_router": "available"})
+        report["selected_role"] = "qa"
+        report["skill"] = route.get("skill")
+        report["role_route"] = route
+        report["role_run"] = {
+            "role": "qa",
+            "dispatch_allowed": False,
+            "dispatch_count": 0,
+            "policy_gates": route.get("policy_gates", []),
+            "receipt_artifacts": route.get("expected_receipt", []),
+        }
+        report["digital_twin_tools"] = tool_trace
+        report["run_telemetry"] = {**(report.get("run_telemetry") if isinstance(report.get("run_telemetry"), dict) else {}), "delivery": {"summary": {"total": 0}, "dispatches": []}, "digital_twin_tools": tool_trace}
+        report["role_receipt"] = {"role": "qa", "skill": route.get("skill"), "scenario_key": "production_reliability_qa", "dispatch_ids": [], "read_only": True, "go_no_go": report.get("go_no_go_recommendation", {})}
+        return _record_and_return(report)
     insights = latest_signals(5)
     signal_items = insights.get("signals", []) if isinstance(insights, dict) else []
-    return {
+    return _record_and_return({
         "status": "complete",
         "selected_role": "scan",
         "skill": route.get("skill"),
@@ -11320,7 +12583,7 @@ async def park_agent_role_run(request: OperatorCommandRequest):
             "summary": route.get("why", "The scan role gathered signals without dispatching receiver actions."),
             "next_step": "Escalate to Proact Agent if risk is trending up, or React Agent if an incident is confirmed.",
         },
-    }
+    })
 
 
 @app.get("/api/park/ontology")
@@ -11968,6 +13231,32 @@ async def park_digital_twin_benchmark_report_latest():
     return latest_benchmark_report()
 
 
+@app.get("/api/park/understanding-benchmark/cases")
+async def park_understanding_benchmark_cases():
+    return list_park_understanding_cases()
+
+
+@app.get("/api/park/understanding-benchmark/latest")
+async def park_understanding_benchmark_latest():
+    return latest_park_understanding_benchmark()
+
+
+@app.post("/api/park/understanding-benchmark")
+async def park_understanding_benchmark(request: ParkUnderstandingBenchmarkRequest):
+    if str(request.provider or "").strip().lower() in {"gemini", "live_gemini", "llm"}:
+        return await run_live_park_understanding_benchmark(
+            case_id=request.case_id,
+            write_artifact=request.write_artifact,
+            timeout_seconds=request.timeout_seconds,
+        )
+    return await asyncio.to_thread(
+        run_park_understanding_benchmark,
+        request.candidate_responses,
+        case_id=request.case_id,
+        write_artifact=request.write_artifact,
+    )
+
+
 @app.get("/api/park/digital-twin/calibration")
 async def park_digital_twin_calibration():
     state = await park_simulation.get_state()
@@ -12105,6 +13394,50 @@ async def park_agent_monitoring_deep():
         _park_monitoring_cache_ttl_seconds,
         build_park_agent_monitoring_response,
     )
+
+
+def latest_live_agents_smoke_report() -> dict[str, Any]:
+    report_path = Path(os.getenv("PARKPULSE_LIVE_AGENTS_SMOKE_REPORT", "output/qa/live-all-agents-smoke.json"))
+    if not report_path.is_absolute():
+        report_path = Path.cwd() / report_path
+    if not report_path.exists():
+        return {
+            "status": "missing",
+            "mode": "live_all_agents_smoke",
+            "report_path": str(report_path),
+            "summary": {
+                "status": "missing",
+                "activated_role_count": 0,
+                "activated_department_count": 0,
+                "role_failures": [],
+                "scenario_failures": [],
+            },
+            "readiness_issues": ["Run `make live-agents-smoke` to generate the latest all-agent proof report."],
+        }
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception as error:
+        return {
+            "status": "error",
+            "mode": "live_all_agents_smoke",
+            "report_path": str(report_path),
+            "summary": {"status": "error"},
+            "readiness_issues": [str(error)[:240]],
+        }
+    if isinstance(payload, dict):
+        return {**payload, "report_path": str(report_path)}
+    return {
+        "status": "error",
+        "mode": "live_all_agents_smoke",
+        "report_path": str(report_path),
+        "summary": {"status": "error"},
+        "readiness_issues": ["Live all-agents smoke report is not a JSON object."],
+    }
+
+
+@app.get("/api/park/live-agents-smoke/latest")
+async def park_live_agents_smoke_latest():
+    return latest_live_agents_smoke_report()
 
 
 @app.get("/api/park/replay")

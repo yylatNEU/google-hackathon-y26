@@ -104,14 +104,24 @@ export function CommandCenter() {
                 <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Operating loop</div>
                 <h2 className="mt-1 text-xl font-black text-slate-100">Signals, features, predictors, optimizer, gate, execute or review, learn</h2>
               </div>
-              <button
-                type="button"
-                onClick={() => void command.runAgent()}
-                disabled={command.isRunning}
-                className="w-fit rounded border border-cyan-300 bg-cyan-300 px-5 py-3 text-sm font-black text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {command.isRunning ? "Running loop" : "Run operating loop"}
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void command.runDepartmentNegotiationDemo()}
+                  disabled={command.isRunning}
+                  className="w-fit rounded border border-amber-300 bg-amber-300 px-4 py-3 text-sm font-black text-slate-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Department demo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void command.runAgent()}
+                  disabled={command.isRunning}
+                  className="w-fit rounded border border-cyan-300 bg-cyan-300 px-5 py-3 text-sm font-black text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {command.isRunning ? "Running loop" : "Run operating loop"}
+                </button>
+              </div>
             </div>
           </section>
 
@@ -123,6 +133,7 @@ export function CommandCenter() {
             selectedAction={command.selectedAction}
             policyGate={command.policyGate}
             memoryMode={command.memoryMode}
+            liveAgentsSmoke={command.liveAgentsSmoke}
           />
           <ActualTrainingPanel
             training={command.actualTraining}

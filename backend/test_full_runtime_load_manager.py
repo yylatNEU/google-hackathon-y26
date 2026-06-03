@@ -133,6 +133,27 @@ def test_agent_monitoring_deep_uses_explicit_full_runtime(monkeypatch):
     assert called
 
 
+def test_live_agents_smoke_latest_stays_on_lazy_fast_path(monkeypatch, tmp_path):
+    _reset_full_runtime_state(monkeypatch)
+    report_path = tmp_path / "live-all-agents-smoke.json"
+    report_path.write_text(
+        '{"summary":{"status":"passed","activated_role_count":10,"activated_department_count":11}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PARKPULSE_LIVE_AGENTS_SMOKE_REPORT", str(report_path))
+
+    async def fail_if_loaded(*args, **kwargs):
+        raise AssertionError("live-agents smoke report should not load full runtime")
+
+    monkeypatch.setattr(main, "_get_full_module", fail_if_loaded)
+
+    status, payload = asyncio.run(_call_lazy_app("/api/park/live-agents-smoke/latest"))
+
+    assert status == 200
+    assert payload["summary"]["status"] == "passed"
+    assert payload["summary"]["activated_department_count"] == 11
+
+
 def test_lazy_main_import_budget():
     backend_dir = Path(__file__).resolve().parent
     env = {**os.environ, "PYTHONPATH": str(backend_dir)}

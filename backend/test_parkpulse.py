@@ -207,6 +207,38 @@ def test_park_action_bridge_translates_plan_and_alias(monkeypatch):
     assert alias_plan["scope"] == "parkpulse_operations_only"
 
 
+def test_department_negotiation_demo_rejects_unsafe_marketing_offer():
+    state = {
+        "guestFlow": {
+            "activeScenario": {"key": "marketing_promo_conflict", "name": "Marketing Promo Conflict"},
+            "rides": [{"name": "Dragon Coaster", "status": "down", "waitMins": 55, "queueGuests": 650}],
+            "zones": [
+                {"id": "zone_b", "name": "Zone B Indoor Food Court", "processType": "food", "density": 91, "waitMins": 34},
+                {"id": "zone_c", "name": "Zone C Garden Market", "processType": "food", "density": 42, "waitMins": 9},
+            ],
+            "paths": [{"fromName": "Coaster Plaza", "toName": "Zone B Indoor Food Court", "congestionLevel": 88}],
+        },
+        "weather": {"condition": "rain", "stormRisk": 68},
+        "staffing": {"scheduled": 210, "checkedIn": 201, "openCallouts": 7},
+    }
+
+    artifact = park_multi_agent.build_role_agent_proposals(state, {"scenario_key": "marketing_promo_conflict"})
+    by_agent = {proposal["agent_id"]: proposal for proposal in artifact["proposals"]}
+
+    assert {"event_creative_agent", "ride_ops_agent", "safety_policy_agent", "finance_agent", "decision_bridge_agent"} <= set(by_agent)
+    assert {"marketing", "operations", "safety", "finance", "executive"} <= set(artifact["active_departments"])
+    assert artifact["active_department_count"] == len(artifact["active_departments"])
+    assert by_agent["event_creative_agent"]["requested_tool"] == "redirect_offer"
+    assert by_agent["ride_ops_agent"]["requested_tool"] == "recommend_route_change"
+    assert by_agent["safety_policy_agent"]["requires_compliance"] is True
+    assert by_agent["finance_agent"]["requested_tool"] == "revenue_impact_report"
+    redirect = next(proposal for proposal in artifact["proposals"] if proposal["proposed_action"].get("decision") == "reject_zone_b_redirect_to_zone_c")
+    assert redirect["agent_id"] == "decision_bridge_agent"
+    assert redirect["proposal_envelope"]["executor_agent"] == "tool_executor_agent"
+    assert artifact["proposal_envelope_summary"]["requires_executive"] >= 1
+    assert any("Zone B" in conflict["conflict"] and conflict["status"] == "resolved" for conflict in artifact["conflicts"])
+
+
 def test_multi_agent_registry_and_runtime_findings_are_park_native():
     registry = park_multi_agent.get_agent_registry()
     topology = park_multi_agent.get_agent_topology()
@@ -231,21 +263,35 @@ def test_multi_agent_registry_and_runtime_findings_are_park_native():
         {"evals": [{"label": "Safety", "score": 96}], "scorecard": {"overall": 84, "needs_human_approval": True}},
         {"response": {"takeRate": 0.34, "reactiveFollowThroughRate": 0.29}},
     )
+    proposals = park_multi_agent.build_role_agent_proposals(state, {"scenario_key": "ride_down"}, retrieved_context={"retrieved": {"playbooks": [{"_id": "pb"}]}})
 
     assert report["status"] == "aligned"
+    assert report["department_count"] == 12
     assert report["agent_group_count"] == 3
     assert report["phase_count"] == 7
     assert report["handoff_count"] >= 12
+    assert topology["pattern"] == "department_systematic_enterprise_nervous_system"
+    assert topology["lifecycle_pattern"] == "pre_event_during_event_post_event_agent_groups"
     assert [group["id"] for group in topology["agent_groups"]] == ["pre_event", "during_event", "post_event"]
     assert [row["group_id"] for row in topology["lifecycle_artifact"]] == ["pre_event", "during_event", "post_event"]
+    assert [step.lower() for step in topology["department_system"]["loop"]] == ["observe", "interpret", "predict", "recommend", "justify", "trace"]
+    assert {department["department"] for department in topology["department_system"]["departments"]} >= {"operations", "safety", "food_retail", "executive", "qa_judge"}
     assert len(topology["phases"]) == 7
     assert topology["logic_graph"]["audit_agent"]["agent_id"] == "logic_audit_agent"
     assert topology["logic_graph"]["decision_layers"][-1]["id"] == "post_decision_result"
-    assert {agent["agent_id"] for agent in registry} >= {"ride_ops_agent", "guest_flow_agent", "traffic_flow_agent", "finance_agent", "decision_bridge_agent", "logic_audit_agent", "gcp_eval_judge_agent"}
+    assert {agent["agent_id"] for agent in registry} >= {"ride_ops_agent", "guest_flow_agent", "traffic_flow_agent", "finance_agent", "decision_bridge_agent", "logic_audit_agent", "gcp_eval_judge_agent", "tool_executor_agent"}
+    assert {agent["department"] for agent in registry} >= {"operations", "guest_experience", "finance", "executive", "compliance", "qa_judge", "tool_executor"}
     assert {finding["agent_id"] for finding in findings} >= {"ride_ops_agent", "guest_flow_agent", "staffing_agent", "decision_bridge_agent", "logic_audit_agent", "gcp_eval_judge_agent"}
+    assert {finding["department"] for finding in findings} >= {"operations", "guest_experience", "hr_labor", "executive", "compliance", "qa_judge"}
     assert all(finding["trace_span"].startswith("parkpulse.agent.") for finding in findings)
+    assert proposals["proposal_envelope_summary"]["total"] == proposals["proposal_count"]
+    assert proposals["proposal_envelope_summary"]["proposed"] >= 1
+    assert all("proposal_envelope" in proposal for proposal in proposals["proposals"])
+    assert {proposal["proposal_envelope"]["executor_agent"] for proposal in proposals["proposals"]} == {"tool_executor_agent"}
     orchestration = park_multi_agent.build_orchestration_run(findings, "reactive", {"takeRate": 0.34, "score": 52}, {"event_plan_id": "v2"})
-    assert orchestration["pattern"] == "pre_event_during_event_post_event_agent_groups"
+    assert orchestration["pattern"] == "department_systematic_enterprise_nervous_system"
+    assert orchestration["lifecycle_pattern"] == "pre_event_during_event_post_event_agent_groups"
+    assert orchestration["department_system"]["active_department_count"] >= 5
     assert {group["id"] for group in orchestration["agent_groups"] if group["status"] == "active"} >= {"during_event", "post_event"}
     assert orchestration["lifecycle_artifact"][1]["status"] == "complete"
     assert orchestration["lifecycle_artifact"][2]["status"] == "revise"

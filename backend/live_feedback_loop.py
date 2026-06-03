@@ -9,6 +9,7 @@ from collections import Counter
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 
 REQUIRED_FEEDS = [
@@ -84,10 +85,6 @@ REVIEW_TRIGGERS = {
     "accessibility",
 }
 
-_mongo_client_lock = threading.Lock()
-_mongo_client: Any | None = None
-_mongo_db: Any | None = None
-
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -126,12 +123,19 @@ def _review_log_path() -> str:
     return _jsonl_path("PARKPULSE_REVIEW_LEDGER_LOG_PATH", "review_ledger.jsonl")
 
 
+_MONGO_CLIENT_LOCK = threading.Lock()
+_MONGO_CLIENT: Any | None = None
+
+
 def _live_feed_storage_mode() -> str:
-    return str(os.getenv("PARKPULSE_LIVE_FEED_STORAGE", "auto")).strip().lower()
+    mode = str(os.getenv("PARKPULSE_LIVE_FEED_STORAGE") or "jsonl").strip().lower().replace("-", "_")
+    if mode in {"mongo", "mongodb"}:
+        return "mongodb"
+    return "jsonl"
 
 
 def _strip_secret(value: str | None) -> str:
-    raw = (value or "").strip()
+    raw = str(value or "").strip()
     if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
         return raw[1:-1].strip()
     return raw
@@ -140,110 +144,118 @@ def _strip_secret(value: str | None) -> str:
 def _int_env(name: str, default: int) -> int:
     try:
         return int(float(os.getenv(name, str(default))))
-    except ValueError:
+    except (TypeError, ValueError):
         return default
-
-
-def _path_env_is_default(name: str) -> bool:
-    return not os.getenv(name, "").strip()
-
-
-def _collection_for_path(path: str) -> str | None:
-    if path == _feed_log_path():
-        return "live_feed_events"
-    if path == _review_log_path():
-        return "live_review_ledger"
-    return None
-
-
-def _mongo_live_feed_storage_enabled(path: str) -> bool:
-    mode = _live_feed_storage_mode()
-    if mode in {"jsonl", "file", "local"}:
-        return False
-    if mode in {"mongodb", "mongo"}:
-        return _collection_for_path(path) is not None
-    if mode != "auto":
-        return False
-    if not _mongo_uri():
-        return False
-    if path == _feed_log_path() and not _path_env_is_default("PARKPULSE_LIVE_FEED_EVENT_LOG_PATH"):
-        return False
-    if path == _review_log_path() and not _path_env_is_default("PARKPULSE_REVIEW_LEDGER_LOG_PATH"):
-        return False
-    return _collection_for_path(path) is not None
 
 
 def _mongo_uri() -> str:
     return _strip_secret(os.getenv("MONGODB_DIRECT_URI") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI"))
 
 
-def _live_feed_mongo_db():
-    global _mongo_client, _mongo_db
-    if _mongo_db is not None:
-        return _mongo_db
+def _mongo_database_name() -> str:
+    configured = str(os.getenv("MONGODB_DATABASE") or "").strip()
+    if configured:
+        return configured
+    uri = _mongo_uri()
+    if uri:
+        path = urlsplit(uri).path.strip("/")
+        if path:
+            return path.split("/")[0]
+    return "parkpulse"
+
+
+def _mongo_collection_name_for_path(path: str) -> str | None:
+    if os.path.abspath(path) == os.path.abspath(_feed_log_path()):
+        return "live_feed_events"
+    if os.path.abspath(path) == os.path.abspath(_review_log_path()):
+        return "live_review_ledger"
+    return None
+
+
+def _mongo_client() -> Any | None:
+    global _MONGO_CLIENT
+    if _MONGO_CLIENT is not None:
+        return _MONGO_CLIENT
     uri = _mongo_uri()
     if not uri:
         return None
-    with _mongo_client_lock:
-        if _mongo_db is not None:
-            return _mongo_db
+    with _MONGO_CLIENT_LOCK:
+        if _MONGO_CLIENT is not None:
+            return _MONGO_CLIENT
         try:
-            from pymongo import MongoClient
-            import certifi
+            from mongo_memory import _ensure_mongo_driver, _normalized_mongodb_uri
+            import mongo_memory
 
+            if not _ensure_mongo_driver() or mongo_memory.MongoClient is None:
+                return None
             timeout_ms = max(250, _int_env("MONGODB_OPERATION_TIMEOUT_MS", 1500))
-            _mongo_client = MongoClient(
-                uri,
+            _MONGO_CLIENT = mongo_memory.MongoClient(
+                _normalized_mongodb_uri(uri),
                 serverSelectionTimeoutMS=timeout_ms,
                 connectTimeoutMS=timeout_ms,
                 socketTimeoutMS=timeout_ms,
-                tlsCAFile=os.getenv("MONGODB_TLS_CA_FILE") or certifi.where(),
+                retryWrites=True,
             )
-            _mongo_client.admin.command("ping")
-            _mongo_db = _mongo_client[os.getenv("MONGODB_DATABASE", "parkpulse_ops")]
+            return _MONGO_CLIENT
         except Exception:
-            _mongo_client = None
-            _mongo_db = None
             return None
-    return _mongo_db
 
 
-def _mongo_document(row: dict[str, Any]) -> dict[str, Any]:
-    document = json.loads(json.dumps(row, default=str))
-    document_id = str(document.get("_id") or document.get("id") or _hash_id("live", document))
-    document["_id"] = document_id
-    document.setdefault("id", document_id)
-    document.setdefault("createdAt", document.get("created_at") or document.get("received_at") or document.get("observed_at") or _now_iso())
-    document["updatedAt"] = _now_iso()
-    return document
+def _strip_mongo_id(row: dict[str, Any]) -> dict[str, Any]:
+    clean = dict(row)
+    clean.pop("_id", None)
+    return clean
 
 
 def _write_mongo_document(collection: str, row: dict[str, Any]) -> bool:
+    client = _mongo_client()
+    if client is None:
+        return False
     try:
-        db = _live_feed_mongo_db()
-        if db is None:
-            return False
-        document = _mongo_document(row)
-        db[collection].update_one({"_id": document["_id"]}, {"$set": document}, upsert=True)
+        document = deepcopy(row)
+        if document.get("id"):
+            document.setdefault("_id", str(document["id"]))
+        client[_mongo_database_name()][collection].replace_one(
+            {"_id": document.get("_id")} if document.get("_id") else {"id": document.get("id")},
+            document,
+            upsert=True,
+        )
         return True
     except Exception:
         return False
 
 
 def _read_mongo_documents(collection: str, limit: int = 500) -> list[dict[str, Any]]:
+    client = _mongo_client()
+    if client is None:
+        return []
     try:
-        db = _live_feed_mongo_db()
-        if db is None:
-            return []
-        bounded_limit = max(1, min(5000, int(limit or 500)))
+        safe_limit = max(1, min(5000, int(limit or 500)))
         max_time_ms = max(250, _int_env("PARKPULSE_LIVE_FEED_MONGO_QUERY_TIMEOUT_MS", 1000))
-        rows = list(db[collection].find({}, {"embedding": 0, "embeddingText": 0}, max_time_ms=max_time_ms).sort("createdAt", -1).limit(bounded_limit))
-        for row in rows:
-            if "_id" in row:
-                row["_id"] = str(row["_id"])
-        return rows
+        cursor = client[_mongo_database_name()][collection].find(
+            {},
+            {"embedding": 0, "embeddingText": 0},
+            max_time_ms=max_time_ms,
+        ).sort("$natural", -1).limit(safe_limit)
+        return [_strip_mongo_id(row) for row in cursor if isinstance(row, dict)]
     except Exception:
         return []
+
+
+def live_feed_storage_status() -> dict[str, Any]:
+    mode = _live_feed_storage_mode()
+    mongo_configured = bool(_mongo_uri())
+    mongo_selected = mode == "mongodb"
+    return {
+        "status": "ready" if mongo_selected and mongo_configured else "local_jsonl",
+        "mode": mode if mongo_selected and mongo_configured else "jsonl",
+        "requested_mode": mode,
+        "shared_across_instances": bool(mongo_selected and mongo_configured),
+        "mongo_configured": mongo_configured,
+        "database": _mongo_database_name() if mongo_selected and mongo_configured else None,
+        "collections": ["live_feed_events", "live_review_ledger", "review_label_decisions"] if mongo_selected and mongo_configured else [],
+        "fallback_path": _feed_log_path(),
+    }
 
 
 def warm_live_feed_storage() -> dict[str, Any]:
@@ -251,32 +263,60 @@ def warm_live_feed_storage() -> dict[str, Any]:
     if not status.get("shared_across_instances"):
         return {**status, "warm": False}
     started = time.perf_counter()
-    db = _live_feed_mongo_db()
-    if db is None:
+    client = _mongo_client()
+    if client is None:
         return {**status, "warm": False, "readiness_issues": ["Mongo live-feed storage client is unavailable."]}
     try:
-        db.live_feed_events.find_one({}, {"_id": 1}, max_time_ms=max(250, _int_env("PARKPULSE_LIVE_FEED_MONGO_QUERY_TIMEOUT_MS", 1000)))
-        db.live_review_ledger.find_one({}, {"_id": 1}, max_time_ms=max(250, _int_env("PARKPULSE_LIVE_FEED_MONGO_QUERY_TIMEOUT_MS", 1000)))
+        max_time_ms = max(250, _int_env("PARKPULSE_LIVE_FEED_MONGO_QUERY_TIMEOUT_MS", 1000))
+        db = client[_mongo_database_name()]
+        db.live_feed_events.find_one({}, {"_id": 1}, max_time_ms=max_time_ms)
+        db.live_review_ledger.find_one({}, {"_id": 1}, max_time_ms=max_time_ms)
+        return {**status, "warm": True, "latency_ms": int((time.perf_counter() - started) * 1000)}
     except Exception as error:
-        return {**status, "warm": False, "latency_ms": int((time.perf_counter() - started) * 1000), "readiness_issues": [str(error)[:240]]}
-    return {**status, "warm": True, "latency_ms": int((time.perf_counter() - started) * 1000)}
+        return {
+            **status,
+            "warm": False,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+            "readiness_issues": [str(error)[:240]],
+        }
 
 
 def _append_jsonl(path: str, row: dict[str, Any]) -> None:
-    collection = _collection_for_path(path)
-    if collection and _mongo_live_feed_storage_enabled(path) and _write_mongo_document(collection, row):
-        return
+    if _live_feed_storage_mode() == "mongodb" and _mongo_uri():
+        collection = _mongo_collection_name_for_path(path)
+        if collection and _write_mongo_document(collection, row):
+            return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
 
 
+def _append_jsonl_many(path: str, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    if _live_feed_storage_mode() == "mongodb" and _mongo_uri():
+        collection = _mongo_collection_name_for_path(path)
+        if collection:
+            unwritten = []
+            for row in rows:
+                if not _write_mongo_document(collection, row):
+                    unwritten.append(row)
+            if not unwritten:
+                return
+            rows = unwritten
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+
+
 def _read_jsonl(path: str, limit: int = 500) -> list[dict[str, Any]]:
-    collection = _collection_for_path(path)
-    if collection and _mongo_live_feed_storage_enabled(path):
-        rows = _read_mongo_documents(collection, limit)
-        if rows:
-            return rows
+    if _live_feed_storage_mode() == "mongodb" and _mongo_uri():
+        collection = _mongo_collection_name_for_path(path)
+        if collection:
+            rows = _read_mongo_documents(collection, limit=limit)
+            if rows:
+                return rows
     if not os.path.exists(path):
         return []
     try:
@@ -293,22 +333,6 @@ def _read_jsonl(path: str, limit: int = 500) -> list[dict[str, Any]]:
         if isinstance(value, dict):
             rows.append(value)
     return rows
-
-
-def live_feed_storage_status() -> dict[str, Any]:
-    feed_collection = _collection_for_path(_feed_log_path())
-    review_collection = _collection_for_path(_review_log_path())
-    feed_mongo = bool(feed_collection and _mongo_live_feed_storage_enabled(_feed_log_path()))
-    review_mongo = bool(review_collection and _mongo_live_feed_storage_enabled(_review_log_path()))
-    return {
-        "mode": "mongodb" if feed_mongo and review_mongo else "jsonl" if not feed_mongo and not review_mongo else "hybrid",
-        "configured_mode": _live_feed_storage_mode(),
-        "event_collection": feed_collection if feed_mongo else None,
-        "review_collection": review_collection if review_mongo else None,
-        "event_log_path": None if feed_mongo else _feed_log_path(),
-        "review_log_path": None if review_mongo else _review_log_path(),
-        "shared_across_instances": feed_mongo and review_mongo,
-    }
 
 
 def _source(value: Any) -> str:
@@ -348,7 +372,7 @@ def normalize_live_feed_event(payload: dict[str, Any]) -> dict[str, Any]:
         "entity_type": entity_type,
         "entity_id": entity_id,
         "signal_type": signal_type,
-        "value": payload.get("value"),
+        "value": payload.get("value") if "value" in payload else payload.get("raw_payload") or payload.get("rawPayload"),
     }
     if not event_core["source_event_id"]:
         event_core["source_event_id"] = _hash_id("src", event_core)
@@ -461,6 +485,34 @@ def ingest_live_feed_event(payload: dict[str, Any]) -> dict[str, Any]:
         "review_case": review_case,
         "schema": live_feed_schema(),
         "boundary": "Feed ingestion records facts only. Recommendations still require policy gates, review gates, and outcome attribution.",
+    }
+
+
+def ingest_live_feed_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    valid_events = [event for event in events if isinstance(event, dict)]
+    normalized = [normalize_live_feed_event(event) for event in valid_events]
+    review_cases = [case for case in (review_case_for_event(event) for event in normalized) if case]
+    _append_jsonl_many(_feed_log_path(), normalized)
+    _append_jsonl_many(_review_log_path(), review_cases)
+    return {
+        "status": "loaded" if normalized else "empty",
+        "mode": "normalized_live_feed_batch_ingest",
+        "event_count": len(normalized),
+        "review_case_count": len(review_cases),
+        "results": [
+            {
+                "status": event["status"],
+                "mode": "normalized_live_feed_ingest",
+                "event": event,
+                "review_case": next((case for case in review_cases if case.get("source_event_id") == event.get("id")), None),
+                "boundary": "Feed ingestion records facts only. Recommendations still require policy gates, review gates, and outcome attribution.",
+            }
+            for event in normalized
+        ],
+        "sources": sorted({str(event.get("source") or "") for event in normalized if event.get("source")}),
+        "boundary": "Batch feed ingestion records facts only. It does not trust sensitive reviews, set reward, dispatch actions, or promote models.",
+        "uses_seed_data": False,
+        "llm_control_authority": False,
     }
 
 
@@ -596,7 +648,7 @@ def live_feed_health(park_state: dict[str, Any] | None = None, limit: int = 500)
             }
         )
     review_rows = _read_jsonl(_review_log_path(), limit=limit)
-    review_state = _fold_review_state(review_rows)
+    review_state = _fold_review_state(review_rows, latest_by_source=latest_by_source)
     open_reviews = review_state["open_reviews"]
     status = "ready" if ready_count == len(REQUIRED_FEEDS) and not open_reviews else "review" if ready_count >= 4 else "not_ready"
     return {
@@ -1638,7 +1690,8 @@ def _append_alert(state: dict[str, Any], title: str, detail: str) -> None:
 
 def review_training_ledger(limit: int = 120) -> dict[str, Any]:
     rows = _read_jsonl(_review_log_path(), limit=limit)
-    review_state = _fold_review_state(rows)
+    latest_by_source = _latest_events_by_source(limit=500)
+    review_state = _fold_review_state(rows, latest_by_source=latest_by_source)
     statuses = Counter(str(row.get("status") or "unknown") for row in rows)
     decisions = Counter(str(row.get("decision") or row.get("priority") or "pending") for row in rows)
     training_candidates = [
@@ -1669,7 +1722,55 @@ def review_training_ledger(limit: int = 120) -> dict[str, Any]:
     }
 
 
-def _fold_review_state(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _latest_events_by_source(limit: int = 500) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for event in _read_jsonl(_feed_log_path(), limit=limit):
+        source = str(event.get("source") or "")
+        if source and source not in latest:
+            latest[source] = event
+    return latest
+
+
+def _feed_event_ready_now(event: dict[str, Any] | None) -> bool:
+    if not isinstance(event, dict):
+        return False
+    source_config = next((feed for feed in REQUIRED_FEEDS if feed["source"] == event.get("source")), {})
+    if not source_config:
+        return False
+    observed_at = _parse_time(event.get("observed_at"))
+    if not observed_at:
+        return False
+    age = int((_now() - observed_at).total_seconds())
+    return age <= int(source_config.get("max_stale_seconds") or 120) and float(event.get("confidence") or 0) >= 0.7
+
+
+def _stale_review_auto_recovered(row: dict[str, Any], latest_by_source: dict[str, dict[str, Any]] | None) -> dict[str, Any] | None:
+    if not latest_by_source:
+        return None
+    reason = str(row.get("reason") or "").lower()
+    if "stale feed event" not in reason or "sensitive trigger" in reason or "low confidence" in reason or "unknown source" in reason:
+        return None
+    event = row.get("event", {}) if isinstance(row.get("event"), dict) else {}
+    source = str(event.get("source") or "")
+    latest = latest_by_source.get(source)
+    if not latest or latest.get("id") == event.get("id") or not _feed_event_ready_now(latest):
+        return None
+    latest_observed = _parse_time(latest.get("observed_at"))
+    reviewed_observed = _parse_time(event.get("observed_at"))
+    if latest_observed and reviewed_observed and latest_observed <= reviewed_observed:
+        return None
+    return {
+        "id": _hash_id("review_auto_close", {"case_id": row.get("id"), "latest_event_id": latest.get("id")}),
+        "created_at": _now_iso(),
+        "decision": "auto_closed_fresh_feed_recovered",
+        "reviewer": "parkpulse-feed-health-reconciler",
+        "reason": f"Newer {source} event is fresh and confident; stale-only review case no longer blocks training.",
+        "training_label": "feed_recovered_after_stale_event",
+        "latest_event_id": latest.get("id"),
+    }
+
+
+def _fold_review_state(rows: list[dict[str, Any]], latest_by_source: dict[str, dict[str, Any]] | None = None) -> dict[str, list[dict[str, Any]]]:
     dispositions_by_case: dict[str, dict[str, Any]] = {}
     for row in rows:
         if row.get("review_type") != "operator_disposition":
@@ -1689,18 +1790,21 @@ def _fold_review_state(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, A
             continue
         seen_cases.add(case_id)
         disposition = dispositions_by_case.get(case_id)
-        if disposition:
+        auto_disposition = None if disposition else _stale_review_auto_recovered(row, latest_by_source)
+        if disposition or auto_disposition:
+            final_disposition = disposition or auto_disposition or {}
             closed_reviews.append(
                 {
                     **row,
                     "status": "closed",
                     "disposition": {
-                        "id": disposition.get("id"),
-                        "created_at": disposition.get("created_at"),
-                        "decision": disposition.get("decision"),
-                        "reviewer": disposition.get("reviewer"),
-                        "reason": disposition.get("reason"),
-                        "training_label": disposition.get("training_label"),
+                        "id": final_disposition.get("id"),
+                        "created_at": final_disposition.get("created_at"),
+                        "decision": final_disposition.get("decision"),
+                        "reviewer": final_disposition.get("reviewer"),
+                        "reason": final_disposition.get("reason"),
+                        "training_label": final_disposition.get("training_label"),
+                        "latest_event_id": final_disposition.get("latest_event_id"),
                     },
                 }
             )

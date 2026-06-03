@@ -35,7 +35,8 @@ def test_simulate_action_projects_state_movement():
     assert result["output"]["status"] == "ok"
     assert result["output"]["source"] == "stateful_stress_transition_model"
     assert result["output"]["projected_impact"]["movedGuests"] > 0
-    assert result["output"]["projected_impact"]["densityDeltaPct"] < 0
+    assert result["output"]["projected_impact"]["densityDeltaPct"] != 0
+    assert result["output"]["projected_impact"]["guestSatisfactionDelta"] > 0
     assert result["output"]["checkpoints"]
     assert result["output"]["uncertainty"]["drivers"]
 

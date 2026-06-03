@@ -25,11 +25,18 @@ export default function LabsPage() {
             </div>
           ))}
         </div>
-        <a href="/" className="mt-6 inline-flex rounded border border-cyan-300 bg-cyan-300 px-4 py-2 text-sm font-black text-slate-950">
-          Back to command center
-        </a>
+        <div className="mt-6 flex flex-wrap gap-2">
+          <a href="/" className="inline-flex rounded border border-cyan-300 bg-cyan-300 px-4 py-2 text-sm font-black text-slate-950">
+            Command center
+          </a>
+          <a href="/venue-profile" className="inline-flex rounded border border-lime-300 bg-lime-300 px-4 py-2 text-sm font-black text-slate-950">
+            Venue Profile
+          </a>
+          <a href="/experience-studio" className="inline-flex rounded border border-slate-700 bg-slate-950 px-4 py-2 text-sm font-black text-slate-100">
+            Experience Studio
+          </a>
+        </div>
       </div>
     </main>
   );
 }
-

@@ -521,6 +521,15 @@ asyncio.run(main())
     )
 
 
+def agent_role_eval_gate_check() -> CheckResult:
+    return run_command(
+        "Agent role eval gate",
+        [sys.executable, "scripts/agent_role_eval_gate.py"],
+        REPO_ROOT,
+        timeout_seconds=90,
+    )
+
+
 def frontend_lint_check() -> CheckResult:
     return run_command(
         "Frontend lint",
@@ -770,7 +779,7 @@ def main() -> int:
     results: list[CheckResult] = [project_inventory(), static_hygiene_scan()]
 
     if not args.frontend_only:
-        results.extend([backend_compile_check(), backend_smoke_check()])
+        results.extend([backend_compile_check(), backend_smoke_check(), agent_role_eval_gate_check()])
 
     if not args.backend_only:
         results.extend([frontend_lint_check(), frontend_typecheck()])

@@ -68,6 +68,9 @@ export function agentBriefsFromRuntime(findings?: RuntimeAgentFinding[]): AgentB
   if (!findings?.length) return [];
   return findings.slice(0, 10).map((item) => ({
     name: item.name ?? "ParkPulse Agent",
+    department: item.department,
+    departmentLabel: item.department_label,
+    departmentAgent: item.department_agent,
     role: item.role,
     signal: item.input_signals?.[0] ?? item.mode ?? "runtime",
     finding: item.finding ?? "Runtime finding recorded.",

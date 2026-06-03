@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 import os
 from types import SimpleNamespace
 
@@ -41,7 +42,7 @@ def test_parkpulse_api_health_sync_cache_and_context_helpers(monkeypatch):
     state = sample_state()
 
     assert run(parkpulse_api.root_health())["service"] == "parkpulse-api"
-    assert run(parkpulse_api.healthz()) == {"status": "ok"}
+    assert run(parkpulse_api.healthz())["status"] == "ok"
     assert run(parkpulse_api.readyz())["startup"] is parkpulse_api._startup_status
 
     monkeypatch.setattr(parkpulse_api, "replay_store_status", lambda: {"ready": False})
@@ -159,7 +160,7 @@ def test_operator_constraints_customize_plan_from_free_text():
     assert patched["operator_candidate_frame"]["mode"] == "constraint_compiled_plan_tournament"
 
 
-def test_parkpulse_api_endpoint_wrappers_cover_recent_surfaces(monkeypatch):
+def test_parkpulse_api_endpoint_wrappers_cover_recent_surfaces(monkeypatch, tmp_path):
     state = sample_state()
 
     class FakeParkSimulation:
@@ -299,6 +300,12 @@ def test_parkpulse_api_endpoint_wrappers_cover_recent_surfaces(monkeypatch):
     assert run(parkpulse_api.park_analytics("ride"))["status"] == "analytics"
     assert run(parkpulse_api.park_integration_status())["status"] == "integrated"
     assert run(parkpulse_api.park_agent_monitoring())["overall_status"] == "clear"
+    smoke_path = tmp_path / "live-smoke.json"
+    smoke_path.write_text(json.dumps({"summary": {"status": "passed", "activated_role_count": 10, "activated_department_count": 11}}), encoding="utf-8")
+    monkeypatch.setenv("PARKPULSE_LIVE_AGENTS_SMOKE_REPORT", str(smoke_path))
+    smoke = run(parkpulse_api.park_live_agents_smoke_latest())
+    assert smoke["summary"]["status"] == "passed"
+    assert smoke["summary"]["activated_department_count"] == 11
     assert run(parkpulse_api.park_replay(7))["limit"] == 7
     assert run(parkpulse_api.park_replay_start(parkpulse_api.ReplayStartRequest(seed="s", scenario_key="ride_down")))["state"]["guestFlow"]
     assert run(parkpulse_api.park_review_snapshot())["review_id"] == "review-1"
@@ -307,7 +314,10 @@ def test_parkpulse_api_endpoint_wrappers_cover_recent_surfaces(monkeypatch):
     assert run(parkpulse_api.park_eval_result("ride_down"))["score"] == 90
     assert run(parkpulse_api.gcp_gemini_status())["gemini"]["ready"] is True
     assert run(parkpulse_api.gcp_improvement_status())["ready"] is True
-    assert run(parkpulse_api.gcp_trace_eval_status())["trace"] is True
+    trace_eval_status = run(parkpulse_api.gcp_trace_eval_status())
+    assert trace_eval_status["trace"] is True
+    assert trace_eval_status["judge_agent"]["agent_id"] == "gcp_eval_judge_agent"
+    assert "score_decision" in trace_eval_status["judge_agent"]["exclusive_tools"]
     assert run(parkpulse_api.gcp_operations_status_endpoint())["pubsub"]["ready"] is True
     assert run(parkpulse_api.gcp_pseudo_firebase_status())["ready"] is True
     assert run(parkpulse_api.gcp_pseudo_firebase_messages(500, "guest"))["messages"][0]["limit"] == 200

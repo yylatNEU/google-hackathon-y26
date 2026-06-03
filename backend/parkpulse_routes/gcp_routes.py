@@ -24,6 +24,40 @@ class GcpWorkflowRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+def _trace_eval_judge_payload() -> dict[str, Any]:
+    from park_multi_agent import get_judge_trace_eval_contract
+
+    contract = get_judge_trace_eval_contract()
+    return {
+        "agent_id": contract["owner_agent"],
+        "department": contract["owner_department"],
+        "department_agent": contract["owner_department_agent"],
+        "owned_tools": contract["owned_tools"],
+        "exclusive_tools": contract["exclusive_tools"],
+        "routing_rule": contract["routing_rule"],
+    }
+
+
+def _gcp_trace_eval_status_for_route() -> dict[str, Any]:
+    from gcp_trace_eval import get_gcp_trace_eval_status
+    from park_multi_agent import get_judge_trace_eval_contract
+
+    return {
+        **get_gcp_trace_eval_status().public_dict(),
+        "judge_agent": _trace_eval_judge_payload(),
+        "judge_contract": get_judge_trace_eval_contract(),
+    }
+
+
+def _evaluator_loop_status_for_route() -> dict[str, Any]:
+    from evaluator_loop import evaluator_loop_status
+
+    return {
+        **evaluator_loop_status(),
+        "judge_agent": _trace_eval_judge_payload(),
+    }
+
+
 def register_gcp_routes(app: Any, deps: dict[str, Any]) -> None:
     router = APIRouter()
 
@@ -31,7 +65,6 @@ def register_gcp_routes(app: Any, deps: dict[str, Any]) -> None:
     async def gcp_gemini_status():
         from arize_config import get_arize_status
         from bigquery_analytics import bigquery_status, online_improvement_status
-        from gcp_trace_eval import get_gcp_trace_eval_status
         from gemini_provider import get_gemini_agent_properties
 
         return {
@@ -40,7 +73,7 @@ def register_gcp_routes(app: Any, deps: dict[str, Any]) -> None:
                 "role": "parkpulse_decision_bridge",
             },
             "gemini": get_gemini_agent_properties().public_dict(),
-            "gcp_trace_eval": get_gcp_trace_eval_status().public_dict(),
+            "gcp_trace_eval": _gcp_trace_eval_status_for_route(),
             "online_improvement": online_improvement_status(),
             "bigquery": bigquery_status(),
             "arize": get_arize_status().public_dict(),
@@ -54,9 +87,7 @@ def register_gcp_routes(app: Any, deps: dict[str, Any]) -> None:
 
     @router.get("/api/gcp/trace-eval-status")
     async def gcp_trace_eval_status():
-        from gcp_trace_eval import get_gcp_trace_eval_status
-
-        return get_gcp_trace_eval_status().public_dict()
+        return _gcp_trace_eval_status_for_route()
 
     @router.get("/api/gcp/trace-export-verify")
     async def gcp_trace_export_verify():
@@ -66,9 +97,7 @@ def register_gcp_routes(app: Any, deps: dict[str, Any]) -> None:
 
     @router.get("/api/gcp/evaluator-loop")
     async def gcp_evaluator_loop_status():
-        from evaluator_loop import evaluator_loop_status
-
-        return evaluator_loop_status()
+        return _evaluator_loop_status_for_route()
 
     @router.post("/api/gcp/evaluator-loop/verify")
     async def gcp_evaluator_loop_verify(scenario_key: str = "ride_down"):
@@ -101,6 +130,7 @@ def register_gcp_routes(app: Any, deps: dict[str, Any]) -> None:
         return {
             "status": result.get("status", "unknown"),
             "scenario_key": scenario_key,
+            "judge_agent": _trace_eval_judge_payload(),
             "hosted_eval": {
                 "status": f"vertex_{result.get('status', 'unknown')}",
                 "provider": result.get("provider"),

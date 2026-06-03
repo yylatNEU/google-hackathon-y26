@@ -742,7 +742,9 @@ def test_parkpulse_api_routes_and_lifecycle(monkeypatch):
     monkeypatch.setattr(parkpulse_api, "build_proactive_operator_brief", fake_brief)
     monkeypatch.setattr(parkpulse_api, "get_park_signals", lambda: asyncio.sleep(0, result={"count": 1}))
 
-    state = run(parkpulse_api.get_park_state())
+    reset = run(parkpulse_api.reset_park_demo())
+    assert reset["status"] == "success"
+    state = reset["state"]
     assert state["guestFlow"]["activeScenario"]["key"] == "ride_down"
     action_response = run(parkpulse_api.execute_park_action(parkpulse_api.ActionRequest(target="ride", action="reroute")))
     assert action_response["status"] == "success"
@@ -812,11 +814,13 @@ def test_parkpulse_new_api_surfaces_and_cache_branches(monkeypatch):
     parkpulse_api._last_memory_sync_at = 0.0
 
     assert run(parkpulse_api.root_health())["service"] == "parkpulse-api"
-    assert run(parkpulse_api.healthz()) == {"status": "ok"}
+    assert run(parkpulse_api.healthz())["status"] == "ok"
     assert run(parkpulse_api.readyz())["status"] in {"ok", "degraded"}
 
     monkeypatch.setenv("PARKPULSE_ALLOWED_ORIGINS", " http://one.test, ,http://two.test ")
-    assert parkpulse_api._allowed_origins() == ["http://one.test", "http://two.test"]
+    origins = parkpulse_api._allowed_origins()
+    assert origins[:2] == ["http://one.test", "http://two.test"]
+    assert "http://localhost:3000" in origins
     monkeypatch.setenv("PARKPULSE_BAD_FLOAT", "not-a-number")
     assert parkpulse_api._float_env("PARKPULSE_BAD_FLOAT", 2.5) == 2.5
 
@@ -1385,11 +1389,29 @@ def test_park_gemini_agent_success_error_enterprise_and_helpers(monkeypatch):
         "selected_action": {"target": "food", "action": "suppress_item", "label": "Food", "owner": "Ops", "expected_effect": "reduce food pressure", "estimated_score": 80},
         "tradeoffs": {"guest": "balanced"},
     }
-    normalized_plan = park_gemini_agent._normalize_gemini_plan(raw, state, "gemini_api")
+    normalized_plan = park_gemini_agent._normalize_gemini_plan(raw, state, "gemini_api", "ride_down", context)
     aligned = park_gemini_agent._align_selected_action_to_scenario(normalized_plan, state, "ride_down")
+    aligned = park_gemini_agent._apply_answer_accuracy_controls(aligned, state, "ride_down", context, raw)
     assert aligned["selected_action"]["action"] == "reroute"
+    assert aligned["answer_accuracy"]["status"] == "verified"
+    assert "validate_policy" in {item["tool"] for item in aligned["tool_use_plan"]}
+    assert aligned["evidence_citations"]
     assert park_gemini_agent._align_selected_action_to_scenario(aligned, state, "unknown") is aligned
     assert "ParkPulse AI" in park_gemini_agent._prompt(state, "ride_down", context)
+    assert "tool_use_contract" in park_gemini_agent._prompt(state, "ride_down", context)
+    weak_raw = {
+        "analysis": "Looks fine.",
+        "root_cause_classification": "ride_down",
+        "recommended_action": "Do something.",
+        "guest_message": "We are helping.",
+        "confidence_score": 97,
+        "candidate_actions": [{"target": "ride", "action": "reroute", "label": "Route", "owner": "Ops", "expected_effect": "Help", "estimated_score": 97}],
+        "selected_action": {"target": "ride", "action": "reroute", "label": "Route", "owner": "Ops", "expected_effect": "Help", "estimated_score": 97},
+        "tradeoffs": {},
+    }
+    weak_plan = park_gemini_agent._normalize_gemini_plan(weak_raw, {"guestFlow": {"activeScenario": {"key": "ride_down"}, "rides": []}}, "gemini_api", "ride_down", {})
+    assert weak_plan["answer_accuracy"]["status"] == "needs_evidence"
+    assert weak_plan["confidence_score"] < 97
 
     fake_client = FakeClient(json.dumps(raw))
     install_fake_genai_types(monkeypatch)
@@ -1406,6 +1428,8 @@ def test_park_gemini_agent_success_error_enterprise_and_helpers(monkeypatch):
     assert plan["timeout_seconds"] == 7.0
     assert "ParkAgentResponse" in park_gemini_agent._prompt(state, "ride_down", context)
     assert "model_json_schema" not in park_gemini_agent._prompt(state, "ride_down", context)
+    assert plan["answer_accuracy"]["status"] == "verified"
+    assert plan["tool_use_plan"]
 
     reaction_raw = {
         "operator_understanding": {
@@ -1460,6 +1484,8 @@ def test_park_gemini_agent_success_error_enterprise_and_helpers(monkeypatch):
     assert reaction["runtime"] == "gemini_api_fast_reaction"
     assert reaction["workflow"] == "react_first_operator_command"
     assert reaction["custom_action_mixes"][0]["name"] == "Family-safe coaster relief"
+    assert reaction["answer_accuracy"]["status"] == "verified"
+    assert reaction["tool_use_plan"]
     assert reaction_calls[0]["prompt"]["response_schema"] is park_gemini_agent.FAST_REACTION_RESPONSE_SCHEMA
     assert reaction_calls[0]["max_output_tokens"] == 1800
     assert reaction_calls[0]["timeout_seconds"] == 5.0

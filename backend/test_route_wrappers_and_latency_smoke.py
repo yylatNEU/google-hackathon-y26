@@ -194,11 +194,18 @@ def test_gcp_route_wrappers(monkeypatch):
         },
     )
     assert client.get("/api/gcp-gemini/status").json()["agent"]["name"] == "ParkPulse AI"
+    assert client.get("/api/gcp-gemini/status").json()["gcp_trace_eval"]["judge_agent"]["agent_id"] == "gcp_eval_judge_agent"
     assert client.get("/api/gcp/improvement-status").json()["ready"] is True
-    assert client.get("/api/gcp/trace-eval-status").json()["ready"] is True
+    trace_eval_status = client.get("/api/gcp/trace-eval-status").json()
+    assert trace_eval_status["ready"] is True
+    assert trace_eval_status["judge_contract"]["owner_agent"] == "gcp_eval_judge_agent"
     assert client.get("/api/gcp/trace-export-verify").json()["status"] == "flush_succeeded"
-    assert client.get("/api/gcp/evaluator-loop").json()["status"] == "local_only"
-    assert client.post("/api/gcp/evaluator-loop/verify?scenario_key=s").json()["hosted_eval"]["provider"] == "vertex"
+    evaluator_loop_status = client.get("/api/gcp/evaluator-loop").json()
+    assert evaluator_loop_status["status"] == "local_only"
+    assert evaluator_loop_status["judge_agent"]["department"] == "qa_judge"
+    evaluator_verify = client.post("/api/gcp/evaluator-loop/verify?scenario_key=s").json()
+    assert evaluator_verify["hosted_eval"]["provider"] == "vertex"
+    assert evaluator_verify["judge_agent"]["agent_id"] == "gcp_eval_judge_agent"
     assert client.post("/api/gcp/evaluator-loop/scenario-sweep", json={"scenario_keys": ["s"], "timeout_seconds": 5}).json()["persistence"]["mongo_eval_document_id"] == "sweep-1"
     assert client.get("/api/gcp/evaluator-loop/scenario-sweep/latest").json()["rows"][0]["collection"] == "eval_results"
     assert client.get("/api/gcp/operations/status").json()["ready"] is True

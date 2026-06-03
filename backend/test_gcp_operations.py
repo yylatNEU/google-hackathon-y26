@@ -93,14 +93,14 @@ def test_delivery_keeps_local_outbox_when_gcp_adapters_disabled(monkeypatch, tmp
 
     assert dispatch["durable"] is True
     assert dispatch["agentBoundary"]["status"] == "allowed"
-    assert dispatch["agentBoundary"]["agent_id"] == "staffing_agent"
+    assert dispatch["agentBoundary"]["agent_id"] == "tool_executor_agent"
     assert dispatch["agentBoundary"]["tool"] == "dispatch_worker_task"
     assert dispatch["gcpDelivery"]["pubsub"]["status"] == "skipped"
     assert dispatch["gcpDelivery"]["fcm"]["status"] == "skipped"
     assert park_delivery.delivery_outbox_status()["durable_count"] == 1
 
 
-def test_delivery_blocks_agents_outside_agent_builder_boundary(monkeypatch, tmp_path):
+def test_delivery_uses_tool_executor_and_blocks_missing_policy_gate(monkeypatch, tmp_path):
     clear_gcp_ops_env(monkeypatch)
     monkeypatch.setenv("PARKPULSE_DELIVERY_OUTBOX", str(tmp_path / "outbox.jsonl"))
     park_delivery._outbox.clear()
@@ -115,13 +115,12 @@ def test_delivery_blocks_agents_outside_agent_builder_boundary(monkeypatch, tmp_
         }
     )
 
-    assert dispatch["status"] == "blocked_by_agent_boundary"
+    assert dispatch["status"] == "delivered"
     assert dispatch["durable"] is True
-    assert dispatch["agentBoundary"]["status"] == "blocked"
-    assert dispatch["agentBoundary"]["agent_id"] == "safety_policy_agent"
+    assert dispatch["agentBoundary"]["status"] == "allowed"
+    assert dispatch["agentBoundary"]["agent_id"] == "tool_executor_agent"
     assert dispatch["agentBoundary"]["tool"] == "dispatch_equipment_command"
-    assert "blocked" in dispatch["agentBoundary"]["reason"]
-    assert dispatch["gcpDelivery"]["reason"] == "Agent Builder boundary blocked receiver dispatch."
+    assert dispatch["agentBoundary"]["tool_contract"]["normalized"]["proposed_by"] == "safety_policy_agent"
 
     missing_gate = park_delivery.send_worker_notification(
         {
@@ -287,21 +286,31 @@ def test_agent_builder_and_dataflow_contracts(monkeypatch, tmp_path):
     registry = gcp_operations.vertex_agent_builder_registry()
     agent_status = gcp_operations.vertex_agent_builder_status()
     assert registry["platform"] == "Vertex AI Agent Builder / Agent Engine"
+    assert registry["contract_version"] == "parkpulse-department-agent-boundaries-v2"
     assert "policy_gate" in registry["tool_registry"]
     safety_agent = next(agent for agent in registry["agents"] if agent["id"] == "safety_policy_agent")
     bridge_agent = next(agent for agent in registry["agents"] if agent["id"] == "decision_bridge_agent")
     customer_agent = next(agent for agent in registry["agents"] if agent["id"] == "customer_support_agent")
     assert safety_agent["decision_rights"] == ["review", "block", "require_human_approval"]
+    assert safety_agent["department"] == "safety"
+    assert bridge_agent["department_agent"] == "Executive Agent"
     assert "validate_policy" in safety_agent["allowed_tools"]
     assert safety_agent["execution_boundary"].startswith("review only")
     assert "dispatch_equipment_command" in safety_agent["blocked_tools"]
+    executor_agent = next(agent for agent in registry["agents"] if agent["id"] == "tool_executor_agent")
+    assert executor_agent["decision_rights"] == ["execute_approved_action", "record_delivery_receipt", "emit_rollback_handle"]
+    assert "dispatch_guest_message" in executor_agent["allowed_tools"]
+    assert executor_agent["execution_boundary"].startswith("executes real receiver actions")
     assert bridge_agent["handoff_to"] == "delivery_proof_agent"
     assert customer_agent["handoff_to"] == "customer_kiosk_ui"
     assert "customer_show_route" in customer_agent["allowed_tools"]
     assert "operator_console_redirect" in customer_agent["blocked_tools"]
     assert registry["runtime_enforcement"]["pre_tool_call"].startswith("Check requested tool")
     assert park_multi_agent.enforce_agent_tool_boundary("guest_flow_agent", "dispatch_guest_message")["allowed"] is False
-    assert park_multi_agent.enforce_agent_tool_boundary("guest_flow_agent", "dispatch_guest_message", {"policy_gate_checked": True})["allowed"] is True
+    blocked_guest_dispatch = park_multi_agent.enforce_agent_tool_boundary("guest_flow_agent", "dispatch_guest_message", {"policy_gate_checked": True})
+    assert blocked_guest_dispatch["allowed"] is False
+    assert "tool_executor_agent" in blocked_guest_dispatch["reason"]
+    assert park_multi_agent.enforce_agent_tool_boundary("tool_executor_agent", "dispatch_guest_message", {"policy_gate_checked": True})["allowed"] is True
     blocked = park_multi_agent.enforce_agent_tool_boundary("safety_policy_agent", "dispatch_equipment_command")
     assert blocked["allowed"] is False
     assert blocked["status"] == "blocked"

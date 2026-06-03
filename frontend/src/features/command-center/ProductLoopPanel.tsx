@@ -1,9 +1,9 @@
 "use client";
 
 import { LLM_INTERPRETER_STAGES, PRIMARY_OPERATING_STAGES, PRODUCT_POSITIONING, productToneClass, type ProductLoopStage } from "@/lib/productOperatingModel";
-import type { EvalScore, RunTelemetry } from "@/types/platform";
+import type { EvalScore, RoleAgentProposal, RunTelemetry } from "@/types/platform";
 import type { ParkState } from "@/types/park";
-import type { DispatchView } from "./useCommandCenter";
+import type { DispatchView, LiveAgentsSmokeReport } from "./useCommandCenter";
 import { humanize } from "./style";
 
 type ProductLoopPanelProps = {
@@ -14,6 +14,7 @@ type ProductLoopPanelProps = {
   selectedAction?: RunTelemetry["planner"] extends infer Planner ? Planner extends { selected_action?: infer Action } ? Action : never : never;
   policyGate?: string;
   memoryMode: string;
+  liveAgentsSmoke?: LiveAgentsSmokeReport | null;
 };
 
 function signalSummary(parkState: ParkState | null) {
@@ -72,6 +73,29 @@ function outcomeSummary(runTelemetry: RunTelemetry | null, memoryMode: string) {
     `Memory ${memoryMode}`,
     "Writes trace, eval, and training rows",
   ];
+}
+
+function proposalStatusClass(status?: string) {
+  const normalized = String(status ?? "").toLowerCase();
+  if (normalized.includes("block")) return "border-rose-500/40 bg-rose-950/25 text-rose-100";
+  if (normalized.includes("executive")) return "border-amber-400/40 bg-amber-950/25 text-amber-100";
+  if (normalized.includes("compliance") || normalized.includes("await")) return "border-sky-400/40 bg-sky-950/20 text-sky-100";
+  return "border-emerald-400/40 bg-emerald-950/20 text-emerald-100";
+}
+
+function proposalLabel(proposal: RoleAgentProposal) {
+  return proposal.department_agent ?? proposal.role ?? proposal.agent_id ?? "Department agent";
+}
+
+function proposalStatus(proposal: RoleAgentProposal) {
+  return proposal.proposal_envelope?.executor_status ?? proposal.executor_status ?? proposal.proposal_envelope?.approval_status ?? "pending";
+}
+
+function liveAgentsStatusClass(status?: string) {
+  const normalized = String(status ?? "").toLowerCase();
+  if (normalized === "passed") return "border-emerald-400/40 bg-emerald-950/20 text-emerald-100";
+  if (normalized === "missing") return "border-amber-400/40 bg-amber-950/20 text-amber-100";
+  return "border-rose-500/40 bg-rose-950/25 text-rose-100";
 }
 
 function stageEvidence(stageId: string, props: ProductLoopPanelProps) {
@@ -162,6 +186,11 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
   const dispatchTarget = requiresReview ? "Human Review" : "Runtime Dispatch";
   const topDispatches = props.dispatches.slice(0, 3);
   const reviewMode = requiresReview ? "Human review required" : "Waiting for gate result";
+  const proposalArtifact = props.runTelemetry?.role_agent_proposals;
+  const proposalSummary = proposalArtifact?.proposal_envelope_summary;
+  const topProposals = proposalArtifact?.proposals?.slice(0, 4) ?? [];
+  const smokeSummary = props.liveAgentsSmoke?.summary;
+  const proactRun = props.liveAgentsSmoke?.role_runs?.find((row) => row.mode === "proact");
 
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
@@ -196,6 +225,104 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
           <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Learning loop</div>
           <div className="mt-2 text-sm font-black text-slate-100">Outcome-backed</div>
           <p className="mt-2 text-xs leading-relaxed text-slate-400">Trace, eval, and training rows are written from actual decisions and observed outcomes.</p>
+        </div>
+      </div>
+
+      <div className={`mt-5 rounded-lg border p-4 ${liveAgentsStatusClass(smokeSummary?.status)}`}>
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          <div>
+            <div className="text-[10px] font-black uppercase opacity-75">Live all-agent proof</div>
+            <h3 className="mt-1 text-lg font-black">Latest smoke: {humanize(smokeSummary?.status ?? props.liveAgentsSmoke?.status ?? "missing")}</h3>
+            <p className="mt-2 max-w-3xl text-xs leading-relaxed opacity-85">
+              Shows the last local proof for role agents, department scenarios, Eval Judge, Tool Executor, and registry boundaries.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              ["Roles", smokeSummary?.activated_role_count],
+              ["Departments", smokeSummary?.activated_department_count],
+              ["Boundary", props.liveAgentsSmoke?.registry_boundary?.failed ?? "--"],
+              ["Eval", props.liveAgentsSmoke?.real_role_eval?.average_score ?? "--"],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded border border-slate-950/40 bg-slate-950/35 px-3 py-2 text-center">
+                <div className="text-[10px] font-black uppercase opacity-65">{label}</div>
+                <div className="mt-1 text-lg font-black">{value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {(smokeSummary?.activated_departments ?? []).slice(0, 12).map((department) => (
+            <span key={department} className="rounded bg-slate-950/40 px-2 py-1 text-[10px] font-black uppercase opacity-90">
+              {humanize(department)}
+            </span>
+          ))}
+          {proactRun?.elapsed_ms !== undefined && (
+            <span className="rounded bg-slate-950/40 px-2 py-1 text-[10px] font-black uppercase opacity-90">
+              Proact {Math.round(proactRun.elapsed_ms / 1000)}s
+            </span>
+          )}
+          {props.liveAgentsSmoke?.readiness_issues?.slice(0, 1).map((issue) => (
+            <span key={issue} className="rounded bg-slate-950/40 px-2 py-1 text-[10px] font-black uppercase opacity-90">
+              {issue}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          <div>
+            <div className="text-[10px] font-black uppercase text-cyan-300">Department proposals</div>
+            <h3 className="mt-1 text-lg font-black text-slate-100">Propose, check, approve, execute, trace</h3>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              ["Proposed", proposalSummary?.proposed],
+              ["Compliance", proposalSummary?.requires_compliance],
+              ["Executive", proposalSummary?.requires_executive],
+              ["Ready", proposalSummary?.ready_for_executor],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded border border-slate-800 bg-slate-950 px-3 py-2 text-center">
+                <div className="text-[10px] font-black uppercase text-slate-500">{label}</div>
+                <div className="mt-1 text-lg font-black text-slate-100">{value ?? "--"}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="mt-3 grid gap-2 xl:grid-cols-4">
+          {topProposals.length ? (
+            topProposals.map((proposal, index) => {
+              const envelope = proposal.proposal_envelope;
+              const status = proposalStatus(proposal);
+              return (
+                <div key={`${proposal.agent_id ?? "proposal"}-${proposal.requested_tool ?? index}`} className={`rounded border p-3 ${proposalStatusClass(status)}`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="text-[10px] font-black uppercase opacity-70">{proposal.department_label ?? humanize(proposal.department)}</div>
+                      <div className="mt-1 text-sm font-black">{proposalLabel(proposal)}</div>
+                    </div>
+                    <div className="rounded bg-slate-950/45 px-2 py-1 text-[10px] font-black uppercase">{humanize(status)}</div>
+                  </div>
+                  <div className="mt-3 text-xs font-black uppercase opacity-80">{humanize(envelope?.requested_tool ?? proposal.requested_tool)}</div>
+                  <p className="mt-2 line-clamp-2 text-xs leading-relaxed opacity-85">{proposal.recommendation ?? envelope?.intent ?? "Proposal pending."}</p>
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    <span className="rounded bg-slate-950/40 px-2 py-1 text-[10px] font-black uppercase">
+                      {envelope?.requires_compliance || proposal.requires_compliance ? "Compliance" : "Department"}
+                    </span>
+                    <span className="rounded bg-slate-950/40 px-2 py-1 text-[10px] font-black uppercase">
+                      {envelope?.requires_executive || proposal.requires_executive ? "Executive" : "No exec"}
+                    </span>
+                    <span className="rounded bg-slate-950/40 px-2 py-1 text-[10px] font-black uppercase">{humanize(envelope?.executor_agent ?? "tool_executor_agent")}</span>
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <div className="rounded border border-slate-800 bg-slate-950 p-3 text-xs leading-relaxed text-slate-400 xl:col-span-4">
+              Department proposal envelopes will appear after the operating loop emits role-agent proposals.
+            </div>
+          )}
         </div>
       </div>
 

@@ -98,15 +98,9 @@ def _tool_for_channel(channel: str) -> str:
 
 
 def _default_agent_for_channel(channel: str, payload: dict[str, Any]) -> str:
-    if payload.get("agentId") or payload.get("agent_id"):
-        return str(payload.get("agentId") or payload.get("agent_id"))
-    if channel == "guest_app":
-        return "guest_flow_agent"
-    if channel == "worker_device":
-        return "staffing_agent"
-    if channel == "equipment_controller":
-        return "facilities_energy_agent"
-    return "decision_bridge_agent"
+    if payload.get("executorAgentId") or payload.get("executor_agent_id"):
+        return str(payload.get("executorAgentId") or payload.get("executor_agent_id"))
+    return "tool_executor_agent"
 
 
 def _agent_boundary_for_dispatch(channel: str, target_system: str, payload: dict[str, Any], status: str) -> dict[str, Any]:
@@ -119,6 +113,14 @@ def _agent_boundary_for_dispatch(channel: str, target_system: str, payload: dict
             "channel": channel,
             "targetSystem": target_system,
             "payload": payload,
+            "proposed_by": payload.get("agentId") or payload.get("agent_id") or payload.get("proposedBy") or payload.get("proposed_by"),
+            "executor_agent": "tool_executor_agent",
+            "intent": payload.get("intent") or payload.get("reason") or "execute approved receiver payload",
+            "evidence": payload.get("evidence") or payload.get("inputSignals") or payload.get("input_signals") or ["approved action envelope"],
+            "risk_level": payload.get("riskLevel") or payload.get("risk_level") or ("high" if payload.get("requiresHumanApproval") else "medium"),
+            "policy_check": payload.get("policyCheck") or payload.get("policy_check") or payload.get("policyGateStatus") or payload.get("policyGate") or "passed",
+            "expected_outcome": payload.get("expectedOutcome") or payload.get("expected_outcome") or payload.get("expectedImpact") or "receiver action delivered",
+            "rollback": payload.get("rollback") or payload.get("rollbackPlan") or "cancel or supersede dispatch if approval changes",
             "status": status,
             "policy_gate_checked": bool(
                 payload.get("policyGateChecked")

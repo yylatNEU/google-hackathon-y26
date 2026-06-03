@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import ssl
 import sys
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
@@ -15,6 +16,78 @@ def _truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _gemini_rest_available() -> bool:
+    if _truthy(os.getenv("PARKPULSE_DISABLE_GEMINI_REST_FAST_PATH")):
+        return False
+    if os.getenv("GEMINI_API_KEY"):
+        return True
+    return bool(os.getenv("GOOGLE_API_KEY")) and not _truthy(os.getenv("GOOGLE_GENAI_USE_VERTEXAI"))
+
+
+def _generate_gemini_json_rest_sync(
+    prompt: dict[str, Any],
+    *,
+    timeout_seconds: float,
+    max_output_tokens: int = 600,
+    temperature: float = 0.2,
+) -> dict[str, Any]:
+    from env_bootstrap import load_backend_env
+    from gemini_provider import get_gemini_model
+
+    load_backend_env()
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("Gemini REST API key is not configured.")
+    model = os.getenv("PARKPULSE_FAST_GEMINI_MODEL") or get_gemini_model()
+    endpoint = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{quote(model, safe='')}:generateContent?key={quote(api_key, safe='')}"
+    )
+    body = json.dumps(
+        {
+            "contents": [{"role": "user", "parts": [{"text": json.dumps(prompt, separators=(',', ':'), sort_keys=True)}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "temperature": float(temperature),
+                "maxOutputTokens": int(max_output_tokens),
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    http_request = urllib_request.Request(
+        endpoint,
+        data=body,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    context = None
+    try:
+        import certifi
+
+        context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        context = ssl.create_default_context()
+    try:
+        with urllib_request.urlopen(http_request, timeout=max(0.5, timeout_seconds), context=context) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Gemini REST HTTP {error.code}: {detail[:500]}") from error
+    except URLError as error:
+        raise RuntimeError(f"Gemini REST request failed: {error}") from error
+    candidate = payload.get("candidates", [{}])[0] if isinstance(payload.get("candidates"), list) else {}
+    parts = candidate.get("content", {}).get("parts", []) if isinstance(candidate, dict) else []
+    text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict))
+    return {
+        "ok": True,
+        "text": text,
+        "transport": "gemini_rest_api_key",
+        "finish_reason": candidate.get("finishReason") if isinstance(candidate, dict) else None,
+        "usage_metadata": payload.get("usageMetadata") if isinstance(payload.get("usageMetadata"), dict) else {},
+    }
+
+
 async def generate_gemini_json_hard_timeout(
     prompt: dict[str, Any],
     *,
@@ -23,6 +96,17 @@ async def generate_gemini_json_hard_timeout(
     temperature: float = 0.2,
 ) -> dict[str, Any]:
     """Run Gemini generation in a child process so a stuck SDK call cannot block a request."""
+    if _gemini_rest_available():
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _generate_gemini_json_rest_sync,
+                prompt,
+                timeout_seconds=timeout_seconds,
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+            ),
+            timeout=max(0.5, timeout_seconds) + 0.5,
+        )
     worker_path = Path(__file__).resolve()
     request = {
         "prompt": prompt,
@@ -68,47 +152,20 @@ def _main() -> int:
 
     load_backend_env()
     request = json.loads(sys.stdin.read() or "{}")
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     prompt_text = json.dumps(request.get("prompt") or {}, separators=(",", ":"), sort_keys=True)
-    timeout_seconds = float(os.getenv("PARKPULSE_GEMINI_REST_TIMEOUT_SECONDS", "5"))
-    model = os.getenv("PARKPULSE_FAST_GEMINI_MODEL") or get_gemini_model()
-    if api_key and not _truthy(os.getenv("GOOGLE_GENAI_USE_VERTEXAI")) and not _truthy(os.getenv("PARKPULSE_DISABLE_GEMINI_REST_FAST_PATH")):
-        endpoint = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{quote(model, safe='')}:generateContent?key={quote(api_key, safe='')}"
+    if _gemini_rest_available():
+        payload = _generate_gemini_json_rest_sync(
+            request.get("prompt") or {},
+            timeout_seconds=float(os.getenv("PARKPULSE_GEMINI_REST_TIMEOUT_SECONDS", "5")),
+            max_output_tokens=int(request.get("max_output_tokens", 600)),
+            temperature=float(request.get("temperature", 0.2)),
         )
-        body = json.dumps(
-            {
-                "contents": [{"role": "user", "parts": [{"text": prompt_text}]}],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "temperature": float(request.get("temperature", 0.2)),
-                    "maxOutputTokens": int(request.get("max_output_tokens", 600)),
-                },
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
-        http_request = urllib_request.Request(
-            endpoint,
-            data=body,
-            headers={"content-type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib_request.urlopen(http_request, timeout=timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Gemini REST HTTP {error.code}: {detail[:500]}") from error
-        except URLError as error:
-            raise RuntimeError(f"Gemini REST request failed: {error}") from error
-        parts = payload.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        text = "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict))
-        print(json.dumps({"ok": True, "text": text, "transport": "gemini_rest_api_key"}, separators=(",", ":")))
+        print(json.dumps(payload, separators=(",", ":")))
         return 0
 
     from google.genai import types
 
+    model = get_gemini_model()
     response = get_gemini_client().models.generate_content(
         model=model,
         contents=prompt_text,
