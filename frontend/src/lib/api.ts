@@ -1,10 +1,41 @@
 const localApiUrls = ["http://127.0.0.1:8000"];
 const defaultRequestTimeoutMs = 12000;
+const roleSessionTokenStorageKey = "parkpulse.roleSessionToken";
 export const longRunningRequestTimeoutMs = 30000;
 
 type ParkPulseRequestInit = RequestInit & {
   timeoutMs?: number;
 };
+
+function browserStorage() {
+  try {
+    return typeof globalThis.localStorage !== "undefined" ? globalThis.localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getParkPulseRoleSessionToken() {
+  if (typeof globalThis.location !== "undefined") {
+    const token = new URLSearchParams(globalThis.location.search).get("roleToken");
+    if (token) {
+      browserStorage()?.setItem(roleSessionTokenStorageKey, token);
+      return token;
+    }
+  }
+  return browserStorage()?.getItem(roleSessionTokenStorageKey) ?? "";
+}
+
+export function setParkPulseRoleSessionToken(token: string) {
+  const storage = browserStorage();
+  if (!storage) return;
+  const normalized = token.trim();
+  if (normalized) {
+    storage.setItem(roleSessionTokenStorageKey, normalized);
+  } else {
+    storage.removeItem(roleSessionTokenStorageKey);
+  }
+}
 
 export function getApiUrls() {
   const urlOverride =
@@ -25,6 +56,16 @@ function headersToEntries(headers?: HeadersInit): Array<[string, string]> {
   if (typeof Headers !== "undefined" && headers instanceof Headers) return Array.from(headers.entries());
   if (Array.isArray(headers)) return headers.map(([key, value]) => [key, value]);
   return Object.entries(headers).map(([key, value]) => [key, String(value)]);
+}
+
+function withRoleSessionHeader(init: RequestInit): RequestInit {
+  const token = getParkPulseRoleSessionToken();
+  if (!token) return init;
+  const headers = new Headers(init.headers);
+  if (!headers.has("x-parkpulse-role-token") && !headers.has("authorization")) {
+    headers.set("x-parkpulse-role-token", token);
+  }
+  return { ...init, headers };
 }
 
 function requestWithXhr(url: string, init?: RequestInit, timeoutMs = defaultRequestTimeoutMs): Promise<Response> {
@@ -99,10 +140,11 @@ function normalizeParkPulseApiError(error: unknown, path: string) {
 export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestInit) {
   let lastError: unknown;
   const { timeoutMs = defaultRequestTimeoutMs, ...requestInit } = init ?? {};
+  const requestInitWithRole = withRoleSessionHeader(requestInit);
 
   for (const apiUrl of getApiUrls()) {
     try {
-      const response = await request(`${apiUrl}${path}`, requestInit, timeoutMs);
+      const response = await request(`${apiUrl}${path}`, requestInitWithRole, timeoutMs);
       if (response.ok) {
         return response;
       }

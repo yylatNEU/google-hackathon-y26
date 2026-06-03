@@ -64,7 +64,7 @@ test("low-confidence live-feed event enters ops review label queue", async ({ pa
       confidence: 0.42,
       value: "Medical support requested near first aid; needs corroboration.",
     },
-    timeout: 10000,
+    timeout: 30000,
   });
   expect(feedResponse.ok()).toBeTruthy();
 

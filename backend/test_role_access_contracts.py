@@ -128,6 +128,35 @@ def test_signed_role_can_be_required_for_mutations(monkeypatch):
     assert blocked["authorization"]["identity"]["authenticated"] is False
     assert "Signed ParkPulse role session is required" in blocked["authorization"]["reason"]
 
+    status, admin_label = run(call_app("POST", "/api/park/review-label-pipeline/decision", {"decision": "reject_label"}, headers=signed_headers("ml_ops_admin")))
+    assert status == 200
+    assert admin_label["status"] == "error"
+    assert admin_label["role_authorization"]["identity"]["authenticated"] is True
+
+
+def test_trusted_operator_session_issuer_and_strict_mutation(monkeypatch):
+    monkeypatch.setenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION", "true")
+    monkeypatch.delenv("PARKPULSE_ROLE_SESSION_ISSUER_KEY", raising=False)
+
+    status, disabled = run(call_app("POST", "/api/park/auth/operator-session", {"role": "ml_ops_admin"}, headers={"x-parkpulse-role-issuer-key": "issuer"}))
+    assert status == 404
+    assert disabled["status"] == "disabled"
+
+    monkeypatch.setenv("PARKPULSE_ROLE_SESSION_ISSUER_KEY", "issuer-secret")
+    status, bad_key = run(call_app("POST", "/api/park/auth/operator-session", {"role": "ml_ops_admin"}, headers={"x-parkpulse-role-issuer-key": "wrong"}))
+    assert status == 403
+    assert bad_key["status"] == "blocked"
+
+    status, issued = run(call_app("POST", "/api/park/auth/operator-session", {"role": "ml_ops_admin", "subject": "qa-admin"}, headers={"x-parkpulse-role-issuer-key": "issuer-secret"}))
+    assert status == 200
+    assert issued["status"] == "issued"
+    assert issued["role"] == "ml_ops_admin"
+
+    status, allowed = run(call_app("POST", "/api/park/review-label-pipeline/decision", {"decision": "reject_label"}, headers={"x-parkpulse-role-token": issued["token"]}))
+    assert status == 200
+    assert allowed["role_authorization"]["identity"]["auth_method"] == "signed_role_session"
+    assert allowed["role_authorization"]["role"] == "ml_ops_admin"
+
 
 def test_signed_role_session_status_and_dev_issuer_boundary(monkeypatch):
     token = sign_role_session("unit-test", "ml_ops_admin", main._role_auth_secret(), ttl_seconds=900)

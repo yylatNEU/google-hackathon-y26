@@ -389,6 +389,27 @@ def _signed_role_required_for_mutation() -> bool:
     return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION"), False)
 
 
+def _role_session_issuer_key() -> str:
+    return os.getenv("PARKPULSE_ROLE_SESSION_ISSUER_KEY") or ""
+
+
+def _trusted_role_issuer_enabled() -> bool:
+    return bool(_role_session_issuer_key().strip())
+
+
+def _issuer_key_from_scope(scope: dict[str, Any]) -> str:
+    headers = _headers_from_scope(scope)
+    return str(headers.get("x-parkpulse-role-issuer-key") or "")
+
+
+def _issuer_key_matches(candidate: str) -> bool:
+    import hmac
+
+    expected = _role_session_issuer_key().strip()
+    supplied = str(candidate or "").strip()
+    return bool(expected and supplied and hmac.compare_digest(expected, supplied))
+
+
 def _headers_from_scope(scope: dict[str, Any]) -> dict[str, str]:
     headers: dict[str, str] = {}
     for key, value in scope.get("headers") or []:
@@ -7540,10 +7561,48 @@ async def app(scope, receive, send):
                 "mode": "role_identity_status",
                 "identity": _role_identity_from_scope(scope),
                 "dev_issuer_enabled": _dev_role_issuer_enabled(),
+                "trusted_issuer_enabled": _trusted_role_issuer_enabled(),
                 "signed_role_required": _signed_role_required_for_mutation(),
                 "boundary": "High-risk mutation routes enforce role capabilities. Signed role sessions can be required by enabling PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION.",
             },
         )
+        return
+
+    if method == "POST" and path == "/api/park/auth/operator-session":
+        request_payload = await _read_json_body(receive)
+        try:
+            from park_role_access import normalize_role, role_access_contracts, sign_role_session, verify_role_session
+
+            if not _trusted_role_issuer_enabled():
+                await _send_json(send, 404, {"status": "disabled", "mode": "trusted_role_session_issuer", "readiness_issues": ["Trusted role session issuer is not configured."]})
+                return
+            if not _issuer_key_matches(_issuer_key_from_scope(scope)):
+                await _send_json(send, 403, {"status": "blocked", "mode": "trusted_role_session_issuer", "readiness_issues": ["Role session issuer key is invalid."]})
+                return
+            role = normalize_role(str(request_payload.get("role") or "ops_team"))
+            if not role_access_contracts(role).get("role_count"):
+                await _send_json(send, 400, {"status": "invalid_role", "mode": "trusted_role_session_issuer", "role": role})
+                return
+            subject = str(request_payload.get("subject") or "parkpulse-operator")
+            token = sign_role_session(subject, role, _role_auth_secret(), ttl_seconds=_role_session_ttl_seconds(), issuer="parkpulse-trusted-issuer")
+            verified = verify_role_session(token, _role_auth_secret())
+            await _send_json(
+                send,
+                200,
+                {
+                    "status": "issued",
+                    "mode": "trusted_role_session_issuer",
+                    "role": role,
+                    "subject": subject,
+                    "token": token,
+                    "token_type": "Bearer",
+                    "expires_at": verified.get("expires_at"),
+                    "dev_issuer": False,
+                    "boundary": "Trusted server-side issuer only. Store the returned token client-side and send it as x-parkpulse-role-token.",
+                },
+            )
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "trusted_role_session_issuer", "readiness_issues": [str(error)[:240]]})
         return
 
     if method == "POST" and path == "/api/park/auth/dev-session":

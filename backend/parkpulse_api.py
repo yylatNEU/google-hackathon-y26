@@ -312,6 +312,22 @@ def _signed_role_required_for_mutation() -> bool:
     return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION"), False)
 
 
+def _role_session_issuer_key() -> str:
+    return os.getenv("PARKPULSE_ROLE_SESSION_ISSUER_KEY") or ""
+
+
+def _trusted_role_issuer_enabled() -> bool:
+    return bool(_role_session_issuer_key().strip())
+
+
+def _issuer_key_matches(candidate: str) -> bool:
+    import hmac
+
+    expected = _role_session_issuer_key().strip()
+    supplied = str(candidate or "").strip()
+    return bool(expected and supplied and hmac.compare_digest(expected, supplied))
+
+
 def _extract_role_token(request: Request) -> str | None:
     explicit = request.headers.get("x-parkpulse-role-token")
     if explicit:
@@ -8248,8 +8264,34 @@ async def park_role_auth_status(request: Request):
         "mode": "role_identity_status",
         "identity": _role_identity_from_request(request),
         "dev_issuer_enabled": _dev_role_issuer_enabled(),
+        "trusted_issuer_enabled": _trusted_role_issuer_enabled(),
         "signed_role_required": _signed_role_required_for_mutation(),
         "boundary": "High-risk mutation routes enforce role capabilities. Signed role sessions can be required by enabling PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION.",
+    }
+
+
+@app.post("/api/park/auth/operator-session")
+async def park_role_auth_operator_session(request: Request, payload: dict[str, Any]):
+    if not _trusted_role_issuer_enabled():
+        raise HTTPException(status_code=404, detail={"status": "disabled", "mode": "trusted_role_session_issuer", "readiness_issues": ["Trusted role session issuer is not configured."]})
+    if not _issuer_key_matches(request.headers.get("x-parkpulse-role-issuer-key") or ""):
+        raise HTTPException(status_code=403, detail={"status": "blocked", "mode": "trusted_role_session_issuer", "readiness_issues": ["Role session issuer key is invalid."]})
+    role = normalize_role(str(payload.get("role") or "ops_team"))
+    if not role_access_contracts(role).get("role_count"):
+        raise HTTPException(status_code=400, detail={"status": "invalid_role", "mode": "trusted_role_session_issuer", "role": role})
+    subject = str(payload.get("subject") or "parkpulse-operator")
+    token = sign_role_session(subject, role, _role_auth_secret(), ttl_seconds=_role_session_ttl_seconds(), issuer="parkpulse-trusted-issuer")
+    verified = verify_role_session(token, _role_auth_secret())
+    return {
+        "status": "issued",
+        "mode": "trusted_role_session_issuer",
+        "role": role,
+        "subject": subject,
+        "token": token,
+        "token_type": "Bearer",
+        "expires_at": verified.get("expires_at"),
+        "dev_issuer": False,
+        "boundary": "Trusted server-side issuer only. Store the returned token client-side and send it as x-parkpulse-role-token.",
     }
 
 
