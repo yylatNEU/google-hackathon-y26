@@ -1,0 +1,1063 @@
+openapi: 3.1.0
+info:
+  title: ParkPulse Agent Handshake Protocol
+  version: parkpulse-ahp-0.1
+  summary: Agent-native contract for personal guest agents negotiating with ParkPulse.
+  description: >
+    ParkPulse AHP lets an outside personal agent prove delegated authority,
+    declare permission scope, negotiate a park visit plan, invoke internal park
+    agents, and receive deterministic judge scorecards for conformance.
+servers:
+  - url: http://127.0.0.1:8001
+    description: Local ParkPulse backend
+paths:
+  /api/park/agent-contract:
+    get:
+      summary: Read the advertised agent contract.
+      operationId: getAgentContract
+      responses:
+        "200":
+          description: Contract metadata, routes, policy gates, and internal agents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentContract"
+  /api/park/delegation-token:
+    post:
+      summary: Issue a signed delegation token for a personal agent.
+      operationId: issueDelegationToken
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DelegationTokenRequest"
+      responses:
+        "200":
+          description: Signed delegation token and verification proof.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, token, proof]
+                properties:
+                  status:
+                    type: string
+                    enum: [issued]
+                  token:
+                    $ref: "#/components/schemas/DelegationToken"
+                  proof:
+                    $ref: "#/components/schemas/DelegationProof"
+  /api/park/agent-onboarding/register:
+    post:
+      summary: Register an outside personal agent for certification.
+      operationId: registerAgentOnboarding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentOnboardingRequest"
+      responses:
+        "200":
+          description: Registered agent record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentOnboardingResponse"
+  /api/park/agent-onboarding/issuer:
+    get:
+      summary: Read certification issuer metadata and key id.
+      operationId: getAgentCertificationIssuer
+      responses:
+        "200":
+          description: Issuer, signing key metadata, verification endpoint, and revocation endpoint.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentCertificationIssuer"
+  /api/park/agent-onboarding/verify-credential:
+    post:
+      summary: Verify a signed agent certification credential.
+      operationId: verifyAgentCertificationCredential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credential]
+              properties:
+                credential:
+                  $ref: "#/components/schemas/AgentCertificationCredential"
+      responses:
+        "200":
+          description: Credential verification result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentCertificationVerification"
+  /api/park/agent-onboarding/revoke-credential:
+    post:
+      summary: Revoke a signed agent certification credential.
+      operationId: revokeAgentCertificationCredential
+      security:
+        - ParkPulseRoleToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentCertificationRevocationRequest"
+      responses:
+        "200":
+          description: Credential revocation result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentCertificationRevocation"
+  /api/park/agent-trust/status:
+    get:
+      summary: Read durable trust registry status.
+      operationId: getAgentTrustStatus
+      responses:
+        "200":
+          description: SQLite trust store status, active signing key, and admin route list.
+          content:
+            application/json:
+              schema:
+                type: object
+  /api/park/agent-trust/partners:
+    get:
+      summary: List approved partner records and scope allowlists.
+      operationId: listAgentTrustPartners
+      security:
+        - ParkPulseRoleToken: []
+      responses:
+        "200":
+          description: Partner registry records.
+          content:
+            application/json:
+              schema:
+                type: object
+    post:
+      summary: Approve or update a partner allowlist.
+      operationId: upsertAgentTrustPartner
+      security:
+        - ParkPulseRoleToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [partner_id]
+              properties:
+                partner_id:
+                  type: string
+                partner_name:
+                  type: string
+                status:
+                  type: string
+                  enum: [active, pending_review, suspended]
+                trust_tier:
+                  type: string
+                  example: sandbox
+                allowed_scopes:
+                  type: array
+                  items:
+                    type: string
+                actor:
+                  type: string
+      responses:
+        "200":
+          description: Stored partner record.
+          content:
+            application/json:
+              schema:
+                type: object
+  /api/park/agent-trust/keys:
+    get:
+      summary: List certification signing keys.
+      operationId: listAgentTrustKeys
+      security:
+        - ParkPulseRoleToken: []
+      responses:
+        "200":
+          description: Active and retired signing keys plus JWKS.
+          content:
+            application/json:
+              schema:
+                type: object
+  /api/park/agent-trust/keys/rotate:
+    post:
+      summary: Rotate the active certification signing key.
+      operationId: rotateAgentCertificationKey
+      security:
+        - ParkPulseRoleToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version:
+                  type: string
+                actor:
+                  type: string
+      responses:
+        "200":
+          description: New active key and updated JWKS.
+          content:
+            application/json:
+              schema:
+                type: object
+  /api/park/agent-trust/revocations:
+    get:
+      summary: List credential revocation history.
+      operationId: listAgentCredentialRevocations
+      security:
+        - ParkPulseRoleToken: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+      responses:
+        "200":
+          description: Revoked certification credentials.
+          content:
+            application/json:
+              schema:
+                type: object
+  /api/park/agent-trust/audit:
+    get:
+      summary: List trust registry audit events.
+      operationId: listAgentTrustAudit
+      security:
+        - ParkPulseRoleToken: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+      responses:
+        "200":
+          description: Partner, key, and revocation audit events.
+          content:
+            application/json:
+              schema:
+                type: object
+  /api/park/agent-onboarding/{agent_id}:
+    get:
+      summary: Read external-agent onboarding status.
+      operationId: getAgentOnboarding
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Onboarded agent record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentOnboardingResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/park/agent-onboarding/{agent_id}/certify:
+    post:
+      summary: Run conformance certification for an outside personal agent.
+      operationId: certifyAgentOnboarding
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                requested_scopes:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Certification result with approved or blocked status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentCertificationResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/park/handshake:
+    post:
+      summary: Verify client-agent identity and create a handshake session.
+      operationId: identityHandshake
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/IdentityRequest"
+                - type: object
+                  properties:
+                    delegation_token:
+                      $ref: "#/components/schemas/DelegationToken"
+      responses:
+        "200":
+          description: Created session with identity trust evaluation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+  /api/park/session/{session_id}:
+    get:
+      summary: Read a handshake session.
+      operationId: getHandshakeSession
+      parameters:
+        - $ref: "#/components/parameters/session_id"
+      responses:
+        "200":
+          description: Current session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/park/session/{session_id}/capabilities:
+    post:
+      summary: Declare client-agent share and receive permissions.
+      operationId: capabilityHandshake
+      parameters:
+        - $ref: "#/components/parameters/session_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/CapabilityRequest"
+                - $ref: "#/components/schemas/DelegatedRequest"
+      responses:
+        "200":
+          description: Scoped session with capability evaluation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "403":
+          $ref: "#/components/responses/DelegationRejected"
+  /api/park/session/{session_id}/intent:
+    post:
+      summary: Declare the guest objective and constraints.
+      operationId: intentHandshake
+      parameters:
+        - $ref: "#/components/parameters/session_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/IntentRequest"
+                - $ref: "#/components/schemas/DelegatedRequest"
+      responses:
+        "200":
+          description: Intent accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "403":
+          $ref: "#/components/responses/DelegationRejected"
+  /api/park/session/{session_id}/propose:
+    post:
+      summary: Request a route proposal.
+      operationId: proposePlan
+      parameters:
+        - $ref: "#/components/parameters/session_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - type: object
+                  properties:
+                    planner:
+                      type: string
+                      example: live_state
+                    horizon:
+                      type: string
+                      example: 3_hours
+                - $ref: "#/components/schemas/DelegatedRequest"
+      responses:
+        "200":
+          description: Route proposal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProposalResponse"
+        "403":
+          $ref: "#/components/responses/DelegationRejected"
+  /api/park/session/{session_id}/counter:
+    post:
+      summary: Counter a route proposal with priority changes.
+      operationId: counterProposal
+      parameters:
+        - $ref: "#/components/parameters/session_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - type: object
+                  properties:
+                    counter_request:
+                      type: string
+                    priority_change:
+                      type: object
+                      additionalProperties: true
+                - $ref: "#/components/schemas/DelegatedRequest"
+      responses:
+        "200":
+          description: Revised route proposal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProposalResponse"
+        "403":
+          $ref: "#/components/responses/DelegationRejected"
+  /api/park/session/{session_id}/commit:
+    post:
+      summary: Commit the accepted route plan.
+      operationId: commitPlan
+      parameters:
+        - $ref: "#/components/parameters/session_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - type: object
+                  properties:
+                    accepted:
+                      type: boolean
+                    notify_user:
+                      type: boolean
+                - $ref: "#/components/schemas/DelegatedRequest"
+      responses:
+        "200":
+          description: Committed session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "403":
+          $ref: "#/components/responses/DelegationRejected"
+  /api/park/session/{session_id}/monitor:
+    post:
+      summary: Monitor live state and negotiate a disruption response.
+      operationId: monitorSession
+      parameters:
+        - $ref: "#/components/parameters/session_id"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              allOf:
+                - type: object
+                  properties:
+                    event:
+                      type: string
+                      example: live
+                - $ref: "#/components/schemas/DelegatedRequest"
+      responses:
+        "200":
+          description: Monitoring result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "403":
+          $ref: "#/components/responses/DelegationRejected"
+  /api/park/session/{session_id}/policy-check:
+    post:
+      summary: Evaluate whether an action is inside delegated authority.
+      operationId: evaluatePolicyAction
+      parameters:
+        - $ref: "#/components/parameters/session_id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - type: object
+                  required: [action]
+                  properties:
+                    action:
+                      type: string
+                      example: payment
+                    amount:
+                      type: number
+                    reason:
+                      type: string
+                - $ref: "#/components/schemas/DelegatedRequest"
+      responses:
+        "200":
+          description: Policy decision, often routed to an internal agent.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, decision, session]
+                properties:
+                  status:
+                    type: string
+                  decision:
+                    $ref: "#/components/schemas/PolicyDecision"
+                  internal_agent:
+                    $ref: "#/components/schemas/InternalAgentEvaluation"
+                  case_evaluation:
+                    $ref: "#/components/schemas/CaseEvaluation"
+                  session:
+                    $ref: "#/components/schemas/HandshakeSession"
+        "403":
+          $ref: "#/components/responses/DelegationRejected"
+  /api/park/internal-agents/commerce/evaluate:
+    post:
+      summary: Call Commerce Agent for payment, refund, purchase, or compensation actions.
+      operationId: commerceAgentEvaluate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - type: object
+                  required: [session_id, action]
+                  properties:
+                    session_id:
+                      type: string
+                    action:
+                      type: string
+                      example: payment
+                    amount:
+                      type: number
+                    reason:
+                      type: string
+                - $ref: "#/components/schemas/DelegatedRequest"
+      responses:
+        "200":
+          description: Commerce decision and judge evaluation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InternalAgentResponse"
+        "403":
+          $ref: "#/components/responses/DelegationRejected"
+  /api/park/internal-agents/queue/reroute:
+    post:
+      summary: Call Queue Agent for a delegated reroute recommendation.
+      operationId: queueAgentReroute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - type: object
+                  required: [session_id]
+                  properties:
+                    session_id:
+                      type: string
+                    walking_priority:
+                      type: string
+                      enum: [highest, medium]
+                    reason:
+                      type: string
+                - $ref: "#/components/schemas/DelegatedRequest"
+      responses:
+        "200":
+          description: Reroute recommendation and judge evaluation.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/InternalAgentResponse"
+                  - type: object
+                    properties:
+                      proposal:
+                        $ref: "#/components/schemas/Proposal"
+        "403":
+          $ref: "#/components/responses/DelegationRejected"
+components:
+  securitySchemes:
+    ParkPulseRoleToken:
+      type: apiKey
+      in: header
+      name: x-parkpulse-role-token
+      description: Signed ParkPulse role session token. Trust-admin routes require the manage_agent_trust capability, currently granted to ml_ops_admin.
+  parameters:
+    session_id:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    DelegationRejected:
+      description: Delegation token was missing, invalid, expired, mismatched, or under-scoped.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+                example: delegation_rejected
+              mode:
+                type: string
+              readiness_issues:
+                type: array
+                items:
+                  type: string
+    NotFound:
+      description: Session was not found.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+                example: not_found
+  schemas:
+    AgentContract:
+      type: object
+      required: [status, protocol_version, routes, state_machine, policy_gates]
+      additionalProperties: true
+    DelegationTokenRequest:
+      type: object
+      properties:
+        subject:
+          type: string
+          example: guest_user_123
+        agent_id:
+          type: string
+          example: john_personal_agent
+        scope:
+          type: array
+          items:
+            type: string
+        cannot_do:
+          type: array
+          items:
+            type: string
+        ttl_seconds:
+          type: integer
+          minimum: 60
+    DelegatedRequest:
+      type: object
+      properties:
+        delegation_token:
+          $ref: "#/components/schemas/DelegationToken"
+    DelegationToken:
+      type: object
+      required: [sub, agent_id, scope, cannot_do, iat, exp, issuer, token_type, token_id, sig]
+      additionalProperties: true
+      properties:
+        sub:
+          type: string
+        agent_id:
+          type: string
+        scope:
+          type: array
+          items:
+            type: string
+        cannot_do:
+          type: array
+          items:
+            type: string
+        iat:
+          type: integer
+        exp:
+          type: integer
+        sig:
+          type: string
+    AgentOnboardingRequest:
+      type: object
+      required: [agent_id, requested_scopes]
+      properties:
+        agent_id:
+          type: string
+          example: certified_family_agent
+        display_name:
+          type: string
+        partner_id:
+          type: string
+          example: external_family_os
+        partner_name:
+          type: string
+          example: External Family OS
+        partner_contact:
+          type: string
+        trust_tier:
+          type: string
+          example: sandbox
+        partner_allowed_scopes:
+          type: array
+          items:
+            type: string
+        requested_scopes:
+          type: array
+          items:
+            type: string
+        cannot_do:
+          type: array
+          items:
+            type: string
+        use_case:
+          type: string
+          example: guest_route_planning
+    AgentOnboardingResponse:
+      type: object
+      required: [status, agent]
+      properties:
+        status:
+          type: string
+        agent:
+          type: object
+          additionalProperties: true
+    AgentCertificationResponse:
+      type: object
+      required: [status, agent, certification]
+      properties:
+        status:
+          type: string
+          enum: [approved, blocked]
+        agent:
+          type: object
+          additionalProperties: true
+        certification:
+          type: object
+          additionalProperties: true
+        session:
+          $ref: "#/components/schemas/HandshakeSession"
+    AgentCertificationCredential:
+      type: object
+      required: [agent_id, certification_id, jti, approval, scope, score_basis_points, iat, exp, alg, issuer, iss, kid, token_type, sig]
+      additionalProperties: true
+      properties:
+        agent_id:
+          type: string
+        certification_id:
+          type: string
+        jti:
+          type: string
+          description: Stable credential id. Matches certification_id in the MVP credential.
+        approval:
+          type: string
+          example: approved_for_guest_route_planning
+        scope:
+          type: array
+          items:
+            type: string
+        score_basis_points:
+          type: integer
+          description: Certification score from 0 to 10000, signed as an integer for stable client verification.
+          example: 10000
+        alg:
+          type: string
+          example: EdDSA
+        issuer:
+          type: string
+          example: parkpulse_agent_onboarding_authority
+        iss:
+          type: string
+          example: parkpulse_agent_onboarding_authority
+        kid:
+          type: string
+          example: parkpulse-ahp-ed25519-local
+        sig:
+          type: string
+    AgentCertificationIssuer:
+      type: object
+      required: [status, issuer, signing, jwks, verification_endpoint, revocation_endpoint]
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          enum: [ready]
+        issuer:
+          type: string
+        protocol_version:
+          type: string
+        signing:
+          type: object
+          additionalProperties: true
+        jwks:
+          type: object
+          additionalProperties: true
+        verification_endpoint:
+          type: string
+        revocation_endpoint:
+          type: string
+    AgentCertificationVerification:
+      type: object
+      required: [status, signature_status, reason]
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          enum: [verified, rejected]
+        signature_status:
+          type: string
+        reason:
+          type: string
+        agent_id:
+          type: string
+        certification_id:
+          type: string
+        approval:
+          type: string
+        kid:
+          type: string
+    AgentCertificationRevocationRequest:
+      type: object
+      properties:
+        credential:
+          $ref: "#/components/schemas/AgentCertificationCredential"
+        certification_id:
+          type: string
+        reason:
+          type: string
+    AgentCertificationRevocation:
+      type: object
+      required: [status, revocation]
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          enum: [revoked, rejected]
+        revocation:
+          type: object
+          additionalProperties: true
+    DelegationProof:
+      type: object
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          enum: [verified, rejected]
+        signature_status:
+          type: string
+        scope_status:
+          type: string
+        missing_scope:
+          type: array
+          items:
+            type: string
+        reason:
+          type: string
+    IdentityRequest:
+      type: object
+      required: [agent_id, represents, proof, requested_session]
+      properties:
+        agent_id:
+          type: string
+        represents:
+          type: string
+        proof:
+          type: string
+          example: signed_token
+        requested_session:
+          type: string
+    CapabilityRequest:
+      type: object
+      required: [can_share, can_receive, cannot_do]
+      properties:
+        can_share:
+          type: array
+          items:
+            type: string
+        can_receive:
+          type: array
+          items:
+            type: string
+        cannot_do:
+          type: array
+          items:
+            type: string
+    IntentRequest:
+      type: object
+      required: [goal, time_window, constraints]
+      properties:
+        goal:
+          type: string
+          example: maximize_family_satisfaction
+        time_window:
+          type: string
+          example: 3_hours
+        constraints:
+          type: object
+          additionalProperties: true
+    SessionResponse:
+      type: object
+      required: [status, session]
+      properties:
+        status:
+          type: string
+        session:
+          $ref: "#/components/schemas/HandshakeSession"
+        delegation:
+          type: object
+          additionalProperties: true
+        case_evaluation:
+          $ref: "#/components/schemas/CaseEvaluation"
+        next:
+          type: string
+    ProposalResponse:
+      type: object
+      required: [status, session, proposal]
+      properties:
+        status:
+          type: string
+        session:
+          $ref: "#/components/schemas/HandshakeSession"
+        proposal:
+          $ref: "#/components/schemas/Proposal"
+    InternalAgentResponse:
+      type: object
+      required: [status, internal_agent, case_evaluation, session]
+      properties:
+        status:
+          type: string
+        decision:
+          $ref: "#/components/schemas/PolicyDecision"
+        internal_agent:
+          $ref: "#/components/schemas/InternalAgentEvaluation"
+        case_evaluation:
+          $ref: "#/components/schemas/CaseEvaluation"
+        session:
+          $ref: "#/components/schemas/HandshakeSession"
+    HandshakeSession:
+      type: object
+      required: [session_id, protocol_version, state, client_agent, park_agent, identity, conversation]
+      additionalProperties: true
+      properties:
+        session_id:
+          type: string
+        protocol_version:
+          type: string
+        state:
+          type: string
+        case_evaluations:
+          type: array
+          items:
+            $ref: "#/components/schemas/CaseEvaluation"
+        internal_handoffs:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        policy_decisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyDecision"
+        conversation:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    Proposal:
+      type: object
+      required: [proposal_id, plan, expected_wait_saved, confidence]
+      additionalProperties: true
+      properties:
+        proposal_id:
+          type: string
+        plan:
+          type: array
+          items:
+            type: string
+        expected_wait_saved:
+          type: string
+        estimated_walking_distance:
+          type: string
+        confidence:
+          type: number
+    PolicyDecision:
+      type: object
+      required: [id, action, status, allowed, requires_user_approval, reason]
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+        action:
+          type: string
+        status:
+          type: string
+        allowed:
+          type: boolean
+        requires_user_approval:
+          type: boolean
+        reason:
+          type: string
+    InternalAgentEvaluation:
+      type: object
+      additionalProperties: true
+      properties:
+        executed_by:
+          type: string
+        endpoint:
+          type: string
+        allowed:
+          type: boolean
+        requires_user_approval:
+          type: boolean
+    CaseEvaluation:
+      type: object
+      required: [id, at, case, status, score, criteria]
+      properties:
+        id:
+          type: string
+        at:
+          type: string
+        case:
+          type: string
+        status:
+          type: string
+          enum: [passed, failed]
+        score:
+          type: number
+        passed_criteria:
+          type: integer
+        total_criteria:
+          type: integer
+        criteria:
+          type: object
+          additionalProperties:
+            type: boolean
+        evidence:
+          type: object
+          additionalProperties: true
