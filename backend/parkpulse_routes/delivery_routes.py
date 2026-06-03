@@ -82,6 +82,20 @@ def _enforce_role_capability(request: Request, capability: str, resource: str) -
         authorization["allowed"] = False
         authorization["status"] = "blocked"
         authorization["reason"] = "Signed ParkPulse role session is required for this mutation."
+    try:
+        from park_role_access_audit import record_role_access_audit_event
+
+        record_role_access_audit_event(
+            "mutation_allowed" if authorization.get("allowed") is True else "mutation_denied",
+            role=authorization.get("role"),
+            subject=identity.get("subject"),
+            capability=capability,
+            resource=resource,
+            status=authorization.get("status"),
+            reason=authorization.get("reason"),
+        )
+    except Exception:
+        pass
     if authorization.get("allowed") is not True:
         raise HTTPException(status_code=403, detail={"status": "blocked", "mode": "role_access_enforcement", "authorization": authorization})
     return authorization

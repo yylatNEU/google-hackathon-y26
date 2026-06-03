@@ -7,7 +7,15 @@ type ParkPulseRequestInit = RequestInit & {
   timeoutMs?: number;
 };
 
-function browserStorage() {
+function browserSessionStorage() {
+  try {
+    return typeof globalThis.sessionStorage !== "undefined" ? globalThis.sessionStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+function browserLocalStorage() {
   try {
     return typeof globalThis.localStorage !== "undefined" ? globalThis.localStorage : null;
   } catch {
@@ -15,19 +23,37 @@ function browserStorage() {
   }
 }
 
+function stripRoleTokenFromUrl() {
+  if (typeof globalThis.location === "undefined" || typeof globalThis.history === "undefined") return;
+  const url = new URL(globalThis.location.href);
+  if (!url.searchParams.has("roleToken")) return;
+  url.searchParams.delete("roleToken");
+  globalThis.history.replaceState(globalThis.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
 export function getParkPulseRoleSessionToken() {
   if (typeof globalThis.location !== "undefined") {
     const token = new URLSearchParams(globalThis.location.search).get("roleToken");
     if (token) {
-      browserStorage()?.setItem(roleSessionTokenStorageKey, token);
+      browserSessionStorage()?.setItem(roleSessionTokenStorageKey, token);
+      browserLocalStorage()?.removeItem(roleSessionTokenStorageKey);
+      stripRoleTokenFromUrl();
       return token;
     }
   }
-  return browserStorage()?.getItem(roleSessionTokenStorageKey) ?? "";
+  const sessionToken = browserSessionStorage()?.getItem(roleSessionTokenStorageKey);
+  if (sessionToken) return sessionToken;
+  const legacyToken = browserLocalStorage()?.getItem(roleSessionTokenStorageKey);
+  if (legacyToken) {
+    browserSessionStorage()?.setItem(roleSessionTokenStorageKey, legacyToken);
+    browserLocalStorage()?.removeItem(roleSessionTokenStorageKey);
+    return legacyToken;
+  }
+  return "";
 }
 
 export function setParkPulseRoleSessionToken(token: string) {
-  const storage = browserStorage();
+  const storage = browserSessionStorage();
   if (!storage) return;
   const normalized = token.trim();
   if (normalized) {
@@ -35,6 +61,7 @@ export function setParkPulseRoleSessionToken(token: string) {
   } else {
     storage.removeItem(roleSessionTokenStorageKey);
   }
+  browserLocalStorage()?.removeItem(roleSessionTokenStorageKey);
 }
 
 export function getApiUrls() {

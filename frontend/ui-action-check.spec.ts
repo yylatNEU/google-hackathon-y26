@@ -67,3 +67,22 @@ test("read-only role blocks review label mutation controls", async ({ page }) =>
   expect(guards.runtimeErrors).toEqual([]);
   expect(guards.failedResponses).toEqual([]);
 });
+
+test("signed role token handoff is stripped from the browser URL", async ({ page }) => {
+  test.setTimeout(120000);
+  const guards = attachRuntimeGuards(page);
+  const importedRoleValue = ["playwright", "invalid", "signed-role-token"].join(".");
+
+  await page.goto(`${APP_URL}?api=${encodeURIComponent(API_URL)}&roleToken=${encodeURIComponent(importedRoleValue)}`, { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "Park operating loop" })).toBeVisible({ timeout: 20000 });
+  await expect.poll(() => page.url()).not.toContain("roleToken=");
+
+  const storageState = await page.evaluate(() => ({
+    sessionToken: sessionStorage.getItem("parkpulse.roleSessionToken"),
+    localToken: localStorage.getItem("parkpulse.roleSessionToken"),
+  }));
+  expect(storageState).toEqual({ sessionToken: importedRoleValue, localToken: null });
+
+  expect(guards.runtimeErrors).toEqual([]);
+  expect(guards.failedResponses).toEqual([]);
+});

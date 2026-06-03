@@ -397,6 +397,20 @@ def _enforce_role_capability(request: Request, capability: str, resource: str, d
         authorization["status"] = "blocked"
         authorization["reason"] = "Signed ParkPulse role session is required for this mutation."
         payload["status"] = "blocked"
+    try:
+        from park_role_access_audit import record_role_access_audit_event
+
+        record_role_access_audit_event(
+            "mutation_allowed" if authorization.get("allowed") is True else "mutation_denied",
+            role=authorization.get("role"),
+            subject=identity.get("subject"),
+            capability=capability,
+            resource=resource,
+            status=authorization.get("status"),
+            reason=authorization.get("reason"),
+        )
+    except Exception:
+        pass
     if authorization.get("allowed") is not True:
         raise HTTPException(status_code=403, detail=payload)
     return payload
@@ -8270,18 +8284,30 @@ async def park_role_auth_status(request: Request):
     }
 
 
+@app.get("/api/park/auth/audit")
+async def park_role_auth_audit():
+    from park_role_access_audit import role_access_audit_status
+
+    return role_access_audit_status()
+
+
 @app.post("/api/park/auth/operator-session")
 async def park_role_auth_operator_session(request: Request, payload: dict[str, Any]):
+    from park_role_access_audit import record_role_access_audit_event
+
     if not _trusted_role_issuer_enabled():
         raise HTTPException(status_code=404, detail={"status": "disabled", "mode": "trusted_role_session_issuer", "readiness_issues": ["Trusted role session issuer is not configured."]})
     if not _issuer_key_matches(request.headers.get("x-parkpulse-role-issuer-key") or ""):
+        record_role_access_audit_event("role_session_denied", status="blocked", reason="invalid issuer key")
         raise HTTPException(status_code=403, detail={"status": "blocked", "mode": "trusted_role_session_issuer", "readiness_issues": ["Role session issuer key is invalid."]})
     role = normalize_role(str(payload.get("role") or "ops_team"))
     if not role_access_contracts(role).get("role_count"):
+        record_role_access_audit_event("role_session_denied", role=role, status="invalid_role", reason="unknown role")
         raise HTTPException(status_code=400, detail={"status": "invalid_role", "mode": "trusted_role_session_issuer", "role": role})
     subject = str(payload.get("subject") or "parkpulse-operator")
     token = sign_role_session(subject, role, _role_auth_secret(), ttl_seconds=_role_session_ttl_seconds(), issuer="parkpulse-trusted-issuer")
     verified = verify_role_session(token, _role_auth_secret())
+    record_role_access_audit_event("role_session_issued", role=role, subject=subject, status="issued")
     return {
         "status": "issued",
         "mode": "trusted_role_session_issuer",

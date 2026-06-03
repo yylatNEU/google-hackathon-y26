@@ -495,6 +495,20 @@ def _role_gate_payload(scope: dict[str, Any], capability: str, resource: str, de
         authorization["status"] = "blocked"
         authorization["reason"] = "Signed ParkPulse role session is required for this mutation."
         payload["status"] = "blocked"
+    try:
+        from park_role_access_audit import record_role_access_audit_event
+
+        record_role_access_audit_event(
+            "mutation_allowed" if authorization.get("allowed") is True else "mutation_denied",
+            role=authorization.get("role"),
+            subject=identity.get("subject"),
+            capability=capability,
+            resource=resource,
+            status=authorization.get("status"),
+            reason=authorization.get("reason"),
+        )
+    except Exception:
+        pass
     return payload
 
 
@@ -7568,24 +7582,37 @@ async def app(scope, receive, send):
         )
         return
 
+    if method == "GET" and path == "/api/park/auth/audit":
+        try:
+            from park_role_access_audit import role_access_audit_status
+
+            await _send_json(send, 200, role_access_audit_status())
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "role_access_audit", "readiness_issues": [str(error)[:240]]})
+        return
+
     if method == "POST" and path == "/api/park/auth/operator-session":
         request_payload = await _read_json_body(receive)
         try:
             from park_role_access import normalize_role, role_access_contracts, sign_role_session, verify_role_session
+            from park_role_access_audit import record_role_access_audit_event
 
             if not _trusted_role_issuer_enabled():
                 await _send_json(send, 404, {"status": "disabled", "mode": "trusted_role_session_issuer", "readiness_issues": ["Trusted role session issuer is not configured."]})
                 return
             if not _issuer_key_matches(_issuer_key_from_scope(scope)):
+                record_role_access_audit_event("role_session_denied", status="blocked", reason="invalid issuer key")
                 await _send_json(send, 403, {"status": "blocked", "mode": "trusted_role_session_issuer", "readiness_issues": ["Role session issuer key is invalid."]})
                 return
             role = normalize_role(str(request_payload.get("role") or "ops_team"))
             if not role_access_contracts(role).get("role_count"):
+                record_role_access_audit_event("role_session_denied", role=role, status="invalid_role", reason="unknown role")
                 await _send_json(send, 400, {"status": "invalid_role", "mode": "trusted_role_session_issuer", "role": role})
                 return
             subject = str(request_payload.get("subject") or "parkpulse-operator")
             token = sign_role_session(subject, role, _role_auth_secret(), ttl_seconds=_role_session_ttl_seconds(), issuer="parkpulse-trusted-issuer")
             verified = verify_role_session(token, _role_auth_secret())
+            record_role_access_audit_event("role_session_issued", role=role, subject=subject, status="issued")
             await _send_json(
                 send,
                 200,

@@ -158,6 +158,31 @@ def test_trusted_operator_session_issuer_and_strict_mutation(monkeypatch):
     assert allowed["role_authorization"]["role"] == "ml_ops_admin"
 
 
+def test_role_access_audit_records_session_and_mutation_decisions(monkeypatch, tmp_path):
+    monkeypatch.setenv("PARKPULSE_ROLE_ACCESS_AUDIT_LOG", str(tmp_path / "role-access-audit.jsonl"))
+    monkeypatch.setenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION", "true")
+    monkeypatch.setenv("PARKPULSE_ROLE_SESSION_ISSUER_KEY", "issuer-secret")
+
+    status, issued = run(call_app("POST", "/api/park/auth/operator-session", {"role": "ops_team", "subject": "qa-operator"}, headers={"x-parkpulse-role-issuer-key": "issuer-secret"}))
+    assert status == 200
+
+    status, allowed = run(call_app("POST", "/api/park/delivery/acknowledge", {"dispatch_id": "dispatch-audit"}, headers={"x-parkpulse-role-token": issued["token"]}))
+    assert status == 200
+    assert allowed["role_authorization"]["identity"]["auth_method"] == "signed_role_session"
+
+    status, blocked = run(call_app("POST", "/api/park/operator-command", {"message": "dispatch crowd staff", "execute": True}, headers={"x-parkpulse-role": "ops_team"}))
+    assert status == 403
+    assert blocked["authorization"]["identity"]["authenticated"] is False
+
+    status, audit = run(call_app("GET", "/api/park/auth/audit"))
+    assert status == 200
+    event_types = [event["event_type"] for event in audit["events"]]
+    assert "role_session_issued" in event_types
+    assert "mutation_allowed" in event_types
+    assert "mutation_denied" in event_types
+    assert all("token" not in event for event in audit["events"])
+
+
 def test_signed_role_session_status_and_dev_issuer_boundary(monkeypatch):
     token = sign_role_session("unit-test", "ml_ops_admin", main._role_auth_secret(), ttl_seconds=900)
     verified = verify_role_session(token, main._role_auth_secret())
