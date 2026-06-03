@@ -39,10 +39,11 @@ test("command center exposes live-feed and review-label reliability controls", a
   await expect(page.getByText("Operational data contract")).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("Ops review label queue")).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("Role authority contracts")).toBeVisible({ timeout: 20000 });
-  await expect(page.getByRole("button", { name: "Run operating loop" })).toBeEnabled({ timeout: 15000 });
+  await expect(page.getByText("Read-only browser session")).toBeVisible({ timeout: 20000 });
+  await expect(page.getByRole("button", { name: "Run operating loop" })).toBeDisabled({ timeout: 15000 });
   await expect(page.getByRole("button", { name: "Refresh feeds" })).toBeEnabled({ timeout: 15000 });
   await expect(page.getByRole("button", { name: "Refresh labels" })).toBeEnabled({ timeout: 15000 });
-  await expect(page.getByRole("button", { name: "Auto-label high confidence" })).toBeEnabled({ timeout: 15000 });
+  await expect(page.getByRole("button", { name: "Auto-label high confidence" })).toBeDisabled({ timeout: 15000 });
   await expect(page.locator("body")).toContainText(/Ops Team|ML \/ Ops Admin/i, { timeout: 20000 });
   await expect(page.getByText(/Backend unavailable/)).toHaveCount(0);
 
@@ -50,32 +51,17 @@ test("command center exposes live-feed and review-label reliability controls", a
   expect(guards.failedResponses).toEqual([]);
 });
 
-test("low-confidence live-feed event enters ops review label queue", async ({ page, request }) => {
+test("read-only role blocks review label mutation controls", async ({ page }) => {
   test.setTimeout(120000);
   const guards = attachRuntimeGuards(page);
 
-  const eventId = `pw-review-${Date.now()}`;
-  const feedResponse = await request.post(`${API_URL}/api/park/live-feed-events`, {
-    data: {
-      id: eventId,
-      source: "operator_signal",
-      signal_type: "guest_care",
-      entity_id: "first_aid",
-      confidence: 0.42,
-      value: "Medical support requested near first aid; needs corroboration.",
-    },
-    timeout: 30000,
-  });
-  expect(feedResponse.ok()).toBeTruthy();
-
   await page.goto(`${APP_URL}?api=${encodeURIComponent(API_URL)}`, { waitUntil: "domcontentloaded" });
+  await expect(page.getByText("Read-only browser session")).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("Ops review label queue")).toBeVisible({ timeout: 20000 });
-  await page.getByRole("button", { name: "Refresh labels" }).click();
-  await expect(page.locator("body")).toContainText(/scan agent|operator signal|guest care/i, { timeout: 20000 });
-  await expect(page.getByRole("button", { name: "Need evidence" }).first()).toBeVisible({ timeout: 20000 });
-
-  await page.getByRole("button", { name: "Need evidence" }).first().click();
-  await expect(page.locator("body")).toContainText(/Review label needs more evidence|needs more evidence/i, { timeout: 20000 });
+  await expect(page.getByRole("button", { name: "Auto-label high confidence" })).toBeDisabled({ timeout: 20000 });
+  await expect(page.getByRole("button", { name: "Start BigQuery ML" })).toBeDisabled({ timeout: 20000 });
+  await expect(page.getByRole("button", { name: "Send through gate" })).toBeDisabled({ timeout: 20000 });
+  await expect(page.locator("body")).toContainText(/Signed ML \/ Ops Admin role is required/i, { timeout: 20000 });
   await expect(page.getByText(/Backend unavailable/)).toHaveCount(0);
 
   expect(guards.runtimeErrors).toEqual([]);

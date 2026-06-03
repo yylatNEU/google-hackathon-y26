@@ -22,6 +22,71 @@ export type DispatchView = {
   dispatch?: DeliveryDispatch;
 };
 
+export type RoleId = "customer" | "onsite_worker" | "ops_team" | "ml_ops_admin" | "read_only";
+
+export type RoleAuthStatus = {
+  status?: string;
+  mode?: string;
+  identity?: {
+    status?: string;
+    authenticated?: boolean;
+    auth_method?: string;
+    role?: RoleId | string;
+    subject?: string;
+    issuer?: string;
+    expires_at?: number;
+    token_status?: string;
+    reason?: string;
+  };
+  dev_issuer_enabled?: boolean;
+  trusted_issuer_enabled?: boolean;
+  signed_role_required?: boolean;
+  boundary?: string;
+};
+
+export type RoleUiCapabilities = {
+  authenticated: boolean;
+  role: RoleId;
+  roleLabel: string;
+  canManageFeeds: boolean;
+  canRunOperatingLoop: boolean;
+  canAcknowledgeDispatch: boolean;
+  canReviewLabels: boolean;
+  canStartTraining: boolean;
+  canViewOpsEvidence: boolean;
+};
+
+function roleLabel(role: RoleId) {
+  return {
+    customer: "Customer / Guest",
+    onsite_worker: "Onsite Worker",
+    ops_team: "Ops Team",
+    ml_ops_admin: "ML / Ops Admin",
+    read_only: "Read-only",
+  }[role];
+}
+
+function normalizeRole(value?: string): RoleId {
+  if (value === "customer" || value === "onsite_worker" || value === "ops_team" || value === "ml_ops_admin") return value;
+  return "read_only";
+}
+
+function capabilitiesForAuth(auth: RoleAuthStatus | null): RoleUiCapabilities {
+  const authenticated = auth?.identity?.authenticated === true;
+  const role = authenticated ? normalizeRole(auth?.identity?.role) : "read_only";
+  return {
+    authenticated,
+    role,
+    roleLabel: roleLabel(role),
+    canManageFeeds: authenticated && (role === "ops_team" || role === "ml_ops_admin"),
+    canRunOperatingLoop: authenticated && role === "ops_team",
+    canAcknowledgeDispatch: authenticated && (role === "onsite_worker" || role === "ops_team"),
+    canReviewLabels: authenticated && role === "ml_ops_admin",
+    canStartTraining: authenticated && role === "ml_ops_admin",
+    canViewOpsEvidence: authenticated && (role === "ops_team" || role === "ml_ops_admin"),
+  };
+}
+
 export type ActualTrainingStatus = {
   status?: string;
   mode?: string;
@@ -337,6 +402,7 @@ export function useCommandCenter() {
   const [reviewTrainingLedger, setReviewTrainingLedger] = useState<ReviewTrainingLedger | null>(null);
   const [reviewLabelPipeline, setReviewLabelPipeline] = useState<ReviewLabelPipeline | null>(null);
   const [roleAccess, setRoleAccess] = useState<RoleAccessContracts | null>(null);
+  const [roleAuthStatus, setRoleAuthStatus] = useState<RoleAuthStatus | null>(null);
   const [liveWeatherLoad, setLiveWeatherLoad] = useState<LiveWeatherLoadResult | null>(null);
   const [liveRideOpsLoad, setLiveRideOpsLoad] = useState<LiveRideOpsLoadResult | null>(null);
   const [liveGuestFlowLoad, setLiveGuestFlowLoad] = useState<LiveGuestFlowLoadResult | null>(null);
@@ -347,6 +413,8 @@ export function useCommandCenter() {
   const [isReviewLabelPipelineLoading, setIsReviewLabelPipelineLoading] = useState(false);
   const [isAutoLabelingReviewLabels, setIsAutoLabelingReviewLabels] = useState(false);
   const [isRoleAccessLoading, setIsRoleAccessLoading] = useState(false);
+
+  const roleCapabilities = useMemo(() => capabilitiesForAuth(roleAuthStatus), [roleAuthStatus]);
 
   const activeEvalScores = useMemo<EvalScore[]>(() => {
     const scorecard = runTelemetry?.eval?.scorecard;
@@ -387,8 +455,28 @@ export function useCommandCenter() {
     }
   }, []);
 
+  const refreshRoleAuthStatus = useCallback(async () => {
+    try {
+      const response = await fetchParkPulseApi("/api/park/auth/status", { timeoutMs: 8000 });
+      setRoleAuthStatus((await response.json()) as RoleAuthStatus);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Role identity status failed.";
+      setRoleAuthStatus({
+        status: "error",
+        mode: "role_identity_status",
+        identity: { authenticated: false, role: "read_only", status: "error", reason: message },
+        signed_role_required: true,
+        trusted_issuer_enabled: false,
+      });
+    }
+  }, []);
+
   const refreshActualTraining = useCallback(async (options?: { runGcpTraining?: boolean }) => {
     const runGcpTraining = options?.runGcpTraining === true;
+    if (runGcpTraining && !roleCapabilities.canStartTraining) {
+      setErrorMessage("Signed ML / Ops Admin role is required to start BigQuery ML training.");
+      return;
+    }
     setIsTrainingLoading(true);
     if (runGcpTraining) {
       setIsStartingGcpTraining(true);
@@ -424,7 +512,7 @@ export function useCommandCenter() {
       setIsTrainingLoading(false);
       if (runGcpTraining) setIsStartingGcpTraining(false);
     }
-  }, []);
+  }, [roleCapabilities.canStartTraining]);
 
   const refreshLiveFeedHealth = useCallback(async () => {
     setIsLiveFeedHealthLoading(true);
@@ -487,6 +575,10 @@ export function useCommandCenter() {
   }, []);
 
   const refreshStaleLiveFeeds = useCallback(async () => {
+    if (!roleCapabilities.canManageFeeds) {
+      setErrorMessage("Signed Ops Team or ML / Ops Admin role is required to refresh live feeds.");
+      return;
+    }
     setIsRefreshingStaleFeeds(true);
     setErrorMessage(null);
     setStatusMessage("Refreshing stale live feeds without blocking on weather.");
@@ -512,10 +604,14 @@ export function useCommandCenter() {
     } finally {
       setIsRefreshingStaleFeeds(false);
     }
-  }, [refreshActualTraining, refreshLiveFeedHealth, refreshReviewLabelPipeline]);
+  }, [refreshActualTraining, refreshLiveFeedHealth, refreshReviewLabelPipeline, roleCapabilities.canManageFeeds]);
 
   const recordReviewDecision = useCallback(
     async (caseId: string, decision: "approve_for_state" | "request_corroboration" | "hold_for_review" | "escalate") => {
+      if (!roleCapabilities.canReviewLabels) {
+        setErrorMessage("Signed ML / Ops Admin role is required to record review decisions.");
+        return;
+      }
       setIsLiveFeedHealthLoading(true);
       setErrorMessage(null);
       try {
@@ -535,11 +631,15 @@ export function useCommandCenter() {
         setIsLiveFeedHealthLoading(false);
       }
     },
-    [refreshActualTraining, refreshLiveFeedHealth, refreshReviewLabelPipeline],
+    [refreshActualTraining, refreshLiveFeedHealth, refreshReviewLabelPipeline, roleCapabilities.canReviewLabels],
   );
 
   const recordReviewLabelDecision = useCallback(
     async (candidate: ReviewLabelCandidate, decision: ReviewLabelDecision, finalLabel?: string) => {
+      if (!roleCapabilities.canReviewLabels) {
+        setErrorMessage("Signed ML / Ops Admin role is required to record review labels.");
+        return;
+      }
       setIsReviewLabelPipelineLoading(true);
       setErrorMessage(null);
       try {
@@ -570,10 +670,14 @@ export function useCommandCenter() {
         setIsReviewLabelPipelineLoading(false);
       }
     },
-    [refreshActualTraining, refreshReviewLabelPipeline],
+    [refreshActualTraining, refreshReviewLabelPipeline, roleCapabilities.canReviewLabels],
   );
 
   const autoLabelHighConfidenceReviewLabels = useCallback(async () => {
+    if (!roleCapabilities.canReviewLabels) {
+      setErrorMessage("Signed ML / Ops Admin role is required to auto-label review candidates.");
+      return;
+    }
     setIsAutoLabelingReviewLabels(true);
     setErrorMessage(null);
     try {
@@ -596,7 +700,7 @@ export function useCommandCenter() {
     } finally {
       setIsAutoLabelingReviewLabels(false);
     }
-  }, [refreshActualTraining, refreshReviewLabelPipeline]);
+  }, [refreshActualTraining, refreshReviewLabelPipeline, roleCapabilities.canReviewLabels]);
 
   const loadFeed = useCallback(
     async <T extends LiveWeatherLoadResult>(
@@ -605,6 +709,10 @@ export function useCommandCenter() {
       setLoading: (value: boolean) => void,
       setResult: (value: T | null) => void,
     ) => {
+      if (!roleCapabilities.canManageFeeds) {
+        setErrorMessage(`Signed Ops Team or ML / Ops Admin role is required to load ${label} feed.`);
+        return;
+      }
       setLoading(true);
       setErrorMessage(null);
       try {
@@ -622,7 +730,7 @@ export function useCommandCenter() {
         setLoading(false);
       }
     },
-    [park, refreshLiveFeedHealth],
+    [park, refreshLiveFeedHealth, roleCapabilities.canManageFeeds],
   );
 
   const loadLiveWeatherFeed = useCallback(
@@ -652,13 +760,18 @@ export function useCommandCenter() {
 
   useEffect(() => {
     void refreshIntegrationStatus();
+    void refreshRoleAuthStatus();
     void refreshActualTraining();
     void refreshLiveFeedHealth();
     void refreshReviewLabelPipeline();
     void refreshRoleAccess();
-  }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveFeedHealth, refreshReviewLabelPipeline, refreshRoleAccess]);
+  }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveFeedHealth, refreshReviewLabelPipeline, refreshRoleAccess, refreshRoleAuthStatus]);
 
   const runAgent = useCallback(async () => {
+    if (!roleCapabilities.canRunOperatingLoop) {
+      setErrorMessage("Signed Ops Team role is required to run the operating loop.");
+      return;
+    }
     setIsRunning(true);
     setErrorMessage(null);
     setStatusMessage("Running feature extraction, prediction, optimization, policy gate, explanation, dispatch draft, and eval receipt.");
@@ -690,9 +803,13 @@ export function useCommandCenter() {
     } finally {
       setIsRunning(false);
     }
-  }, [park, refreshActualTraining, refreshIntegrationStatus, refreshReviewLabelPipeline]);
+  }, [park, refreshActualTraining, refreshIntegrationStatus, refreshReviewLabelPipeline, roleCapabilities.canRunOperatingLoop]);
 
   const executeSelectedAction = useCallback(async () => {
+    if (!roleCapabilities.canRunOperatingLoop) {
+      setErrorMessage("Signed Ops Team role is required to execute selected actions.");
+      return;
+    }
     setIsDispatching(true);
     setErrorMessage(null);
     if (!selectedAction?.action || !selectedAction.target) {
@@ -721,10 +838,14 @@ export function useCommandCenter() {
     } finally {
       setIsDispatching(false);
     }
-  }, [park, refreshActualTraining, selectedAction?.action, selectedAction?.target]);
+  }, [park, refreshActualTraining, selectedAction?.action, selectedAction?.target, roleCapabilities.canRunOperatingLoop]);
 
   const acknowledgeDispatch = useCallback(
     async (dispatch: DispatchView, choice: "approved" | "held_for_review" | "acknowledged") => {
+      if (!roleCapabilities.canAcknowledgeDispatch) {
+        setErrorMessage("Signed Onsite Worker or Ops Team role is required to acknowledge dispatches.");
+        return;
+      }
       setIsApproving(true);
       setErrorMessage(null);
       try {
@@ -753,7 +874,7 @@ export function useCommandCenter() {
         setIsApproving(false);
       }
     },
-    [park, refreshActualTraining],
+    [park, refreshActualTraining, roleCapabilities.canAcknowledgeDispatch],
   );
 
   return {
@@ -769,6 +890,8 @@ export function useCommandCenter() {
     actualTraining,
     reviewLabelPipeline,
     roleAccess,
+    roleAuthStatus,
+    roleCapabilities,
     selectedAction,
     policyGate,
     evalScore,
@@ -807,6 +930,7 @@ export function useCommandCenter() {
     recordReviewLabelDecision,
     autoLabelHighConfidenceReviewLabels,
     refreshRoleAccess,
+    refreshRoleAuthStatus,
     loadLiveWeatherFeed,
     loadLiveRideOpsFeed,
     loadLiveGuestFlowFeed,

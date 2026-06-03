@@ -34,12 +34,14 @@ export function ReviewLabelPipelinePanel({
   onRefresh,
   onAutoLabel,
   onDecision,
+  canReviewLabels,
 }: {
   pipeline: ReviewLabelPipeline | null;
   isLoading: boolean;
   onRefresh: () => void;
   onAutoLabel: () => void;
   onDecision: (candidate: ReviewLabelCandidate, decision: ReviewLabelDecision, finalLabel?: string) => void;
+  canReviewLabels: boolean;
 }) {
   const [labelOverrides, setLabelOverrides] = useState<Record<string, string>>({});
   const candidates = pipeline?.candidates ?? [];
@@ -79,7 +81,7 @@ export function ReviewLabelPipelinePanel({
           <button
             type="button"
             onClick={onAutoLabel}
-            disabled={isLoading}
+            disabled={isLoading || !canReviewLabels}
             className="w-fit rounded border border-lime-300 bg-lime-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-lime-200 disabled:opacity-50"
           >
             Auto-label high confidence
@@ -116,6 +118,11 @@ export function ReviewLabelPipelinePanel({
       )}
 
       {readiness.length ? <div className="mt-3 rounded border border-amber-500/30 bg-amber-950/20 p-3 text-xs font-bold text-amber-100">{readiness.slice(0, 3).join(" / ")}</div> : null}
+      {!canReviewLabels && (
+        <div className="mt-3 rounded border border-slate-700 bg-slate-900 p-3 text-xs font-bold text-slate-300">
+          Signed ML / Ops Admin role is required to record or auto-approve review labels.
+        </div>
+      )}
 
       <div className="mt-4 space-y-4">
         {Object.entries(grouped).map(([agentId, rows]) => (
@@ -160,7 +167,7 @@ export function ReviewLabelPipelinePanel({
                     <div className="flex flex-wrap items-start gap-2 xl:justify-end">
                       <button
                         type="button"
-                        disabled={isLoading}
+                        disabled={isLoading || !canReviewLabels}
                         onClick={() => approveDecision(candidate)}
                         className="rounded border border-lime-300 bg-lime-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-lime-200 disabled:opacity-50"
                       >
@@ -168,7 +175,7 @@ export function ReviewLabelPipelinePanel({
                       </button>
                       <button
                         type="button"
-                        disabled={isLoading}
+                        disabled={isLoading || !canReviewLabels}
                         onClick={() => onDecision(candidate, "needs_more_evidence")}
                         className="rounded border border-amber-300 bg-amber-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-amber-200 disabled:opacity-50"
                       >
@@ -176,7 +183,7 @@ export function ReviewLabelPipelinePanel({
                       </button>
                       <button
                         type="button"
-                        disabled={isLoading}
+                        disabled={isLoading || !canReviewLabels}
                         onClick={() => onDecision(candidate, "reject_label")}
                         className="rounded border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-rose-300 hover:text-rose-100 disabled:opacity-50"
                       >

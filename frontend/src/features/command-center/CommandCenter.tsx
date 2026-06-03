@@ -52,6 +52,38 @@ export function CommandCenter() {
           onRefresh={() => void command.refreshParkState()}
         />
 
+        <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Signed role session</div>
+              <h2 className="mt-1 text-xl font-black text-slate-100">{command.roleCapabilities.roleLabel}</h2>
+              <div className="mt-2 text-sm leading-relaxed text-slate-400">
+                {command.roleCapabilities.authenticated
+                  ? `Authenticated with ${command.roleAuthStatus?.identity?.auth_method ?? "signed role session"}.`
+                  : "Read-only browser session. Add a signed role token to unlock role-scoped actions."}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-xs font-black text-slate-100 sm:grid-cols-4">
+              <div className="rounded border border-slate-800 bg-slate-900 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-widest text-slate-500">Auth</div>
+                <div>{command.roleCapabilities.authenticated ? "signed" : "read only"}</div>
+              </div>
+              <div className="rounded border border-slate-800 bg-slate-900 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-widest text-slate-500">Strict</div>
+                <div>{command.roleAuthStatus?.signed_role_required ? "on" : "off"}</div>
+              </div>
+              <div className="rounded border border-slate-800 bg-slate-900 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-widest text-slate-500">Dispatch</div>
+                <div>{command.roleCapabilities.canRunOperatingLoop ? "allowed" : "blocked"}</div>
+              </div>
+              <div className="rounded border border-slate-800 bg-slate-900 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-widest text-slate-500">Learning</div>
+                <div>{command.roleCapabilities.canReviewLabels ? "allowed" : "blocked"}</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <LiveFeedReviewPanel
           health={command.liveFeedHealth}
           ledger={command.reviewTrainingLedger}
@@ -78,6 +110,8 @@ export function CommandCenter() {
           onLoadFoodOps={() => void command.loadLiveFoodOpsFeed()}
           onLoadOperatorSignal={() => void command.loadLiveOperatorSignalFeed()}
           onReviewDecision={(caseId, decision) => void command.recordReviewDecision(caseId, decision)}
+          canManageFeeds={command.roleCapabilities.canManageFeeds}
+          canReviewCases={command.roleCapabilities.canReviewLabels}
         />
 
         <ReviewLabelPipelinePanel
@@ -86,6 +120,7 @@ export function CommandCenter() {
           onRefresh={() => void command.refreshReviewLabelPipeline()}
           onAutoLabel={() => void command.autoLabelHighConfidenceReviewLabels()}
           onDecision={(candidate, decision, finalLabel) => void command.recordReviewLabelDecision(candidate, decision, finalLabel)}
+          canReviewLabels={command.roleCapabilities.canReviewLabels}
         />
 
         <RoleAccessPanel
@@ -111,7 +146,7 @@ export function CommandCenter() {
               <button
                 type="button"
                 onClick={() => void command.runAgent()}
-                disabled={command.isRunning}
+                disabled={command.isRunning || !command.roleCapabilities.canRunOperatingLoop}
                 className="w-fit rounded border border-cyan-300 bg-cyan-300 px-5 py-3 text-sm font-black text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {command.isRunning ? "Running loop" : "Run operating loop"}
@@ -134,6 +169,7 @@ export function CommandCenter() {
             isStartingGcpTraining={command.isStartingGcpTraining}
             onRefresh={() => void command.refreshActualTraining()}
             onStartGcpTraining={() => void command.refreshActualTraining({ runGcpTraining: true })}
+            canStartTraining={command.roleCapabilities.canStartTraining}
           />
           <DispatchApprovalPanel
             dispatches={command.dispatches}
@@ -142,6 +178,8 @@ export function CommandCenter() {
             isApproving={command.isApproving}
             onExecute={() => void command.executeSelectedAction()}
             onAcknowledge={(dispatch, choice) => void command.acknowledgeDispatch(dispatch, choice)}
+            canExecute={command.roleCapabilities.canRunOperatingLoop}
+            canAcknowledge={command.roleCapabilities.canAcknowledgeDispatch}
           />
           <EvalReceiptPanel
             evals={command.activeEvalScores}
