@@ -273,6 +273,75 @@ const protocolScenarios = [
     outcome: "Multiple personal agents converge on one bounded group plan.",
   },
 ];
+type ProtocolScenario = (typeof protocolScenarios)[number];
+type ScenarioRunConfig = {
+  goal: string;
+  constraints: Record<string, unknown>;
+  counterRequest: string;
+  priorityChange: Record<string, string>;
+  monitorEvent: string;
+  commerceAction: string;
+  commerceReason: string;
+  queueReason: string;
+  planner: string;
+};
+const scenarioRunConfigs: Record<string, ScenarioRunConfig> = {
+  visit_planning: {
+    goal: "maximize_family_satisfaction",
+    constraints: { children: 2, avoid_wait_over_minutes: 35, avoid_thrill_rides: true, food_allergy: "peanut", scenario_mode: "visit_planning" },
+    counterRequest: "reduce walking distance",
+    priorityChange: { walking_distance: "highest", wait_time: "medium" },
+    monitorEvent: "live_family_visit",
+    commerceAction: "payment",
+    commerceReason: "Visit planning payment boundary probe.",
+    queueReason: "Avoid current congestion and long waits.",
+    planner: "live_state",
+  },
+  incident_response: {
+    goal: "preserve_guest_experience_after_incident",
+    constraints: { incident: "Wave Pool safety delay", prefer_time_over_credit: true, children: 2, avoid_wait_over_minutes: 30, scenario_mode: "incident_response" },
+    counterRequest: "prefer priority access over food credit",
+    priorityChange: { time_saved: "highest", compensation_value: "low" },
+    monitorEvent: "wave_pool_safety_delay",
+    commerceAction: "compensation_settlement",
+    commerceReason: "Incident response settlement boundary probe.",
+    queueReason: "Find a time-first reroute while safety delay remains active.",
+    planner: "incident_response",
+  },
+  accessibility_support: {
+    goal: "minimize_walking_and_sensory_load",
+    constraints: { low_walking: true, sensory_safe: true, covered_route: true, children: 2, food_allergy: "peanut", scenario_mode: "accessibility_support" },
+    counterRequest: "prioritize rest points over maximum wait savings",
+    priorityChange: { walking_distance: "highest", crowd_density: "highest", wait_time: "medium" },
+    monitorEvent: "accessibility_route_check",
+    commerceAction: "payment",
+    commerceReason: "Accessibility support payment boundary probe.",
+    queueReason: "Prefer lower walking and crowd density over absolute wait savings.",
+    planner: "accessibility_support",
+  },
+  commerce_resolution: {
+    goal: "resolve_closed_attraction_without_wasting_time",
+    constraints: { closed_attraction: "Wave Pool", prefer_time_over_credit: true, accept_offer_without_user: false, scenario_mode: "commerce_resolution" },
+    counterRequest: "decline food credit and request priority queue alternative",
+    priorityChange: { time_saved: "highest", credit_value: "low" },
+    monitorEvent: "attraction_closure_compensation_offer",
+    commerceAction: "refund_acceptance",
+    commerceReason: "Commerce resolution refund acceptance boundary probe.",
+    queueReason: "Convert compensation discussion into a priority-access reroute.",
+    planner: "commerce_resolution",
+  },
+  group_coordination: {
+    goal: "coordinate_multiple_family_agents",
+    constraints: { agents: 3, shared_anchor: "Parade Zone", split_paths_allowed: true, avoid_cross_guest_data_sharing: true, scenario_mode: "group_coordination" },
+    counterRequest: "keep one shared anchor stop and split ride branches",
+    priorityChange: { shared_time: "highest", individual_preferences: "medium" },
+    monitorEvent: "multi_agent_group_coordination",
+    commerceAction: "payment",
+    commerceReason: "Group coordination payment boundary probe.",
+    queueReason: "Coordinate shared route anchors with optional split-path windows.",
+    planner: "group_coordination",
+  },
+};
 const extensionMarkets = [
   { market: "Airlines", example: "Passenger agent negotiates delay handling, lounge access, and rebooking options." },
   { market: "Hotels", example: "Guest agent negotiates allergy, room, accessibility, and late-checkout preferences." },
@@ -413,8 +482,7 @@ function MiniMap({ activeState }: { activeState: string }) {
   );
 }
 
-function ProtocolExplorer() {
-  const [selectedId, setSelectedId] = useState(protocolScenarios[0].id);
+function ProtocolExplorer({ selectedId, onSelect }: { selectedId: string; onSelect: (id: string) => void }) {
   const selected = protocolScenarios.find((scenario) => scenario.id === selectedId) ?? protocolScenarios[0];
   return (
     <section className="mx-auto max-w-7xl px-4 pb-6 md:px-8">
@@ -435,7 +503,7 @@ function ProtocolExplorer() {
             <button
               key={scenario.id}
               type="button"
-              onClick={() => setSelectedId(scenario.id)}
+              onClick={() => onSelect(scenario.id)}
               className={`rounded border px-3 py-3 text-left text-xs font-black transition ${selected.id === scenario.id ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-slate-800 bg-slate-950 text-slate-200 hover:border-cyan-300/70"}`}
             >
               <span className="block text-[10px] uppercase tracking-normal opacity-70">Mode</span>
@@ -921,19 +989,19 @@ function TrustAdminGatePanel({ probe, running, onRun }: { probe: TrustAdminProbe
   );
 }
 
-function Simulator({ steps, running, onRun, onReject }: { steps: SimulatorStep[]; running: boolean; onRun: () => void; onReject: () => void }) {
+function Simulator({ steps, running, scenario, onRun, onReject }: { steps: SimulatorStep[]; running: boolean; scenario: ProtocolScenario; onRun: () => void; onReject: () => void }) {
   return (
     <section className="mx-auto max-w-7xl px-4 pb-6 md:px-8">
       <div className="rounded-lg border border-slate-800 bg-[#11161a] p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="text-[11px] font-black uppercase tracking-normal text-slate-500">External counterparty</div>
-            <h2 className="mt-1 text-xl font-black text-slate-100">Client-agent simulator</h2>
-            <p className="mt-2 max-w-3xl text-sm font-bold leading-6 text-slate-400">John&apos;s personal agent calls the ParkPulse contract directly, negotiates a route, commits it, monitors live state, and probes gated commerce.</p>
+            <h2 className="mt-1 text-xl font-black text-slate-100">Scenario-driven client-agent simulator</h2>
+            <p className="mt-2 max-w-3xl text-sm font-bold leading-6 text-slate-400">Selected mode: {scenario.mode}. The same handshake phases run with scenario-specific intent, counterproposal, live event, internal handoffs, and policy probe.</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={onRun} disabled={running} className="rounded border border-cyan-300 bg-cyan-300 px-4 py-3 text-sm font-black text-slate-950 hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50">
-              {running ? "Running protocol" : "Run client agent"}
+              {running ? "Running protocol" : `Run ${scenario.mode}`}
             </button>
             <button type="button" onClick={onReject} disabled={running} className="rounded border border-rose-300 px-4 py-3 text-sm font-black text-rose-100 hover:bg-rose-300 hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-50">
               Run rejection demo
@@ -1068,6 +1136,7 @@ export default function AgentHandshakePage() {
   const [credentialVerification, setCredentialVerification] = useState<CredentialVerification | null>(null);
   const [trustAdminProbe, setTrustAdminProbe] = useState<TrustAdminProbe>({ status: "idle" });
   const [trustAdminRunning, setTrustAdminRunning] = useState(false);
+  const [selectedScenarioId, setSelectedScenarioId] = useState(protocolScenarios[0].id);
   const [onboardingRunning, setOnboardingRunning] = useState(false);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("ready");
@@ -1075,6 +1144,8 @@ export default function AgentHandshakePage() {
 
   const clientItems = useMemo(() => ["Represents John and family", "Can share location, party size, preferences, accessibility needs", "Cannot purchase, share health data, or accept refunds"], []);
   const parkItems = useMemo(() => ["Represents park operations", "Offers itinerary, queue, food, safety, and compensation options", "Requires approval for payment, refund, medical, and identity-sensitive action"], []);
+  const selectedScenario = protocolScenarios.find((scenario) => scenario.id === selectedScenarioId) ?? protocolScenarios[0];
+  const selectedScenarioConfig = scenarioRunConfigs[selectedScenario.id] ?? scenarioRunConfigs.visit_planning;
 
   async function loadContract() {
     try {
@@ -1237,6 +1308,8 @@ export default function AgentHandshakePage() {
   async function runClientAgent() {
     setRunning(true);
     setError(null);
+    const scenario = selectedScenario;
+    const scenarioConfig = selectedScenarioConfig;
     const tokenRequest = {
       subject: "guest_user_123",
       agent_id: "john_personal_agent",
@@ -1248,13 +1321,13 @@ export default function AgentHandshakePage() {
       { id: "delegation", label: "Issue delegation token", path: "/api/park/delegation-token", request: tokenRequest, status: "pending" },
       { id: "identity", label: "Identity handshake", path: "/api/park/handshake", request: {}, status: "pending" },
       { id: "capability", label: "Capability handshake", path: "/api/park/session/{session_id}/capabilities", request: {}, status: "pending" },
-      { id: "intent", label: "Intent handshake", path: "/api/park/session/{session_id}/intent", request: {}, status: "pending" },
-      { id: "propose", label: "Live proposal", path: "/api/park/session/{session_id}/propose", request: {}, status: "pending" },
-      { id: "counter", label: "Client counter", path: "/api/park/session/{session_id}/counter", request: {}, status: "pending" },
+      { id: "intent", label: `${scenario.mode} intent`, path: "/api/park/session/{session_id}/intent", request: {}, status: "pending" },
+      { id: "propose", label: `${scenario.mode} proposal`, path: "/api/park/session/{session_id}/propose", request: {}, status: "pending" },
+      { id: "counter", label: "Scenario counterproposal", path: "/api/park/session/{session_id}/counter", request: {}, status: "pending" },
       { id: "commit", label: "Commit route", path: "/api/park/session/{session_id}/commit", request: {}, status: "pending" },
-      { id: "monitor", label: "Monitor live state", path: "/api/park/session/{session_id}/monitor", request: {}, status: "pending" },
-      { id: "commerce", label: "Direct Commerce Agent", path: "/api/park/internal-agents/commerce/evaluate", request: {}, status: "pending" },
-      { id: "queue", label: "Direct Queue Agent", path: "/api/park/internal-agents/queue/reroute", request: {}, status: "pending" },
+      { id: "monitor", label: `${scenario.mode} monitor event`, path: "/api/park/session/{session_id}/monitor", request: {}, status: "pending" },
+      { id: "commerce", label: "Policy-gated Commerce Agent", path: "/api/park/internal-agents/commerce/evaluate", request: {}, status: "pending" },
+      { id: "queue", label: "Scenario Queue Agent", path: "/api/park/internal-agents/queue/reroute", request: {}, status: "pending" },
     ];
     setSteps(baseSteps);
     try {
@@ -1268,13 +1341,13 @@ export default function AgentHandshakePage() {
       );
       const sessionId = (identity.session as HandshakeSession).session_id;
       await callStep("capability", `/api/park/session/${sessionId}/capabilities`, withToken({ can_share: ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference"], can_receive: ["route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer"], cannot_do: ["auto_purchase", "share_health_data", "accept_refund_without_user"] }));
-      await callStep("intent", `/api/park/session/${sessionId}/intent`, withToken({ goal: "maximize_family_satisfaction", time_window: "3_hours", constraints: { children: 2, avoid_wait_over_minutes: 35, avoid_thrill_rides: true, food_allergy: "peanut" } }));
-      await callStep("propose", `/api/park/session/${sessionId}/propose`, withToken({ planner: "live_state", horizon: "3_hours" }));
-      await callStep("counter", `/api/park/session/${sessionId}/counter`, withToken({ counter_request: "reduce walking distance", priority_change: { walking_distance: "highest", wait_time: "medium" } }));
+      await callStep("intent", `/api/park/session/${sessionId}/intent`, withToken({ goal: scenarioConfig.goal, time_window: "3_hours", constraints: scenarioConfig.constraints, scenario_mode: scenario.id }));
+      await callStep("propose", `/api/park/session/${sessionId}/propose`, withToken({ planner: scenarioConfig.planner, horizon: "3_hours", scenario_mode: scenario.id, expected_handoffs: scenario.handoffs }));
+      await callStep("counter", `/api/park/session/${sessionId}/counter`, withToken({ counter_request: scenarioConfig.counterRequest, priority_change: scenarioConfig.priorityChange, scenario_mode: scenario.id }));
       await callStep("commit", `/api/park/session/${sessionId}/commit`, withToken({ accepted: true, notify_user: true }));
-      await callStep("monitor", `/api/park/session/${sessionId}/monitor`, withToken({ event: "live" }));
-      await callStep("commerce", "/api/park/internal-agents/commerce/evaluate", withToken({ session_id: sessionId, action: "payment", amount: 42, reason: "Direct Commerce Agent charge probe." }));
-      await callStep("queue", "/api/park/internal-agents/queue/reroute", withToken({ session_id: sessionId, walking_priority: "highest", reason: "Avoid current congestion and long waits." }));
+      await callStep("monitor", `/api/park/session/${sessionId}/monitor`, withToken({ event: scenarioConfig.monitorEvent, scenario_mode: scenario.id, expected_outcome: scenario.outcome }));
+      await callStep("commerce", "/api/park/internal-agents/commerce/evaluate", withToken({ session_id: sessionId, action: scenarioConfig.commerceAction, amount: 42, reason: scenarioConfig.commerceReason, scenario_mode: scenario.id }));
+      await callStep("queue", "/api/park/internal-agents/queue/reroute", withToken({ session_id: sessionId, walking_priority: scenarioConfig.priorityChange.walking_distance ?? "medium", reason: scenarioConfig.queueReason, scenario_mode: scenario.id, expected_handoffs: scenario.handoffs }));
       setStatus("ready");
     } catch (apiError) {
       setError(apiError instanceof Error ? apiError.message : "Unable to run client-agent simulator.");
@@ -1352,11 +1425,11 @@ export default function AgentHandshakePage() {
         <AgentCard title="ParkPulse Park Agent" subtitle="Park counterparty" items={parkItems} accent="bg-cyan-300" />
       </section>
 
-      <ProtocolExplorer />
+      <ProtocolExplorer selectedId={selectedScenarioId} onSelect={setSelectedScenarioId} />
       <ContractPanel contract={contract} />
       <AgentOnboardingPanel agent={onboardedAgent} running={onboardingRunning} credentialVerification={credentialVerification} onVerifyCredential={() => void verifyCredential()} onCertifyFull={() => void certifyAgent("full")} onCertifyUnderScoped={() => void certifyAgent("under_scoped")} />
       <TrustAdminGatePanel probe={trustAdminProbe} running={trustAdminRunning} onRun={() => void runTrustAdminGate()} />
-      <Simulator steps={steps} running={running} onRun={runClientAgent} onReject={runRejectionDemo} />
+      <Simulator steps={steps} running={running} scenario={selectedScenario} onRun={runClientAgent} onReject={runRejectionDemo} />
       {session ? <SessionPanels session={session} /> : null}
     </main>
   );

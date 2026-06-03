@@ -127,7 +127,7 @@ Test command:
 python3 -m pytest backend/test_production_reliability_qa_agent.py backend/test_parkpulse_completion.py::test_agent_role_run_is_custom_and_persists_receipt backend/test_parkpulse_completion.py::test_agent_role_scan_never_dispatches_and_medical_stays_bounded backend/test_parkpulse_completion.py::test_agent_role_routes_vague_signals_to_proact backend/test_parkpulse_completion.py::test_park_gemini_agent_success_error_enterprise_and_helpers backend/test_park_understanding_benchmark.py backend/test_live_feedback_loop.py -q
 ```
 
-Latest focused result: `17 passed`.
+Latest focused result: `18 passed`.
 
 ## Real-Trace Release Gate
 
@@ -181,4 +181,6 @@ Adversarial sampled fixtures currently checked:
 - QA trace missing delivery and observability inspection tools.
 - proact trace writing memory without policy validation and outcome scoring.
 
-Latest backend result: `313 passed`.
+Latest backend result: `315 passed`.
+
+Latest full QA result: `make qa` completed with `Routine QA score: 100/100`, including agent role eval gate, frontend build, and Playwright E2E.
