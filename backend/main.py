@@ -370,6 +370,97 @@ async def _read_json_body(receive) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _role_auth_secret() -> str:
+    return os.getenv("PARKPULSE_ROLE_AUTH_SECRET") or "parkpulse-local-dev-secret-change-before-production"
+
+
+def _role_session_ttl_seconds() -> int:
+    try:
+        return max(300, int(os.getenv("PARKPULSE_ROLE_SESSION_TTL_SECONDS", "3600")))
+    except ValueError:
+        return 3600
+
+
+def _dev_role_issuer_enabled() -> bool:
+    return _truthy(os.getenv("PARKPULSE_ENABLE_DEV_ROLE_ISSUER"), False)
+
+
+def _headers_from_scope(scope: dict[str, Any]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for key, value in scope.get("headers") or []:
+        try:
+            name = key.decode("latin-1").lower() if isinstance(key, bytes) else str(key).lower()
+            headers[name] = value.decode("latin-1") if isinstance(value, bytes) else str(value)
+        except Exception:
+            continue
+    return headers
+
+
+def _extract_role_token(headers: dict[str, str]) -> str | None:
+    explicit = headers.get("x-parkpulse-role-token")
+    if explicit:
+        return explicit
+    authorization = headers.get("authorization") or ""
+    if authorization.lower().startswith("bearer "):
+        return authorization.split(" ", 1)[1].strip()
+    return None
+
+
+def _role_identity_from_scope(scope: dict[str, Any]) -> dict[str, Any]:
+    from park_role_access import normalize_role, verify_role_session
+
+    headers = _headers_from_scope(scope)
+    token_status = verify_role_session(_extract_role_token(headers), _role_auth_secret())
+    if token_status.get("authenticated"):
+        return {
+            "status": "authenticated",
+            "authenticated": True,
+            "auth_method": "signed_role_session",
+            "role": token_status.get("role"),
+            "subject": token_status.get("subject"),
+            "issuer": token_status.get("issuer"),
+            "expires_at": token_status.get("expires_at"),
+            "token_status": token_status.get("status"),
+        }
+    role_header = headers.get("x-parkpulse-role") or headers.get("x-role")
+    return {
+        "status": "unauthenticated",
+        "authenticated": False,
+        "auth_method": "role_header_fallback",
+        "role": normalize_role(role_header, default="ops_team"),
+        "subject": "",
+        "token_status": token_status.get("status"),
+        "reason": token_status.get("reason"),
+    }
+
+
+def _role_authorization_payload(payload: dict[str, Any], scope: dict[str, Any] | None = None) -> dict[str, Any]:
+    from park_role_access import authorize_role_action
+
+    identity = _role_identity_from_scope(scope or {}) if scope is not None else {}
+    role = payload.get("role") or payload.get("actor_role") or payload.get("actorRole") or identity.get("role")
+    capability = str(payload.get("capability") or "").strip()
+    if not capability:
+        return {"status": "error", "mode": "role_authorization_check", "readiness_issues": ["capability is required."]}
+    decision = authorize_role_action(
+        str(role or "ops_team"),
+        capability,
+        resource=str(payload.get("resource") or ""),
+        detail=str(payload.get("detail") or ""),
+        default_role="ops_team",
+    )
+    if identity:
+        decision["identity"] = identity
+    return {
+        "status": decision["status"],
+        "mode": "role_authorization_check",
+        "authorization": decision,
+        "uses_seed_data": False,
+        "loads_bigquery_per_tick": False,
+        "llm_control_authority": False,
+    }
+
+
 def _sse(event: str, payload: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n".encode("utf-8")
 
@@ -7356,6 +7447,74 @@ async def app(scope, receive, send):
             await _send_json(send, 200, review_label_decision_ledger(limit=int(limit_raw) if limit_raw else 120))
         except Exception as error:
             await _send_json(send, 200, {"status": "error", "mode": "review_label_decision_ledger", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "GET" and path == "/api/park/role-access-contracts":
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        role = (query.get("role") or [None])[0]
+        try:
+            from park_role_access import role_access_contracts
+
+            await _send_json(send, 200, role_access_contracts(role))
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "role_access_contracts", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "POST" and path == "/api/park/role-access/authorize":
+        request_payload = await _read_json_body(receive)
+        try:
+            await _send_json(send, 200, _role_authorization_payload(request_payload, scope))
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "role_authorization_check", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "GET" and path == "/api/park/auth/status":
+        await _send_json(
+            send,
+            200,
+            {
+                "status": "ready",
+                "mode": "role_identity_status",
+                "identity": _role_identity_from_scope(scope),
+                "dev_issuer_enabled": _dev_role_issuer_enabled(),
+                "signed_role_required": False,
+                "boundary": "Role identity is observable in this release. Enforcement is added feature-by-feature so command-center flows do not break silently.",
+            },
+        )
+        return
+
+    if method == "POST" and path == "/api/park/auth/dev-session":
+        request_payload = await _read_json_body(receive)
+        try:
+            from park_role_access import normalize_role, role_access_contracts, sign_role_session, verify_role_session
+
+            if not _dev_role_issuer_enabled():
+                await _send_json(send, 404, {"status": "disabled", "mode": "signed_role_session_issuer", "readiness_issues": ["Dev role session issuer is disabled."]})
+                return
+            role = normalize_role(str(request_payload.get("role") or "ops_team"))
+            if not role_access_contracts(role).get("role_count"):
+                await _send_json(send, 400, {"status": "invalid_role", "mode": "signed_role_session_issuer", "role": role})
+                return
+            subject = str(request_payload.get("subject") or "parkpulse-command-center")
+            token = sign_role_session(subject, role, _role_auth_secret(), ttl_seconds=_role_session_ttl_seconds())
+            verified = verify_role_session(token, _role_auth_secret())
+            await _send_json(
+                send,
+                200,
+                {
+                    "status": "issued",
+                    "mode": "signed_role_session_issuer",
+                    "role": role,
+                    "subject": subject,
+                    "token": token,
+                    "token_type": "Bearer",
+                    "expires_at": verified.get("expires_at"),
+                    "dev_issuer": True,
+                    "boundary": "Local dev issuer only. Production should use a server-verified identity provider.",
+                },
+            )
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "signed_role_session_issuer", "readiness_issues": [str(error)[:240]]})
         return
 
     if method == "GET" and path == "/api/park/live-summary":

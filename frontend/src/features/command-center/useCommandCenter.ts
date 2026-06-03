@@ -179,6 +179,33 @@ export type ReviewLabelPipeline = {
   readiness_issues?: string[];
 };
 
+export type RoleAccessContracts = {
+  status?: string;
+  mode?: string;
+  principle?: string;
+  roles?: Array<{
+    id?: string;
+    label?: string;
+    surface?: string;
+    primary_users?: string[];
+    can_read?: string[];
+    can_do?: string[];
+    cannot_read?: string[];
+    cannot_do?: string[];
+    evidence_products?: string[];
+    ui_contract?: string;
+    llm_contract?: string;
+  }>;
+  role_count?: number;
+  global_boundaries?: string[];
+  route_matrix?: Record<string, string>;
+  data_products?: string[];
+  uses_seed_data?: boolean;
+  loads_bigquery_per_tick?: boolean;
+  llm_control_authority?: boolean;
+  readiness_issues?: string[];
+};
+
 export type LiveWeatherLoadResult = {
   status?: string;
   mode?: string;
@@ -256,6 +283,7 @@ export function useCommandCenter() {
   const [liveFeedHealth, setLiveFeedHealth] = useState<LiveFeedHealth | null>(null);
   const [reviewTrainingLedger, setReviewTrainingLedger] = useState<ReviewTrainingLedger | null>(null);
   const [reviewLabelPipeline, setReviewLabelPipeline] = useState<ReviewLabelPipeline | null>(null);
+  const [roleAccess, setRoleAccess] = useState<RoleAccessContracts | null>(null);
   const [liveWeatherLoad, setLiveWeatherLoad] = useState<LiveWeatherLoadResult | null>(null);
   const [liveRideOpsLoad, setLiveRideOpsLoad] = useState<LiveRideOpsLoadResult | null>(null);
   const [liveGuestFlowLoad, setLiveGuestFlowLoad] = useState<LiveGuestFlowLoadResult | null>(null);
@@ -265,6 +293,7 @@ export function useCommandCenter() {
   const [liveFeedRefreshSupervisor, setLiveFeedRefreshSupervisor] = useState<LiveFeedRefreshSupervisorResult | null>(null);
   const [isReviewLabelPipelineLoading, setIsReviewLabelPipelineLoading] = useState(false);
   const [isAutoLabelingReviewLabels, setIsAutoLabelingReviewLabels] = useState(false);
+  const [isRoleAccessLoading, setIsRoleAccessLoading] = useState(false);
 
   const activeEvalScores = useMemo<EvalScore[]>(() => {
     const scorecard = runTelemetry?.eval?.scorecard;
@@ -385,6 +414,27 @@ export function useCommandCenter() {
       });
     } finally {
       setIsReviewLabelPipelineLoading(false);
+    }
+  }, []);
+
+  const refreshRoleAccess = useCallback(async () => {
+    setIsRoleAccessLoading(true);
+    try {
+      const response = await fetchParkPulseApi("/api/park/role-access-contracts", { timeoutMs: 12000 });
+      setRoleAccess((await response.json()) as RoleAccessContracts);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Role access contracts failed.";
+      setRoleAccess({
+        status: "error",
+        mode: "role_access_contracts",
+        roles: [],
+        readiness_issues: [message],
+        uses_seed_data: false,
+        loads_bigquery_per_tick: false,
+        llm_control_authority: false,
+      });
+    } finally {
+      setIsRoleAccessLoading(false);
     }
   }, []);
 
@@ -557,7 +607,8 @@ export function useCommandCenter() {
     void refreshActualTraining();
     void refreshLiveFeedHealth();
     void refreshReviewLabelPipeline();
-  }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveFeedHealth, refreshReviewLabelPipeline]);
+    void refreshRoleAccess();
+  }, [refreshActualTraining, refreshIntegrationStatus, refreshLiveFeedHealth, refreshReviewLabelPipeline, refreshRoleAccess]);
 
   const runAgent = useCallback(async () => {
     setIsRunning(true);
@@ -669,6 +720,7 @@ export function useCommandCenter() {
     integrationStatus,
     actualTraining,
     reviewLabelPipeline,
+    roleAccess,
     selectedAction,
     policyGate,
     evalScore,
@@ -681,6 +733,7 @@ export function useCommandCenter() {
     isLiveFeedHealthLoading: isLiveFeedHealthLoading || isRefreshingStaleFeeds,
     isReviewLabelPipelineLoading,
     isAutoLabelingReviewLabels,
+    isRoleAccessLoading,
     isLoadingLiveWeather,
     isLoadingLiveRideOps,
     isLoadingLiveGuestFlow,
@@ -705,6 +758,7 @@ export function useCommandCenter() {
     refreshReviewLabelPipeline,
     recordReviewLabelDecision,
     autoLabelHighConfidenceReviewLabels,
+    refreshRoleAccess,
     loadLiveWeatherFeed,
     loadLiveRideOpsFeed,
     loadLiveGuestFlowFeed,

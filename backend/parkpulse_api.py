@@ -36,7 +36,7 @@ def _get_tracer(name: str):
         return _NoopTracer()
 
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -175,6 +175,7 @@ from park_scenarios import get_park_scenarios
 from park_signal_intake import classify_unstructured_signal, fuse_signal_batch, latest_signals, realistic_signal_batch
 from live_feedback_loop import ingest_live_feed_event, live_feed_health, record_review_decision, review_training_ledger
 from review_label_pipeline import auto_label_recommended_candidates, build_review_label_pipeline, record_review_label_decision, review_label_decision_ledger
+from park_role_access import authorize_role_action, normalize_role, role_access_contracts, sign_role_session, verify_role_session
 from guest_flow_live_feed import ingest_live_guest_flow_feed, guest_flow_feed_config
 from ops_remaining_live_feeds import food_ops_feed_config, ingest_live_food_ops_feed, ingest_live_operator_signal_feed, ingest_live_staffing_feed, operator_signal_feed_config, staffing_feed_config
 from ride_ops_live_feed import ingest_live_ride_ops_feed, ride_ops_feed_config
@@ -290,6 +291,81 @@ def _truthy(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _role_auth_secret() -> str:
+    return os.getenv("PARKPULSE_ROLE_AUTH_SECRET") or "parkpulse-local-dev-secret-change-before-production"
+
+
+def _role_session_ttl_seconds() -> int:
+    try:
+        return max(300, int(os.getenv("PARKPULSE_ROLE_SESSION_TTL_SECONDS", "3600")))
+    except ValueError:
+        return 3600
+
+
+def _dev_role_issuer_enabled() -> bool:
+    return _truthy(os.getenv("PARKPULSE_ENABLE_DEV_ROLE_ISSUER"), False)
+
+
+def _extract_role_token(request: Request) -> str | None:
+    explicit = request.headers.get("x-parkpulse-role-token")
+    if explicit:
+        return explicit
+    authorization = request.headers.get("authorization") or ""
+    if authorization.lower().startswith("bearer "):
+        return authorization.split(" ", 1)[1].strip()
+    return None
+
+
+def _role_identity_from_request(request: Request) -> dict[str, Any]:
+    token_status = verify_role_session(_extract_role_token(request), _role_auth_secret())
+    if token_status.get("authenticated"):
+        return {
+            "status": "authenticated",
+            "authenticated": True,
+            "auth_method": "signed_role_session",
+            "role": token_status.get("role"),
+            "subject": token_status.get("subject"),
+            "issuer": token_status.get("issuer"),
+            "expires_at": token_status.get("expires_at"),
+            "token_status": token_status.get("status"),
+        }
+    role_header = request.headers.get("x-parkpulse-role") or request.headers.get("x-role")
+    return {
+        "status": "unauthenticated",
+        "authenticated": False,
+        "auth_method": "role_header_fallback",
+        "role": normalize_role(role_header, default="ops_team"),
+        "subject": "",
+        "token_status": token_status.get("status"),
+        "reason": token_status.get("reason"),
+    }
+
+
+def _role_authorization_payload(payload: dict[str, Any], request: Request | None = None) -> dict[str, Any]:
+    identity = _role_identity_from_request(request) if request is not None else {}
+    role = payload.get("role") or payload.get("actor_role") or payload.get("actorRole") or identity.get("role")
+    capability = str(payload.get("capability") or "").strip()
+    if not capability:
+        return {"status": "error", "mode": "role_authorization_check", "readiness_issues": ["capability is required."]}
+    decision = authorize_role_action(
+        str(role or "ops_team"),
+        capability,
+        resource=str(payload.get("resource") or ""),
+        detail=str(payload.get("detail") or ""),
+        default_role="ops_team",
+    )
+    if identity:
+        decision["identity"] = identity
+    return {
+        "status": decision["status"],
+        "mode": "role_authorization_check",
+        "authorization": decision,
+        "uses_seed_data": False,
+        "loads_bigquery_per_tick": False,
+        "llm_control_authority": False,
+    }
 
 
 _memory_sync_min_interval_seconds = max(0.1, _float_env("PARKPULSE_MEMORY_SYNC_MIN_INTERVAL_SECONDS", 3.0))
@@ -8103,6 +8179,51 @@ async def park_review_label_pipeline_auto_label(payload: dict[str, Any] | None =
 @app.get("/api/park/review-label-pipeline/decisions")
 async def park_review_label_pipeline_decisions(limit: int = 120):
     return review_label_decision_ledger(limit=max(1, min(500, limit)))
+
+
+@app.get("/api/park/role-access-contracts")
+async def park_role_access_contracts(role: str | None = None):
+    return role_access_contracts(role)
+
+
+@app.post("/api/park/role-access/authorize")
+async def park_role_access_authorize(request: Request, payload: dict[str, Any]):
+    return _role_authorization_payload(payload, request)
+
+
+@app.get("/api/park/auth/status")
+async def park_role_auth_status(request: Request):
+    return {
+        "status": "ready",
+        "mode": "role_identity_status",
+        "identity": _role_identity_from_request(request),
+        "dev_issuer_enabled": _dev_role_issuer_enabled(),
+        "signed_role_required": False,
+        "boundary": "Role identity is observable in this release. Enforcement is added feature-by-feature so command-center flows do not break silently.",
+    }
+
+
+@app.post("/api/park/auth/dev-session")
+async def park_role_auth_dev_session(payload: dict[str, Any]):
+    if not _dev_role_issuer_enabled():
+        raise HTTPException(status_code=404, detail={"status": "disabled", "mode": "signed_role_session_issuer", "readiness_issues": ["Dev role session issuer is disabled."]})
+    role = normalize_role(str(payload.get("role") or "ops_team"))
+    if not role_access_contracts(role).get("role_count"):
+        raise HTTPException(status_code=400, detail={"status": "invalid_role", "mode": "signed_role_session_issuer", "role": role})
+    subject = str(payload.get("subject") or "parkpulse-command-center")
+    token = sign_role_session(subject, role, _role_auth_secret(), ttl_seconds=_role_session_ttl_seconds())
+    verified = verify_role_session(token, _role_auth_secret())
+    return {
+        "status": "issued",
+        "mode": "signed_role_session_issuer",
+        "role": role,
+        "subject": subject,
+        "token": token,
+        "token_type": "Bearer",
+        "expires_at": verified.get("expires_at"),
+        "dev_issuer": True,
+        "boundary": "Local dev issuer only. Production should use a server-verified identity provider.",
+    }
 
 
 @app.get("/api/park/learning/episodes")

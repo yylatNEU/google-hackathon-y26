@@ -7,6 +7,7 @@ import { LiveFeedReviewPanel } from "./LiveFeedReviewPanel";
 import { ParkStateStrip } from "./ParkStateStrip";
 import { ProductLoopPanel } from "./ProductLoopPanel";
 import { ReviewLabelPipelinePanel } from "./ReviewLabelPipelinePanel";
+import { RoleAccessPanel } from "./RoleAccessPanel";
 import { useCommandCenter } from "./useCommandCenter";
 
 export function CommandCenter() {
@@ -85,6 +86,12 @@ export function CommandCenter() {
           onRefresh={() => void command.refreshReviewLabelPipeline()}
           onAutoLabel={() => void command.autoLabelHighConfidenceReviewLabels()}
           onDecision={(candidate, decision, finalLabel) => void command.recordReviewLabelDecision(candidate, decision, finalLabel)}
+        />
+
+        <RoleAccessPanel
+          contracts={command.roleAccess}
+          isLoading={command.isRoleAccessLoading}
+          onRefresh={() => void command.refreshRoleAccess()}
         />
 
         {(command.statusMessage || command.errorMessage || command.connectionError) && (

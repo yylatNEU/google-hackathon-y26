@@ -38,10 +38,12 @@ test("command center exposes live-feed and review-label reliability controls", a
   await expect(page.getByRole("heading", { name: "Park operating loop" })).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("Operational data contract")).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("Ops review label queue")).toBeVisible({ timeout: 20000 });
+  await expect(page.getByText("Role authority contracts")).toBeVisible({ timeout: 20000 });
   await expect(page.getByRole("button", { name: "Run operating loop" })).toBeEnabled({ timeout: 15000 });
   await expect(page.getByRole("button", { name: "Refresh feeds" })).toBeEnabled({ timeout: 15000 });
   await expect(page.getByRole("button", { name: "Refresh labels" })).toBeEnabled({ timeout: 15000 });
   await expect(page.getByRole("button", { name: "Auto-label high confidence" })).toBeEnabled({ timeout: 15000 });
+  await expect(page.locator("body")).toContainText(/Ops Team|ML \/ Ops Admin/i, { timeout: 20000 });
   await expect(page.getByText(/Backend unavailable/)).toHaveCount(0);
 
   expect(guards.runtimeErrors).toEqual([]);
