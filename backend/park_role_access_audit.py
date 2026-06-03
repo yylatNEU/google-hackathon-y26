@@ -4,6 +4,7 @@ import json
 import os
 import time
 from collections import deque
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,10 @@ def _safe_text(value: Any, limit: int = 160) -> str:
 
 
 def record_role_access_audit_event(event_type: str, *, role: Any = "", subject: Any = "", capability: Any = "", resource: Any = "", status: Any = "", reason: Any = "") -> dict[str, Any]:
+    now = datetime.now(UTC).isoformat()
     event = {
+        "_id": f"role_audit_{time.time_ns()}",
+        "createdAt": now,
         "timestamp": int(time.time()),
         "mode": "role_access_audit",
         "event_type": _safe_text(event_type, 80),
@@ -28,6 +32,15 @@ def record_role_access_audit_event(event_type: str, *, role: Any = "", subject: 
         "status": _safe_text(status, 80),
         "reason": _safe_text(reason, 240),
     }
+    try:
+        from mongo_memory import record_role_access_audit_event as record_mongo_role_access_audit_event
+
+        mongo_status = record_mongo_role_access_audit_event(event)
+        event["mongo_status"] = mongo_status.get("status")
+        event["mongo_mode"] = mongo_status.get("mode")
+    except Exception as error:
+        event["mongo_status"] = "failed"
+        event["mongo_error"] = str(error)[:160]
     try:
         path = _audit_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -42,6 +55,21 @@ def record_role_access_audit_event(event_type: str, *, role: Any = "", subject: 
 
 
 def role_access_audit_status(limit: int = 20) -> dict[str, Any]:
+    try:
+        from mongo_memory import get_latest_role_access_audit_events
+
+        mongo_events = get_latest_role_access_audit_events(limit)
+    except Exception:
+        mongo_events = []
+    if mongo_events:
+        return {
+            "status": "ready",
+            "mode": "role_access_audit",
+            "storage": "mongodb",
+            "event_count": len(mongo_events),
+            "events": mongo_events,
+        }
+
     path = _audit_log_path()
     events: list[dict[str, Any]] = []
     if path.exists():
@@ -57,6 +85,7 @@ def role_access_audit_status(limit: int = 20) -> dict[str, Any]:
     return {
         "status": "ready",
         "mode": "role_access_audit",
+        "storage": "jsonl_fallback",
         "path": str(path),
         "event_count": len(events),
         "events": events,

@@ -79,6 +79,7 @@ COLLECTION_PURPOSES = {
     "cache_accuracy_replays": "Replay evidence comparing fresh retrieval, fresh cache, stale cache, and dangerous drift behavior.",
     "live_feed_events": "Normalized live operating feed events shared across Cloud Run instances.",
     "live_review_ledger": "Human review cases and dispositions for live feed trust and training eligibility.",
+    "role_access_audit": "Signed role issuance and mutation allow/deny audit events shared across Cloud Run instances.",
 }
 
 AGENT_ROLE_CONFIGS = {
@@ -898,6 +899,7 @@ class OperationalMemory:
             "cache_accuracy_replays": [],
             "live_feed_events": [],
             "live_review_ledger": [],
+            "role_access_audit": [],
         }
 
     def initialize(self) -> dict[str, Any]:
@@ -999,6 +1001,8 @@ class OperationalMemory:
         self._create_index(self.db.live_feed_events, [("source", ASCENDING), ("signal_type", ASCENDING), ("createdAt", DESCENDING)])
         self._create_index(self.db.live_review_ledger, [("createdAt", DESCENDING), ("status", ASCENDING)])
         self._create_index(self.db.live_review_ledger, [("case_id", ASCENDING), ("source_event_id", ASCENDING), ("createdAt", DESCENDING)])
+        self._create_index(self.db.role_access_audit, [("createdAt", DESCENDING), ("event_type", ASCENDING)])
+        self._create_index(self.db.role_access_audit, [("role", ASCENDING), ("status", ASCENDING), ("createdAt", DESCENDING)])
 
     def seed_defaults(self) -> None:
         self._invalidate_dashboard_cache()
@@ -3927,6 +3931,34 @@ class OperationalMemory:
         rows = deepcopy(self._fallback.setdefault(collection_name, [])[:bounded_limit])
         return [_public_doc(row) for row in rows]
 
+    def record_role_access_audit_event(self, row: dict[str, Any]) -> dict[str, Any]:
+        now = _utc_now()
+        document = _clean_for_bson(deepcopy(row))
+        document_id = str(document.get("_id") or document.get("id") or hashlib.sha1(json.dumps(document, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:20])
+        document["_id"] = document_id
+        document.setdefault("id", document_id)
+        document.setdefault("createdAt", now)
+        document["updatedAt"] = now
+        document["documentType"] = "role_access_audit"
+        collection = self._collection("role_access_audit")
+        if collection is not None:
+            collection.update_one({"_id": document_id}, {"$set": document}, upsert=True)
+        else:
+            rows = self._fallback.setdefault("role_access_audit", [])
+            rows[:] = [existing for existing in rows if existing.get("_id") != document_id and existing.get("id") != document_id]
+            rows.insert(0, document)
+            del rows[500:]
+        return {"status": "stored", "mode": self.mode, "collection": "role_access_audit", "id": document_id}
+
+    def latest_role_access_audit_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(500, int(limit or 100)))
+        collection = self._collection("role_access_audit")
+        if collection is not None:
+            rows = list(collection.find({}, {}).sort("createdAt", DESCENDING).limit(bounded_limit))
+            return [_public_doc(row) for row in rows]
+        rows = deepcopy(self._fallback.setdefault("role_access_audit", [])[:bounded_limit])
+        return [_public_doc(row) for row in rows]
+
     def backfill_embeddings(self, collection_names: list[str] | None = None, limit: int = 250) -> dict[str, Any]:
         self._invalidate_dashboard_cache()
         allowed = {"playbooks", "incidents", "agent_learnings"}
@@ -4597,6 +4629,24 @@ def get_latest_live_feed_documents(collection_name: str, limit: int = 500) -> li
     return _safe_memory_call(
         f"mongo.{collection_name}.latest",
         lambda: _memory.latest_live_feed_documents(collection_name, limit),
+        lambda error: [],
+        retry_operation_on_fallback=False,
+    )
+
+
+def record_role_access_audit_event(row: dict[str, Any]) -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.role_access_audit.record",
+        lambda: _memory.record_role_access_audit_event(row),
+        lambda error: {"status": "skipped", "mode": _memory.mode, "collection": "role_access_audit", "error": str(error)[:300]},
+        retry_operation_on_fallback=False,
+    )
+
+
+def get_latest_role_access_audit_events(limit: int = 100) -> list[dict[str, Any]]:
+    return _safe_memory_call(
+        "mongo.role_access_audit.latest",
+        lambda: _memory.latest_role_access_audit_events(limit),
         lambda error: [],
         retry_operation_on_fallback=False,
     )
