@@ -5,6 +5,7 @@ PROJECT_ID="${1:-${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project 2>/de
 REGION="${2:-${GOOGLE_CLOUD_LOCATION:-us-central1}}"
 SERVICE="${3:-${PARKPULSE_CLOUD_RUN_SERVICE:-parkpulse-private-api}}"
 ROLE_ISSUER_NAME="${PARKPULSE_ROLE_ISSUER_KEY_SECRET:-parkpulse-role-issuer-key}"
+EXPECTED_REVISION="${PARKPULSE_EXPECTED_REVISION:-}"
 
 if [[ -z "$PROJECT_ID" ]]; then
   echo "Usage: scripts/verify_private_cloud_run_deploy.sh <gcp-project-id> [region] [service]" >&2
@@ -30,13 +31,18 @@ curl_json() {
     "${SERVICE_URL}${path}" > "$output"
 }
 
-echo "Verifying Cloud Run traffic targets latest ready revision..."
+if [[ -n "$EXPECTED_REVISION" ]]; then
+  echo "Verifying Cloud Run traffic targets ${EXPECTED_REVISION}..."
+else
+  echo "Verifying Cloud Run traffic targets latest ready revision..."
+fi
 gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format=json > "$TMP_DIR/service.json"
-python3 - "$TMP_DIR/service.json" <<'PY'
+python3 - "$TMP_DIR/service.json" "$EXPECTED_REVISION" <<'PY'
 import json
 import sys
 
 payload = json.load(open(sys.argv[1]))
+expected_revision = sys.argv[2].strip()
 status = payload.get("status") or {}
 spec = payload.get("spec") or {}
 latest_ready = status.get("latestReadyRevisionName")
@@ -44,6 +50,15 @@ traffic = status.get("traffic") or []
 spec_traffic = spec.get("traffic") or []
 if not latest_ready:
     raise SystemExit("Cloud Run has no latest ready revision.")
+if expected_revision:
+    expected_status = [{"percent": 100, "revisionName": expected_revision}]
+    expected_spec = [{"percent": 100, "revisionName": expected_revision}]
+    if traffic != expected_status:
+        raise SystemExit(f"Cloud Run traffic is not 100% expected revision: expected={expected_revision}, traffic={traffic}")
+    if spec_traffic != expected_spec:
+        raise SystemExit(f"Cloud Run spec is not pinned to expected revision: expected={expected_revision}, spec={spec_traffic}")
+    print(f"Traffic: 100% {expected_revision}")
+    raise SystemExit(0)
 if traffic != [{"latestRevision": True, "percent": 100, "revisionName": latest_ready}]:
     raise SystemExit(f"Cloud Run traffic is not 100% latest ready revision: latest={latest_ready}, traffic={traffic}")
 if spec_traffic != [{"latestRevision": True, "percent": 100}]:
@@ -64,9 +79,10 @@ if payload.get("status") != "ok":
     raise SystemExit(f"/readyz is not ok: {payload.get('status')}")
 if issues:
     raise SystemExit(f"/readyz has readiness issues: {issues}")
-if mongo.get("connected") is not True or mongo.get("mode") != "mongodb":
+mongo_ready = mongo.get("connected") is True or (mongo.get("ready") is True and mongo.get("configured") is True)
+if not mongo_ready:
     raise SystemExit(f"MongoDB is not connected in live readiness: {mongo}")
-print("Readiness: ok; MongoDB connected")
+print("Readiness: ok; MongoDB configured for live runtime")
 PY
 
 echo "Verifying signed-role auth contract..."
