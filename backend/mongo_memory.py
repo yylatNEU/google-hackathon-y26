@@ -510,13 +510,18 @@ def _mongodb_uri_summary(uri: str) -> dict[str, Any]:
 def _mongo_connectivity_diagnosis(errors: list[str]) -> dict[str, Any]:
     latest_error = errors[-1] if errors else ""
     normalized = latest_error.lower()
+    cloud_run_egress_ip = os.getenv("PARKPULSE_CLOUD_RUN_EGRESS_IP", "").strip()
     probable_cause = "not_configured"
     next_action = "Set MONGODB_URI in backend/.env or disable Mongo-dependent demo assertions."
     severity = "warning"
 
     if "tlsv1 alert internal error" in normalized or "ssl handshake failed" in normalized:
         probable_cause = "atlas_ip_access_list_or_network_tls_interception"
-        next_action = "Add this machine's public egress IP to the MongoDB Atlas Network Access list, then rerun scripts/repair_mongodb_memory.py."
+        next_action = (
+            f"Add Cloud Run static NAT IP {cloud_run_egress_ip} to the MongoDB Atlas Network Access list, then redeploy."
+            if cloud_run_egress_ip
+            else "Add this runtime's public egress IP to the MongoDB Atlas Network Access list, then rerun scripts/repair_mongodb_memory.py."
+        )
         severity = "critical"
     elif "authentication failed" in normalized or "bad auth" in normalized:
         probable_cause = "invalid_credentials"
@@ -528,7 +533,11 @@ def _mongo_connectivity_diagnosis(errors: list[str]) -> dict[str, Any]:
         severity = "critical"
     elif "serverselectiontimeouterror" in normalized or "timed out" in normalized:
         probable_cause = "network_unreachable_or_cluster_paused"
-        next_action = "Verify Atlas cluster status, network access, and outbound connectivity to port 27017."
+        next_action = (
+            f"Verify Atlas cluster status and allowlist Cloud Run static NAT IP {cloud_run_egress_ip} for outbound MongoDB port 27017."
+            if cloud_run_egress_ip
+            else "Verify Atlas cluster status, network access, and outbound connectivity to port 27017."
+        )
         severity = "critical"
     elif "pymongo is not installed" in normalized:
         probable_cause = "driver_missing"
