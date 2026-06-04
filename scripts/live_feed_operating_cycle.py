@@ -423,6 +423,49 @@ def _quality_blocked_training_status(min_rows: int, case_bank_summary: dict[str,
     }
 
 
+def _apply_case_bank_reward_promotion_guard(actual_training: dict[str, Any], case_bank_summary: dict[str, Any]) -> dict[str, Any]:
+    quality_gate = case_bank_summary.get("quality_gate", {}) if isinstance(case_bank_summary.get("quality_gate"), dict) else {}
+    metrics = quality_gate.get("metrics", {}) if isinstance(quality_gate.get("metrics"), dict) else {}
+    promotion_eligible_count = _safe_int(metrics.get("promotion_eligible_case_count"))
+    average_operational_reward = _safe_float(metrics.get("average_operational_reward_vector_only", metrics.get("average_operational_reward")), 0.0)
+    promotion_blockers = []
+    if promotion_eligible_count <= 0:
+        promotion_blockers.append("No reward-vector cases are promotion eligible.")
+    if average_operational_reward < 0.55:
+        promotion_blockers.append(f"Average operational reward is {average_operational_reward}; promotion requires at least 0.55.")
+    if not promotion_blockers:
+        return actual_training
+
+    guarded = json.loads(json.dumps(actual_training, default=_json_default))
+    model_ops = guarded.setdefault("model_ops", {})
+    if not isinstance(model_ops, dict):
+        guarded["model_ops"] = {}
+        model_ops = guarded["model_ops"]
+    original_gate = model_ops.get("promotion_gate", {}) if isinstance(model_ops.get("promotion_gate"), dict) else {}
+    model_ops["promotion_gate"] = {
+        **original_gate,
+        "status": "hold",
+        "decision": "train_but_do_not_promote_operational_policy",
+        "source": "case_bank_reward_vector_guard",
+        "original_gate": original_gate,
+        "promotion_eligible_case_count": promotion_eligible_count,
+        "average_operational_reward": average_operational_reward,
+        "minimum_operational_reward": 0.55,
+        "blockers": promotion_blockers,
+    }
+    guarded["promotion_guard"] = {
+        "status": "hold",
+        "decision": "train_but_do_not_promote_operational_policy",
+        "blockers": promotion_blockers,
+    }
+    debug = guarded.setdefault("debug", {})
+    if isinstance(debug, dict):
+        issues = debug.setdefault("readiness_issues", [])
+        if isinstance(issues, list):
+            issues.extend(f"Promotion guard: {blocker}" for blocker in promotion_blockers)
+    return guarded
+
+
 def _case_bank_paths(case_bank_dir: Path) -> dict[str, Path]:
     return {
         "index": case_bank_dir / "index.jsonl",
@@ -1041,6 +1084,7 @@ async def _async_main(args: argparse.Namespace) -> int:
         actual_training = _quality_blocked_training_status(args.min_training_rows, case_bank_summary)
     else:
         actual_training = _deferred_training_status(args.min_training_rows, historical_case_count, historical_reward_count)
+    actual_training = _apply_case_bank_reward_promotion_guard(actual_training, case_bank_summary)
     report = _aggregate_report(cycles, actual_training, started_at, case_bank)
     json_path = output_dir / "live-feed-operating-cycle.json"
     html_path = output_dir / "live-feed-operating-cycle.html"
