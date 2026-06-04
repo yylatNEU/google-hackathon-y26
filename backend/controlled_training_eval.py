@@ -338,7 +338,7 @@ def _write_durable_eval(report: dict[str, Any]) -> dict[str, Any]:
     try:
         from mongo_memory import record_controlled_training_eval
 
-        return record_controlled_training_eval(report)
+        return record_controlled_training_eval(_durable_eval_document(report))
     except Exception as error:
         return {"status": "skipped", "mode": "durable_eval_error", "reason": str(error)[:160]}
 
@@ -351,6 +351,42 @@ def _latest_durable_eval() -> dict[str, Any] | None:
     except Exception:
         latest = None
     return latest if isinstance(latest, dict) and latest.get("id") else None
+
+
+def _durable_eval_document(report: dict[str, Any]) -> dict[str, Any]:
+    role_results = report.get("role_results", []) if isinstance(report.get("role_results"), list) else []
+    compact_roles = [
+        {
+            "agent_id": row.get("agent_id"),
+            "status": row.get("status"),
+            "passed": row.get("passed"),
+            "score": row.get("score"),
+            "min_score": row.get("min_score"),
+            "example_count": row.get("example_count"),
+            "failure_reasons": row.get("failure_reasons", [])[:8] if isinstance(row.get("failure_reasons"), list) else [],
+        }
+        for row in role_results
+        if isinstance(row, dict)
+    ]
+    return {
+        "id": report.get("id"),
+        "created_at": report.get("created_at"),
+        "status": report.get("status"),
+        "mode": report.get("mode"),
+        "pack_id": report.get("pack_id"),
+        "summary": report.get("summary") if isinstance(report.get("summary"), dict) else {},
+        "role_results": compact_roles,
+        "readiness_issues": report.get("readiness_issues", [])[:30] if isinstance(report.get("readiness_issues"), list) else [],
+        "decision": report.get("decision"),
+        "training_rule": report.get("training_rule"),
+        "boundaries": report.get("boundaries", [])[:12] if isinstance(report.get("boundaries"), list) else [],
+        "uses_seed_data": report.get("uses_seed_data"),
+        "labels_or_reward_changed": report.get("labels_or_reward_changed"),
+        "llm_used_for_reward_or_label": report.get("llm_used_for_reward_or_label"),
+        "gcp_training_started": report.get("gcp_training_started"),
+        "model_promotion_started": report.get("model_promotion_started"),
+        "durability_contract": "Compact controlled-eval record for cross-instance resilience gates; full local JSON remains best-effort artifact.",
+    }
 
 
 def _artifact_dir() -> str:
