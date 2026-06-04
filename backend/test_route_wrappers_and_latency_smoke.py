@@ -102,6 +102,50 @@ def test_delivery_route_wrappers(monkeypatch):
     assert approval["approval"]["decision"] == "approved"
 
 
+def test_operator_route_wrapper_enforces_signed_role_and_audits_denial(monkeypatch):
+    from park_role_access import sign_role_session
+    from parkpulse_routes.operator_routes import register_operator_routes
+
+    monkeypatch.setenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION", "true")
+    audit_events = []
+
+    fake_audit = types.ModuleType("park_role_access_audit")
+    fake_audit.record_role_access_audit_event = lambda event_type, **kwargs: audit_events.append({"event_type": event_type, **kwargs})
+    monkeypatch.setitem(sys.modules, "park_role_access_audit", fake_audit)
+
+    async def fake_operator_command(request):
+        return {"status": "ok", "message": request.message}
+
+    class OperatorCommandRequest:
+        def __init__(self, **kwargs):
+            self.message = kwargs.get("message", "")
+            self.execute = bool(kwargs.get("execute", False))
+            self.mode = kwargs.get("mode", "auto")
+
+    client = client_for(
+        register_operator_routes,
+        {
+            "park_operator_command": fake_operator_command,
+            "OperatorCommandRequest": OperatorCommandRequest,
+            "park_operator_command_refinement": lambda refinement_id: {"refinement_id": refinement_id},
+            "park_operator_command_stream": lambda **kwargs: {"status": "stream", **kwargs},
+        },
+    )
+
+    blocked = client.post("/api/park/operator-command", headers={"x-parkpulse-role": "ops_team"}, json={"message": "dispatch crowd staff", "execute": True})
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"]["authorization"]["resource"] == "operator_command"
+    assert audit_events[-1]["event_type"] == "mutation_denied"
+    assert audit_events[-1]["capability"] == "dispatch_live_action"
+    assert audit_events[-1]["resource"] == "operator_command"
+
+    token = sign_role_session("unit-test", "ops_team", "parkpulse-local-dev-secret-change-before-production", ttl_seconds=900)
+    allowed = client.post("/api/park/operator-command", headers={"x-parkpulse-role-token": token}, json={"message": "dispatch crowd staff", "execute": True})
+    assert allowed.status_code == 200
+    assert allowed.json()["role_authorization"]["identity"]["authenticated"] is True
+    assert audit_events[-1]["event_type"] == "mutation_allowed"
+
+
 def test_memory_route_wrappers(monkeypatch):
     import bigquery_analytics
     import cache_accuracy_replay
