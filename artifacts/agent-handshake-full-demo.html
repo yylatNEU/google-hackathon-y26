@@ -185,6 +185,13 @@
 
     .card.pad { padding: 16px; }
 
+    .live-spotlight {
+      border-color: rgba(73, 214, 232, .42);
+      background:
+        linear-gradient(180deg, rgba(20, 31, 35, .98), rgba(10, 15, 18, .98));
+      box-shadow: 0 24px 80px rgba(73, 214, 232, .1), 0 18px 50px rgba(0, 0, 0, .28);
+    }
+
     .section-title {
       display: flex;
       justify-content: space-between;
@@ -709,6 +716,9 @@
       display: grid;
       gap: 10px;
       min-height: 430px;
+      max-height: 630px;
+      overflow: auto;
+      scroll-behavior: smooth;
       align-content: start;
     }
 
@@ -730,6 +740,13 @@
     .live-turn.active {
       border-color: rgba(73, 214, 232, .72);
       background: rgba(73, 214, 232, .08);
+      box-shadow: 0 0 0 1px rgba(73, 214, 232, .18) inset, 0 14px 42px rgba(73, 214, 232, .08);
+      animation: liveGlow 1.45s ease-in-out infinite;
+    }
+
+    @keyframes liveGlow {
+      0%, 100% { border-color: rgba(73, 214, 232, .62); }
+      50% { border-color: rgba(131, 227, 119, .78); }
     }
 
     .live-turn-head {
@@ -786,6 +803,13 @@
       margin-top: 10px;
       border-left: 3px solid var(--green);
       padding: 8px 0 8px 10px;
+    }
+
+    .demo-context {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
     }
 
     .live-side {
@@ -895,6 +919,32 @@
     </header>
 
     <main class="shell grid">
+      <section class="card pad live-spotlight">
+        <div class="section-title">
+          <div>
+            <div class="kicker">Live agent exchange</div>
+            <h2>One run, shown as a negotiation</h2>
+            <div class="demo-context">
+              <span class="badge info">default: guest experience</span>
+              <span class="badge">extension: supply chain</span>
+              <span class="badge">proof below</span>
+            </div>
+          </div>
+          <span id="liveBadge" class="badge info">ready</span>
+        </div>
+        <div class="live-demo">
+          <div id="liveConversation" class="live-conversation"></div>
+          <aside class="live-side">
+            <div>
+              <div class="kicker">Progression</div>
+              <h3 id="liveHeadline">Run the agent demo</h3>
+              <p class="section-note" id="liveSubhead">The protocol evidence stays below; this panel shows what the agents actually decided.</p>
+            </div>
+            <div id="liveTimeline"></div>
+          </aside>
+        </div>
+      </section>
+
       <section class="grid main-grid">
         <div class="card stage" aria-label="Agent network visualization">
           <svg viewBox="0 0 900 548" preserveAspectRatio="none" aria-hidden="true">
@@ -966,27 +1016,6 @@
             </div>
             <div id="receiptBox" class="receipt json-box">Run a handshake to issue a receipt.</div>
           </section>
-        </div>
-      </section>
-
-      <section class="card pad">
-        <div class="section-title">
-          <div>
-            <div class="kicker">Live agent exchange</div>
-            <h2>One run, shown as a negotiation</h2>
-          </div>
-          <span id="liveBadge" class="badge info">ready</span>
-        </div>
-        <div class="live-demo">
-          <div id="liveConversation" class="live-conversation"></div>
-          <aside class="live-side">
-            <div>
-              <div class="kicker">Progression</div>
-              <h3 id="liveHeadline">Run the agent demo</h3>
-              <p class="section-note" id="liveSubhead">The protocol evidence stays below; this panel shows what the agents actually decided.</p>
-            </div>
-            <div id="liveTimeline"></div>
-          </aside>
         </div>
       </section>
 
@@ -1552,58 +1581,58 @@
         {
           phase: "Identity",
           title: "External agent asks to speak for the represented party",
-          client: `I am ${input.agentId}. I represent ${input.represents}. I need a bounded session for ${titleize(input.goal)}.`,
-          park: session.identity ? `Verified ${titleize(session.identity.status)} as ${titleize(session.identity.guest_role || "counterparty")} with ${titleize(session.identity.trust_level || "standard")} trust.` : "Waiting to verify agent identity and represented subject.",
-          outcome: consent ? `Consent grant ${consent.grant_id} is signed and revocable.` : "No plan starts until representation is verified."
+          client: `I represent ${input.represents}. My job is to get the best outcome for ${titleize(input.goal)} without overstepping.`,
+          park: session.identity ? `Verified. I can work with this agent as a ${titleize(session.identity.guest_role || "counterparty")} under ${titleize(session.identity.trust_level || "standard")} trust.` : "I need to verify who this agent represents before I plan anything.",
+          outcome: consent ? `A signed consent grant exists and can be revoked. The agent is allowed to negotiate, not take unlimited action.` : "No plan starts until representation is verified."
         },
         {
           phase: "Scope",
           title: "The agents agree on what can and cannot be shared",
-          client: `Can share ${shortList(permissions.client_agent?.can_share, shortList(input.scopes, "declared scopes"))}. Cannot do ${shortList(permissions.client_agent?.cannot_do, shortList(input.cannotDo, "unsafe actions"))}.`,
-          park: `Can offer ${shortList(permissions.park_agent?.can_offer, "route planning, alerts, food recommendations, and gated offers")}.`,
-          outcome: "Payment, refund, medical, identity, and safety-bypass actions remain outside delegated authority."
+          client: `I can share ${shortList(permissions.client_agent?.can_share, shortList(input.scopes, "declared scopes"))}. I cannot do ${shortList(permissions.client_agent?.cannot_do, shortList(input.cannotDo, "unsafe actions"))}.`,
+          park: `I can offer ${shortList(permissions.park_agent?.can_offer, "route planning, alerts, food recommendations, and gated offers")}.`,
+          outcome: "The represented person gets help without giving up payment, refund, medical, identity, or safety control."
         },
         {
           phase: "Intent",
           title: "The client agent turns preference into an objective",
-          client: `Goal: ${titleize(intent.client_agent?.goal || input.goal)}. Constraints: ${compact(intent.client_agent?.constraints || input.constraints, 180)}.`,
-          park: intent.park_agent?.accepted_goal ? `Accepted targets: ${shortList(intent.park_agent.optimization_targets, "low wait, safe, useful")}.` : "Waiting for a goal before proposing.",
-          outcome: "The park optimizes for declared preferences, not a generic itinerary."
+          client: `My user wants ${titleize(intent.client_agent?.goal || input.goal)}. Here are the constraints: ${compact(intent.client_agent?.constraints || input.constraints, 180)}.`,
+          park: intent.park_agent?.accepted_goal ? `I will optimize for ${shortList(intent.park_agent.optimization_targets, "low wait, safe, useful")}.` : "Waiting for a goal before proposing.",
+          outcome: "The plan is personalized before ParkPulse proposes anything."
         },
         {
           phase: "Proposal",
           title: "ParkPulse proposes a bounded plan",
-          client: `Evaluating proposal against time, authority, safety, and user value. Selected alternative: ${selectedAlternative}.`,
-          park: proposal.proposal_id ? `${proposal.proposal_id}: ${planText()}. Confidence ${Math.round(Number(proposal.confidence || 0) * 100)}%.` : `Draft plan: ${planText()}.`,
-          outcome: "The proposal is inspectable before the client agent accepts it."
+          client: `I am comparing the offer against time, safety, authority, and user value. Best option so far: ${selectedAlternative}.`,
+          park: proposal.proposal_id ? `Here is my bounded plan: ${planText()}. Confidence ${Math.round(Number(proposal.confidence || 0) * 100)}%.` : `Draft plan: ${planText()}.`,
+          outcome: "The represented party gets a concrete plan, not a generic API response."
         },
         {
           phase: "Counter",
           title: "The external agent negotiates, not just posts a request",
-          client: counter.counter_request || proposal.countered_from?.counter_request || "Counter for a plan that better fits the represented party.",
-          park: proposal.rationale || "ParkPulse revises the plan while preserving authority boundaries.",
-          outcome: "This is the agent-to-agent value: preferences become tradeoffs, not one-shot API parameters."
+          client: counter.counter_request || proposal.countered_from?.counter_request || "I want a plan that better fits the represented party.",
+          park: proposal.rationale || "I will revise the plan while preserving the authority boundaries.",
+          outcome: "The agent improves the experience through negotiation, not repeated button clicks."
         },
         {
           phase: "Commit",
           title: "The final plan is committed without expanding authority",
-          client: session.commitment?.accepted ? "Accepted. Notify the represented party with the bounded result." : "Waiting for final acceptance.",
-          park: session.commitment?.commitment_id ? `Commitment ${session.commitment.commitment_id} recorded for ${planText()}.` : "No commitment yet.",
-          outcome: monitoring.accepted_resolution || "The run becomes a trackable session once committed."
+          client: session.commitment?.accepted ? "Accepted. Tell my user what changed and what still needs approval." : "Waiting for final acceptance.",
+          park: session.commitment?.commitment_id ? `Committed: ${planText()}.` : "No commitment yet.",
+          outcome: monitoring.accepted_resolution || "The accepted plan becomes a trackable session."
         },
         {
           phase: "Boundary",
           title: "Unsafe or sensitive actions are blocked",
           client: `Probe requested: ${titleize(input.commerceAction)}.`,
           park: blockedPolicyText(),
-          outcome: "The agent can negotiate experience, but cannot silently spend money, release unsafe stock, or share protected data."
+          outcome: "ParkPulse helps the user, but does not silently spend money, release unsafe stock, or share protected data."
         },
         {
           phase: "Receipt",
           title: "The outcome is verifiable and replayable",
           client: verification === "verified" ? "Receipt verified. Notify represented party." : "Waiting for receipt verification.",
           park: state.receipt ? `Receipt ${state.receipt.receipt_id} signed with digest ${String(state.receipt.signature?.sha256 || "").slice(0, 18)}...` : "No receipt issued yet.",
-          outcome: verification === "verified" ? "Judge can inspect the signed outcome instead of trusting the UI." : "Run the demo to issue a receipt."
+          outcome: verification === "verified" ? "The demo ends with evidence the judge can inspect, replay, and verify." : "Run the demo to issue a receipt."
         }
       ];
     }
@@ -1646,6 +1675,14 @@
           <div><strong>${safe(step.phase)}</strong><p>${safe(step.title)}</p></div>
         </div>`;
       }).join("");
+      scrollLiveConversation();
+    }
+
+    function scrollLiveConversation() {
+      const box = $("liveConversation");
+      const active = box?.querySelector(".live-turn.active");
+      if (!box || !active) return;
+      box.scrollTo({ top: Math.max(0, active.offsetTop - box.offsetTop - 10), behavior: "smooth" });
     }
 
     function startLivePlayback() {
