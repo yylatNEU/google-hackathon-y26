@@ -11580,6 +11580,15 @@ async def app(scope, receive, send):
         await _send_json(send, 200, status if isinstance(status, dict) else {"ready": False})
         return
 
+    if method == "GET" and path == "/api/gcp/live-readiness":
+        try:
+            from gcp_live_readiness import build_gcp_live_readiness
+
+            await _send_json(send, 200, build_gcp_live_readiness())
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "gcp_live_readiness", "readiness_issues": [str(error)[:240]]})
+        return
+
     if method in {"GET", "POST"} and path == "/api/park/auth/dev-session":
         if not _dev_role_issuer_enabled():
             await _send_json(
@@ -11807,7 +11816,9 @@ async def app(scope, receive, send):
             employee_message = str(request_payload.get("employee_message") or request_payload.get("employeeMessage") or request_payload.get("message") or "")
             use_llm_guest_raw = request_payload.get("use_llm_guest") if "use_llm_guest" in request_payload else request_payload.get("useLlmGuest")
             use_llm_guest = _truthy(str(use_llm_guest_raw), False) if use_llm_guest_raw is not None else None
-            await _send_json(send, 200, advance_staff_training_turn(session_id, employee_message, use_llm_guest=use_llm_guest))
+            use_shadow_eval_raw = request_payload.get("use_shadow_eval") if "use_shadow_eval" in request_payload else request_payload.get("useShadowEval")
+            use_shadow_eval = _truthy(str(use_shadow_eval_raw), False) if use_shadow_eval_raw is not None else False
+            await _send_json(send, 200, advance_staff_training_turn(session_id, employee_message, use_llm_guest=use_llm_guest, use_shadow_eval=use_shadow_eval))
         except Exception as error:
             await _send_json(send, 200, {"status": "error", "mode": "staff_roleplay_turn", "readiness_issues": [str(error)[:240]]})
         return

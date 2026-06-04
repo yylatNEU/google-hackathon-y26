@@ -4179,6 +4179,12 @@ class OperationalMemory:
             return [_public_doc(row) for row in rows]
         return [_public_doc(row) for row in deepcopy(self._fallback.get(collection_name, [])[:limit])]
 
+    def collection_count(self, collection_name: str) -> int:
+        collection = self._collection(collection_name)
+        if collection is not None:
+            return int(collection.count_documents({}))
+        return len(self._fallback.get(collection_name, []))
+
     def record_experience_studio_memory_event(self, collection_name: str, event: dict[str, Any]) -> dict[str, Any]:
         self._invalidate_dashboard_cache()
         allowed = {
@@ -5004,6 +5010,14 @@ def get_latest_memory_documents_fast(collection_name: str, limit: int = 5) -> li
         return _memory.latest_documents(collection_name, limit)
     except Exception:
         return []
+
+
+def get_memory_collection_count(collection_name: str) -> int:
+    return _safe_memory_call(
+        "mongo.collection_count",
+        lambda: _memory.collection_count(collection_name),
+        lambda error: 0,
+    )
 
 
 def record_experience_studio_memory_event(collection_name: str, event: dict[str, Any]) -> dict[str, Any]:

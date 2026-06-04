@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ParkPulse App Structure and Backend Migration Plan</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1f2933;
+      --muted: #5f6f7f;
+      --line: #d8e0e8;
+      --panel: #ffffff;
+      --band: #f5f8fb;
+      --accent: #0f7b6c;
+      --accent-2: #3d5a80;
+      --warn: #a15c00;
+      --risk: #9f2a38;
+      --good: #116846;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: #f8fafc;
+      line-height: 1.55;
+    }
+
+    header {
+      background: #10232f;
+      color: #fff;
+      padding: 44px 28px 34px;
+    }
+
+    header .wrap,
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(2rem, 5vw, 4rem);
+      line-height: 1.02;
+      letter-spacing: 0;
+      max-width: 980px;
+    }
+
+    .subtitle {
+      margin: 0;
+      max-width: 900px;
+      color: #dce8ef;
+      font-size: 1.05rem;
+    }
+
+    main {
+      padding: 28px;
+    }
+
+    section {
+      margin: 0 0 24px;
+      padding: 24px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 1.35rem;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 22px 0 10px;
+      font-size: 1.05rem;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+      background: #eef3f6;
+      border: 1px solid #dde7ee;
+      border-radius: 4px;
+      padding: 0 4px;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 5px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 999px;
+      color: #e7f2f0;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 0.9rem;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .grid.cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid.cols-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .tile {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: var(--band);
+    }
+
+    .tile h3 {
+      margin-top: 0;
+    }
+
+    .status {
+      display: inline-block;
+      margin-bottom: 8px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .status.good {
+      color: #fff;
+      background: var(--good);
+    }
+
+    .status.warn {
+      color: #fff;
+      background: var(--warn);
+    }
+
+    .status.risk {
+      color: #fff;
+      background: var(--risk);
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(150px, 1fr));
+      gap: 12px;
+      align-items: stretch;
+      margin-top: 18px;
+    }
+
+    .flow-node {
+      position: relative;
+      min-height: 126px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .flow-node::after {
+      content: "->";
+      position: absolute;
+      top: 50%;
+      right: -23px;
+      transform: translateY(-50%);
+      color: var(--accent-2);
+      font-weight: 800;
+      z-index: 1;
+    }
+
+    .flow-node:last-child::after {
+      content: "";
+    }
+
+    .flow-node strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--accent-2);
+    }
+
+    .flow-node span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 0.94rem;
+    }
+
+    th,
+    td {
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #eaf1f6;
+      color: #22313d;
+    }
+
+    ul,
+    ol {
+      margin: 10px 0 0 20px;
+      padding: 0;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: #edf8f5;
+      padding: 14px 16px;
+      border-radius: 6px;
+      margin: 14px 0;
+    }
+
+    .callout.warn {
+      border-color: var(--warn);
+      background: #fff6e7;
+    }
+
+    .callout.risk {
+      border-color: var(--risk);
+      background: #fff0f2;
+    }
+
+    .tree {
+      white-space: pre-wrap;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      background: #111827;
+      color: #e5eef5;
+      border-radius: 8px;
+      padding: 16px;
+      overflow-x: auto;
+      line-height: 1.45;
+      font-size: 0.88rem;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 900px) {
+      main {
+        padding: 16px;
+      }
+
+      section {
+        padding: 18px;
+      }
+
+      .grid.cols-2,
+      .grid.cols-3,
+      .flow {
+        grid-template-columns: 1fr;
+      }
+
+      .flow-node::after {
+        content: "";
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>ParkPulse App Structure and Backend Migration Plan</h1>
+      <p class="subtitle">Current repository analysis, runtime ownership, dataflow pipeline map, migration risks, and a practical sequence for finishing the Spring backend authority shift.</p>
+      <div class="meta">
+        <span class="pill">Generated: 2026-06-04</span>
+        <span class="pill">Workspace: google hackathon y26</span>
+        <span class="pill">Primary goal: Spring owns backend authority</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>Executive Summary</h2>
+      <p>ParkPulse is a hybrid app with a React/Vite frontend, a large FastAPI Python backend, and a newer Java Spring Boot backend that is being promoted as the authoritative backend. The current migration direction is sound: keep SQLite as the shared platform registry, move authority-sensitive routes into Spring, and leave agent intelligence or simulation-heavy Python paths behind the Spring fallback gateway until they are ready.</p>
+      <div class="callout">
+        <strong>Recommended next move:</strong> make the browser and deployment entrypoint prefer Spring, then migrate Dataflow job launch/status control into Spring. This closes the biggest dataflow pipeline gap without forcing an unsafe rewrite of Python agent intelligence.
+      </div>
+      <div class="callout warn">
+        <strong>Wiring issue:</strong> the frontend API discovery currently defaults to <code>http://127.0.0.1:8000</code> and <code>http://127.0.0.1:8017</code>. Spring runs on <code>8010</code> by default, so the app can still talk directly to Python unless <code>VITE_API_URL</code>, <code>NEXT_PUBLIC_API_URL</code>, or same-origin deployment routing points at Spring.
+      </div>
+    </section>
+
+    <section>
+      <h2>Runtime Structure</h2>
+      <div class="flow" aria-label="ParkPulse runtime flow">
+        <div class="flow-node">
+          <strong>Browser UI</strong>
+          <span>React 19 and Vite pages under <code>frontend/src/app</code> and feature modules under <code>frontend/src/features</code>.</span>
+        </div>
+        <div class="flow-node">
+          <strong>API Client</strong>
+          <span><code>frontend/src/lib/api.ts</code> retries configured URLs, signs role sessions, and handles request timeouts.</span>
+        </div>
+        <div class="flow-node">
+          <strong>Spring Backend</strong>
+          <span>Java 21 Spring Boot backend for auth, platform store, trust, handshake, delivery, event ledger, BigQuery export, and fallback gates.</span>
+        </div>
+        <div class="flow-node">
+          <strong>Python Backend</strong>
+          <span>FastAPI monolith for unmigrated park state, agent intelligence, live feeds, digital twin, training, and simulation routes.</span>
+        </div>
+        <div class="flow-node">
+          <strong>Data Systems</strong>
+          <span>SQLite runtime registry, Mongo operational memory, JSONL ledgers, GCP Pub/Sub, Firestore, Workflows, BigQuery, and Dataflow.</span>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Repository Map</h2>
+      <div class="tree">.
+|-- frontend/                    React/Vite UI, API client, Playwright checks
+|   |-- src/app/                 Route-level page wrappers
+|   |-- src/features/            Command center, staff training, labs, experience studio
+|   |-- src/lib/api.ts           API URL selection, role token injection, retry/timeout behavior
+|   `-- package.json             React 19, Vite, TypeScript, ESLint, Playwright
+|
+|-- spring-backend/              Java Spring Boot backend migration target
+|   |-- src/main/java/...        Controllers and services
+|   |-- src/test/java/...        Spring MVC, service, fallback, and event tests
+|   `-- pom.xml                  Java 21, Spring Boot, JDBC, SQLite, Google auth
+|
+|-- backend/                     Legacy and intelligence-heavy Python backend
+|   |-- parkpulse_api.py         FastAPI app with many /api/park routes
+|   |-- parkpulse_routes/        Modular Python routers for memory, delivery, GCP
+|   |-- mongo_memory.py          Operational memory and analytics memory layer
+|   |-- park_*                   Simulation, agents, policy, live feed, eval modules
+|   `-- requirements.txt         FastAPI, Google Cloud clients, Mongo, Arize, pytest
+|
+|-- infra/
+|   |-- dataflow/                Beam/Dataflow stream template scaffold
+|   `-- workflows/               GCP Workflows approval handoff
+|
+|-- docs/                        Architecture, migration, QA, GCP, and contract docs
+`-- scripts/                     Runtime, deploy, smoke, QA, and migration helpers</div>
+    </section>
+
+    <section>
+      <h2>Backend Ownership Matrix</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Area</th>
+            <th>Current owner</th>
+            <th>Status</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Health, readiness, auth status, role session issue</td>
+            <td>Spring</td>
+            <td><span class="status good">Migrated</span></td>
+            <td>Spring verifies signed role session tokens and blocks unsafe production dev issuer defaults.</td>
+          </tr>
+          <tr>
+            <td>SQLite platform registry and safe migration</td>
+            <td>Spring with shared SQLite</td>
+            <td><span class="status good">Migrated</span></td>
+            <td>Shared <code>PARKPULSE_PLATFORM_DB</code> keeps the migration non-destructive and rollback-friendly.</td>
+          </tr>
+          <tr>
+            <td>Agent trust and onboarding</td>
+            <td>Spring</td>
+            <td><span class="status good">Migrated</span></td>
+            <td>Issuer metadata, credential issue/verify/revoke, partners, keys, audit, and certification scoring are Spring-owned.</td>
+          </tr>
+          <tr>
+            <td>Handshake core lifecycle</td>
+            <td>Spring</td>
+            <td><span class="status good">Migrated</span></td>
+            <td>Identity, session readback, capabilities, intent, propose, counter, commit, monitor, receipt, commerce evaluation, and reroute are Spring-owned.</td>
+          </tr>
+          <tr>
+            <td>Handshake demo/eval helpers</td>
+            <td>Python</td>
+            <td><span class="status warn">Partial</span></td>
+            <td>Scenario eval, policy challenges, artifact verification, demo handshakes, policy-check, escalate, and close routes still appear in Python.</td>
+          </tr>
+          <tr>
+            <td>Delivery outbox and external dispatch</td>
+            <td>Spring</td>
+            <td><span class="status good">Migrated</span></td>
+            <td>Guest, worker, equipment, approval, acknowledgement, partner retry, idempotency, and GCP adapter receipts are Spring-owned.</td>
+          </tr>
+          <tr>
+            <td>Canonical event pipeline</td>
+            <td>Spring</td>
+            <td><span class="status good">Migrated</span></td>
+            <td><code>parkpulse.event.v1</code> JSONL ledger, receiver callbacks, Eventarc signal ingestion, and BigQuery insertAll export are implemented behind gates.</td>
+          </tr>
+          <tr>
+            <td>Dataflow job orchestration</td>
+            <td>Infra scaffold plus Spring readiness receipts</td>
+            <td><span class="status warn">Next</span></td>
+            <td>Beam template exists in <code>infra/dataflow</code>, but Spring does not yet launch or monitor Flex Template jobs directly.</td>
+          </tr>
+          <tr>
+            <td>Park state, simulation, action loop, live feed ingestion</td>
+            <td>Python</td>
+            <td><span class="status warn">Legacy authority</span></td>
+            <td>These are broad mutable routes and should move to Spring in smaller route groups only after parity tests exist.</td>
+          </tr>
+          <tr>
+            <td>Agent intelligence, Gemini/Vertex, evals, training</td>
+            <td>Python</td>
+            <td><span class="status warn">Keep for now</span></td>
+            <td>Good candidate for service boundary cleanup, but not the first target for backend authority migration.</td>
+          </tr>
+          <tr>
+            <td>Operational memory</td>
+            <td>Python and MongoDB</td>
+            <td><span class="status warn">Separate subsystem</span></td>
+            <td>Mongo memory should stay behind read/write contracts until Spring needs direct typed access.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Current Backend Setup</h2>
+      <div class="grid cols-3">
+        <div class="tile">
+          <span class="status good">Spring</span>
+          <h3>Authority Layer</h3>
+          <p>Runs with <code>scripts/run_spring_backend.sh</code> on default port <code>8010</code>. It uses Spring Boot, MVC, JDBC, SQLite, Bouncy Castle, and Google auth.</p>
+          <p>It should be the first backend endpoint clients call during migration.</p>
+        </div>
+        <div class="tile">
+          <span class="status warn">Python</span>
+          <h3>Fallback and Intelligence Layer</h3>
+          <p>FastAPI remains available on default port <code>8000</code>. Spring forwards unmigrated <code>/api/**</code> and <code>/readyz/deep</code> requests through a controlled proxy.</p>
+          <p>This keeps development moving while route groups migrate one at a time.</p>
+        </div>
+        <div class="tile">
+          <span class="status warn">Frontend</span>
+          <h3>Client Entry Path</h3>
+          <p>The API client supports configured URLs and role tokens, but local defaults still point at Python-oriented ports. This should be adjusted once Spring is the desired local gateway.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Dataflow Pipeline Analysis</h2>
+      <p>The dataflow pipeline is moving in the right direction: Spring now records canonical events, mirrors dispatch/ack/approval/partner callback state, and can export event rows into BigQuery. That gives the platform a single authoritative event schema for analytics and model feedback.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Pipeline step</th>
+            <th>Implementation</th>
+            <th>Upgrade need</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Dispatch/action creation</td>
+            <td>Spring delivery outbox</td>
+            <td>Keep Spring-owned. Continue adding parity tests when replacing Python routes.</td>
+          </tr>
+          <tr>
+            <td>Event envelope</td>
+            <td>Spring <code>EventPipelineService</code></td>
+            <td>Stable enough for downstream analytics. Keep schema versioned.</td>
+          </tr>
+          <tr>
+            <td>Durable local ledger</td>
+            <td>JSONL ledger under runtime path</td>
+            <td>Acceptable for current app. Add retention/rotation before heavy production traffic.</td>
+          </tr>
+          <tr>
+            <td>BigQuery analytics sink</td>
+            <td>Spring REST insertAll behind explicit env gates</td>
+            <td>Good for event export. Add dead-letter accounting if live BigQuery failures increase.</td>
+          </tr>
+          <tr>
+            <td>Pub/Sub and Eventarc</td>
+            <td>Spring adapter receipts and callback route</td>
+            <td>Keep env-gated. Add authenticated Eventarc validation before production exposure.</td>
+          </tr>
+          <tr>
+            <td>Dataflow stream processing</td>
+            <td>Python Beam template scaffold in <code>infra/dataflow</code></td>
+            <td>Next upgrade: Spring-controlled launch/status for Dataflow Flex Templates.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Risk and Gating Analysis</h2>
+      <div class="grid cols-2">
+        <div class="tile">
+          <span class="status good">Strong</span>
+          <h3>Authority Gates Already Present</h3>
+          <ul>
+            <li>Spring-owned route fallback gate blocks accidental Python handling for migrated routes.</li>
+            <li>Delivery creation requires role capability and policy-gate/tool-executor boundaries.</li>
+            <li>Live GCP adapters require explicit environment gates, project config, and credentials.</li>
+            <li>Receiver callbacks can require <code>x-parkpulse-receiver-token</code>.</li>
+          </ul>
+        </div>
+        <div class="tile">
+          <span class="status risk">Needs Attention</span>
+          <h3>Gating Gaps</h3>
+          <ul>
+            <li>Frontend can still call Python first in local defaults.</li>
+            <li>Catch-all fallback remains broad, so unmigrated mutable routes need inventory and ownership labels.</li>
+            <li>Some old Python handshake helper routes remain reachable unless they are deliberately kept as demo-only.</li>
+            <li>Dataflow job control lacks a Spring admin gate because it has not been implemented yet.</li>
+          </ul>
+        </div>
+        <div class="tile">
+          <span class="status good">Efficient</span>
+          <h3>Efficiency Wins</h3>
+          <ul>
+            <li>Spring reduces Python hot-path pressure for trust, delivery, event, and gateway paths.</li>
+            <li>SQLite remains enough for the platform registry and local authority records.</li>
+            <li>JSONL ledgers keep migration simple and audit-friendly.</li>
+          </ul>
+        </div>
+        <div class="tile">
+          <span class="status warn">Watch</span>
+          <h3>Efficiency Risks</h3>
+          <ul>
+            <li>Python monolith still imports many heavy modules at API startup.</li>
+            <li>Frontend retries multiple API bases, which can add latency when the preferred backend is not first.</li>
+            <li>Local JSONL ledgers need rotation/compaction if event volume grows.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Migration Plan</h2>
+      <ol>
+        <li><strong>Make Spring the visible app gateway.</strong> Add <code>http://127.0.0.1:8010</code> to local frontend API defaults, or set <code>VITE_API_URL</code> and deployment routing so browser calls hit Spring first.</li>
+        <li><strong>Add Spring Dataflow job control.</strong> Implement a gated <code>DataflowJobLauncherService</code> with Flex Template launch/status routes, fake-server tests, env gates, and fallback ownership blocks.</li>
+        <li><strong>Inventory remaining Python mutable routes.</strong> Label each route as keep-in-Python, migrate-to-Spring, or demo-only. Prioritize state mutation, action, live feed load, and review decision routes.</li>
+        <li><strong>Migrate park state read models next.</strong> Move low-risk read routes such as state-lite, live-summary, scenarios, integration status, and monitoring summaries before mutating routes.</li>
+        <li><strong>Migrate action and live feed write paths only with parity gates.</strong> For each route group, require response parity, auth parity, idempotency, audit receipt, rollback path, and load smoke tests.</li>
+        <li><strong>Keep AI reasoning services behind contracts.</strong> Do not rewrite Gemini, Vertex, Mongo memory, and digital twin internals until the Spring contract boundary is stable.</li>
+        <li><strong>Harden ledgers for production volume.</strong> Add JSONL rotation, replay checkpoints, dead-letter rows, and dashboardable export failure counters.</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Immediate Engineering Tickets</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Priority</th>
+            <th>Ticket</th>
+            <th>Files likely touched</th>
+            <th>Acceptance check</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>P0</td>
+            <td>Point frontend local API discovery at Spring first.</td>
+            <td><code>frontend/src/lib/api.ts</code>, frontend runtime env docs</td>
+            <td>Local browser calls reach <code>8010</code> first, and Spring fallback handles unmigrated Python routes.</td>
+          </tr>
+          <tr>
+            <td>P0</td>
+            <td>Add Spring Dataflow launch/status admin routes.</td>
+            <td><code>spring-backend/src/main/java/com/parkpulse/backend</code>, Spring tests, migration docs</td>
+            <td>Tests prove disabled-by-default behavior, fake launch success, auth gating, and fallback gate coverage.</td>
+          </tr>
+          <tr>
+            <td>P1</td>
+            <td>Document and gate legacy handshake demo/helper routes.</td>
+            <td><code>backend/parkpulse_api.py</code>, Spring fallback route set, docs</td>
+            <td>Core handshake cannot bypass Spring; demo/eval routes are explicitly marked non-authoritative.</td>
+          </tr>
+          <tr>
+            <td>P1</td>
+            <td>Create a route ownership manifest.</td>
+            <td><code>docs/</code>, optional generated JSON manifest</td>
+            <td>Every <code>/api/park</code> route has owner, risk level, auth capability, fallback behavior, and migration target.</td>
+          </tr>
+          <tr>
+            <td>P2</td>
+            <td>Add ledger rotation and export dead-letter accounting.</td>
+            <td>Spring event and delivery services</td>
+            <td>High-volume event writes do not create unbounded local files without operational visibility.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Go/No-Go View</h2>
+      <div class="callout warn">
+        <strong>Recommendation:</strong> go with conditions for continued demo and staged migration. The core migration pattern is correct, but production authority should wait until frontend routing prefers Spring and Dataflow launch/status is gated in Spring.
+      </div>
+      <ul>
+        <li><strong>Go:</strong> SQLite remains enough for the current app platform registry and migration ledger needs.</li>
+        <li><strong>Go:</strong> Spring is a better authority layer than FastAPI for durable backend contracts, route gating, typed service boundaries, and long-lived operational APIs.</li>
+        <li><strong>Condition:</strong> make Spring the first backend endpoint from the frontend and deployment ingress.</li>
+        <li><strong>Condition:</strong> close the Dataflow orchestration gap before calling the dataflow pipeline fully Spring-owned.</li>
+        <li><strong>Condition:</strong> keep Python AI modules behind contracts rather than migrating them all at once.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Source Files Used</h2>
+      <p class="small">This report was generated from repository inspection of these primary files:</p>
+      <ul>
+        <li><code>frontend/src/lib/api.ts</code></li>
+        <li><code>frontend/src/vite-main.tsx</code></li>
+        <li><code>frontend/package.json</code></li>
+        <li><code>spring-backend/pom.xml</code></li>
+        <li><code>spring-backend/src/main/java/com/parkpulse/backend/*Controller.java</code></li>
+        <li><code>spring-backend/src/main/java/com/parkpulse/backend/PythonFallbackProxyService.java</code></li>
+        <li><code>backend/parkpulse_api.py</code></li>
+        <li><code>backend/requirements.txt</code></li>
+        <li><code>infra/dataflow/README.md</code></li>
+        <li><code>docs/java-spring-continuous-migration.md</code></li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

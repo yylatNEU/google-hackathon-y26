@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ParkPulse Staff Roleplay Trainer Plan</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #071013;
+      --panel: #0e1a1f;
+      --panel-2: #13232a;
+      --line: #29434c;
+      --text: #eef7f8;
+      --muted: #9eb3ba;
+      --teal: #50e3c2;
+      --amber: #f3c969;
+      --rose: #ff7d8a;
+      --green: #87e09a;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 40px 24px 56px;
+    }
+
+    header {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 24px;
+      margin-bottom: 28px;
+    }
+
+    .eyebrow {
+      color: var(--teal);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 8px 0 10px;
+      font-size: clamp(34px, 5vw, 62px);
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin: 0 0 14px;
+      font-size: 22px;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 0 0 8px;
+      font-size: 15px;
+      letter-spacing: 0;
+      text-transform: uppercase;
+      color: var(--teal);
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .summary {
+      max-width: 780px;
+      font-size: 18px;
+      color: #cfe1e5;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .grid.cols-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .grid.cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    section {
+      margin-top: 28px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 18px;
+    }
+
+    .metric {
+      font-size: 34px;
+      line-height: 1;
+      font-weight: 900;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .pill {
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      border-radius: 999px;
+      padding: 6px 10px;
+      color: #d6e5e8;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .step {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 14px;
+      min-height: 132px;
+    }
+
+    .step-number {
+      color: var(--amber);
+      font-weight: 900;
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+
+    ul {
+      margin: 10px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--panel-2);
+      color: var(--text);
+      font-size: 12px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    td {
+      color: var(--muted);
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .status {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .done {
+      background: rgba(135, 224, 154, .15);
+      color: var(--green);
+      border: 1px solid rgba(135, 224, 154, .35);
+    }
+
+    .next {
+      background: rgba(243, 201, 105, .14);
+      color: var(--amber);
+      border: 1px solid rgba(243, 201, 105, .35);
+    }
+
+    .risk {
+      background: rgba(255, 125, 138, .12);
+      color: var(--rose);
+      border: 1px solid rgba(255, 125, 138, .35);
+    }
+
+    .callout {
+      border-left: 4px solid var(--teal);
+      background: rgba(80, 227, 194, .08);
+      padding: 16px;
+      border-radius: 8px;
+      color: #d8f8f2;
+    }
+
+    @media (max-width: 900px) {
+      .grid.cols-3,
+      .grid.cols-2,
+      .flow {
+        grid-template-columns: 1fr;
+      }
+
+      main {
+        padding: 28px 16px 40px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">ParkPulse staff training</div>
+      <h1>Roleplay Trainer Implementation Plan</h1>
+      <p class="summary">
+        Build a governed staff-training simulator where Vertex AI plays realistic guests, deterministic policy scoring grades employee responses, and manager review uses golden evals to keep the rubric calibrated.
+      </p>
+      <div class="pill-row">
+        <span class="pill">Vertex AI guest simulator</span>
+        <span class="pill">Deterministic scoring authority</span>
+        <span class="pill">40-case golden eval</span>
+        <span class="pill">No live dispatch</span>
+        <span class="pill">No reward-model labels</span>
+      </div>
+    </header>
+
+    <section class="grid cols-3">
+      <div class="card">
+        <div class="metric">10</div>
+        <div class="label">Training scenarios</div>
+      </div>
+      <div class="card">
+        <div class="metric">40</div>
+        <div class="label">Golden scoring cases</div>
+      </div>
+      <div class="card">
+        <div class="metric">7</div>
+        <div class="label">Rubric dimensions</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Operating Model</h2>
+      <div class="flow">
+        <div class="step">
+          <div class="step-number">01</div>
+          <h3>Scenario</h3>
+          <p>Employee chooses a guest-interaction scenario such as lost child, refund request, accessibility support, or safety-rule refusal.</p>
+        </div>
+        <div class="step">
+          <div class="step-number">02</div>
+          <h3>Guest Turn</h3>
+          <p>Vertex AI generates the next guest reply only. It cannot score, approve refunds, dispatch work, or reveal rubric details.</p>
+        </div>
+        <div class="step">
+          <div class="step-number">03</div>
+          <h3>Employee Reply</h3>
+          <p>The trainee responds in natural language, practicing empathy, clarity, safety, policy handling, and escalation judgment.</p>
+        </div>
+        <div class="step">
+          <div class="step-number">04</div>
+          <h3>Scoring</h3>
+          <p>The deterministic backend rubric scores the response and caps critical misses where safety or escalation is absent.</p>
+        </div>
+        <div class="step">
+          <div class="step-number">05</div>
+          <h3>Coaching</h3>
+          <p>The app shows what worked, what to fix, weak dimensions, and a recommended next response for practice.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid cols-2">
+      <div class="card">
+        <h2>Backend Contracts</h2>
+        <ul>
+          <li>Vertex transport must be <strong>vertex_ai_rest</strong> when Vertex mode is configured.</li>
+          <li>LLM guest generation must return or fall back inside the hard timeout budget.</li>
+          <li>Official score is deterministic and never controlled by Vertex output.</li>
+          <li>Golden eval endpoint must pass all calibration cases before scoring changes ship.</li>
+          <li>Training data stays simulated and never feeds live operations or reward labels.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h2>Current Validation</h2>
+        <ul>
+          <li>Focused backend tests: passing.</li>
+          <li>Golden eval: 40 / 40 passing.</li>
+          <li>Live Vertex probe: generated via Vertex AI REST.</li>
+          <li>Scenario matrix: all sample good responses pass or strong.</li>
+          <li>Frontend route: /staff-training using backend :8017.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <h2>Build Plan</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Phase</th>
+            <th>Status</th>
+            <th>Scope</th>
+            <th>Exit Criteria</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1. Core Roleplay</td>
+            <td><span class="status done">Done</span></td>
+            <td>Scenario catalog, session start, employee turn, guest follow-up, deterministic scoring.</td>
+            <td>Start roleplay works, response box unlocks, scoring returns without hangs.</td>
+          </tr>
+          <tr>
+            <td>2. Vertex Integration</td>
+            <td><span class="status done">Done</span></td>
+            <td>Vertex AI REST guest generation, provider status, hard timeout fallback.</td>
+            <td>Live payload reports vertex_ai_rest and llm_controls_score false.</td>
+          </tr>
+          <tr>
+            <td>3. Scoring Calibration</td>
+            <td><span class="status done">Done</span></td>
+            <td>Golden response fixtures for bad, partial, passing, excellent bands.</td>
+            <td>/api/park/staff-training/golden-eval returns pass with zero failures.</td>
+          </tr>
+          <tr>
+            <td>4. Manager Review</td>
+            <td><span class="status next">Next</span></td>
+            <td>Expose golden eval summary and recent trainee readiness in the manager tab.</td>
+            <td>Manager can see scoring health, readiness holds, and retry recommendations.</td>
+          </tr>
+          <tr>
+            <td>5. Multi-Turn Mastery</td>
+            <td><span class="status next">Next</span></td>
+            <td>Track whether a trainee repairs missed safety, escalation, or clarity signals across turns.</td>
+            <td>Debrief distinguishes one good reply from sustained scenario control.</td>
+          </tr>
+          <tr>
+            <td>6. Shadow Evaluator</td>
+            <td><span class="status next">Next</span></td>
+            <td>Add optional LLM-as-judge commentary for rubric disagreements without score authority.</td>
+            <td>Shadow evaluator can explain drift, but deterministic score remains official.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="grid cols-2">
+      <div class="card">
+        <h2>API Surface</h2>
+        <ul>
+          <li><strong>GET</strong> /api/park/staff-training/scenarios</li>
+          <li><strong>GET</strong> /api/park/staff-training/policy-pack</li>
+          <li><strong>GET</strong> /api/park/staff-training/golden-eval</li>
+          <li><strong>POST</strong> /api/park/staff-training/sessions</li>
+          <li><strong>POST</strong> /api/park/staff-training/turn</li>
+          <li><strong>POST</strong> /api/park/staff-training/finish</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h2>Risks To Watch</h2>
+        <ul>
+          <li>Keyword scoring can still miss nuanced but policy-correct language.</li>
+          <li>Golden fixtures need real trainer review before production use.</li>
+          <li>Vertex latency must stay bounded with visible fallback status.</li>
+          <li>Manager sign-off should not be automated solely from simulated scores.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <div class="callout">
+        <strong>Recommended next action:</strong>
+        wire the manager tab to the golden-eval endpoint and show a compact scoring-health panel before live-shadowing readiness. This makes the trainer auditable instead of just interactive.
+      </div>
+    </section>
+  </main>
+</body>
+</html>

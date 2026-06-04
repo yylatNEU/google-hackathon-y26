@@ -103,6 +103,45 @@ STUDIO_LAYER_AGENTS = [
 ]
 _STORE_LOCK = threading.Lock()
 
+STUDIO_CORE_PRESET: dict[str, Any] = {
+    "id": "parkpulse_experience_studio_core_v1",
+    "version": "2026-06-04",
+    "mission": "Help park experience teams design guest journeys, story, signage, scripts, and channel copy that feel imaginative while staying grounded in approved venue facts.",
+    "coreValues": [
+        "Guest comfort before novelty.",
+        "Accessibility and sensory care by default.",
+        "Family-safe imagination without fear, shame, or pressure.",
+        "Operational humility: never imply live control, availability, staffing, safety clearance, or dispatch authority.",
+        "Source-grounded specificity: use real venue names and facts, or say what input is missing.",
+        "Reviewable craft: produce work that creative, accessibility, safety, and channel owners can inspect.",
+    ],
+    "creativePrinciples": [
+        "Use story to reduce uncertainty, not to obscure instructions.",
+        "Make every stop earn its place with a guest purpose, emotional beat, staff cue, and accessibility note.",
+        "Give guests optionality: a route should invite, not force.",
+        "Prefer concrete sensory and pacing language over generic excitement.",
+        "Separate guest-facing copy from internal staff notes and operational review items.",
+        "Keep rewards, character appearances, shortcuts, and access claims reviewable until owners approve them.",
+    ],
+    "reasoningPriorities": [
+        "1. Protect source integrity and policy boundaries.",
+        "2. Fit the target audience and visit context.",
+        "3. Improve comfort, clarity, and accessibility.",
+        "4. Build a coherent story arc across verified stops.",
+        "5. Produce channel-ready copy with explicit review questions.",
+    ],
+    "voiceDefaults": [
+        "Clear, warm, practical, and lightly themed.",
+        "Confident about experience design, cautious about operations.",
+        "Specific enough for production review; never falsely certain about live park conditions.",
+    ],
+    "antiPatterns": [
+        "Do not invent attractions, zones, characters, rewards, wait times, discounts, weather, crowd levels, or accessibility facts.",
+        "Do not use fear, urgency, guilt, or exclusion as creative pressure.",
+        "Do not turn a creative route into dispatch, crowd-control, safety, or live-publishing instruction.",
+    ],
+}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -186,14 +225,28 @@ def _latest_studio_memory(collection: str, limit: int) -> list[dict[str, Any]]:
         return []
 
 
+def _studio_memory_count(collection: str) -> int:
+    try:
+        from mongo_memory import get_memory_collection_count
+
+        return get_memory_collection_count(collection)
+    except Exception:
+        return 0
+
+
 def _memory_learning_policy() -> dict[str, Any]:
     return {
         "primaryMemory": "mongodb",
         "analyticsMirror": "gcp_bigquery_later",
-        "rule": "Generated copy is evidence, not learning truth. Promote learning only from human review, approved drafts, rejected reasons, edited-before-approval diffs, or measured outcomes.",
+        "rule": "Experience Studio does not run an automatic feedback loop. Generated copy, saved drafts, and reviews are audit receipts; the LLM is guided by the preset Studio Core and the approved Venue Profile.",
+        "presetCoreId": STUDIO_CORE_PRESET["id"],
         "generatedTextLearningEligible": False,
-        "humanFeedbackLearningEligible": True,
+        "humanFeedbackLearningEligible": False,
     }
+
+
+def _studio_core_preset() -> dict[str, Any]:
+    return json.loads(json.dumps(STUDIO_CORE_PRESET, default=str))
 
 
 def _generation_memory_event(payload: dict[str, Any], draft: dict[str, Any], llm: dict[str, Any], venue_experience_data: dict[str, Any] | None) -> dict[str, Any]:
@@ -205,6 +258,7 @@ def _generation_memory_event(payload: dict[str, Any], draft: dict[str, Any], llm
         "templateId": payload.get("templateId") or payload.get("template"),
         "audience": draft.get("audience"),
         "creativeBrief": creative_brief,
+        "studioCore": draft.get("studioCore") if isinstance(draft.get("studioCore"), dict) else _studio_core_preset(),
         "llm": llm,
         "route": _route_summary(draft),
         "sourceIntegrity": {
@@ -243,7 +297,7 @@ def list_experience_studio_memory(limit: int = 20) -> dict[str, Any]:
         "learningPolicy": _memory_learning_policy(),
         "collections": collections,
         "latestReceipts": receipts[:safe_limit],
-        "collectionCounts": {name: len(rows) for name, rows in collections.items()},
+        "collectionCounts": {name: _studio_memory_count(name) for name in EXPERIENCE_STUDIO_MEMORY_COLLECTIONS},
     }
 
 
@@ -342,6 +396,7 @@ def studio_layer_contract() -> dict[str, Any]:
                 "authority": ["draft_artifacts", "review_artifacts", "save_versions", "prepare_handoff"],
             },
         },
+        "studioCore": _studio_core_preset(),
         "boundary": {
             "experience_studio_can": ["draft_route", "draft_copy", "review_brand_fit", "review_accessibility", "mark_publish_readiness"],
             "experience_studio_cannot": ["dispatch_staff", "change_queue", "publish_guest_message", "override_safety_policy", "alter_live_operations"],
@@ -444,8 +499,8 @@ def update_experience_studio_draft_status(draft_id: str, payload: dict[str, Any]
                     "actor": payload.get("actor") or "experience_reviewer",
                     "note": _text(payload.get("note"), f"Moved to {next_status}."),
                     "templateId": record.get("templateId"),
-                    "learningEligible": next_status in {"approved", "needs_changes"},
-                    "learningSource": "human_review_status",
+                    "learningEligible": False,
+                    "learningSource": "human_review_receipt_only",
                     "learningPolicy": _memory_learning_policy(),
                 },
             )
@@ -709,8 +764,8 @@ def update_experience_studio_handoff_status(handoff_id: str, payload: dict[str, 
                         "reviewStatus": next_status,
                         "actor": payload.get("actor") or "command_center",
                         "note": handoff["commandCenterNote"],
-                        "learningEligible": next_status in {"accepted_for_channel_owner_review", "held_for_operations_changes", "blocked"},
-                        "learningSource": "command_center_review",
+                        "learningEligible": False,
+                        "learningSource": "command_center_review_receipt_only",
                         "learningPolicy": _memory_learning_policy(),
                     },
                 )
@@ -1149,6 +1204,7 @@ def _kid_quest_story(stop: str, index: int, stage: str, audience: str, detail: d
 def _draft_reasoning_trace(template_id: str, route_names: list[str], real_inputs: dict[str, Any], creative_brief: dict[str, str], llm_status: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     intelligence = _profile_intelligence(real_inputs)
     rules = _experience_rules(real_inputs)
+    studio_core = _studio_core_preset()
     return [
         {
             "step": "brief_interpretation",
@@ -1158,6 +1214,16 @@ def _draft_reasoning_trace(template_id: str, route_names: list[str], real_inputs
                 "walkingPace": creative_brief.get("walkingPace"),
                 "outputPackage": creative_brief.get("outputPackage"),
                 "seasonalTheme": creative_brief.get("seasonalTheme"),
+            },
+        },
+        {
+            "step": "studio_core_preset",
+            "summary": "The draft uses a fixed Studio Core preset before LLM polish: guest comfort, accessibility, family-safe imagination, operational humility, source-grounded specificity, and reviewable craft.",
+            "inputs": {
+                "presetId": studio_core.get("id"),
+                "version": studio_core.get("version"),
+                "coreValues": studio_core.get("coreValues", []),
+                "reasoningPriorities": studio_core.get("reasoningPriorities", []),
             },
         },
         {
@@ -1219,7 +1285,9 @@ def _llm_creative_prompt(payload: dict[str, Any], state_context: dict[str, Any],
     return {
         "task": "Improve a ParkPulse Experience Studio draft as a creative reasoning pass after verified route selection.",
         "return_only_json": True,
+        "studio_core_preset": _studio_core_preset(),
         "hard_constraints": [
+            "Apply the Studio Core preset before style choices.",
             "Keep the exact stop names, stop count, and stop order.",
             "Only rewrite purpose, guestCopy, staffNote, message copy, creative_rationale, and review_questions.",
             "Do not invent places, characters, live availability, wait times, weather, staffing, safety instructions, discounts, guarantees, or access-lane claims.",
@@ -1399,6 +1467,7 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
         "title": template["label"],
         "audience": audience,
         "intent": template["intent"],
+        "studioCore": _studio_core_preset(),
         "creativeBrief": {
             **creative_brief,
             "tone": tone,
@@ -1539,6 +1608,7 @@ def _prompt(payload: dict[str, Any], state_context: dict[str, Any], fallback_dra
     return json.dumps(
         {
             "task": "Create a ParkPulse Experience Studio creative draft. This is content and guest journey design, not live operations.",
+            "studio_core_preset": _studio_core_preset(),
             "data_integrity": "No seed data. Do not invent park locations, attraction names, staff positions, wait times, weather, availability, or channel owner facts. Use placeholders when real inputs are missing.",
             "control_boundary": {
                 "llm_control_authority": False,
@@ -1627,6 +1697,7 @@ async def build_experience_studio_payload(payload: dict[str, Any], state: dict[s
         "prompt": prompt,
         "creativePrompt": creative_prompt,
         "llm": llm,
+        "studioCore": _studio_core_preset(),
         "sourceContext": state_context,
         "memoryPersistence": memory_persistence,
         "sourceIntegrity": {

@@ -31,10 +31,14 @@ def test_generation_writes_evidence_only_memory_receipt(monkeypatch, tmp_path):
     memory = result["memoryPersistence"]
     assert memory["status"] == "stored"
     assert memory["collection"] == "experience_studio_generation_runs"
+    assert result["studioCore"]["id"] == "parkpulse_experience_studio_core_v1"
+    assert result["draft"]["studioCore"]["coreValues"]
+    assert result["creativePrompt"]["studio_core_preset"]["id"] == "parkpulse_experience_studio_core_v1"
     assert result["draft"]["sourceIntegrity"]["usesSeedData"] is False
     rows = mongo_memory.get_latest_memory_documents_fast("experience_studio_generation_runs", 5)
     assert rows
     assert rows[0]["eventType"] == "generation_run"
+    assert rows[0]["studioCore"]["id"] == "parkpulse_experience_studio_core_v1"
     assert rows[0]["learningEligible"] is False
     assert rows[0]["learningSource"] == "generation_receipt_only"
 
@@ -69,10 +73,12 @@ def test_saved_draft_and_human_review_write_studio_memory(monkeypatch, tmp_path)
     feedback_rows = mongo_memory.get_latest_memory_documents_fast("experience_studio_feedback", 5)
     assert feedback_rows
     assert feedback_rows[0]["eventType"] == "draft_status_review"
-    assert feedback_rows[0]["learningEligible"] is True
-    assert feedback_rows[0]["learningSource"] == "human_review_status"
+    assert feedback_rows[0]["learningEligible"] is False
+    assert feedback_rows[0]["learningSource"] == "human_review_receipt_only"
+    assert feedback_rows[0]["learningPolicy"]["humanFeedbackLearningEligible"] is False
 
     memory = experience_studio.list_experience_studio_memory(limit=5)
     assert memory["status"] == "ready"
+    assert memory["learningPolicy"]["presetCoreId"] == "parkpulse_experience_studio_core_v1"
     assert memory["collectionCounts"]["experience_studio_drafts"] >= 1
     assert memory["collectionCounts"]["experience_studio_feedback"] >= 1

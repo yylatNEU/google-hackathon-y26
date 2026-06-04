@@ -52,6 +52,11 @@ def _source_run_json(row: dict[str, Any]) -> Path | None:
 
 def _measurement_row(measurement: dict[str, Any]) -> dict[str, Any]:
     reward_layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
+    controlled_effect_projection = (
+        measurement.get("controlled_effect_projection", {})
+        if isinstance(measurement.get("controlled_effect_projection"), dict)
+        else {}
+    )
     return {
         "status": measurement.get("status"),
         "attribution_confidence": measurement.get("attribution_confidence"),
@@ -60,6 +65,7 @@ def _measurement_row(measurement: dict[str, Any]) -> dict[str, Any]:
         "eligible_for_reward": measurement.get("eligible_for_reward"),
         "promotion_eligible": measurement.get("promotion_eligible"),
         "reward_layers": reward_layers,
+        "controlled_effect_projection": controlled_effect_projection,
     }
 
 
@@ -68,6 +74,7 @@ def migrate_case_bank_reward_vectors(
     *,
     update_run_json: bool,
     dry_run: bool,
+    force_recompute: bool,
     min_training_rows: int,
     min_issue_kinds: int,
     min_targets: int,
@@ -81,7 +88,7 @@ def migrate_case_bank_reward_vectors(
     now = _now_iso()
 
     for row in rows:
-        if _has_reward_vector(row):
+        if _has_reward_vector(row) and not force_recompute:
             migrated_rows.append(row)
             skipped_rows.append({"case_id": row.get("case_id"), "reason": "already_reward_vector"})
             continue
@@ -154,6 +161,7 @@ def migrate_case_bank_reward_vectors(
         "migrated_count": changed,
         "skipped_count": len(skipped_rows),
         "update_run_json": update_run_json,
+        "force_recompute": force_recompute,
         "backup_paths": backup_paths,
         "summary": summary,
         "skipped_rows": skipped_rows[:25],
@@ -164,6 +172,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Backfill reward-vector measurements for existing live-feed case-bank rows from saved run JSON.")
     parser.add_argument("--case-bank-dir", default=str(REPO_ROOT / "output/qa/live-feed-case-bank"))
     parser.add_argument("--update-run-json", action="store_true", help="Also update each saved live-feed run JSON with the recomputed reward-vector measurement.")
+    parser.add_argument("--force-recompute", action="store_true", help="Recompute rows that already have reward vectors.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--min-training-rows", type=int, default=50)
     parser.add_argument("--min-issue-kinds", type=int, default=12)
@@ -175,6 +184,7 @@ def main() -> int:
         Path(args.case_bank_dir),
         update_run_json=args.update_run_json,
         dry_run=args.dry_run,
+        force_recompute=args.force_recompute,
         min_training_rows=args.min_training_rows,
         min_issue_kinds=args.min_issue_kinds,
         min_targets=args.min_targets,

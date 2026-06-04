@@ -142,6 +142,7 @@ type ExperienceDraft = {
   title: string;
   audience: string;
   intent: string;
+  studioCore?: StudioCore;
   creativeBrief?: {
     creativeDirection?: string;
     storyArc?: string;
@@ -187,10 +188,22 @@ type ExperienceDraft = {
   };
 };
 
+type StudioCore = {
+  id?: string;
+  version?: string;
+  mission?: string;
+  coreValues?: string[];
+  creativePrinciples?: string[];
+  reasoningPriorities?: string[];
+  voiceDefaults?: string[];
+  antiPatterns?: string[];
+};
+
 type DraftPayload = {
   status?: string;
   mode?: string;
   draft?: ExperienceDraft;
+  studioCore?: StudioCore;
   llm?: {
     status?: string;
     error?: string;
@@ -242,6 +255,43 @@ type HandoffPackage = {
   channels?: Array<{ id: string; label: string; owner: string; artifact: unknown }>;
 };
 
+type StudioMemoryReceipt = {
+  _id?: string;
+  id?: string;
+  eventType?: string;
+  collection?: string;
+  memoryId?: string | null;
+  status?: string;
+  mode?: string;
+  connected?: boolean;
+  draftId?: string;
+  handoffId?: string;
+  reviewStatus?: string;
+  learningEligible?: boolean;
+  learningSource?: string;
+  title?: string;
+  templateId?: string;
+  updatedAt?: string;
+  createdAt?: string;
+};
+
+type StudioMemoryPayload = {
+  status?: string;
+  mode?: string;
+  memoryLayer?: string;
+  learningPolicy?: {
+    primaryMemory?: string;
+    analyticsMirror?: string;
+    rule?: string;
+    presetCoreId?: string;
+    generatedTextLearningEligible?: boolean;
+    humanFeedbackLearningEligible?: boolean;
+  };
+  collectionCounts?: Record<string, number>;
+  collections?: Record<string, StudioMemoryReceipt[]>;
+  latestReceipts?: StudioMemoryReceipt[];
+};
+
 const draftTemplates: Array<{ id: ExperienceTemplateId; label: string; audience: string; tone: string; detail: string }> = [
   { id: "halloween-route", label: "Halloween route", audience: "families with older kids", tone: "spooky, playful, never graphic", detail: "Story route with themed transitions." },
   { id: "rainy-day", label: "Rainy-day journey", audience: "mixed family groups", tone: "calm, helpful, upbeat", detail: "Indoor-first comfort journey." },
@@ -286,6 +336,14 @@ const storyArcs = [
 const sensoryLevels = ["low", "balanced", "high energy"];
 const walkingPaces = ["compact", "moderate", "exploratory"];
 const outputPackages = ["route storyboard", "channel copy", "full package", "host script"];
+
+const studioMemoryCollectionMeta = [
+  { id: "experience_studio_generation_runs", label: "generation runs" },
+  { id: "experience_studio_drafts", label: "drafts" },
+  { id: "experience_studio_feedback", label: "feedback" },
+  { id: "experience_studio_revision_events", label: "revisions" },
+  { id: "experience_studio_learning_rules", label: "learning rules" },
+];
 
 const creativeDefaultsByTemplate: Record<ExperienceTemplateId, {
   creativeDirection: string;
@@ -393,6 +451,13 @@ function compactList(items?: string[], limit = 3) {
   return `${list.slice(0, limit).join(", ")}${list.length > limit ? ` +${list.length - limit}` : ""}`;
 }
 
+function formatTimestamp(value?: string) {
+  if (!value) return "time unknown";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 function collectIssues(payload: VenueDataPayload | null) {
   return payload?.readiness?.issues ?? payload?.validation?.issues ?? [];
 }
@@ -428,6 +493,8 @@ export function ExperienceStudio() {
   const [isUpdatingDraft, setIsUpdatingDraft] = useState(false);
   const [isWorkflowBusy, setIsWorkflowBusy] = useState(false);
   const [isSendingHandoff, setIsSendingHandoff] = useState(false);
+  const [studioMemory, setStudioMemory] = useState<StudioMemoryPayload | null>(null);
+  const [isLoadingMemory, setIsLoadingMemory] = useState(false);
 
   const refreshReadiness = async () => {
     setIsLoading(true);
@@ -464,6 +531,34 @@ export function ExperienceStudio() {
 
   useEffect(() => {
     void refreshSavedDrafts();
+  }, []);
+
+  const refreshStudioMemory = async () => {
+    setIsLoadingMemory(true);
+    try {
+      const response = await fetchParkPulseApi("/api/park/experience-studio/memory?limit=12", { timeoutMs: 5000 });
+      setStudioMemory(await response.json() as StudioMemoryPayload);
+    } catch {
+      setStudioMemory({
+        status: "unavailable",
+        mode: "experience_studio_memory",
+        memoryLayer: "not connected",
+        collectionCounts: {},
+        latestReceipts: [],
+        collections: {},
+        learningPolicy: {
+          rule: "Studio memory endpoint unavailable.",
+          generatedTextLearningEligible: false,
+          humanFeedbackLearningEligible: false,
+        },
+      });
+    } finally {
+      setIsLoadingMemory(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshStudioMemory();
   }, []);
 
   const selectDraftTemplate = (id: ExperienceTemplateId) => {
@@ -525,6 +620,7 @@ export function ExperienceStudio() {
       setLastGeneratedAt(generatedAt);
       setGenerationCount((current) => current + 1);
       setMessage(payload.draft?.sourceIntegrity?.readyForHandoff ? `Creative package generated at ${generatedAt}` : `Draft generated at ${generatedAt} with blockers because verified venue data is incomplete`);
+      void refreshStudioMemory();
       window.setTimeout(() => draftResultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
     } catch {
       setMessage("Draft generation failed");
@@ -560,6 +656,7 @@ export function ExperienceStudio() {
       setWorkflowStatus(saved.status ?? "draft");
       setSavedDrafts((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
       setMessage("Draft saved");
+      void refreshStudioMemory();
     } catch {
       setMessage("Draft save failed");
     } finally {
@@ -634,6 +731,7 @@ export function ExperienceStudio() {
       const summary = payload.summary ?? payload.draftRecord;
       if (summary?.id) setSavedDrafts((current) => current.map((item) => item.id === summary.id ? { ...item, ...summary } : item));
       setMessage(payload.draftRecord.draft.sourceIntegrity?.readyForHandoff ? "Draft content updated" : "Draft content updated; source-integrity gate still blocks handoff");
+      void refreshStudioMemory();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Draft update failed");
     } finally {
@@ -696,6 +794,7 @@ export function ExperienceStudio() {
       setWorkflowStatus(nextStatus);
       if (updated?.id) setSavedDrafts((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated } : item));
       setMessage(`Workflow moved to ${nextStatus.replaceAll("_", " ")}`);
+      void refreshStudioMemory();
     } catch {
       setMessage("Workflow update failed");
     } finally {
@@ -730,6 +829,7 @@ export function ExperienceStudio() {
       setWorkflowStatus("ready_for_publish");
       if (payload.draftSummary?.id) setSavedDrafts((current) => current.map((item) => item.id === payload.draftSummary?.id ? { ...item, ...payload.draftSummary } : item));
       setMessage("Handoff sent to Command Center review");
+      void refreshStudioMemory();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Handoff failed");
     } finally {
@@ -782,8 +882,21 @@ export function ExperienceStudio() {
   const studioPolicy = (profileIntelligence?.experienceStudioPolicy ?? profileIntelligence?.modulePolicy?.experience_studio ?? {}) as NonNullable<ProfileIntelligence["experienceStudioPolicy"]>;
   const brandTone = profileIntelligence?.brandBible?.tone ?? [];
   const bannedClaims = profileIntelligence?.brandBible?.bannedClaims ?? [];
-  const learningLabels = profileIntelligence?.learningLabels ?? profileIntelligence?.learningSchema?.feedbackLabels ?? [];
   const studioReview = draft?.studioReview ?? [];
+  const studioCore = draft?.studioCore ?? draftPayload?.studioCore ?? null;
+  const studioMemoryCounts = studioMemory?.collectionCounts ?? {};
+  const latestStudioMemoryReceipts = useMemo(() => {
+    const collectionReceipts = Object.entries(studioMemory?.collections ?? {}).flatMap(([collection, rows]) =>
+      (rows ?? []).map((row) => ({ ...row, collection })),
+    );
+    const receipts = collectionReceipts.length
+      ? collectionReceipts
+      : (studioMemory?.latestReceipts ?? []);
+    return receipts
+      .filter((item) => Boolean(item?._id || item?.id || item?.eventType))
+      .sort((a, b) => `${b.updatedAt ?? b.createdAt ?? ""}`.localeCompare(`${a.updatedAt ?? a.createdAt ?? ""}`))
+      .slice(0, 6);
+  }, [studioMemory]);
 
   return (
     <main className="min-h-screen bg-[#10130f] px-4 py-5 font-sans text-slate-200 lg:px-8">
@@ -999,9 +1112,9 @@ export function ExperienceStudio() {
                   <div className="mt-1 text-[11px] leading-relaxed text-slate-500">Review: {compactList(studioPolicy.mustReview, 4) || "movement, safety, access, and availability claims"}</div>
                 </div>
                 <div className="rounded border border-slate-800 bg-[#151914] p-3">
-                  <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Learning loop</div>
-                  <div className="mt-2 text-xs leading-relaxed text-slate-300">{learningLabels.length ? compactList(learningLabels, 5) : "No feedback labels connected."}</div>
-                  <div className="mt-1 text-[11px] leading-relaxed text-slate-500">{profileQualityGaps.length ? `${profileQualityGaps.length} profile gap(s) need review.` : "Profile gaps clear for this view."}</div>
+                  <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">LLM core</div>
+                  <div className="mt-2 text-xs leading-relaxed text-slate-300">{studioCore?.mission ?? "Preset core values attach when a package is generated."}</div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-slate-500">{studioCore?.coreValues?.length ? compactList(studioCore.coreValues, 3) : profileQualityGaps.length ? `${profileQualityGaps.length} profile gap(s) need review.` : "No generated package loaded yet."}</div>
                 </div>
               </div>
 
@@ -1033,6 +1146,27 @@ export function ExperienceStudio() {
                             <div className="mt-1 text-xs font-bold text-slate-200">{value ?? "not set"}</div>
                           </div>
                         ))}
+                      </div>
+                    ) : null}
+                    {studioCore ? (
+                      <div className="mt-4 rounded border border-lime-300/25 bg-[#0d1115] p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Preset LLM core</div>
+                            <div className="mt-1 text-xs leading-relaxed text-slate-300">{studioCore.mission}</div>
+                          </div>
+                          <div className="rounded border border-slate-700 bg-[#151914] px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">{studioCore.version ?? "v1"}</div>
+                        </div>
+                        <div className="mt-3 grid gap-2 md:grid-cols-2">
+                          <div className="rounded border border-slate-800 bg-[#151914] p-3">
+                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Core values</div>
+                            <div className="mt-2 text-xs leading-relaxed text-slate-300">{compactList(studioCore.coreValues, 6)}</div>
+                          </div>
+                          <div className="rounded border border-slate-800 bg-[#151914] p-3">
+                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Reasoning priorities</div>
+                            <div className="mt-2 text-xs leading-relaxed text-slate-300">{compactList(studioCore.reasoningPriorities, 5)}</div>
+                          </div>
+                        </div>
                       </div>
                     ) : null}
                     {draft.reasoningTrace?.length ? (
@@ -1071,7 +1205,7 @@ export function ExperienceStudio() {
                             </div>
                             <div className="mt-1 text-[11px] leading-relaxed text-slate-500">
                               {draftPayload.memoryPersistence.memoryId ? `ID ${draftPayload.memoryPersistence.memoryId}. ` : ""}
-                              Generated copy is stored as evidence only; learning needs human review or measured outcomes.
+                              Generated copy is stored as an audit receipt only; Studio reasoning comes from the preset core and verified profile.
                             </div>
                           </div>
                         ) : null}
@@ -1552,6 +1686,73 @@ export function ExperienceStudio() {
                 ) : (
                   <div className="rounded border border-slate-800 bg-[#0d1115] p-3 text-xs leading-relaxed text-slate-500">No saved drafts yet.</div>
                 )}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-lime-300/25 bg-[#151914] p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Studio memory</div>
+                  <h2 className="mt-1 text-lg font-black text-white">Core and receipts</h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void refreshStudioMemory()}
+                  disabled={isLoadingMemory}
+                  className="rounded border border-slate-700 bg-[#0d1115] px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-300 transition hover:border-lime-300 disabled:opacity-50"
+                >
+                  {isLoadingMemory ? "Loading" : "Refresh"}
+                </button>
+              </div>
+              <div className={`mt-3 w-fit rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${studioMemory?.status === "ready" ? "border-emerald-400/40 bg-emerald-950/25 text-emerald-100" : "border-amber-400/40 bg-amber-950/25 text-amber-100"}`}>
+                {studioMemory?.memoryLayer ?? "not loaded"}
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {studioMemoryCollectionMeta.map((item) => (
+                  <div key={item.id} className="rounded border border-slate-800 bg-[#0d1115] p-3">
+                    <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{item.label}</div>
+                    <div className="mt-1 text-xl font-black text-slate-100">{studioMemoryCounts[item.id] ?? 0}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 rounded border border-slate-800 bg-[#0d1115] p-3">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Memory boundary</div>
+                <p className="mt-2 text-xs leading-relaxed text-slate-300">
+                  {studioMemory?.learningPolicy?.rule ?? "Generated packages and reviews are stored for audit; Studio reasoning comes from the preset core and verified profile."}
+                </p>
+                <div className="mt-2 grid gap-2 text-[11px] leading-relaxed text-slate-500">
+                  <div>Generated copy: {studioMemory?.learningPolicy?.generatedTextLearningEligible ? "learning eligible" : "evidence only"}</div>
+                  <div>Review receipts: {studioMemory?.learningPolicy?.humanFeedbackLearningEligible ? "learning eligible" : "audit only"}</div>
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Latest receipts</div>
+                <div className="mt-2 grid gap-2">
+                  {latestStudioMemoryReceipts.length ? (
+                    latestStudioMemoryReceipts.map((item, index) => (
+                      <div key={`${item.collection ?? item.eventType ?? "memory"}-${item._id ?? item.id ?? index}`} className="rounded border border-slate-800 bg-[#0d1115] p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate text-xs font-black text-slate-100">{formatStatus(item.eventType ?? item.status ?? "memory event")}</span>
+                          <span className="rounded border border-slate-700 bg-[#11161a] px-2 py-1 text-[9px] font-black uppercase tracking-widest text-slate-400">
+                            audit
+                          </span>
+                        </div>
+                        <div className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                          {formatStatus(item.collection ?? item.learningSource ?? "receipt")} / {formatTimestamp(item.updatedAt ?? item.createdAt)}
+                        </div>
+                        {(item.title || item.draftId || item.handoffId || item.memoryId) ? (
+                          <div className="mt-1 truncate text-[11px] leading-relaxed text-slate-500">
+                            {item.title ?? item.draftId ?? item.handoffId ?? item.memoryId}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded border border-slate-800 bg-[#0d1115] p-3 text-xs leading-relaxed text-slate-500">
+                      No Studio memory receipts loaded yet.
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </aside>

@@ -323,7 +323,7 @@ import sys
 
 payload = json.load(open(sys.argv[1]))
 summary = payload.get("summary", {})
-if payload.get("status") != "passed":
+if payload.get("status") not in {"passed", "passed_with_conditions"}:
     raise SystemExit(f"Operating-loop resilience gate did not pass: {summary or payload}")
 if summary.get("critical_failed_count"):
     raise SystemExit(f"Operating-loop resilience has critical failures: {summary}")

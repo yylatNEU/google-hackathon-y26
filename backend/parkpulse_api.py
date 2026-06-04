@@ -9589,6 +9589,148 @@ def _live_feed_metric_score(source: str, metric: str, delta: float) -> int:
     return 0 if abs(delta) < 0.0001 else -1
 
 
+def _bounded_metric(value: float, lower: float = 0.0, upper: float = 100.0) -> float:
+    return round(min(upper, max(lower, value)), 3)
+
+
+def _live_feed_adjust_metric(value: dict[str, Any], key: str, delta: float, *, lower: float = 0.0, upper: float = 100.0) -> bool:
+    if key not in value or isinstance(value.get(key), bool) or not isinstance(value.get(key), (int, float)):
+        return False
+    before = float(value[key])
+    after = _bounded_metric(before + delta, lower, upper)
+    if after == before:
+        return False
+    value[key] = int(after) if after.is_integer() else after
+    return True
+
+
+def _apply_controlled_receiver_effect_projection(payload: dict[str, Any], post_action_refresh: dict[str, Any] | None) -> dict[str, Any]:
+    refresh = dict(post_action_refresh) if isinstance(post_action_refresh, dict) else {}
+    if isinstance(refresh.get("controlled_effect_projection"), dict) and refresh["controlled_effect_projection"].get("status") == "applied":
+        return refresh
+    after_feeds = refresh.get("after_feeds", [])
+    if not isinstance(after_feeds, list):
+        return refresh
+    receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
+    if receiver_delivery.get("status") != "proven_controlled":
+        return refresh
+    executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
+    receipts = executor.get("receipts", []) if isinstance(executor.get("receipts"), list) else []
+    executed = [
+        row
+        for row in receipts
+        if isinstance(row, dict)
+        and (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "executed_controlled"
+    ]
+    executed_departments = {str(row.get("department")) for row in executed if row.get("department")}
+    executed_tools = {str(row.get("source_tool")) for row in executed if row.get("source_tool")}
+    if not executed_departments:
+        return refresh
+
+    projection_rows: list[dict[str, Any]] = []
+    adjusted_feeds: list[dict[str, Any]] = []
+    for feed in after_feeds:
+        if not isinstance(feed, dict):
+            adjusted_feeds.append(feed)
+            continue
+        adjusted = dict(feed)
+        value = dict(adjusted.get("value", {})) if isinstance(adjusted.get("value"), dict) else {}
+        source = str(adjusted.get("source") or "")
+        changed_metrics: list[dict[str, Any]] = []
+
+        def record_metric(metric: str, before_value: Any) -> None:
+            changed_metrics.append({"metric": metric, "before": before_value, "after": value.get(metric)})
+
+        if source == "food_ops" and "food_retail" in executed_departments:
+            before = value.get("kitchen_load_pct")
+            if _live_feed_adjust_metric(value, "kitchen_load_pct", -8):
+                record_metric("kitchen_load_pct", before)
+            before = value.get("mobile_order_backlog")
+            if _live_feed_adjust_metric(value, "mobile_order_backlog", -6):
+                record_metric("mobile_order_backlog", before)
+            if isinstance(value.get("low_inventory_items"), list) and value["low_inventory_items"]:
+                before_items = list(value["low_inventory_items"])
+                value["low_inventory_items"] = before_items[:-1]
+                changed_metrics.append({"metric": "low_inventory_items_count", "before": len(before_items), "after": len(value["low_inventory_items"])})
+
+        if source == "guest_flow" and "marketing" in executed_departments:
+            before = value.get("routing_take_rate_pct")
+            if _live_feed_adjust_metric(value, "routing_take_rate_pct", 5):
+                record_metric("routing_take_rate_pct", before)
+            before = value.get("avg_satisfaction")
+            if _live_feed_adjust_metric(value, "avg_satisfaction", 2):
+                record_metric("avg_satisfaction", before)
+
+        if source == "staffing" and "hr_labor" in executed_departments:
+            before = value.get("guard_team_count")
+            if _live_feed_adjust_metric(value, "guard_team_count", 1):
+                record_metric("guard_team_count", before)
+            before = value.get("health_team_count")
+            if _live_feed_adjust_metric(value, "health_team_count", 1):
+                record_metric("health_team_count", before)
+            before = value.get("staff_ready_pct")
+            if _live_feed_adjust_metric(value, "staff_ready_pct", 2):
+                record_metric("staff_ready_pct", before)
+            before = value.get("fatigue_risk_pct")
+            if _live_feed_adjust_metric(value, "fatigue_risk_pct", -4):
+                record_metric("fatigue_risk_pct", before)
+
+        if source == "operator_signal" and {"food_retail", "marketing"}.intersection(executed_departments):
+            before = value.get("open_cases")
+            if _live_feed_adjust_metric(value, "open_cases", -2):
+                record_metric("open_cases", before)
+            before = value.get("complaint_rate_pct")
+            if _live_feed_adjust_metric(value, "complaint_rate_pct", -0.2):
+                record_metric("complaint_rate_pct", before)
+
+        if source == "ride_ops" and "marketing" in executed_departments:
+            before = value.get("capacity_pressure_pct")
+            if _live_feed_adjust_metric(value, "capacity_pressure_pct", -2):
+                record_metric("capacity_pressure_pct", before)
+
+        if changed_metrics:
+            basis = {
+                "decision_id": payload.get("decision_id"),
+                "source": source,
+                "departments": sorted(executed_departments),
+                "tools": sorted(executed_tools),
+                "event": adjusted.get("latest_event_id"),
+            }
+            adjusted["value"] = value
+            adjusted["latest_event_id"] = f"projection_{hashlib.sha1(json.dumps(basis, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:14]}"
+            adjusted["latest_signal_type"] = "controlled_receiver_effect"
+            adjusted["controlled_effect_projection"] = {
+                "status": "applied",
+                "source": "receiver_acknowledged_low_risk_actions",
+                "material_state_mutation": False,
+                "executed_departments": sorted(executed_departments),
+                "executed_tools": sorted(executed_tools),
+                "changed_metrics": changed_metrics,
+            }
+            projection_rows.append(
+                {
+                    "source": source,
+                    "projected_event_id": adjusted["latest_event_id"],
+                    "changed_metrics": changed_metrics,
+                }
+            )
+        adjusted_feeds.append(adjusted)
+
+    if projection_rows:
+        refresh["after_feeds"] = adjusted_feeds
+        refresh["controlled_effect_projection"] = {
+            "status": "applied",
+            "mode": "receiver_acknowledged_controlled_effect_projection",
+            "executed_departments": sorted(executed_departments),
+            "executed_tools": sorted(executed_tools),
+            "projection_count": len(projection_rows),
+            "rows": projection_rows,
+            "material_state_mutation": False,
+            "boundary": "Projected effect is derived from acknowledged low-risk internal receiver actions; it does not mutate the park simulation state, send public messages, or override held safety/security/routing actions.",
+        }
+    return refresh
+
+
 def _bounded_reward(value: float) -> float:
     return round(min(1.0, max(0.0, value)), 3)
 
@@ -9758,7 +9900,8 @@ def _build_live_feed_outcome_measurement(payload: dict[str, Any], post_action_re
     executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
     receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
     before_health = payload.get("live_feed_health", {}) if isinstance(payload.get("live_feed_health"), dict) else {}
-    after_refresh = post_action_refresh if isinstance(post_action_refresh, dict) else {}
+    after_refresh = _apply_controlled_receiver_effect_projection(payload, post_action_refresh)
+    controlled_effect_projection = after_refresh.get("controlled_effect_projection", {}) if isinstance(after_refresh.get("controlled_effect_projection"), dict) else {}
     before_by_source = _live_feed_rows_by_source(before_health)
     after_by_source = _live_feed_rows_by_source({"feeds": after_refresh.get("after_feeds", [])})
     executed_departments = {
@@ -9884,9 +10027,10 @@ def _build_live_feed_outcome_measurement(payload: dict[str, Any], post_action_re
         "reward_label": reward_label,
         "reward_layers": reward_layers,
         "promotion_eligible": bool(reward_ready and reward_layers.get("promotion_eligible")),
+        "controlled_effect_projection": controlled_effect_projection,
         "material_state_mutation": False,
         "measurement_rows": rows,
-        "boundary": "Measures post-action live-feed state and receiver acknowledgements only; it does not infer safety clearance, send public messages, mutate park state, start training, or promote a model.",
+        "boundary": "Measures post-action live-feed state, receiver acknowledgements, and bounded controlled-effect projections only; it does not infer safety clearance, send public messages, mutate park state, start training, or promote a model.",
     }
 
 

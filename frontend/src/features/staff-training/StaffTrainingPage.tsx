@@ -35,6 +35,32 @@ type GuestSimulator = {
   model?: string;
 };
 
+type MasteryTracker = {
+  status?: string;
+  mastery_level?: string;
+  turn_count?: number;
+  open_gaps?: Array<{ key?: string; type?: string; label?: string; severity?: string; first_seen_turn?: number; last_seen_turn?: number }>;
+  repaired_gaps?: Array<{ key?: string; type?: string; label?: string; severity?: string; first_seen_turn?: number; repaired_at_turn?: number }>;
+  latest_repairs?: Array<{ key?: string; type?: string; label?: string; severity?: string; repaired_at_turn?: number }>;
+  repair_count?: number;
+  unrepaired_critical_count?: number;
+  summary?: string;
+};
+
+type ShadowEvaluator = {
+  status?: string;
+  alignment?: string;
+  summary?: string;
+  coaching_focus?: string[];
+  rubric_disagreement?: string;
+  suggested_human_review?: boolean;
+  score_authority?: boolean;
+  provider?: string;
+  platform?: string;
+  transport?: string;
+  llm_controls_score?: boolean;
+};
+
 type Debrief = {
   result?: string;
   summary?: string;
@@ -59,6 +85,7 @@ type TrainingSession = {
   completed_objectives?: string[];
   missing_objectives?: string[];
   guest_simulator?: GuestSimulator;
+  mastery_tracker?: MasteryTracker;
   debrief?: Debrief;
 };
 
@@ -299,6 +326,7 @@ export function StaffTrainingPage() {
   const [selectedScenarioId, setSelectedScenarioId] = useState("lost_child_report");
   const [traineeName, setTraineeName] = useState("Seasonal staff trainee");
   const [useLlmGuest, setUseLlmGuest] = useState(true);
+  const [useShadowEval, setUseShadowEval] = useState(false);
   const [session, setSession] = useState<TrainingSession | null>(null);
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
@@ -310,6 +338,7 @@ export function StaffTrainingPage() {
   const [activeAssignmentId, setActiveAssignmentId] = useState("");
   const [employeeMessage, setEmployeeMessage] = useState("");
   const [lastTurnScore, setLastTurnScore] = useState<TurnScore | null>(null);
+  const [lastShadowEval, setLastShadowEval] = useState<ShadowEvaluator | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isStartingSession, setIsStartingSession] = useState(false);
   const [isSendingTurn, setIsSendingTurn] = useState(false);
@@ -323,6 +352,7 @@ export function StaffTrainingPage() {
   const transcript = session?.transcript ?? [];
   const scorecard = session?.scorecard;
   const turnCoaching = lastTurnScore?.turn_coaching;
+  const masteryTracker = session?.mastery_tracker;
   const objectives = session?.scenario?.objectives ?? selectedScenario?.objectives ?? [];
   const completedObjectives = new Set(session?.completed_objectives ?? []);
   const activeAssignment = assignments.find((assignment) => assignment.id === activeAssignmentId);
@@ -411,6 +441,7 @@ export function StaffTrainingPage() {
     setError("");
     setStatus("");
     setLastTurnScore(null);
+    setLastShadowEval(null);
     try {
       const assignment = options?.assignment;
       const nextTraineeName = assignment?.trainee_name ?? traineeName;
@@ -453,12 +484,13 @@ export function StaffTrainingPage() {
       const response = await fetchParkPulseApi("/api/park/staff-training/turn", {
         method: "POST",
         headers: { "content-type": "application/json", "x-parkpulse-role": "onsite_worker" },
-        body: JSON.stringify({ session_id: session.id, employee_message: outbound, useLlmGuest: useLlmGuest }),
-        timeoutMs: useLlmGuest ? 14000 : 8000,
+        body: JSON.stringify({ session_id: session.id, employee_message: outbound, useLlmGuest: useLlmGuest, useShadowEval: useShadowEval }),
+        timeoutMs: useLlmGuest || useShadowEval ? 16000 : 8000,
       });
-      const payload = (await response.json()) as { session?: TrainingSession; turn_score?: TurnScore; coaching_notes?: string[]; readiness_issues?: string[] };
+      const payload = (await response.json()) as { session?: TrainingSession; turn_score?: TurnScore; shadow_evaluator?: ShadowEvaluator; coaching_notes?: string[]; readiness_issues?: string[] };
       if (payload.session) setSession(payload.session);
       if (payload.turn_score) setLastTurnScore(payload.turn_score);
+      setLastShadowEval(payload.shadow_evaluator ?? null);
       if (payload.readiness_issues?.length) setError(payload.readiness_issues.join(" "));
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Unable to score response.");
@@ -830,7 +862,7 @@ export function StaffTrainingPage() {
                   {session?.id ? "Roleplay is active. Read the guest message, answer in the employee response box, then use the coaching feedback to improve the next turn." : selectedScenario?.context}
                 </p>
               </div>
-              <div className="grid gap-2 sm:grid-cols-[220px_180px]">
+              <div className="grid gap-2 sm:grid-cols-[220px_180px_180px]">
                 <input
                   value={traineeName}
                   onChange={(event) => setTraineeName(event.target.value)}
@@ -841,11 +873,15 @@ export function StaffTrainingPage() {
                   <input type="checkbox" checked={useLlmGuest} onChange={(event) => setUseLlmGuest(event.target.checked)} />
                   Vertex AI guest
                 </label>
+                <label className="flex min-h-10 items-center gap-2 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200">
+                  <input type="checkbox" checked={useShadowEval} onChange={(event) => setUseShadowEval(event.target.checked)} />
+                  Shadow evaluator
+                </label>
                 <button
                   type="button"
                   onClick={() => void startSession()}
                   disabled={!selectedScenario || isStartingSession}
-                  className="rounded border border-teal-300 bg-teal-300 px-4 py-2 text-sm font-black text-slate-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50 sm:col-span-2"
+                  className="rounded border border-teal-300 bg-teal-300 px-4 py-2 text-sm font-black text-slate-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50 sm:col-span-3"
                 >
                   {isStartingSession ? "Starting..." : session?.id && session.status !== "finished" ? "Restart roleplay" : "Start roleplay"}
                 </button>
@@ -863,6 +899,7 @@ export function StaffTrainingPage() {
                     onClick={() => {
                       setSelectedScenarioId(scenario.id);
                       setLastTurnScore(null);
+                      setLastShadowEval(null);
                     }}
                     className={`w-full rounded border p-3 text-left transition ${
                       selectedScenarioId === scenario.id ? "border-teal-300 bg-teal-300/10" : "border-slate-800 bg-slate-950 hover:border-teal-400"
@@ -1042,6 +1079,68 @@ export function StaffTrainingPage() {
                   <div className="mt-2 text-sm font-semibold leading-relaxed text-teal-50">{turnCoaching.next_response}</div>
                 </div>
               )}
+            </div>
+
+            <div className="mt-4 grid gap-4 xl:grid-cols-2">
+              <div className="rounded border border-slate-800 bg-slate-950 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-[10px] font-black uppercase tracking-widest text-emerald-300">Mastery tracker</div>
+                    <div className="mt-2 text-lg font-black text-slate-50">{masteryTracker?.mastery_level?.replaceAll("_", " ") ?? "not started"}</div>
+                    <p className="mt-2 text-sm font-semibold leading-relaxed text-slate-400">{masteryTracker?.summary ?? "Repair tracking appears after scored turns."}</p>
+                  </div>
+                  <div className="rounded border border-slate-700 bg-[#0d171b] px-2 py-1 text-xs font-black text-slate-300">
+                    {masteryTracker?.repair_count ?? 0} repairs
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                  <div>
+                    <div className="text-[10px] font-black uppercase tracking-widest text-amber-300">Open gaps</div>
+                    <div className="mt-2 space-y-2">
+                      {(masteryTracker?.open_gaps?.length ? masteryTracker.open_gaps : [{ label: "No open gaps." }]).slice(0, 4).map((item) => (
+                        <div key={item.key ?? item.label} className="rounded border border-slate-800 bg-[#0d171b] p-2 text-xs font-bold leading-relaxed text-slate-300">
+                          {item.label}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-black uppercase tracking-widest text-emerald-300">Latest repairs</div>
+                    <div className="mt-2 space-y-2">
+                      {(masteryTracker?.latest_repairs?.length ? masteryTracker.latest_repairs : [{ label: "No repaired gaps yet." }]).slice(0, 4).map((item) => (
+                        <div key={item.key ?? item.label} className="rounded border border-emerald-300/20 bg-emerald-300/10 p-2 text-xs font-bold leading-relaxed text-emerald-100">
+                          {item.label}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded border border-slate-800 bg-slate-950 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-[10px] font-black uppercase tracking-widest text-sky-300">Shadow evaluator</div>
+                    <div className="mt-2 text-lg font-black text-slate-50">{lastShadowEval?.alignment?.replaceAll("_", " ") ?? "not requested"}</div>
+                    <p className="mt-2 text-sm font-semibold leading-relaxed text-slate-400">{lastShadowEval?.summary ?? "Enable Shadow evaluator before sending a reply to get a second-pass rubric comment."}</p>
+                  </div>
+                  <div className="rounded border border-slate-700 bg-[#0d171b] px-2 py-1 text-xs font-black text-slate-300">
+                    {lastShadowEval?.score_authority === false ? "no score authority" : "--"}
+                  </div>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {(lastShadowEval?.coaching_focus?.length ? lastShadowEval.coaching_focus : ["No shadow notes yet."]).map((item) => (
+                    <div key={item} className="rounded border border-slate-800 bg-[#0d171b] p-2 text-xs font-bold leading-relaxed text-slate-300">
+                      {item}
+                    </div>
+                  ))}
+                </div>
+                {lastShadowEval?.rubric_disagreement && (
+                  <div className="mt-3 rounded border border-sky-300/25 bg-sky-300/10 p-2 text-xs font-bold leading-relaxed text-sky-100">
+                    {lastShadowEval.rubric_disagreement}
+                  </div>
+                )}
+              </div>
             </div>
           </section>
 

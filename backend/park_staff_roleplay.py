@@ -826,6 +826,7 @@ def start_staff_training_session(
             "llm_controls_score": False,
             "fallback": "deterministic_guest_reply",
         },
+        "mastery_tracker": _empty_mastery_tracker(),
         "completed_objectives": [],
         "missing_objectives": list(scenario["objectives"]),
         "boundary": "Training simulator only; no live dispatch, guest PII, reward labels, or policy promotion authority.",
@@ -835,7 +836,7 @@ def start_staff_training_session(
     return _session_response(session)
 
 
-def advance_staff_training_turn(session_id: str, employee_message: str, use_llm_guest: bool | None = None) -> dict[str, Any]:
+def advance_staff_training_turn(session_id: str, employee_message: str, use_llm_guest: bool | None = None, use_shadow_eval: bool | None = None) -> dict[str, Any]:
     session = _SESSIONS.get(str(session_id or ""))
     if not session:
         return {"status": "not_found", "mode": "staff_roleplay_turn", "readiness_issues": ["Training session was not found or has expired. Start a new session."]}
@@ -857,6 +858,7 @@ def advance_staff_training_turn(session_id: str, employee_message: str, use_llm_
     completed, missing = _objective_progress(scenario, session["transcript"])
     session["completed_objectives"] = completed
     session["missing_objectives"] = missing
+    session["mastery_tracker"] = _update_mastery_tracker(session.get("mastery_tracker"), score, session["turn_count"])
 
     fallback_reply = _guest_reply(scenario, score, missing, session["turn_count"])
     llm_guest_requested = _llm_guest_requested(use_llm_guest, session)
@@ -879,6 +881,7 @@ def advance_staff_training_turn(session_id: str, employee_message: str, use_llm_
     session["updated_at"] = _now_iso()
     if session["turn_count"] >= 4 or (not missing and not session["critical_miss"]):
         session["status"] = "ready_to_finish"
+    shadow_eval = _generate_shadow_evaluator(scenario, session, message, score) if use_shadow_eval else {"status": "not_requested", "score_authority": False}
 
     payload = {
         "status": "complete",
@@ -890,6 +893,8 @@ def advance_staff_training_turn(session_id: str, employee_message: str, use_llm_
         "critical_miss": score["critical_miss"],
         "guest_reply_source": guest_generation.get("source"),
         "llm_guest": {key: value for key, value in guest_generation.items() if key != "reply"},
+        "mastery_tracker": session.get("mastery_tracker"),
+        "shadow_evaluator": shadow_eval,
     }
     _write_jsonl({"event": "turn_scored", "turn_score": score, **_session_event_snapshot(session)})
     return payload
@@ -1453,6 +1458,107 @@ def _turn_coaching(
     }
 
 
+def _empty_mastery_tracker() -> dict[str, Any]:
+    return {
+        "status": "not_started",
+        "mastery_level": "not_started",
+        "turn_count": 0,
+        "open_gaps": [],
+        "repaired_gaps": [],
+        "latest_repairs": [],
+        "repair_count": 0,
+        "unrepaired_critical_count": 0,
+        "summary": "No scored turns yet.",
+        "boundary": "Mastery tracks simulated training repairs only; it does not authorize live work.",
+    }
+
+
+def _gap_key(kind: str, signal: str) -> str:
+    return f"{kind}:{' '.join(str(signal or '').lower().split())}"
+
+
+def _score_gap_entries(score: dict[str, Any], turn_count: int) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    sources = [
+        ("policy", score.get("missing_policy_signals", []), "policy detail"),
+        ("safety", score.get("missing_safety_signals", []), "safety action"),
+        ("escalation", score.get("missing_escalation_signals", []), "escalation path"),
+    ]
+    for kind, signals, label_prefix in sources:
+        for signal in signals if isinstance(signals, list) else []:
+            signal_text = str(signal or "").strip()
+            if not signal_text:
+                continue
+            severity = "critical" if kind in {"safety", "escalation"} and bool(score.get("critical_miss")) else "coaching"
+            entries.append(
+                {
+                    "key": _gap_key(kind, signal_text),
+                    "type": kind,
+                    "label": f"Missing {label_prefix}: {_humanize_signal(signal_text)}.",
+                    "signal": signal_text,
+                    "severity": severity,
+                    "first_seen_turn": turn_count,
+                    "last_seen_turn": turn_count,
+                }
+            )
+    if bool(score.get("critical_miss")) and not any(entry["severity"] == "critical" for entry in entries):
+        entries.append(
+            {
+                "key": f"critical_miss:turn_{turn_count}",
+                "type": "critical_miss",
+                "label": "Critical miss remained unresolved on this turn.",
+                "signal": "critical miss",
+                "severity": "critical",
+                "first_seen_turn": turn_count,
+                "last_seen_turn": turn_count,
+            }
+        )
+    return entries
+
+
+def _update_mastery_tracker(previous: dict[str, Any] | None, score: dict[str, Any], turn_count: int) -> dict[str, Any]:
+    prior = previous if isinstance(previous, dict) else _empty_mastery_tracker()
+    prior_open = {str(item.get("key")): item for item in prior.get("open_gaps", []) if isinstance(item, dict) and item.get("key")}
+    current_entries = {entry["key"]: entry for entry in _score_gap_entries(score, turn_count)}
+    repaired = [dict(item, repaired_at_turn=turn_count) for key, item in prior_open.items() if key not in current_entries]
+    repaired_gaps = [item for item in prior.get("repaired_gaps", []) if isinstance(item, dict)] + repaired
+    open_gaps = []
+    for key, entry in current_entries.items():
+        original = prior_open.get(key)
+        if original:
+            entry["first_seen_turn"] = original.get("first_seen_turn", entry["first_seen_turn"])
+        open_gaps.append(entry)
+
+    unrepaired_critical = sum(1 for item in open_gaps if item.get("severity") == "critical")
+    if not open_gaps and repaired_gaps:
+        level = "repaired"
+        summary = "Previous misses were repaired; continue holding the standard through the scenario."
+    elif not open_gaps:
+        level = "on_track"
+        summary = "No open scoring gaps on the latest turn."
+    elif unrepaired_critical:
+        level = "blocked"
+        summary = "Critical safety or escalation gaps remain open; retry before live shadowing."
+    elif repaired:
+        level = "repairing"
+        summary = "Some earlier gaps were repaired, but coaching gaps remain open."
+    else:
+        level = "needs_practice"
+        summary = "Coaching gaps remain open on the latest turn."
+    return {
+        "status": "ready",
+        "mastery_level": level,
+        "turn_count": turn_count,
+        "open_gaps": open_gaps,
+        "repaired_gaps": repaired_gaps[-12:],
+        "latest_repairs": repaired,
+        "repair_count": len(repaired_gaps),
+        "unrepaired_critical_count": unrepaired_critical,
+        "summary": summary,
+        "boundary": "Mastery tracks simulated training repairs only; it does not authorize live work.",
+    }
+
+
 def _coaching_notes(missing_policy: list[str], missing_safety: list[str], missing_escalation: list[str], rude: bool, critical_miss: bool) -> list[str]:
     notes: list[str] = []
     if rude:
@@ -1726,6 +1832,100 @@ def _generate_llm_guest_reply(
         }
 
 
+def _shadow_evaluator_prompt(scenario: dict[str, Any], session: dict[str, Any], employee_message: str, score: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task": "Review a staff-training response as a shadow evaluator. Return strict JSON.",
+        "hard_rules": [
+            "Do not change or override the official score.",
+            "Do not invent live park actions, dispatches, approvals, diagnoses, refunds, or accommodations.",
+            "Do not reveal hidden policy keywords.",
+            "Focus on whether the deterministic rubric seems aligned, too strict, or too lenient.",
+            "Keep commentary concise and useful for a trainer.",
+        ],
+        "scenario": {
+            "id": scenario.get("id"),
+            "title": scenario.get("title"),
+            "difficulty": scenario.get("difficulty"),
+            "context": scenario.get("context"),
+            "objectives": scenario.get("objectives", []),
+        },
+        "latest_employee_message": employee_message[:1000],
+        "conversation": [
+            {"speaker": turn.get("speaker"), "message": str(turn.get("message") or "")[:500]}
+            for turn in (session.get("transcript", []) if isinstance(session.get("transcript"), list) else [])[-8:]
+        ],
+        "deterministic_score": {
+            "overall": score.get("overall"),
+            "dimensions": score.get("dimensions"),
+            "critical_miss": score.get("critical_miss"),
+            "coaching": score.get("turn_coaching"),
+            "missing_policy_signals": score.get("missing_policy_signals", []),
+            "missing_safety_signals": score.get("missing_safety_signals", []),
+            "missing_escalation_signals": score.get("missing_escalation_signals", []),
+        },
+        "response_schema": {
+            "alignment": "one of aligned|too_strict|too_lenient|needs_human_review",
+            "summary": "one sentence",
+            "coaching_focus": ["one to three concise strings"],
+            "rubric_disagreement": "string or empty",
+            "suggested_human_review": "boolean",
+            "score_authority": False,
+        },
+    }
+
+
+def _generate_shadow_evaluator(scenario: dict[str, Any], session: dict[str, Any], employee_message: str, score: dict[str, Any]) -> dict[str, Any]:
+    props = None
+    timeout_seconds = float(os.getenv("PARKPULSE_STAFF_TRAINING_SHADOW_EVAL_TIMEOUT_SECONDS", "8"))
+    try:
+        from gemini_provider import get_gemini_agent_properties, get_gemini_model
+
+        props = get_gemini_agent_properties()
+        if not props.ready:
+            return {
+                "status": "fallback_not_configured",
+                "score_authority": False,
+                "provider": props.provider,
+                "platform": props.platform,
+                "readiness_issues": props.readiness_issues,
+            }
+        result = _generate_gemini_json_sync_hard_timeout(
+            _shadow_evaluator_prompt(scenario, session, employee_message, score),
+            timeout_seconds=timeout_seconds,
+            temperature=float(os.getenv("PARKPULSE_STAFF_TRAINING_SHADOW_EVAL_TEMPERATURE", "0.2")),
+            max_output_tokens=int(os.getenv("PARKPULSE_STAFF_TRAINING_SHADOW_EVAL_MAX_OUTPUT_TOKENS", "360")),
+        )
+        parsed = _first_json_object(result.get("text", "") or "") or {}
+        coaching_focus = parsed.get("coaching_focus") if isinstance(parsed.get("coaching_focus"), list) else []
+        alignment = str(parsed.get("alignment") or "aligned").strip().lower()
+        if alignment not in {"aligned", "too_strict", "too_lenient", "needs_human_review"}:
+            alignment = "needs_human_review"
+        return {
+            "status": "generated",
+            "alignment": alignment,
+            "summary": " ".join(str(parsed.get("summary") or "Shadow evaluator completed.").split())[:300],
+            "coaching_focus": [" ".join(str(item).split())[:180] for item in coaching_focus[:3]],
+            "rubric_disagreement": " ".join(str(parsed.get("rubric_disagreement") or "").split())[:300],
+            "suggested_human_review": bool(parsed.get("suggested_human_review")) or alignment in {"too_strict", "too_lenient", "needs_human_review"},
+            "score_authority": False,
+            "model": get_gemini_model(),
+            "provider": props.provider,
+            "platform": props.platform,
+            "transport": result.get("transport"),
+            "timeout_seconds": timeout_seconds,
+            "llm_controls_score": False,
+        }
+    except Exception as error:
+        return {
+            "status": "fallback_timeout" if isinstance(error, TimeoutError) or "timeout" in str(error).lower() else "fallback_error",
+            "score_authority": False,
+            "error": str(error)[:240],
+            "provider": getattr(props, "provider", None),
+            "platform": getattr(props, "platform", None),
+            "llm_controls_score": False,
+        }
+
+
 def _aggregate_scorecard(scores: list[dict[str, Any]]) -> dict[str, Any]:
     if not scores:
         return _empty_scorecard()
@@ -1755,6 +1955,7 @@ def _debrief(session: dict[str, Any]) -> dict[str, Any]:
         "completed_objectives": session.get("completed_objectives", []),
         "missing_objectives": session.get("missing_objectives", []),
         "critical_miss": bool(session.get("critical_miss")),
+        "mastery_tracker": session.get("mastery_tracker") or _empty_mastery_tracker(),
         "recommended_retry": session.get("scenario_id") if not passed else None,
     }
 
@@ -1770,6 +1971,7 @@ def _session_event_snapshot(session: dict[str, Any]) -> dict[str, Any]:
         "turn_count": session.get("turn_count"),
         "scorecard": session.get("scorecard"),
         "critical_miss": session.get("critical_miss"),
+        "mastery_tracker": session.get("mastery_tracker"),
         "completed_objectives": session.get("completed_objectives", []),
         "missing_objectives": session.get("missing_objectives", []),
         "created_at": _now_iso(),
@@ -1792,6 +1994,7 @@ def _session_response(session: dict[str, Any]) -> dict[str, Any]:
         "transcript": session.get("transcript", []),
         "scorecard": session.get("scorecard", _empty_scorecard()),
         "critical_miss": bool(session.get("critical_miss")),
+        "mastery_tracker": session.get("mastery_tracker") or _empty_mastery_tracker(),
         "completed_objectives": session.get("completed_objectives", []),
         "missing_objectives": session.get("missing_objectives", []),
         "debrief": session.get("debrief"),

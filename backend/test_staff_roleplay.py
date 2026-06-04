@@ -82,6 +82,27 @@ def test_good_lost_child_response_passes_debrief(monkeypatch, tmp_path):
     assert finished["session"]["feeds_actual_reward_model"] is False
 
 
+def test_multi_turn_mastery_tracks_repaired_gaps(monkeypatch, tmp_path):
+    reset_roleplay(monkeypatch, tmp_path)
+    session = roleplay.start_staff_training_session("lost_child_report", "Repair trainee")
+
+    first = roleplay.advance_staff_training_turn(session["id"], "I am sorry. What is she wearing?")
+    assert first["critical_miss"] is True
+    assert first["mastery_tracker"]["unrepaired_critical_count"] > 0
+    assert first["mastery_tracker"]["mastery_level"] == "blocked"
+
+    second = roleplay.advance_staff_training_turn(
+        session["id"],
+        "I am sorry. Stay with me at this meeting point while I radio Security and Operations now. What is her name, age, clothing, and last seen location?",
+    )
+
+    assert second["turn_score"]["critical_miss"] is False
+    assert second["mastery_tracker"]["repair_count"] > 0
+    assert second["mastery_tracker"]["latest_repairs"]
+    assert second["mastery_tracker"]["mastery_level"] in {"repaired", "repairing", "on_track"}
+    assert second["session"]["mastery_tracker"]["repair_count"] == second["mastery_tracker"]["repair_count"]
+
+
 def test_common_policy_correct_responses_clear_shadowing_threshold(monkeypatch, tmp_path):
     reset_roleplay(monkeypatch, tmp_path)
     examples = {
@@ -252,6 +273,58 @@ def test_llm_guest_mode_uses_mocked_guest_reply_without_changing_score(monkeypat
     assert turn["turn_score"]["overall"] >= 80
     assert turn["session"]["guest_simulator"]["llm_controls_score"] is False
     assert turn["session"]["transcript"][-1]["message"].startswith("I am still upset")
+
+
+def test_shadow_evaluator_comments_without_score_authority(monkeypatch, tmp_path):
+    reset_roleplay(monkeypatch, tmp_path)
+
+    import gemini_provider
+
+    fake_props = types.SimpleNamespace(
+        ready=True,
+        provider="Vertex AI Gemini",
+        platform="vertex_ai",
+        use_vertex_ai=True,
+        readiness_issues=[],
+        required_env=[],
+    )
+    captured = {}
+
+    def fake_generate(prompt, *, timeout_seconds, max_output_tokens, temperature):
+        captured["prompt"] = prompt
+        return {
+            "ok": True,
+            "transport": "vertex_ai_rest",
+            "text": json.dumps(
+                {
+                    "alignment": "aligned",
+                    "summary": "The deterministic rubric is aligned with the response.",
+                    "coaching_focus": ["Keep escalation explicit."],
+                    "rubric_disagreement": "",
+                    "suggested_human_review": False,
+                    "score_authority": False,
+                }
+            ),
+        }
+
+    monkeypatch.setattr(gemini_provider, "get_gemini_agent_properties", lambda: fake_props)
+    monkeypatch.setattr(gemini_provider, "get_gemini_model", lambda: "gemini-2.5-flash")
+    monkeypatch.setattr(roleplay, "_generate_gemini_json_sync_hard_timeout", fake_generate)
+
+    session = roleplay.start_staff_training_session("lost_child_report", "Shadow trainee", use_llm_guest=False)
+    turn = roleplay.advance_staff_training_turn(
+        session["id"],
+        "I am sorry. Stay with me while I call Security now. What is her name, age, clothing, and last seen location?",
+        use_shadow_eval=True,
+    )
+
+    assert turn["turn_score"]["overall"] >= 75
+    assert turn["shadow_evaluator"]["status"] == "generated"
+    assert turn["shadow_evaluator"]["score_authority"] is False
+    assert turn["shadow_evaluator"]["llm_controls_score"] is False
+    assert turn["shadow_evaluator"]["transport"] == "vertex_ai_rest"
+    assert captured["prompt"]["deterministic_score"]["overall"] == turn["turn_score"]["overall"]
+    assert captured["prompt"]["response_schema"]["score_authority"] is False
 
 
 def test_vertex_guest_generator_uses_provider_without_changing_score(monkeypatch, tmp_path):

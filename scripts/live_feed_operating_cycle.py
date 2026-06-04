@@ -105,6 +105,11 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
     outcome_measurement = payload.get("live_feed_outcome_measurement", {}) if isinstance(payload.get("live_feed_outcome_measurement"), dict) else {}
     outcome_memory = payload.get("live_feed_outcome_memory", {}) if isinstance(payload.get("live_feed_outcome_memory"), dict) else {}
     reward_layers = outcome_measurement.get("reward_layers", {}) if isinstance(outcome_measurement.get("reward_layers"), dict) else {}
+    controlled_effect_projection = (
+        outcome_measurement.get("controlled_effect_projection", {})
+        if isinstance(outcome_measurement.get("controlled_effect_projection"), dict)
+        else {}
+    )
     memory_priors = payload.get("live_feed_memory_priors", {}) if isinstance(payload.get("live_feed_memory_priors"), dict) else {}
     memory_prior_use = proposals.get("memory_prior_use", {}) if isinstance(proposals.get("memory_prior_use"), dict) else {}
     tradeoff = proposals.get("executive_tradeoff", {}) if isinstance(proposals.get("executive_tradeoff"), dict) else {}
@@ -192,6 +197,7 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
             "reward_label": outcome_measurement.get("reward_label"),
             "promotion_eligible": outcome_measurement.get("promotion_eligible"),
             "reward_layers": reward_layers,
+            "controlled_effect_projection": controlled_effect_projection,
         },
         "training_closure": {
             "status": closure.get("status"),
@@ -503,6 +509,11 @@ def _case_bank_row_from_summary(summary: dict[str, Any], *, batch_id: str, outpu
     actions = summary.get("actions", {}) if isinstance(summary.get("actions"), dict) else {}
     measurement = summary.get("measurement", {}) if isinstance(summary.get("measurement"), dict) else {}
     reward_layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
+    controlled_effect_projection = (
+        measurement.get("controlled_effect_projection", {})
+        if isinstance(measurement.get("controlled_effect_projection"), dict)
+        else {}
+    )
     training = summary.get("training_closure", {}) if isinstance(summary.get("training_closure"), dict) else {}
     artifacts = summary.get("artifacts", {}) if isinstance(summary.get("artifacts"), dict) else {}
     closed_case = (
@@ -571,6 +582,7 @@ def _case_bank_row_from_summary(summary: dict[str, Any], *, batch_id: str, outpu
             "eligible_for_reward": measurement.get("eligible_for_reward"),
             "promotion_eligible": measurement.get("promotion_eligible"),
             "reward_layers": reward_layers,
+            "controlled_effect_projection": controlled_effect_projection,
         },
         "training_material": {
             "example_count": training.get("example_count"),
@@ -674,6 +686,121 @@ def _case_bank_quality_gate(
     }
 
 
+def _case_bank_sustainability_gate(
+    rows: list[dict[str, Any]],
+    *,
+    min_training_rows: int,
+    min_promotion_eligible_cases: int = 15,
+    min_promotion_eligible_ratio: float = 0.25,
+    min_average_operational_reward: float = 0.55,
+    recent_window_size: int = 12,
+    min_recent_operational_reward: float = 0.55,
+    min_recent_promotion_eligible_cases: int = 3,
+    min_promotion_issue_kinds: int = 8,
+    min_promotion_targets: int = 6,
+    min_controlled_effect_projection_ratio: float = 0.75,
+) -> dict[str, Any]:
+    reward_vector_rows: list[dict[str, Any]] = []
+    promotion_eligible_rows: list[dict[str, Any]] = []
+    operational_rewards: list[float] = []
+    controlled_projection_rows: list[dict[str, Any]] = []
+    for row in rows:
+        measurement = row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}
+        reward_layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
+        if reward_layers.get("version") != "live_feed_reward_vector_v1" or "operational_reward" not in reward_layers:
+            continue
+        reward_vector_rows.append(row)
+        operational_rewards.append(_safe_float(reward_layers.get("operational_reward"), 0.0))
+        if measurement.get("promotion_eligible") is True:
+            promotion_eligible_rows.append(row)
+        projection = measurement.get("controlled_effect_projection", {}) if isinstance(measurement.get("controlled_effect_projection"), dict) else {}
+        if projection.get("status") == "applied":
+            controlled_projection_rows.append(row)
+
+    promotion_kind_counts, promotion_target_counts, _domain_counts = _issue_counts(promotion_eligible_rows)
+    recent_rows = sorted(reward_vector_rows, key=lambda row: str(row.get("created_at") or ""), reverse=True)[:recent_window_size]
+    recent_rewards = [
+        _safe_float(
+            ((row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}).get("reward_layers", {}) if isinstance((row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}).get("reward_layers"), dict) else {}).get("operational_reward"),
+            0.0,
+        )
+        for row in recent_rows
+    ]
+    recent_promotion_rows = [
+        row
+        for row in recent_rows
+        if (row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}).get("promotion_eligible") is True
+    ]
+    recent_memory_rows = [
+        row
+        for row in recent_rows
+        if _safe_int((row.get("memory", {}) if isinstance(row.get("memory"), dict) else {}).get("applied_count")) > 0
+    ]
+    recent_projection_rows = [
+        row
+        for row in recent_rows
+        if ((row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}).get("controlled_effect_projection", {}) if isinstance((row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}).get("controlled_effect_projection"), dict) else {}).get("status") == "applied"
+    ]
+    average_operational_reward = round(sum(operational_rewards) / max(1, len(operational_rewards)), 3)
+    promotion_ratio = round(len(promotion_eligible_rows) / max(1, len(reward_vector_rows)), 3)
+    recent_average_operational_reward = round(sum(recent_rewards) / max(1, len(recent_rewards)), 3)
+    recent_memory_applied_ratio = round(len(recent_memory_rows) / max(1, len(recent_rows)), 3)
+    controlled_projection_ratio = round(len(controlled_projection_rows) / max(1, len(reward_vector_rows)), 3)
+
+    blockers: list[str] = []
+    if len(reward_vector_rows) < min_training_rows:
+        blockers.append(f"Need {min_training_rows} reward-vector cases for sustainable growth; found {len(reward_vector_rows)}.")
+    if len(promotion_eligible_rows) < min_promotion_eligible_cases:
+        blockers.append(f"Need {min_promotion_eligible_cases} promotion-eligible cases; found {len(promotion_eligible_rows)}.")
+    if promotion_ratio < min_promotion_eligible_ratio:
+        blockers.append(f"Promotion-eligible ratio too low: {promotion_ratio}, min={min_promotion_eligible_ratio}.")
+    if average_operational_reward < min_average_operational_reward:
+        blockers.append(f"Average operational reward too low: {average_operational_reward}, min={min_average_operational_reward}.")
+    if recent_average_operational_reward < min_recent_operational_reward:
+        blockers.append(f"Recent operational reward too low: {recent_average_operational_reward}, min={min_recent_operational_reward}.")
+    if len(recent_promotion_rows) < min_recent_promotion_eligible_cases:
+        blockers.append(f"Need {min_recent_promotion_eligible_cases} promotion-eligible cases in the latest {recent_window_size}; found {len(recent_promotion_rows)}.")
+    if len(promotion_kind_counts) < min_promotion_issue_kinds:
+        blockers.append(f"Promotion evidence needs {min_promotion_issue_kinds} issue kinds; found {len(promotion_kind_counts)}.")
+    if len(promotion_target_counts) < min_promotion_targets:
+        blockers.append(f"Promotion evidence needs {min_promotion_targets} targets/zones; found {len(promotion_target_counts)}.")
+    if controlled_projection_ratio < min_controlled_effect_projection_ratio:
+        blockers.append(f"Controlled-effect projection coverage too low: {controlled_projection_ratio}, min={min_controlled_effect_projection_ratio}.")
+
+    return {
+        "status": "growing" if not blockers else "watch",
+        "ready_for_sustainable_growth": not blockers,
+        "blockers": blockers,
+        "requirements": {
+            "min_training_rows": min_training_rows,
+            "min_promotion_eligible_cases": min_promotion_eligible_cases,
+            "min_promotion_eligible_ratio": min_promotion_eligible_ratio,
+            "min_average_operational_reward": min_average_operational_reward,
+            "recent_window_size": recent_window_size,
+            "min_recent_operational_reward": min_recent_operational_reward,
+            "min_recent_promotion_eligible_cases": min_recent_promotion_eligible_cases,
+            "min_promotion_issue_kinds": min_promotion_issue_kinds,
+            "min_promotion_targets": min_promotion_targets,
+            "min_controlled_effect_projection_ratio": min_controlled_effect_projection_ratio,
+        },
+        "metrics": {
+            "reward_vector_case_count": len(reward_vector_rows),
+            "promotion_eligible_case_count": len(promotion_eligible_rows),
+            "promotion_eligible_ratio": promotion_ratio,
+            "promotion_issue_kind_count": len(promotion_kind_counts),
+            "promotion_target_count": len(promotion_target_counts),
+            "average_operational_reward": average_operational_reward,
+            "recent_window_size": len(recent_rows),
+            "recent_average_operational_reward": recent_average_operational_reward,
+            "recent_promotion_eligible_case_count": len(recent_promotion_rows),
+            "recent_memory_applied_ratio": recent_memory_applied_ratio,
+            "controlled_effect_projection_case_count": len(controlled_projection_rows),
+            "controlled_effect_projection_ratio": controlled_projection_ratio,
+            "recent_controlled_effect_projection_count": len(recent_projection_rows),
+        },
+    }
+
+
 def _case_bank_summary(
     rows: list[dict[str, Any]],
     *,
@@ -700,6 +827,10 @@ def _case_bank_summary(
         max_dominant_issue_ratio=max_dominant_issue_ratio,
         min_memory_applied_ratio=min_memory_applied_ratio,
     )
+    sustainability_gate = _case_bank_sustainability_gate(
+        rows,
+        min_training_rows=min_training_rows,
+    )
     return {
         "status": "ready",
         "mode": "append_only_live_feed_case_bank",
@@ -722,6 +853,7 @@ def _case_bank_summary(
         "append_only": True,
         "training_threshold_uses": "historical closed_case_count plus reward-vector cases with operational_reward; legacy scalar reward rows are trace/eval material only",
         "quality_gate": quality_gate,
+        "sustainability_gate": sustainability_gate,
         "updated_at": _now_iso(),
     }
 
@@ -803,6 +935,7 @@ def _aggregate_report(cycles: list[dict[str, Any]], actual_training: dict[str, A
     actual_debug = actual_training.get("debug", {}) if isinstance(actual_training.get("debug"), dict) else {}
     case_bank_summary = case_bank.get("summary", {}) if isinstance(case_bank.get("summary"), dict) else {}
     quality_gate = case_bank_summary.get("quality_gate", {}) if isinstance(case_bank_summary.get("quality_gate"), dict) else {}
+    sustainability_gate = case_bank_summary.get("sustainability_gate", {}) if isinstance(case_bank_summary.get("sustainability_gate"), dict) else {}
     status = "passed" if summaries and all(summary.get("status") == "passed" for summary in summaries) and unresolved == 0 else "review"
     return {
         "created_at": _now_iso(),
@@ -825,6 +958,7 @@ def _aggregate_report(cycles: list[dict[str, Any]], actual_training: dict[str, A
             "case_bank_added_count": case_bank_summary.get("added_count"),
             "case_bank_duplicate_count": case_bank_summary.get("duplicate_count"),
             "case_bank_quality_status": quality_gate.get("status"),
+            "case_bank_sustainability_status": sustainability_gate.get("status"),
             "memory_growth": memory_growth,
             "actual_training_status": actual_training.get("status"),
             "actual_training_sample_count": actual_training.get("sample_count"),
@@ -875,7 +1009,7 @@ def _aggregate_report(cycles: list[dict[str, Any]], actual_training: dict[str, A
 def _badge(value: Any) -> str:
     text = html.escape(str(value))
     normalized = str(value).lower()
-    cls = "ok" if normalized in {"passed", "ready", "success", "recorded", "eligible_live_weather", "eligible_live_ride_ops", "eligible_live_guest_flow", "eligible_live_staffing", "eligible_live_food_ops", "eligible_live_operator_signal"} else "warn" if normalized in {"review", "hold", "not_ready", "timeout"} else "muted"
+    cls = "ok" if normalized in {"passed", "ready", "success", "recorded", "growing", "eligible_live_weather", "eligible_live_ride_ops", "eligible_live_guest_flow", "eligible_live_staffing", "eligible_live_food_ops", "eligible_live_operator_signal"} else "warn" if normalized in {"review", "hold", "not_ready", "timeout", "watch"} else "muted"
     return f'<span class="badge {cls}">{text}</span>'
 
 
@@ -887,6 +1021,9 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
     quality_gate = case_bank.get("quality_gate", {}) if isinstance(case_bank.get("quality_gate"), dict) else {}
     quality_metrics = quality_gate.get("metrics", {}) if isinstance(quality_gate.get("metrics"), dict) else {}
     quality_blockers = quality_gate.get("blockers", []) if isinstance(quality_gate.get("blockers"), list) else []
+    sustainability_gate = case_bank.get("sustainability_gate", {}) if isinstance(case_bank.get("sustainability_gate"), dict) else {}
+    sustainability_metrics = sustainability_gate.get("metrics", {}) if isinstance(sustainability_gate.get("metrics"), dict) else {}
+    sustainability_blockers = sustainability_gate.get("blockers", []) if isinstance(sustainability_gate.get("blockers"), list) else []
     memory_growth = summary.get("memory_growth", {}) if isinstance(summary.get("memory_growth"), dict) else {}
     cycle_cards = []
     for cycle in cycles:
@@ -896,6 +1033,11 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
         agents = cycle.get("agents", {}) if isinstance(cycle.get("agents"), dict) else {}
         measurement = cycle.get("measurement", {}) if isinstance(cycle.get("measurement"), dict) else {}
         reward_layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
+        controlled_effect_projection = (
+            measurement.get("controlled_effect_projection", {})
+            if isinstance(measurement.get("controlled_effect_projection"), dict)
+            else {}
+        )
         training = cycle.get("training_closure", {}) if isinstance(cycle.get("training_closure"), dict) else {}
         cycle_cards.append(
             f"""
@@ -915,6 +1057,7 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
                 <p><b>Memory use:</b> prior status {html.escape(str(memory.get('prior_status')))}, prior count {html.escape(str(memory.get('prior_count')))}, applied {html.escape(str(memory.get('applied_count')))}. Accepted departments: {html.escape(', '.join(str(x) for x in memory.get('accepted_departments', [])[:8]) or 'none')}.</p>
                 <p><b>Measured outcome:</b> {html.escape(str(measurement.get('status')))} with attribution confidence {html.escape(str(measurement.get('attribution_confidence')))} and operational reward {html.escape(str(reward_layers.get('operational_reward', measurement.get('reward_value'))))}. Promotion eligible: {html.escape(str(measurement.get('promotion_eligible')))}.</p>
                 <p><b>Reward layers:</b> trace {html.escape(str(reward_layers.get('trace_reward')))}, policy {html.escape(str(reward_layers.get('policy_reward')))}, execution {html.escape(str(reward_layers.get('execution_reward')))}, operational {html.escape(str(reward_layers.get('operational_reward')))}, learning {html.escape(str(reward_layers.get('learning_reward')))}.</p>
+                <p><b>Controlled effect:</b> {html.escape(str(controlled_effect_projection.get('status') or 'not_applied'))}; {html.escape(str(controlled_effect_projection.get('projection_count') or 0))} projected feed rows from acknowledged low-risk receiver actions.</p>
               </div>
             </section>
             """
@@ -924,6 +1067,7 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
         readiness_issues = []
     issue_items = "".join(f"<li>{html.escape(str(item))}</li>" for item in readiness_issues[:10]) or "<li>No readiness blockers reported.</li>"
     quality_items = "".join(f"<li>{html.escape(str(item))}</li>" for item in quality_blockers[:10]) or "<li>Quality gate passed.</li>"
+    sustainability_items = "".join(f"<li>{html.escape(str(item))}</li>" for item in sustainability_blockers[:10]) or "<li>Sustainable growth gate passed.</li>"
     html_doc = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1008,6 +1152,20 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
       <div class="truth">
         <strong>Quality gate issues</strong>
         <ul>{quality_items}</ul>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-title"><h2>Sustainable Growth</h2>{_badge(sustainability_gate.get('status'))}</div>
+      <div class="grid four">
+        <div><strong>Promotion cases</strong><span>{html.escape(str(sustainability_metrics.get('promotion_eligible_case_count')))}</span><small>Ratio {html.escape(str(sustainability_metrics.get('promotion_eligible_ratio')))}</small></div>
+        <div><strong>Recent reward</strong><span>{html.escape(str(sustainability_metrics.get('recent_average_operational_reward')))}</span><small>{html.escape(str(sustainability_metrics.get('recent_promotion_eligible_case_count')))} promotion cases in latest {html.escape(str(sustainability_metrics.get('recent_window_size')))}</small></div>
+        <div><strong>Promotion diversity</strong><span>{html.escape(str(sustainability_metrics.get('promotion_issue_kind_count')))} kinds</span><small>{html.escape(str(sustainability_metrics.get('promotion_target_count')))} targets/zones</small></div>
+        <div><strong>Effect coverage</strong><span>{html.escape(str(sustainability_metrics.get('controlled_effect_projection_ratio')))}</span><small>{html.escape(str(sustainability_metrics.get('controlled_effect_projection_case_count')))} cases with controlled-effect projection</small></div>
+      </div>
+      <div class="truth">
+        <strong>Sustainability gate issues</strong>
+        <ul>{sustainability_items}</ul>
       </div>
     </section>
 
