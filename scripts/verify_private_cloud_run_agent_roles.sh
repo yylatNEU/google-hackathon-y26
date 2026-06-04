@@ -22,7 +22,7 @@ curl_json() {
   local path="$2"
   local output="$3"
   shift 3
-  /usr/bin/curl -fsS --max-time "${REQUEST_TIMEOUT_SECONDS}" \
+  /usr/bin/curl --http1.1 -fsS --max-time "${REQUEST_TIMEOUT_SECONDS}" \
     -X "$method" \
     -H "Authorization: Bearer ${GOOGLE_IDENTITY}" \
     -H "Accept: application/json" \
