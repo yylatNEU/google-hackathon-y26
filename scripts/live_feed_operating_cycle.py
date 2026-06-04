@@ -111,7 +111,9 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
         else {}
     )
     memory_priors = payload.get("live_feed_memory_priors", {}) if isinstance(payload.get("live_feed_memory_priors"), dict) else {}
+    ml_policy_evidence = payload.get("live_feed_ml_policy_evidence", {}) if isinstance(payload.get("live_feed_ml_policy_evidence"), dict) else {}
     memory_prior_use = proposals.get("memory_prior_use", {}) if isinstance(proposals.get("memory_prior_use"), dict) else {}
+    ml_policy_use = proposals.get("ml_policy_evidence_use", {}) if isinstance(proposals.get("ml_policy_evidence_use"), dict) else {}
     tradeoff = proposals.get("executive_tradeoff", {}) if isinstance(proposals.get("executive_tradeoff"), dict) else {}
     closure_summary = closure.get("summary", {}) if isinstance(closure.get("summary"), dict) else {}
     issue_event = injected_issue.get("event", {}) if isinstance(injected_issue.get("event"), dict) else {}
@@ -149,6 +151,12 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
             "negotiation_round_count": len(proposals.get("negotiation_rounds", []) if isinstance(proposals.get("negotiation_rounds"), list) else []),
             "tradeoff_matrix_count": len(proposals.get("tradeoff_matrix", []) if isinstance(proposals.get("tradeoff_matrix"), list) else []),
             "memory_decision_delta_count": len(proposals.get("memory_decision_deltas", []) if isinstance(proposals.get("memory_decision_deltas"), list) else []),
+            "ml_policy_decision_delta_count": len(proposals.get("ml_policy_decision_deltas", []) if isinstance(proposals.get("ml_policy_decision_deltas"), list) else []),
+            "learned_policy_evidence_count": sum(
+                1
+                for row in rows
+                if isinstance(row.get("department_reasoning"), dict) and row["department_reasoning"].get("learned_policy_evidence")
+            ),
             "approved_departments": accepted_departments,
             "held_departments": held_departments,
             "evidence_argument_count": sum(
@@ -187,6 +195,18 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
             "outcome_memory_status": outcome_memory.get("status"),
             "outcome_id": outcome_memory.get("outcome_id"),
             "decision_id": outcome_memory.get("decision_id"),
+        },
+        "ml_policy": {
+            "status": ml_policy_evidence.get("status"),
+            "scenario_key": ml_policy_evidence.get("scenario_key"),
+            "slice_decision": ml_policy_evidence.get("slice_decision"),
+            "slice_sample_count": ml_policy_evidence.get("slice_sample_count"),
+            "latest_average_reward": ml_policy_evidence.get("latest_average_reward"),
+            "curve_delta": ml_policy_evidence.get("curve_delta"),
+            "accepted_low_risk_count": ml_policy_use.get("accepted_low_risk_count"),
+            "context_only_count": ml_policy_use.get("context_only_count"),
+            "warning_count": ml_policy_use.get("warning_count"),
+            "policy": ml_policy_evidence.get("policy"),
         },
         "measurement": {
             "status": outcome_measurement.get("status"),
@@ -1030,6 +1050,7 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
         issue = cycle.get("issue", {}) if isinstance(cycle.get("issue"), dict) else {}
         actions = cycle.get("actions", {}) if isinstance(cycle.get("actions"), dict) else {}
         memory = cycle.get("memory", {}) if isinstance(cycle.get("memory"), dict) else {}
+        ml_policy = cycle.get("ml_policy", {}) if isinstance(cycle.get("ml_policy"), dict) else {}
         agents = cycle.get("agents", {}) if isinstance(cycle.get("agents"), dict) else {}
         measurement = cycle.get("measurement", {}) if isinstance(cycle.get("measurement"), dict) else {}
         reward_layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
@@ -1048,13 +1069,14 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
               </div>
               <div class="grid four">
                 <div><strong>Generated issue</strong><span>{html.escape(str(issue.get('kind')))} at {html.escape(str(issue.get('target_id')))}</span><small>Intensity {html.escape(str(issue.get('intensity')))}, reliability {html.escape(str(issue.get('signal_reliability_pct')))}%</small></div>
-                <div><strong>Agent board</strong><span>{html.escape(str(agents.get('proposal_count')))} proposals, {html.escape(str(agents.get('negotiation_round_count')))} negotiation rounds</span><small>{html.escape(str(agents.get('memory_decision_delta_count')))} memory decision deltas</small></div>
+                <div><strong>Agent board</strong><span>{html.escape(str(agents.get('proposal_count')))} proposals, {html.escape(str(agents.get('negotiation_round_count')))} negotiation rounds</span><small>{html.escape(str(agents.get('memory_decision_delta_count')))} memory deltas, {html.escape(str(agents.get('ml_policy_decision_delta_count')))} ML deltas</small></div>
                 <div><strong>Actions</strong><span>{html.escape(str(actions.get('executed_count')))} executed, {html.escape(str(actions.get('held_count')))} held</span><small>{html.escape(str(actions.get('active_follow_up_count')))} active follow-ups, {html.escape(str(actions.get('unresolved_without_owner_count')))} ownerless</small></div>
-                <div><strong>Learning</strong><span>{html.escape(str(training.get('example_count')))} examples, {html.escape(str(training.get('reward_example_count')))} reward candidates</span><small>{html.escape(str(memory.get('outcome_id')))}</small></div>
+                <div><strong>Learning</strong><span>{html.escape(str(ml_policy.get('scenario_key')))} {html.escape(str(ml_policy.get('slice_decision')))}</span><small>Reward {html.escape(str(ml_policy.get('latest_average_reward')))}, delta {html.escape(str(ml_policy.get('curve_delta')))}</small></div>
               </div>
               <div class="decision">
                 <p><b>Why this was not scripted:</b> the event came from the current park simulation state, then live feeds were reloaded and agents grounded decisions in persisted feed event IDs.</p>
                 <p><b>Memory use:</b> prior status {html.escape(str(memory.get('prior_status')))}, prior count {html.escape(str(memory.get('prior_count')))}, applied {html.escape(str(memory.get('applied_count')))}. Accepted departments: {html.escape(', '.join(str(x) for x in memory.get('accepted_departments', [])[:8]) or 'none')}.</p>
+                <p><b>ML policy evidence:</b> scenario {html.escape(str(ml_policy.get('scenario_key')))}, status {html.escape(str(ml_policy.get('status')))}, slice decision {html.escape(str(ml_policy.get('slice_decision')))}. Accepted low-risk guidance {html.escape(str(ml_policy.get('accepted_low_risk_count')))}, context-only {html.escape(str(ml_policy.get('context_only_count')))}, warnings {html.escape(str(ml_policy.get('warning_count')))}.</p>
                 <p><b>Measured outcome:</b> {html.escape(str(measurement.get('status')))} with attribution confidence {html.escape(str(measurement.get('attribution_confidence')))} and operational reward {html.escape(str(reward_layers.get('operational_reward', measurement.get('reward_value'))))}. Promotion eligible: {html.escape(str(measurement.get('promotion_eligible')))}.</p>
                 <p><b>Reward layers:</b> trace {html.escape(str(reward_layers.get('trace_reward')))}, policy {html.escape(str(reward_layers.get('policy_reward')))}, execution {html.escape(str(reward_layers.get('execution_reward')))}, operational {html.escape(str(reward_layers.get('operational_reward')))}, learning {html.escape(str(reward_layers.get('learning_reward')))}.</p>
                 <p><b>Controlled effect:</b> {html.escape(str(controlled_effect_projection.get('status') or 'not_applied'))}; {html.escape(str(controlled_effect_projection.get('projection_count') or 0))} projected feed rows from acknowledged low-risk receiver actions.</p>

@@ -907,6 +907,69 @@ def test_live_feed_memory_priors_enrich_proposals_without_execution_rights():
     assert enriched["memory_decision_deltas"]
 
 
+def test_live_feed_ml_policy_evidence_shapes_reasoning_without_execution_rights():
+    import parkpulse_api
+
+    proposals = {
+        "proposals": [
+            {
+                "agent_id": "food_demand_agent",
+                "department": "food_retail",
+                "evidence": ["live_feed:food_ops"],
+                "department_reasoning": {
+                    "candidate_actions": [{"action": "pause_launch_promo", "score": 0.81}],
+                    "forecast": {"expected_outcome": "avoid stockout"},
+                    "memory_carry_forward": {"carry": [], "do_better_next_time": []},
+                },
+                "proposal_envelope": {"requested_tool": "pause_launch_promo"},
+            },
+            {
+                "agent_id": "ride_ops_agent",
+                "department": "operations",
+                "evidence": ["live_feed:ride_ops"],
+                "department_reasoning": {
+                    "candidate_actions": [{"action": "recommend_route_change", "score": 0.9}],
+                    "forecast": {"expected_outcome": "reduce queue pressure"},
+                    "memory_carry_forward": {"carry": [], "do_better_next_time": []},
+                },
+                "proposal_envelope": {"requested_tool": "recommend_route_change"},
+            },
+        ],
+        "executive_tradeoff": {},
+        "negotiation_rounds": [{"round": 1, "name": "local_department_positions"}],
+        "negotiation_turns": [],
+    }
+    ml_evidence = {
+        "status": "matched",
+        "scenario_key": "food_spike",
+        "slice_decision": "promote_slice",
+        "slice_sample_count": 18,
+        "latest_average_reward": 58.4,
+        "curve_delta": 4.2,
+        "actual_training_source": "heartbeat_delayed_outcome_signals+live_feed_case_bank_reward_vectors",
+        "policy": "ML evidence is guidance only.",
+    }
+
+    enriched = parkpulse_api._apply_live_feed_ml_policy_evidence_to_proposals(proposals, ml_evidence)
+    food = enriched["proposals"][0]
+    ops = enriched["proposals"][1]
+
+    assert enriched["ml_policy_evidence_use"]["status"] == "applied"
+    assert enriched["ml_policy_evidence_use"]["accepted_low_risk_count"] == 1
+    assert enriched["ml_policy_evidence_use"]["context_only_count"] == 1
+    assert food["ml_policy_evidence_use"]["accepted_by_judge"] is True
+    assert food["ml_policy_decision_delta"]["effect"] == "reinforced_low_risk_candidate"
+    assert food["department_reasoning"]["learned_policy_evidence"]["slice_decision"] == "promote_slice"
+    assert food["department_reasoning"]["counterfactual_learning_comparison"]["compare_against"] == ["hold_action", "current_live_feed_only", "memory_prior_only"]
+    assert food["department_reasoning"]["candidate_actions"][0]["ml_policy_adjusted_score"] == 0.84
+    assert "ml_slice:food_spike:decision=promote_slice:reward=58.4:delta=4.2" in food["evidence"]
+    assert ops["ml_policy_evidence_use"]["accepted_by_judge"] is False
+    assert ops["ml_policy_evidence_use"]["used_for"] == "tradeoff_context_no_execution_bias"
+    assert ops["ml_policy_decision_delta"]["decision_boundary"].startswith("ML evidence cannot grant execution rights")
+    assert enriched["negotiation_rounds"][1]["name"] == "actual_training_slice_challenge"
+    assert enriched["negotiation_turns"][0]["agent"] == "actual_training_policy_gate"
+
+
 def test_live_feed_controlled_outcome_memory_records_existing_memory_shape(monkeypatch):
     import parkpulse_api
 
@@ -928,7 +991,23 @@ def test_live_feed_controlled_outcome_memory_records_existing_memory_shape(monke
                 "proposal_count": 2,
                 "live_feed_grounded_proposal_count": 2,
                 "live_feed_event_ids": ["feed-1"],
+                "ml_policy_evidence_use": {
+                    "accepted_low_risk_count": 1,
+                    "context_only_count": 1,
+                    "warning_count": 0,
+                },
+                "ml_policy_decision_deltas": [
+                    {"department": "food_retail", "status": "accepted_low_risk_policy_guidance"}
+                ],
                 "proposals": [{"policy_judge": {"status": "passed"}}, {"policy_judge": {"status": "requires_human_approval"}}],
+            },
+            "live_feed_ml_policy_evidence": {
+                "status": "matched",
+                "scenario_key": "food_spike",
+                "slice_decision": "promote_slice",
+                "latest_average_reward": 58.4,
+                "curve_delta": 4.2,
+                "actual_training_source": "heartbeat_delayed_outcome_signals+live_feed_case_bank_reward_vectors",
             },
             "tool_executor_live_test": {
                 "status": "executed",
@@ -1014,11 +1093,16 @@ def test_live_feed_controlled_outcome_memory_records_existing_memory_shape(monke
     assert recorded["outcome"]["state_impact"]["hard_decision_follow_through_tasks"][0]["task_id"] == "hard-follow-safety"
     assert recorded["outcome"]["state_impact"]["receiver_delivery_proof_id"] == "receiver-proof"
     assert recorded["outcome"]["state_impact"]["post_action_measurement_id"] == "measurement-proof"
+    assert recorded["outcome"]["state_impact"]["ml_policy_evidence"]["scenario_key"] == "food_spike"
+    assert recorded["outcome"]["state_impact"]["ml_policy_evidence_use"]["accepted_low_risk_count"] == 1
+    assert recorded["outcome"]["state_impact"]["ml_policy_decision_deltas"][0]["department"] == "food_retail"
     assert recorded["outcome"]["scorecard"]["receiver_delivery"] == 100
     assert recorded["outcome"]["scorecard"]["post_action_measurement"] == 100
     assert recorded["outcome"]["learning"]["eligible_for_reward"] is True
     assert recorded["outcome"]["learning"]["reward_layers"]["operational_reward"] == 0.82
     assert recorded["outcome"]["learning"]["promotion_eligible"] is True
+    assert recorded["outcome"]["learning"]["ml_policy_learning_context"]["slice_decision"] == "promote_slice"
+    assert recorded["outcome"]["learning"]["ml_policy_learning_context"]["accepted_low_risk_count"] == 1
 
 
 def test_live_feed_training_closure_materializes_supervised_eval_only_and_dedupes_ledger(tmp_path, monkeypatch):

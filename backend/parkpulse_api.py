@@ -10132,6 +10132,74 @@ def _live_feed_memory_prior_for_department(memory_priors: dict[str, Any], depart
     return priors[0] if priors and isinstance(priors[0], dict) else None
 
 
+def _infer_live_feed_training_scenario(live_case: dict[str, Any]) -> str:
+    evidence = live_case.get("evidence", []) if isinstance(live_case, dict) and isinstance(live_case.get("evidence"), list) else []
+    text_parts = [
+        live_case.get("scenario_key") if isinstance(live_case, dict) else "",
+        live_case.get("lead_source") if isinstance(live_case, dict) else "",
+        live_case.get("lead_signal_type") if isinstance(live_case, dict) else "",
+        live_case.get("operator_message") if isinstance(live_case, dict) else "",
+    ]
+    for row in evidence[:8]:
+        if isinstance(row, dict):
+            text_parts.extend([row.get("source"), row.get("signal_type"), row.get("summary")])
+    text = " ".join(str(item or "").lower().replace("-", "_") for item in text_parts)
+    scenario_terms = [
+        ("food_spike", ("food", "inventory", "pos", "promo", "mobile_order", "pickup", "kitchen", "payment")),
+        ("staff_shortage", ("staff", "shift", "fatigue", "overtime", "callout", "coverage", "break")),
+        ("storm_response", ("storm", "weather", "lightning", "heat", "shelter", "indoor", "rain")),
+        ("proactive_eventops", ("parade", "parking", "gate", "access_lane", "eventops", "arrival_wave")),
+        ("scan", ("sensor", "energy", "water_leak", "radio_dead_zone", "restroom", "triage")),
+        ("ride_down", ("ride", "coaster", "wait", "queue", "route", "capacity", "downtime", "outage", "reopen")),
+    ]
+    for scenario, terms in scenario_terms:
+        if any(term in text for term in terms):
+            return scenario
+    return "unknown"
+
+
+def _live_feed_ml_policy_evidence(live_case: dict[str, Any], min_rows: int = 50) -> dict[str, Any]:
+    scenario_key = _infer_live_feed_training_scenario(live_case)
+    try:
+        from park_actual_training import actual_training_status
+
+        actual = actual_training_status(min_rows, False, detail="readiness")
+    except Exception as error:
+        return {
+            "mode": "live_feed_ml_policy_evidence",
+            "status": "unavailable",
+            "scenario_key": scenario_key,
+            "reason": str(error)[:300],
+            "policy": "ML evidence failed closed; live feed, memory, policy, Compliance, Executive, and Tool Executor gates remain authoritative.",
+        }
+    model_ops = actual.get("model_ops", {}) if isinstance(actual.get("model_ops"), dict) else {}
+    scenario_fitness = model_ops.get("scenario_fitness", {}) if isinstance(model_ops.get("scenario_fitness"), dict) else {}
+    scenarios = scenario_fitness.get("scenarios", []) if isinstance(scenario_fitness.get("scenarios"), list) else []
+    matched = next((row for row in scenarios if isinstance(row, dict) and str(row.get("scenario_key") or "") == scenario_key), None)
+    decision = str((matched or {}).get("decision") or "")
+    guidance = {
+        "promote_slice": "reinforce_pattern_with_rollback_monitoring",
+        "collect_more_evidence": "use_as_watch_context_collect_more_cases",
+        "hold_slice": "warn_against_policy_promotion",
+    }.get(decision, "context_only_no_slice_decision")
+    return {
+        "mode": "live_feed_ml_policy_evidence",
+        "status": "matched" if matched else "no_slice",
+        "scenario_key": scenario_key,
+        "actual_training_status": actual.get("status"),
+        "actual_training_source": actual.get("source"),
+        "actual_training_sample_count": actual.get("sample_count"),
+        "current_policy_id": model_ops.get("current_policy_id"),
+        "slice": matched or {},
+        "slice_decision": decision or None,
+        "slice_sample_count": (matched or {}).get("sample_count"),
+        "latest_average_reward": (matched or {}).get("latest_average_reward"),
+        "curve_delta": (matched or {}).get("curve_delta"),
+        "guidance": guidance,
+        "policy": "ML slice evidence can shape confidence, counterfactual comparison, and next-case learning questions, but cannot grant execution rights or override live evidence, Compliance, Executive, or Tool Executor gates.",
+    }
+
+
 def _judge_live_feed_memory_relevance(prior: dict[str, Any] | None, department: str, requested_tool: str) -> dict[str, Any]:
     if not prior:
         return {
@@ -10359,6 +10427,221 @@ def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memor
     return proposals
 
 
+def _ml_evidence_scope_for_department(ml_evidence: dict[str, Any], department: str) -> dict[str, Any]:
+    status = str(ml_evidence.get("status") or "")
+    decision = str(ml_evidence.get("slice_decision") or "")
+    department = str(department or "")
+    low_risk_departments = {"food_retail", "hr_labor", "marketing"}
+    sensitive_departments = {"operations", "maintenance", "guest_experience", "safety", "security"}
+    if status != "matched":
+        return {
+            "status": "no_matching_slice",
+            "accepted_by_judge": False,
+            "usage_scope": "context_only",
+            "score_adjustment": 0,
+            "reason": "No matching trained scenario slice was available for this live-feed case.",
+        }
+    if decision == "promote_slice" and department in low_risk_departments:
+        return {
+            "status": "accepted_low_risk_policy_guidance",
+            "accepted_by_judge": True,
+            "usage_scope": "low_risk_confidence_bias",
+            "score_adjustment": 0.03,
+            "reason": f"Scenario slice {ml_evidence.get('scenario_key')} is promotable; guidance can reinforce bounded low-risk proposals only.",
+        }
+    if decision == "promote_slice":
+        return {
+            "status": "context_only_sensitive_boundary",
+            "accepted_by_judge": False,
+            "usage_scope": "tradeoff_context_no_execution_bias",
+            "score_adjustment": 0,
+            "reason": f"Scenario slice {ml_evidence.get('scenario_key')} is healthy, but {department} remains sensitive or governance-only.",
+        }
+    if decision == "hold_slice":
+        return {
+            "status": "warning_hold_slice",
+            "accepted_by_judge": False,
+            "usage_scope": "warning_no_promotion",
+            "score_adjustment": -0.05 if department in low_risk_departments else 0,
+            "reason": f"Scenario slice {ml_evidence.get('scenario_key')} is held or regressed; do not promote this pattern.",
+        }
+    if decision == "collect_more_evidence":
+        return {
+            "status": "watch_collect_more_evidence",
+            "accepted_by_judge": False,
+            "usage_scope": "counterfactual_context",
+            "score_adjustment": 0,
+            "reason": f"Scenario slice {ml_evidence.get('scenario_key')} is thin; use evidence for comparison and collect measured outcomes.",
+        }
+    if department in sensitive_departments:
+        return {
+            "status": "context_only_sensitive_boundary",
+            "accepted_by_judge": False,
+            "usage_scope": "tradeoff_context_no_execution_bias",
+            "score_adjustment": 0,
+            "reason": "ML policy evidence is context only for sensitive departments.",
+        }
+    return {
+        "status": "context_only",
+        "accepted_by_judge": False,
+        "usage_scope": "tradeoff_context",
+        "score_adjustment": 0,
+        "reason": "ML policy evidence is available for explanation but does not change action rights.",
+    }
+
+
+def _apply_live_feed_ml_policy_evidence_to_proposals(proposals: dict[str, Any], ml_evidence: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(proposals, dict):
+        return proposals
+    rows = proposals.get("proposals", []) if isinstance(proposals.get("proposals"), list) else []
+    accepted = []
+    context_only = []
+    warnings = []
+    for proposal in rows:
+        if not isinstance(proposal, dict):
+            continue
+        envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+        requested_tool = envelope.get("requested_tool") or proposal.get("requested_tool")
+        department = str(proposal.get("department") or "")
+        scope = _ml_evidence_scope_for_department(ml_evidence, department)
+        decision_delta = {
+            "effect": "reinforced_low_risk_candidate" if scope["accepted_by_judge"] else "warning_no_promotion" if scope["status"] == "warning_hold_slice" else "context_only",
+            "before": "Proposal used current live feed, policy, and memory evidence.",
+            "after": scope["reason"],
+            "score_adjustment": scope["score_adjustment"],
+            "decision_boundary": "ML evidence cannot grant execution rights; policy, Compliance, Executive, and Tool Executor gates remain unchanged.",
+        }
+        use = {
+            "status": scope["status"],
+            "scenario_key": ml_evidence.get("scenario_key"),
+            "slice_decision": ml_evidence.get("slice_decision"),
+            "slice_sample_count": ml_evidence.get("slice_sample_count"),
+            "latest_average_reward": ml_evidence.get("latest_average_reward"),
+            "curve_delta": ml_evidence.get("curve_delta"),
+            "used_for": scope["usage_scope"],
+            "accepted_by_judge": scope["accepted_by_judge"],
+            "score_adjustment": scope["score_adjustment"],
+            "reason": scope["reason"],
+            "policy": ml_evidence.get("policy"),
+            "decision_delta": decision_delta,
+        }
+        proposal["ml_policy_evidence_use"] = use
+        proposal["ml_policy_decision_delta"] = decision_delta
+        reasoning = proposal.get("department_reasoning", {}) if isinstance(proposal.get("department_reasoning"), dict) else {}
+        if reasoning:
+            reasoning["learned_policy_evidence"] = use
+            reasoning["counterfactual_learning_comparison"] = {
+                "scenario_key": ml_evidence.get("scenario_key"),
+                "slice_decision": ml_evidence.get("slice_decision"),
+                "candidate_pattern": requested_tool,
+                "compare_against": ["hold_action", "current_live_feed_only", "memory_prior_only"],
+                "learning_question": "Did the chosen department action outperform hold/fallback under the same scenario slice without crossing policy boundaries?",
+            }
+            candidate_actions = reasoning.get("candidate_actions", []) if isinstance(reasoning.get("candidate_actions"), list) else []
+            if candidate_actions and isinstance(candidate_actions[0], dict):
+                base = float(candidate_actions[0].get("memory_adjusted_score") or candidate_actions[0].get("score") or 0)
+                candidate_actions[0]["ml_policy_adjusted_score"] = round(max(0.01, min(0.99, base + float(scope["score_adjustment"]))), 2)
+                candidate_actions[0]["ml_policy_adjustment_reason"] = scope["reason"]
+            forecast = reasoning.get("forecast", {}) if isinstance(reasoning.get("forecast"), dict) else {}
+            if forecast:
+                forecast["ml_policy_evidence_adjustment"] = decision_delta
+            carry = reasoning.get("memory_carry_forward", {}) if isinstance(reasoning.get("memory_carry_forward"), dict) else {}
+            if carry:
+                carry.setdefault("carry", [])
+                if isinstance(carry["carry"], list):
+                    carry["carry"] = list(dict.fromkeys([*carry["carry"], "ml_slice_decision", "ml_reward_curve_delta", "ml_policy_decision_delta"]))
+                carry.setdefault("do_better_next_time", [])
+                if isinstance(carry["do_better_next_time"], list):
+                    carry["do_better_next_time"] = list(dict.fromkeys(["compare selected action against ML slice expectation", *carry["do_better_next_time"]]))
+            proposal["department_reasoning"] = reasoning
+        if ml_evidence.get("scenario_key"):
+            proposal.setdefault("evidence", [])
+            if isinstance(proposal["evidence"], list):
+                proposal["evidence"] = list(
+                    dict.fromkeys(
+                        [
+                            f"ml_slice:{ml_evidence.get('scenario_key')}:decision={ml_evidence.get('slice_decision')}:reward={ml_evidence.get('latest_average_reward')}:delta={ml_evidence.get('curve_delta')}",
+                            *[str(item) for item in proposal["evidence"]],
+                        ]
+                    )
+                )[:12]
+        if envelope:
+            envelope["ml_policy_evidence"] = use
+            envelope["ml_policy_decision_delta"] = decision_delta
+            proposal["proposal_envelope"] = envelope
+        row = {
+            "agent": proposal.get("agent_id"),
+            "department": department,
+            "requested_tool": requested_tool,
+            "status": scope["status"],
+            "accepted_by_judge": scope["accepted_by_judge"],
+            "usage_scope": scope["usage_scope"],
+            "decision_delta": decision_delta,
+        }
+        if scope["accepted_by_judge"]:
+            accepted.append(row)
+        elif scope["status"] == "warning_hold_slice":
+            warnings.append(row)
+        else:
+            context_only.append(row)
+    proposals["ml_policy_evidence"] = ml_evidence
+    proposals["ml_policy_evidence_use"] = {
+        "status": "applied" if accepted or context_only or warnings else "none",
+        "scenario_key": ml_evidence.get("scenario_key"),
+        "accepted_low_risk_count": len(accepted),
+        "context_only_count": len(context_only),
+        "warning_count": len(warnings),
+        "policy": "Actual-training evidence shapes confidence and counterfactual questions only; execution authority remains with policy, Compliance, Executive, and Tool Executor.",
+        "accepted_rows": accepted,
+        "context_only_rows": context_only,
+        "warning_rows": warnings,
+    }
+    proposals["ml_policy_decision_deltas"] = [*accepted, *context_only, *warnings]
+    tradeoff = proposals.get("executive_tradeoff", {}) if isinstance(proposals.get("executive_tradeoff"), dict) else {}
+    if tradeoff:
+        tradeoff["ml_policy_influence"] = {
+            "scenario_key": ml_evidence.get("scenario_key"),
+            "slice_decision": ml_evidence.get("slice_decision"),
+            "latest_average_reward": ml_evidence.get("latest_average_reward"),
+            "curve_delta": ml_evidence.get("curve_delta"),
+            "accepted_low_risk_count": len(accepted),
+            "context_only_count": len(context_only),
+            "warning_count": len(warnings),
+            "decision_rule": "Use ML slice evidence as learned policy context, not as permission to execute.",
+            "deltas": [*accepted, *context_only, *warnings],
+        }
+        proposals["executive_tradeoff"] = tradeoff
+    rounds = proposals.get("negotiation_rounds", []) if isinstance(proposals.get("negotiation_rounds"), list) else []
+    if rounds and (accepted or context_only or warnings):
+        rounds.insert(
+            min(4, len(rounds)),
+            {
+                "round": "ml_policy",
+                "name": "actual_training_slice_challenge",
+                "decision": "learned_policy_evidence_applied",
+                "scenario_key": ml_evidence.get("scenario_key"),
+                "slice_decision": ml_evidence.get("slice_decision"),
+                "accepted_low_risk": accepted,
+                "context_only": context_only,
+                "warnings": warnings,
+                "resolution": "ML evidence may reinforce or warn, but cannot override policy or execute held actions.",
+            },
+        )
+        proposals["negotiation_rounds"] = rounds
+    proposals.setdefault("negotiation_turns", [])
+    if isinstance(proposals["negotiation_turns"], list) and (accepted or context_only or warnings):
+        proposals["negotiation_turns"].insert(
+            2,
+            {
+                "turn": "ml_policy",
+                "agent": "actual_training_policy_gate",
+                "decision": "attached_slice_evidence",
+                "reason": f"Scenario {ml_evidence.get('scenario_key')} slice decision {ml_evidence.get('slice_decision')} with reward {ml_evidence.get('latest_average_reward')} and delta {ml_evidence.get('curve_delta')}.",
+            },
+        )
+    return proposals
+
+
 def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict[str, Any]:
     executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
     proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
@@ -10366,6 +10649,8 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
     receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
     outcome_measurement = payload.get("live_feed_outcome_measurement", {}) if isinstance(payload.get("live_feed_outcome_measurement"), dict) else {}
     memory_priors = payload.get("live_feed_memory_priors", {}) if isinstance(payload.get("live_feed_memory_priors"), dict) else {}
+    ml_policy_evidence = payload.get("live_feed_ml_policy_evidence", {}) if isinstance(payload.get("live_feed_ml_policy_evidence"), dict) else {}
+    ml_policy_use = proposals.get("ml_policy_evidence_use", {}) if isinstance(proposals.get("ml_policy_evidence_use"), dict) else {}
     follow_through = payload.get("hard_decision_follow_through", {}) if isinstance(payload.get("hard_decision_follow_through"), dict) else {}
     park_profile_summary = payload.get("park_profile_summary") or proposals.get("park_profile_summary") or {}
     if not isinstance(park_profile_summary, dict):
@@ -10399,6 +10684,7 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
         "phases": [
             {"phase": "observe", "status": "complete", "evidence_count": len(live_case.get("evidence", []) if isinstance(live_case.get("evidence"), list) else [])},
             {"phase": "memory_retrieval", "status": memory_priors.get("status") or "missing", "prior_count": memory_priors.get("prior_count"), "prior_outcome_ids": memory_priors.get("latest_outcome_ids", [])},
+            {"phase": "actual_training_policy_evidence", "status": ml_policy_evidence.get("status") or "missing", "scenario_key": ml_policy_evidence.get("scenario_key"), "slice_decision": ml_policy_evidence.get("slice_decision"), "accepted_low_risk_count": ml_policy_use.get("accepted_low_risk_count")},
             {"phase": "park_profile_context", "status": proposals.get("park_profile_context_status") or park_profile_summary.get("status") or "missing", "profile_context_proposal_count": proposals.get("profile_context_proposal_count"), "profile_version": proposals.get("profile_version") or park_profile_summary.get("profile_version")},
             {"phase": "propose", "status": "complete", "proposal_count": proposals.get("proposal_count")},
             {"phase": "policy_judge", "status": "complete", "concrete_policy_count": sum(1 for item in proposals.get("proposals", []) if isinstance(item, dict) and item.get("policy_judge")) if isinstance(proposals.get("proposals"), list) else 0},
@@ -10430,6 +10716,9 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
             "memory_prior_outcome_ids": memory_priors.get("latest_outcome_ids", []),
             "memory_prior_count": memory_priors.get("prior_count", 0),
             "memory_prior_policy": memory_priors.get("policy"),
+            "ml_policy_evidence": ml_policy_evidence,
+            "ml_policy_evidence_use": ml_policy_use,
+            "ml_policy_decision_deltas": proposals.get("ml_policy_decision_deltas", []),
             "park_profile_summary": park_profile_summary,
             "profile_context_proposal_count": proposals.get("profile_context_proposal_count"),
             "profile_precedence": proposals.get("precedence") or park_profile_summary.get("precedence"),
@@ -10470,6 +10759,16 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
                 "precedence": proposals.get("precedence") or park_profile_summary.get("precedence"),
                 "observation_keys": ((park_profile_summary.get("counts") or {}) if isinstance(park_profile_summary.get("counts"), dict) else {}),
             },
+            "ml_policy_learning_context": {
+                "scenario_key": ml_policy_evidence.get("scenario_key"),
+                "slice_decision": ml_policy_evidence.get("slice_decision"),
+                "latest_average_reward": ml_policy_evidence.get("latest_average_reward"),
+                "curve_delta": ml_policy_evidence.get("curve_delta"),
+                "accepted_low_risk_count": ml_policy_use.get("accepted_low_risk_count"),
+                "context_only_count": ml_policy_use.get("context_only_count"),
+                "warning_count": ml_policy_use.get("warning_count"),
+                "training_source": ml_policy_evidence.get("actual_training_source"),
+            },
             "next_gap": "Resolve active hard-decision follow-up tasks and attribute longer-horizon operational lift." if follow_through.get("active_follow_up_count") else "Attribute longer-horizon operational lift after receiver action." if eligible_for_reward else "Record post-action state measurements before reward training.",
         },
     }
@@ -10507,7 +10806,9 @@ async def park_live_feed_agent_run(request: LiveFeedAgentRunRequest):
     health = await _live_feed_health_payload(limit=500)
     live_case = _live_feed_case_from_health(health)
     memory_priors = _live_feed_memory_priors_from_dashboard(live_case)
+    ml_policy_evidence = _live_feed_ml_policy_evidence(live_case)
     live_case["memory_priors"] = memory_priors
+    live_case["ml_policy_evidence"] = ml_policy_evidence
     readiness_issues: list[str] = []
     if request.require_persisted_events and int(live_case.get("persisted_event_count") or 0) <= 0:
         readiness_issues.append("No persisted live feed events are available; load live feeds before running a live-feed case.")
@@ -10546,8 +10847,10 @@ async def park_live_feed_agent_run(request: LiveFeedAgentRunRequest):
         payload["live_feed_health"] = health
         payload["live_feed_refresh"] = refresh
         payload["live_feed_memory_priors"] = memory_priors
+        payload["live_feed_ml_policy_evidence"] = ml_policy_evidence
         proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
         proposals = _apply_live_feed_memory_priors_to_proposals(proposals, memory_priors)
+        proposals = _apply_live_feed_ml_policy_evidence_to_proposals(proposals, ml_policy_evidence)
         payload["role_agent_proposals"] = proposals
         payload["park_profile_summary"] = proposals.get("park_profile_summary", {})
         payload["live_feed_cooperation"] = proposals.get("cooperation_graph") or _build_live_feed_cooperation_graph(proposals, live_case)
