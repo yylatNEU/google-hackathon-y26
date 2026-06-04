@@ -907,6 +907,61 @@ def test_live_feed_memory_priors_enrich_proposals_without_execution_rights():
     assert enriched["memory_decision_deltas"]
 
 
+def test_live_feed_memory_priors_fall_back_to_case_bank_when_mongo_empty(tmp_path, monkeypatch):
+    import parkpulse_api
+
+    case_bank = tmp_path / "index.jsonl"
+    case_bank.write_text(
+        json.dumps(
+            {
+                "case_id": "live_feed_case:outcome-prior",
+                "closed_case": True,
+                "created_at": "2026-06-04T12:00:00Z",
+                "decision_id": "decision-prior",
+                "outcome_id": "outcome-prior",
+                "issue": {"kind": "staff_callout", "target_id": "zone-b"},
+                "actions": {"receiver_delivery_status": "proven_controlled"},
+                "agent_decision": {"held_departments": ["operations", "safety"]},
+                "measurement": {
+                    "status": "measured",
+                    "eligible_for_reward": True,
+                    "reward_value": 0.77,
+                    "attribution_confidence": 0.91,
+                    "controlled_effect_projection": {
+                        "executed_departments": ["food_retail", "hr_labor", "marketing"],
+                        "executed_tools": ["pause_launch_promo", "shift_adjustment_recommendation", "redirect_offer"],
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(parkpulse_api, "LIVE_FEED_CASE_BANK_INDEX", case_bank)
+    monkeypatch.setattr(
+        parkpulse_api,
+        "get_operational_memory_dashboard",
+        lambda _query: {"status": {"mode": "demo_fallback", "connected": False}, "latest_outcomes": []},
+    )
+
+    priors = parkpulse_api._live_feed_memory_priors_from_dashboard(
+        {"scenario_key": "staff_shortage", "lead_source": "staffing", "lead_signal_type": "callout"},
+        limit=3,
+    )
+
+    assert priors["status"] == "retrieved"
+    assert priors["source"] == "case_bank_memory_fallback"
+    assert priors["fallback_reason"] == "mongodb_memory_empty"
+    assert priors["prior_count"] == 1
+    assert priors["latest_outcome_ids"] == ["outcome-prior"]
+    prior = priors["priors"][0]
+    assert prior["scenario_key"] == "staff_shortage"
+    assert prior["executed_tools"] == ["pause_launch_promo", "shift_adjustment_recommendation", "redirect_offer"]
+    assert prior["executed_departments"] == ["food_retail", "hr_labor", "marketing"]
+    assert prior["reward_value"] == 0.77
+    assert prior["attribution_confidence"] == 0.91
+
+
 def test_live_feed_ml_policy_evidence_shapes_reasoning_without_execution_rights():
     import parkpulse_api
 

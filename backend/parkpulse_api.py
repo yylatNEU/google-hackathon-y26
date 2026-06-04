@@ -16,6 +16,12 @@ load_backend_env()
 
 
 RUNTIME_BUILD_ID = "latency-hot-route-v5-2026-06-03"
+LIVE_FEED_CASE_BANK_INDEX = Path(
+    os.getenv(
+        "PARKPULSE_LIVE_FEED_CASE_BANK_INDEX",
+        str(Path(__file__).resolve().parents[1] / "output" / "qa" / "live-feed-case-bank" / "index.jsonl"),
+    )
+)
 
 
 class _NoopSpan:
@@ -10070,6 +10076,11 @@ def _live_feed_memory_priors_from_dashboard(live_case: dict[str, Any], limit: in
     try:
         dashboard = get_operational_memory_dashboard(" ".join(part for part in query_parts if part).strip())
     except Exception as error:
+        case_bank_priors = _live_feed_case_bank_memory_priors(live_case, limit=limit)
+        if case_bank_priors.get("prior_count"):
+            case_bank_priors["dashboard_status"] = {"status": "unavailable", "reason": str(error)[:300]}
+            case_bank_priors["fallback_reason"] = "mongodb_dashboard_unavailable"
+            return case_bank_priors
         return {
             "mode": "live_feed_memory_priors",
             "status": "unavailable",
@@ -10108,6 +10119,12 @@ def _live_feed_memory_priors_from_dashboard(live_case: dict[str, Any], limit: in
         )
         if len(priors) >= limit:
             break
+    if not priors:
+        case_bank_priors = _live_feed_case_bank_memory_priors(live_case, limit=limit)
+        if case_bank_priors.get("prior_count"):
+            case_bank_priors["dashboard_status"] = dashboard.get("status")
+            case_bank_priors["fallback_reason"] = "mongodb_memory_empty"
+            return case_bank_priors
     return {
         "mode": "live_feed_memory_priors",
         "status": "retrieved" if priors else "empty",
@@ -10116,6 +10133,120 @@ def _live_feed_memory_priors_from_dashboard(live_case: dict[str, Any], limit: in
         "latest_outcome_ids": [row.get("outcome_id") for row in priors if row.get("outcome_id")],
         "dashboard_status": dashboard.get("status"),
         "policy": "Memory can bias only low-risk execute-vs-hold recommendations; live feed evidence, policy judge, and Executive gate remain authoritative.",
+    }
+
+
+def _live_feed_issue_kind_to_training_scenario(kind: Any) -> str:
+    normalized = str(kind or "").strip().lower().replace("-", "_")
+    mapping = {
+        "ride_failure": "ride_down",
+        "show_dump": "ride_down",
+        "radio_dead_zone": "ride_down",
+        "access_lane_block": "ride_down",
+        "staff_callout": "staff_shortage",
+        "food_spike": "food_spike",
+        "inventory_stockout": "food_spike",
+        "mobile_order_outage": "food_spike",
+        "payment_outage": "food_spike",
+        "demand_spike": "food_spike",
+        "storm_risk": "storm_response",
+        "heat_index_spike": "storm_response",
+        "lightning_delay": "storm_response",
+        "energy_spike": "scan",
+        "sensor_anomaly": "scan",
+        "water_leak": "scan",
+        "restroom_closure": "scan",
+        "security_perimeter": "scan",
+        "parade_route_conflict": "proactive_eventops",
+        "parking_arrival_wave": "proactive_eventops",
+        "ticketing_gate_surge": "proactive_eventops",
+    }
+    return mapping.get(normalized, normalized if normalized else "unknown")
+
+
+def _live_feed_case_bank_memory_priors(live_case: dict[str, Any], limit: int = 5) -> dict[str, Any]:
+    scenario_key = _infer_live_feed_training_scenario(live_case)
+    path = LIVE_FEED_CASE_BANK_INDEX
+    if not path.exists():
+        return {
+            "mode": "live_feed_memory_priors",
+            "source": "case_bank_memory_fallback",
+            "status": "empty",
+            "scenario_key": scenario_key,
+            "prior_count": 0,
+            "priors": [],
+            "latest_outcome_ids": [],
+            "case_bank_path": str(path),
+            "policy": "No durable case-bank memory was available; proposal remains live-feed-only.",
+        }
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            parsed = json.loads(line)
+            if isinstance(parsed, dict):
+                rows.append(parsed)
+    except Exception as error:
+        return {
+            "mode": "live_feed_memory_priors",
+            "source": "case_bank_memory_fallback",
+            "status": "unavailable",
+            "scenario_key": scenario_key,
+            "reason": str(error)[:300],
+            "prior_count": 0,
+            "priors": [],
+            "latest_outcome_ids": [],
+            "case_bank_path": str(path),
+            "policy": "Case-bank memory failed closed; proposal remains live-feed-only.",
+        }
+
+    priors: list[dict[str, Any]] = []
+    for row in reversed(rows):
+        if not isinstance(row, dict) or not row.get("closed_case"):
+            continue
+        issue = row.get("issue", {}) if isinstance(row.get("issue"), dict) else {}
+        row_scenario = _live_feed_issue_kind_to_training_scenario(issue.get("kind"))
+        if scenario_key != "unknown" and row_scenario != scenario_key:
+            continue
+        measurement = row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}
+        actions = row.get("actions", {}) if isinstance(row.get("actions"), dict) else {}
+        agent_decision = row.get("agent_decision", {}) if isinstance(row.get("agent_decision"), dict) else {}
+        projection = measurement.get("controlled_effect_projection", {}) if isinstance(measurement.get("controlled_effect_projection"), dict) else {}
+        if not measurement.get("eligible_for_reward") and measurement.get("status") != "measured":
+            continue
+        prior = {
+            "outcome_id": row.get("outcome_id"),
+            "decision_id": row.get("decision_id"),
+            "case_id": row.get("case_id"),
+            "source": "case_bank_memory_fallback",
+            "scenario_key": row_scenario,
+            "issue_kind": issue.get("kind"),
+            "created_at": row.get("created_at"),
+            "executed_tools": projection.get("executed_tools", []),
+            "held_tools": [],
+            "executed_departments": projection.get("executed_departments", []),
+            "held_departments": agent_decision.get("held_departments", []),
+            "reward_value": measurement.get("reward_value"),
+            "attribution_confidence": measurement.get("attribution_confidence"),
+            "receiver_delivery_proven": actions.get("receiver_delivery_status") == "proven_controlled",
+            "measured_outcome_available": measurement.get("status") == "measured",
+            "measurement_id": measurement.get("measurement_id"),
+            "status": "usable_prior" if measurement.get("status") == "measured" else "trace_only",
+        }
+        priors.append(prior)
+        if len(priors) >= limit:
+            break
+    return {
+        "mode": "live_feed_memory_priors",
+        "source": "case_bank_memory_fallback",
+        "status": "retrieved" if priors else "empty",
+        "scenario_key": scenario_key,
+        "prior_count": len(priors),
+        "priors": priors,
+        "latest_outcome_ids": [row.get("outcome_id") for row in priors if row.get("outcome_id")],
+        "case_bank_path": str(path),
+        "policy": "Durable case-bank memory can bias only low-risk execute-vs-hold recommendations; live feed evidence, policy judge, and Executive gate remain authoritative.",
     }
 
 
