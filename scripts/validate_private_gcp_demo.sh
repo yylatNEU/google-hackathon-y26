@@ -16,6 +16,8 @@ TOKEN="$(gcloud auth print-identity-token)"
 TMP_DIR="${TMPDIR:-/tmp}/parkpulse-private-validation"
 ROLE_AUTH_RESOURCE_NAME="${PARKPULSE_ROLE_AUTH_SECRET_NAME:-parkpulse-role-auth-secret}"
 ROLE_SIGNING_VALUE="$(gcloud secrets versions access latest --secret "$ROLE_AUTH_RESOURCE_NAME" --project "$PROJECT_ID")"
+VALIDATION_LONG_CURL_MAX_SECONDS="${PARKPULSE_VALIDATION_LONG_CURL_MAX_SECONDS:-240}"
+VALIDATION_LONG_CURL_ATTEMPTS="${PARKPULSE_VALIDATION_LONG_CURL_ATTEMPTS:-2}"
 mkdir -p "$TMP_DIR"
 
 role_token() {
@@ -39,6 +41,23 @@ query_count() {
     "SELECT COUNT(*) AS row_count FROM \`${PROJECT_ID}.${DATASET}.${table}\`" \
     2>/dev/null | python3 -c 'import json,sys; data=json.load(sys.stdin); print(int(data[0]["row_count"]) if data else 0)' \
     || printf '0'
+}
+
+curl_long_json() {
+  local output_path="$1"
+  shift
+  local attempt=1
+  while true; do
+    if curl --connect-timeout 20 --max-time "$VALIDATION_LONG_CURL_MAX_SECONDS" -fsS "$@" > "$output_path"; then
+      return 0
+    fi
+    if (( attempt >= VALIDATION_LONG_CURL_ATTEMPTS )); then
+      return 1
+    fi
+    echo "Retrying long validation call after attempt ${attempt}/${VALIDATION_LONG_CURL_ATTEMPTS}..." >&2
+    sleep $((attempt * 8))
+    attempt=$((attempt + 1))
+  done
 }
 
 echo "Checking Cloud Run private IAM..."
@@ -82,12 +101,12 @@ print("GCP readiness:", checks)
 PY
 
 echo "Checking strict GCP judge trace/eval smoke..."
-curl -fsS \
+curl_long_json "$TMP_DIR/gcp-judge-smoke.json" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -X POST \
   -d '{"scenario_key":"ride_down","execute":false,"strict":true,"blocking_hosted_eval":true}' \
-  "${SERVICE_URL}/api/gcp/judge-smoke" > "$TMP_DIR/gcp-judge-smoke.json"
+  "${SERVICE_URL}/api/gcp/judge-smoke"
 python3 - "$TMP_DIR/gcp-judge-smoke.json" <<'PY'
 import json
 import sys
@@ -234,15 +253,15 @@ print("Live-feed events loaded:", {"count": len(rows), "sources": payload.get("s
 PY
 
 echo "Generating controlled training pack and eval artifacts..."
-curl -fsS \
+curl_long_json "$TMP_DIR/controlled-training-generation.json" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "x-parkpulse-role: ml_ops_admin" \
   -H "x-parkpulse-role-token: ${ML_ROLE_TOKEN}" \
   -H "Content-Type: application/json" \
   -X POST \
   -d '{"minReviewLabels":1,"minOutcomeRows":3,"maxExamples":60,"writeArtifacts":true}' \
-  "${SERVICE_URL}/api/park/controlled-training-generation" > "$TMP_DIR/controlled-training-generation.json"
-curl -fsS \
+  "${SERVICE_URL}/api/park/controlled-training-generation"
+curl_long_json "$TMP_DIR/controlled-training-eval.json" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "x-parkpulse-role: ml_ops_admin" \
   -H "x-parkpulse-role-token: ${ML_ROLE_TOKEN}" \
@@ -256,7 +275,7 @@ pack = json.load(open(sys.argv[1]))
 print(json.dumps({"writeArtifact": True, "pack": pack}, separators=(",", ":"), sort_keys=True))
 PY
 )" \
-  "${SERVICE_URL}/api/park/controlled-training-eval" > "$TMP_DIR/controlled-training-eval.json"
+  "${SERVICE_URL}/api/park/controlled-training-eval"
 python3 - "$TMP_DIR/controlled-training-generation.json" "$TMP_DIR/controlled-training-eval.json" <<'PY'
 import json
 import sys
@@ -277,7 +296,7 @@ print("Controlled training artifacts:", {
 PY
 
 echo "Checking BQML training dry run gate..."
-curl -fsS \
+curl_long_json "$TMP_DIR/gcp-training-dry-run.json" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "x-parkpulse-role: ml_ops_admin" \
   -H "x-parkpulse-role-token: ${ML_ROLE_TOKEN}" \
@@ -291,7 +310,7 @@ controlled_eval = json.load(open(sys.argv[1]))
 print(json.dumps({"minRows": 3, "validateTables": True, "controlledEval": controlled_eval}, separators=(",", ":"), sort_keys=True))
 PY
 )" \
-  "${SERVICE_URL}/api/park/gcp-training-dry-run" > "$TMP_DIR/gcp-training-dry-run.json"
+  "${SERVICE_URL}/api/park/gcp-training-dry-run"
 python3 - "$TMP_DIR/gcp-training-dry-run.json" <<'PY'
 import json
 import sys
@@ -314,9 +333,9 @@ print("BQML dry run:", {
 PY
 
 echo "Checking operating-loop resilience gate..."
-curl -fsS \
+curl_long_json "$TMP_DIR/operating-loop-resilience.json" \
   -H "Authorization: Bearer ${TOKEN}" \
-  "${SERVICE_URL}/api/gcp/operating-loop-resilience?write_artifact=true" > "$TMP_DIR/operating-loop-resilience.json"
+  "${SERVICE_URL}/api/gcp/operating-loop-resilience?write_artifact=true"
 python3 - "$TMP_DIR/operating-loop-resilience.json" <<'PY'
 import json
 import sys
@@ -340,14 +359,14 @@ before_dispatches="$(query_count action_dispatches)"
 before_evals="$(query_count eval_results)"
 
 echo "Running one private Cloud Run agent scenario..."
-curl -fsS \
+curl_long_json "$TMP_DIR/agent-run.json" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "x-parkpulse-role: ops_team" \
   -H "x-parkpulse-role-token: ${OPS_ROLE_TOKEN}" \
   -H "Content-Type: application/json" \
   -X POST \
   -d '{"scenario_key":"ride_down"}' \
-  "${SERVICE_URL}/api/park/agent-run" > "$TMP_DIR/agent-run.json"
+  "${SERVICE_URL}/api/park/agent-run"
 
 python3 - "$TMP_DIR/agent-run.json" <<'PY'
 import json, sys
