@@ -73,7 +73,7 @@ gcp-judge-smoke:
 	PYTHONPATH=backend python3 scripts/gcp_judge_smoke.py
 
 gcp-judge-smoke-strict:
-	PYTHONPATH=backend python3 scripts/gcp_judge_smoke.py --strict --blocking-hosted-eval
+	ENABLE_GCP_CLOUD_TRACE_EXPORT=$${ENABLE_GCP_CLOUD_TRACE_EXPORT:-true} PARKPULSE_ENABLE_OTEL_SPANS=$${PARKPULSE_ENABLE_OTEL_SPANS:-true} PARKPULSE_LIVE_BIGQUERY=$${PARKPULSE_LIVE_BIGQUERY:-true} PYTHONPATH=backend python3 scripts/gcp_judge_smoke.py --strict --blocking-hosted-eval
 
 gcp-deploy-private:
 	scripts/deploy_private_cloud_run.sh

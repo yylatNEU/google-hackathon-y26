@@ -53,6 +53,7 @@ for role in \
   roles/aiplatform.user \
   roles/bigquery.dataEditor \
   roles/bigquery.jobUser \
+  roles/cloudtrace.agent \
   roles/logging.logWriter \
   roles/pubsub.publisher \
   roles/secretmanager.secretAccessor \
@@ -67,9 +68,21 @@ if ! gcloud pubsub topics describe "$PUBSUB_TOPIC" --project "$PROJECT_ID" >/dev
   gcloud pubsub topics create "$PUBSUB_TOPIC" --project "$PROJECT_ID"
 fi
 
-if ! bq show --dataset "${PROJECT_ID}:${DATASET}" >/dev/null 2>&1; then
-  bq --location="${BIGQUERY_LOCATION:-US}" mk --dataset "${PROJECT_ID}:${DATASET}"
-fi
+python3 - "$PROJECT_ID" "$DATASET" "${BIGQUERY_LOCATION:-US}" <<'PY'
+import sys
+
+from google.cloud import bigquery
+
+project, dataset, location = sys.argv[1], sys.argv[2], sys.argv[3]
+client = bigquery.Client(project=project)
+dataset_id = f"{project}.{dataset}"
+try:
+    client.get_dataset(dataset_id)
+except Exception:
+    resource = bigquery.Dataset(dataset_id)
+    resource.location = location
+    client.create_dataset(resource, exists_ok=True)
+PY
 
 python3 - "$ENV_FILE" "$PROJECT_ID" "$REGION" "$DATASET" "$PUBSUB_TOPIC" <<'PY'
 from pathlib import Path
@@ -95,6 +108,12 @@ updates = {
     "BIGQUERY_DATASET": dataset,
     "BIGQUERY_LOCATION": "US",
     "BIGQUERY_AUTO_CREATE_TABLES": "true",
+    "ENABLE_GCP_CLOUD_TRACE_EXPORT": "true",
+    "PARKPULSE_ENABLE_OTEL_SPANS": "true",
+    "GCP_TRACE_PROJECT": project,
+    "ENABLE_VERTEX_GENAI_EVAL": "true",
+    "VERTEX_GENAI_EVALUATOR_ID": "parkpulse-vertex-genai-eval",
+    "PARKPULSE_ENABLE_HOSTED_EVAL_TRIGGER": "true",
     "ENABLE_PARKPULSE_PUBSUB": "true",
     "PARKPULSE_PUBSUB_TOPIC": pubsub_topic,
     "ENABLE_PARKPULSE_FCM": "false",

@@ -156,6 +156,7 @@ class ParkPulseSpringBackendApplicationTests {
 	void deliveryOutboxReceiptsRunNativelyInSpringWithRoleGates() throws Exception {
 		Path outbox = Path.of("target/test-parkpulse-runtime/delivery_outbox.jsonl");
 		Files.createDirectories(outbox.getParent());
+		Files.deleteIfExists(Path.of("target/test-parkpulse-runtime/canonical_events.jsonl"));
 		Files.writeString(
 			outbox,
 			"{\"id\":\"dispatch-1\",\"createdAt\":\"2026-06-03T00:00:00Z\",\"channel\":\"worker_device\",\"targetSystem\":\"staff-dispatch-app\",\"status\":\"pending_operator_approval\",\"response\":{\"state\":\"pending\"}}\n",
@@ -187,6 +188,11 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(jsonPath("$.mode", equalTo("spring_partner_receiver_retry_worker")))
 			.andExpect(jsonPath("$.enabled", equalTo(false)));
 
+		mockMvc.perform(get("/api/park/events/contract").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.schema_version", equalTo("parkpulse.event.v1")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
 		mockMvc.perform(
 				post("/api/park/delivery/guest-promotion")
 					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
@@ -210,7 +216,23 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(jsonPath("$.dispatch.gcpDelivery.pubsub.status", equalTo("skipped")))
 			.andExpect(jsonPath("$.dispatch.gcpDelivery.firestore.status", equalTo("mirrored")))
 			.andExpect(jsonPath("$.dispatch.gcpDelivery.dataflow.status", equalTo("mirrored")))
+			.andExpect(jsonPath("$.dispatch.eventPipeline.status", equalTo("recorded")))
 			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(get("/api/park/events/ledger?event_type=parkpulse.delivery.dispatch").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.count", equalTo(1)))
+			.andExpect(jsonPath("$.events[0].event_type", equalTo("parkpulse.delivery.dispatch")))
+			.andExpect(jsonPath("$.events[0].schema_version", equalTo("parkpulse.event.v1")));
+
+		mockMvc.perform(
+				post("/api/park/events/receiver/worker-acknowledgement")
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"dispatchId\":\"dispatch-worker-1\",\"channel\":\"worker_device\",\"receiver\":\"staff-dispatch-app\",\"acknowledged\":true}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("recorded")))
+			.andExpect(jsonPath("$.event.event_type", equalTo("parkpulse.receiver.worker_acknowledgement")));
 
 		mockMvc.perform(
 				post("/api/park/delivery/guest-promotion")
@@ -405,15 +427,18 @@ class ParkPulseSpringBackendApplicationTests {
 		});
 		server.start();
 		try {
-			DeliveryGcpAdapterService gcp = new DeliveryGcpAdapterService(new MockEnvironment().withProperty("PARKPULSE_RUNTIME_DIR", runtime.toString()), objectMapper);
-			DeliveryOutboxService outbox = new DeliveryOutboxService(new MockEnvironment().withProperty("PARKPULSE_RUNTIME_DIR", runtime.toString()), objectMapper, gcp);
+			MockEnvironment baseEnvironment = new MockEnvironment().withProperty("PARKPULSE_RUNTIME_DIR", runtime.toString());
+			EventPipelineService events = new EventPipelineService(baseEnvironment, objectMapper);
+			DeliveryGcpAdapterService gcp = new DeliveryGcpAdapterService(baseEnvironment, objectMapper);
+			DeliveryOutboxService outbox = new DeliveryOutboxService(baseEnvironment, objectMapper, gcp, events);
 			DeliveryPartnerRetryService retry = new DeliveryPartnerRetryService(
 				new MockEnvironment()
 					.withProperty("PARKPULSE_RUNTIME_DIR", runtime.toString())
 					.withProperty("PARKPULSE_ENABLE_PARTNER_RECEIVER_RETRY", "true")
 					.withProperty("PARKPULSE_PARTNER_RECEIVER_BASE_URL", "http://127.0.0.1:" + server.getAddress().getPort()),
 				objectMapper,
-				outbox
+				outbox,
+				events
 			);
 
 			Map<String, Object> result = retry.run(Map.of("limit", 5, "dry_run", false));
@@ -429,6 +454,53 @@ class ParkPulseSpringBackendApplicationTests {
 			org.assertj.core.api.Assertions.assertThat(partnerCalls.get()).isEqualTo(1);
 			org.assertj.core.api.Assertions.assertThat(((Map<?, ?>) secondAttempts.get(0)).get("status")).isEqualTo("skipped");
 			org.assertj.core.api.Assertions.assertThat(((Map<?, ?>) secondAttempts.get(0)).get("reason")).isEqualTo("Partner receiver already accepted this dispatch.");
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
+	void eventPipelineExportsCanonicalRowsToBigQueryWhenExplicitlyEnabled() throws Exception {
+		Path runtime = Path.of("target/test-parkpulse-bigquery-events");
+		Files.createDirectories(runtime);
+		Files.deleteIfExists(runtime.resolve("canonical_events.jsonl"));
+		HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+		AtomicInteger bigQueryCalls = new AtomicInteger();
+		server.createContext("/bigquery/v2/projects/demo-project/datasets/parkpulse/tables/events/insertAll", exchange -> {
+			bigQueryCalls.incrementAndGet();
+			org.assertj.core.api.Assertions.assertThat(exchange.getRequestHeaders().getFirst("authorization")).isEqualTo("Bearer test-token");
+			String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+			org.assertj.core.api.Assertions.assertThat(body)
+				.contains("insertId")
+				.contains("parkpulse.receiver.guest_response")
+				.contains("payload_json");
+			byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
+			exchange.getResponseHeaders().add("content-type", "application/json");
+			exchange.sendResponseHeaders(200, bytes.length);
+			exchange.getResponseBody().write(bytes);
+			exchange.close();
+		});
+		server.start();
+		try {
+			EventPipelineService events = new EventPipelineService(
+				new MockEnvironment()
+					.withProperty("PARKPULSE_RUNTIME_DIR", runtime.toString())
+					.withProperty("ENABLE_PARKPULSE_BIGQUERY_EVENT_EXPORT", "true")
+					.withProperty("PARKPULSE_BIGQUERY_EVENT_TABLE", "demo-project.parkpulse.events")
+					.withProperty("PARKPULSE_BIGQUERY_API_BASE_URL", "http://127.0.0.1:" + server.getAddress().getPort() + "/bigquery/v2")
+					.withProperty("PARKPULSE_GCP_ACCESS_TOKEN", "test-token"),
+				objectMapper
+			);
+
+			Map<String, Object> result = events.recordReceiverEvent(
+				"parkpulse.receiver.guest_response",
+				Map.of("dispatchId", "dispatch-bq-1", "channel", "guest_app", "accepted", true)
+			);
+
+			org.assertj.core.api.Assertions.assertThat(result.get("status")).isEqualTo("recorded");
+			org.assertj.core.api.Assertions.assertThat(((Map<?, ?>) result.get("bigquery")).get("status")).isEqualTo("inserted");
+			org.assertj.core.api.Assertions.assertThat(bigQueryCalls.get()).isEqualTo(1);
+			org.assertj.core.api.Assertions.assertThat(Files.readString(runtime.resolve("canonical_events.jsonl"))).contains("parkpulse.receiver.guest_response");
 		} finally {
 			server.stop(0);
 		}

@@ -26,12 +26,14 @@ public class DeliveryPartnerRetryService {
     private final Environment environment;
     private final ObjectMapper objectMapper;
     private final DeliveryOutboxService deliveryOutboxService;
+    private final EventPipelineService eventPipelineService;
     private final HttpClient httpClient;
 
-    public DeliveryPartnerRetryService(Environment environment, ObjectMapper objectMapper, DeliveryOutboxService deliveryOutboxService) {
+    public DeliveryPartnerRetryService(Environment environment, ObjectMapper objectMapper, DeliveryOutboxService deliveryOutboxService, EventPipelineService eventPipelineService) {
         this.environment = environment;
         this.objectMapper = objectMapper;
         this.deliveryOutboxService = deliveryOutboxService;
+        this.eventPipelineService = eventPipelineService;
         this.httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofMillis(intEnv("PARKPULSE_PARTNER_RECEIVER_TIMEOUT_MS", 5000)))
             .followRedirects(HttpClient.Redirect.NEVER)
@@ -73,6 +75,7 @@ public class DeliveryPartnerRetryService {
             Map<String, Object> attempt = attemptDispatch(dispatch, dryRun, actor);
             attempts.add(attempt);
             appendReceipt(attempt);
+            attempt.put("eventPipeline", eventPipelineService.recordPartnerRetry(attempt));
         }
         Map<String, Object> payload = orderedMap();
         payload.put("status", attempts.stream().anyMatch(row -> "retry_failed".equals(row.get("status"))) ? "completed_with_failures" : "completed");

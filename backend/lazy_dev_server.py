@@ -196,7 +196,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
 
     def _run_experience_studio_fast_path(self, path: str, body: bytes) -> bool:
         try:
-            if path in {"/api/park/venue-profile", "/api/park/experience-studio/draft", "/api/park/experience-studio/drafts"} and self.command == "OPTIONS":
+            if path in {"/api/park/venue-profile", "/api/park/experience-studio/draft", "/api/park/experience-studio/drafts", "/api/park/experience-studio/memory"} and self.command == "OPTIONS":
                 self._send_direct_options()
                 return True
             if self.command == "GET" and path == "/api/park/venue-profile":

@@ -89,6 +89,11 @@ COLLECTION_PURPOSES = {
     "executive_competitor_review_themes": "Curated public competitor review themes for executive experience intelligence.",
     "executive_staff_training_outcomes": "Curated aggregate staff training outcome rows linked to guest-experience themes.",
     "executive_brief_artifacts": "Generated executive intelligence artifacts with source coverage and human-review status.",
+    "experience_studio_generation_runs": "Experience Studio generation receipts, prompts, model status, source receipts, and merge-guard outcomes.",
+    "experience_studio_drafts": "Saved Experience Studio draft versions with source integrity, review state, and compact route metadata.",
+    "experience_studio_feedback": "Human reviewer feedback, approval/rejection reasons, and edited-before-approval notes for Experience Studio.",
+    "experience_studio_revision_events": "Experience Studio revision diffs, status transitions, handoff events, and reviewer workflow receipts.",
+    "experience_studio_learning_rules": "Human-approved Experience Studio learning rules promoted from feedback and measured outcomes.",
 }
 
 AGENT_ROLE_CONFIGS = {
@@ -984,6 +989,11 @@ class OperationalMemory:
             "executive_competitor_review_themes": [],
             "executive_staff_training_outcomes": [],
             "executive_brief_artifacts": [],
+            "experience_studio_generation_runs": [],
+            "experience_studio_drafts": [],
+            "experience_studio_feedback": [],
+            "experience_studio_revision_events": [],
+            "experience_studio_learning_rules": [],
         }
 
     def initialize(self) -> dict[str, Any]:
@@ -1091,6 +1101,14 @@ class OperationalMemory:
         self._create_index(self.db.customer_emergency_audit, [("createdAt", DESCENDING), ("incidentId", ASCENDING), ("eventType", ASCENDING)])
         self._create_index(self.db.evidence_refresh_jobs, [("kind", ASCENDING), ("status", ASCENDING), ("updatedAt", DESCENDING)])
         self._create_index(self.db.evidence_refresh_jobs, [("cacheKey", ASCENDING), ("updatedAt", DESCENDING)])
+        self._create_index(self.db.experience_studio_generation_runs, [("createdAt", DESCENDING), ("templateId", ASCENDING)])
+        self._create_index(self.db.experience_studio_generation_runs, [("draftId", ASCENDING), ("generationId", ASCENDING)])
+        self._create_index(self.db.experience_studio_drafts, [("updatedAt", DESCENDING), ("status", ASCENDING)])
+        self._create_index(self.db.experience_studio_drafts, [("draftId", ASCENDING)])
+        self._create_index(self.db.experience_studio_feedback, [("createdAt", DESCENDING), ("draftId", ASCENDING), ("reviewStatus", ASCENDING)])
+        self._create_index(self.db.experience_studio_revision_events, [("createdAt", DESCENDING), ("draftId", ASCENDING), ("eventType", ASCENDING)])
+        self._create_index(self.db.experience_studio_learning_rules, [("updatedAt", DESCENDING), ("approvalStatus", ASCENDING)])
+        self._create_index(self.db.experience_studio_learning_rules, [("lesson", TEXT), ("rule", TEXT), ("tags", TEXT), ("templateId", TEXT)])
 
     def seed_defaults(self) -> None:
         self._invalidate_dashboard_cache()
@@ -4159,7 +4177,50 @@ class OperationalMemory:
         if collection is not None:
             rows = list(collection.find({}, projection).sort("createdAt", DESCENDING).limit(limit))
             return [_public_doc(row) for row in rows]
-        return [_public_doc(row) for row in deepcopy(self._fallback[collection_name][:limit])]
+        return [_public_doc(row) for row in deepcopy(self._fallback.get(collection_name, [])[:limit])]
+
+    def record_experience_studio_memory_event(self, collection_name: str, event: dict[str, Any]) -> dict[str, Any]:
+        self._invalidate_dashboard_cache()
+        allowed = {
+            "experience_studio_generation_runs",
+            "experience_studio_drafts",
+            "experience_studio_feedback",
+            "experience_studio_revision_events",
+            "experience_studio_learning_rules",
+        }
+        if collection_name not in allowed:
+            return {
+                "status": "blocked",
+                "mode": self.mode,
+                "connected": self.connected,
+                "collection": collection_name,
+                "reason": "Collection is not approved for Experience Studio memory writes.",
+            }
+        now = _utc_now()
+        payload = deepcopy(event) if isinstance(event, dict) else {}
+        document_id = str(payload.get("_id") or payload.get("id") or f"{collection_name}_{hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:16]}")
+        payload["_id"] = document_id
+        payload.setdefault("id", document_id)
+        payload.setdefault("createdAt", now)
+        payload["updatedAt"] = now
+        payload.setdefault("memoryLayer", "experience_studio")
+        payload.setdefault("learningEligible", False)
+        payload.setdefault("learningSource", "not_promoted")
+        collection = self._collection(collection_name)
+        if collection is not None:
+            collection.replace_one({"_id": document_id}, _clean_for_bson(payload), upsert=True)
+        else:
+            bucket = self._fallback.setdefault(collection_name, [])
+            bucket[:] = [row for row in bucket if row.get("_id") != document_id]
+            bucket.insert(0, payload)
+            bucket[:] = bucket[:100]
+        return {
+            "status": "stored",
+            "mode": self.mode,
+            "connected": self.connected,
+            "collection": collection_name,
+            "memoryId": document_id,
+        }
 
     def record_executive_experience_documents(self, collection_name: str, documents: list[dict[str, Any]]) -> dict[str, Any]:
         self._invalidate_dashboard_cache()
@@ -4943,6 +5004,22 @@ def get_latest_memory_documents_fast(collection_name: str, limit: int = 5) -> li
         return _memory.latest_documents(collection_name, limit)
     except Exception:
         return []
+
+
+def record_experience_studio_memory_event(collection_name: str, event: dict[str, Any]) -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.experience_studio.record",
+        lambda: _memory.record_experience_studio_memory_event(collection_name, event),
+        lambda error: {
+            "status": "skipped",
+            "mode": _memory.mode,
+            "connected": _memory.connected,
+            "collection": collection_name,
+            "memoryId": None,
+            "error": str(error)[:300],
+            "readinessIssues": list(_memory.errors[-3:]),
+        },
+    )
 
 
 def record_executive_experience_documents(collection_name: str, documents: list[dict[str, Any]]) -> dict[str, Any]:

@@ -135,5 +135,12 @@ class PythonFallbackProxyServiceTests {
         assertThat(partnerRetryResponse.getStatusCode().value()).isEqualTo(409);
         assertThat(new String(partnerRetryResponse.getBody(), StandardCharsets.UTF_8))
             .contains("POST /api/park/delivery/partner-retries/run");
+
+        MockHttpServletRequest eventContractRequest = new MockHttpServletRequest("GET", "/api/park/events/contract");
+        ResponseEntity<byte[]> eventContractResponse = service.forward(eventContractRequest, new byte[0]);
+
+        assertThat(eventContractResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(eventContractResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/events/contract");
     }
 }

@@ -26,11 +26,13 @@ public class DeliveryOutboxService {
     private final Environment environment;
     private final ObjectMapper objectMapper;
     private final DeliveryGcpAdapterService gcpAdapterService;
+    private final EventPipelineService eventPipelineService;
 
-    public DeliveryOutboxService(Environment environment, ObjectMapper objectMapper, DeliveryGcpAdapterService gcpAdapterService) {
+    public DeliveryOutboxService(Environment environment, ObjectMapper objectMapper, DeliveryGcpAdapterService gcpAdapterService, EventPipelineService eventPipelineService) {
         this.environment = environment;
         this.objectMapper = objectMapper;
         this.gcpAdapterService = gcpAdapterService;
+        this.eventPipelineService = eventPipelineService;
     }
 
     public Map<String, Object> contract() {
@@ -123,6 +125,7 @@ public class DeliveryOutboxService {
         acknowledgement.put("at", now);
         dispatch.put("lastAcknowledgement", acknowledgement);
         appendRecord(Map.of("acknowledgement", dispatch));
+        dispatch.put("eventPipeline", eventPipelineService.recordAcknowledgement(dispatch, acknowledgement));
         Map<String, Object> payload = orderedMap();
         payload.put("status", dispatch.getOrDefault("status", "acknowledged"));
         payload.put("dispatch", dispatch);
@@ -189,6 +192,7 @@ public class DeliveryOutboxService {
         dispatch.put("approvalDelivery", gcpAdapterService.publishApprovalDecision(dispatch, approval));
         dispatch.put("approvalDurable", true);
         appendRecord(Map.of("approvalDecision", dispatch));
+        dispatch.put("eventPipeline", eventPipelineService.recordApprovalDecision(dispatch, approval));
         Map<String, Object> payload = orderedMap();
         payload.put("status", dispatch.getOrDefault("status", nextStatus));
         payload.put("dispatch", dispatch);
@@ -229,6 +233,9 @@ public class DeliveryOutboxService {
             "agentBoundary", boundary
         ));
         persistDispatch(dispatch);
+        if (allowed) {
+            dispatch.put("eventPipeline", eventPipelineService.recordDeliveryDispatch(dispatch));
+        }
         return dispatch;
     }
 

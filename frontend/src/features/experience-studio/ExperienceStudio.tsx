@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { fetchParkPulseApi } from "@/lib/api";
+import { fetchParkPulseApi, longRunningRequestTimeoutMs } from "@/lib/api";
 
 type VenueIssue = {
   id?: string;
@@ -203,6 +203,16 @@ type DraftPayload = {
     venueExperienceDataAttached?: boolean;
     usesSeedData?: boolean;
     usesSimulatedParkState?: boolean;
+  };
+  memoryPersistence?: {
+    status?: string;
+    mode?: string;
+    connected?: boolean;
+    collection?: string;
+    memoryId?: string | null;
+    learningEligible?: boolean;
+    learningSource?: string;
+    error?: string;
   };
 };
 
@@ -503,7 +513,7 @@ export function ExperienceStudio() {
           useRealParkContext: false,
           useVenueExperienceData: true,
         }),
-        timeoutMs: 9000,
+        timeoutMs: longRunningRequestTimeoutMs,
       });
       const payload = await response.json() as DraftPayload;
       setDraftPayload(payload);
@@ -1051,6 +1061,18 @@ export function ExperienceStudio() {
                               Status: {formatStatus(draft.llmCreativePass.status)} / route accepted: {draft.llmCreativePass.routeAccepted ? "yes" : "no"}
                             </div>
                             {draft.llmCreativePass.creativeRationale?.length ? <div className="mt-2 text-[11px] leading-relaxed text-slate-500">Rationale: {compactList(draft.llmCreativePass.creativeRationale, 3)}</div> : null}
+                          </div>
+                        ) : null}
+                        {draftPayload?.memoryPersistence ? (
+                          <div className="mt-3 rounded border border-slate-800 bg-[#0d1115] p-3">
+                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Memory receipt</div>
+                            <div className="mt-2 text-xs leading-relaxed text-slate-300">
+                              {formatStatus(draftPayload.memoryPersistence.status)} / {draftPayload.memoryPersistence.collection ?? "experience studio memory"} / {draftPayload.memoryPersistence.connected ? "MongoDB" : formatStatus(draftPayload.memoryPersistence.mode)}
+                            </div>
+                            <div className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                              {draftPayload.memoryPersistence.memoryId ? `ID ${draftPayload.memoryPersistence.memoryId}. ` : ""}
+                              Generated copy is stored as evidence only; learning needs human review or measured outcomes.
+                            </div>
                           </div>
                         ) : null}
                       </div>

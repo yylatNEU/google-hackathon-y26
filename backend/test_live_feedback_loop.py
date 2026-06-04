@@ -578,6 +578,9 @@ def test_live_feed_outcome_measurement_builds_reward_candidate_from_post_action_
                 ]
             },
             "tool_executor_live_test": {
+                "executed_count": 3,
+                "held_count": 1,
+                "held_disposition_count": 1,
                 "receipts": [
                     {"department": "food_retail", "result": {"status": "executed_controlled"}},
                     {"department": "hr_labor", "result": {"status": "executed_controlled"}},
@@ -585,7 +588,21 @@ def test_live_feed_outcome_measurement_builds_reward_candidate_from_post_action_
                     {"department": "safety", "result": {"status": "held"}},
                 ]
             },
-            "live_feed_receiver_delivery": {"status": "proven_controlled"},
+            "live_feed_receiver_delivery": {"status": "proven_controlled", "delivered_count": 3, "acknowledged_count": 3, "public_guest_messages_sent": 0, "material_state_mutation": False},
+            "hard_decision_follow_through": {"status": "routed", "unresolved_without_owner_count": 0},
+            "role_agent_proposals": {
+                "negotiation_rounds": [{"round": 1}, {"round": 2}, {"round": 3}, {"round": 4}],
+                "proposals": [
+                    {
+                        "proposal_envelope": {"policy_check": "passed"},
+                        "department_reasoning": {"evidence_argument": "event before-food supports food action"},
+                    },
+                    {
+                        "proposal_envelope": {"policy_check": "requires_human_approval"},
+                        "department_reasoning": {"evidence_argument": "event before-ops supports safety hold"},
+                    },
+                ],
+            },
         },
         {
             "status": "refreshed",
@@ -634,6 +651,12 @@ def test_live_feed_outcome_measurement_builds_reward_candidate_from_post_action_
     assert result["measured_outcome_available"] is True
     assert result["eligible_for_reward"] is True
     assert result["reward_value"] is not None
+    assert result["reward_layers"]["trace_reward"] > 0
+    assert result["reward_layers"]["policy_reward"] > 0
+    assert result["reward_layers"]["execution_reward"] > 0
+    assert result["reward_layers"]["operational_reward"] == result["reward_value"]
+    assert result["reward_layers"]["learning_reward"] >= 0
+    assert result["promotion_eligible"] == result["reward_layers"]["promotion_eligible"]
     assert result["attribution_confidence"] >= 0.7
     assert result["source_coverage"] == 1
     assert result["department_coverage"] == 1
@@ -785,6 +808,16 @@ def test_live_feed_controlled_outcome_memory_records_existing_memory_shape(monke
                 "eligible_for_reward": True,
                 "reward_value": 0.82,
                 "reward_label": "safe_controlled_handoff_with_measured_live_state",
+                "reward_layers": {
+                    "trace_reward": 1.0,
+                    "policy_reward": 1.0,
+                    "execution_reward": 0.95,
+                    "operational_reward": 0.82,
+                    "learning_reward": 0.6,
+                    "composite_reward": 0.85,
+                    "promotion_eligible": True,
+                },
+                "promotion_eligible": True,
                 "attribution_confidence": 0.9,
                 "measurement_rows": [{"source": "food_ops", "post_action_snapshot_captured": True, "metrics": []}],
             },
@@ -800,6 +833,8 @@ def test_live_feed_controlled_outcome_memory_records_existing_memory_shape(monke
     assert recorded["outcome"]["response_metrics"]["receiverDeliveryProven"] is True
     assert recorded["outcome"]["response_metrics"]["measuredOutcomeAvailable"] is True
     assert recorded["outcome"]["response_metrics"]["rewardValue"] == 0.82
+    assert recorded["outcome"]["response_metrics"]["rewardLayers"]["operational_reward"] == 0.82
+    assert recorded["outcome"]["response_metrics"]["promotionEligible"] is True
     assert recorded["outcome"]["state_impact"]["executed_departments"] == ["food_retail"]
     assert recorded["outcome"]["state_impact"]["held_departments"] == ["safety"]
     assert recorded["outcome"]["state_impact"]["hard_decision_follow_through_status"] == "routed"
@@ -810,6 +845,8 @@ def test_live_feed_controlled_outcome_memory_records_existing_memory_shape(monke
     assert recorded["outcome"]["scorecard"]["receiver_delivery"] == 100
     assert recorded["outcome"]["scorecard"]["post_action_measurement"] == 100
     assert recorded["outcome"]["learning"]["eligible_for_reward"] is True
+    assert recorded["outcome"]["learning"]["reward_layers"]["operational_reward"] == 0.82
+    assert recorded["outcome"]["learning"]["promotion_eligible"] is True
 
 
 def test_live_feed_training_closure_materializes_supervised_eval_only_and_dedupes_ledger(tmp_path, monkeypatch):
@@ -923,6 +960,16 @@ def test_live_feed_training_closure_materializes_supervised_eval_only_and_dedupe
             "attribution_confidence": 0.9,
             "eligible_for_reward": True,
             "reward_value": 0.82,
+            "reward_layers": {
+                "trace_reward": 1.0,
+                "policy_reward": 1.0,
+                "execution_reward": 0.95,
+                "operational_reward": 0.82,
+                "learning_reward": 0.6,
+                "composite_reward": 0.85,
+                "promotion_eligible": True,
+            },
+            "promotion_eligible": True,
             "measurement_rows": [
                 {
                     "source": "food_ops",
@@ -947,6 +994,16 @@ def test_live_feed_training_closure_materializes_supervised_eval_only_and_dedupe
                     "eligible_for_reward": True,
                     "reward_label": "safe_controlled_handoff_with_measured_live_state",
                     "reward_value": 0.82,
+                    "reward_layers": {
+                        "trace_reward": 1.0,
+                        "policy_reward": 1.0,
+                        "execution_reward": 0.95,
+                        "operational_reward": 0.82,
+                        "learning_reward": 0.6,
+                        "composite_reward": 0.85,
+                        "promotion_eligible": True,
+                    },
+                    "promotion_eligible": True,
                 },
             },
         },

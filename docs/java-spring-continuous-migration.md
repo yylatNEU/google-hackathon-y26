@@ -19,8 +19,21 @@ Spring owns only the first safe migration slice:
 - `GET /api/park/authorization-audit`
 - `GET /api/park/delivery/contract`
 - `GET /api/park/delivery/outbox`
+- `GET /api/park/delivery/gcp-adapters/status`
+- `GET /api/park/delivery/partner-retries/status`
+- `POST /api/park/delivery/partner-retries/run`
+- `POST /api/park/delivery/guest-promotion`
+- `POST /api/park/delivery/worker-notification`
+- `POST /api/park/delivery/equipment-command`
 - `POST /api/park/delivery/acknowledge`
 - `POST /api/park/delivery/approval-decision`
+- `GET /api/park/events/contract`
+- `GET /api/park/events/status`
+- `GET /api/park/events/ledger`
+- `POST /api/park/events/receiver/guest-response`
+- `POST /api/park/events/receiver/worker-acknowledgement`
+- `POST /api/park/events/receiver/equipment-result`
+- `POST /api/park/events/eventarc/park-signal`
 - `POST /api/park/delegation-token`
 - `GET /api/park/agent-onboarding/issuer`
 - `POST /api/park/agent-onboarding/register`
@@ -118,7 +131,7 @@ In `PARKPULSE_ENV=production` or `ENVIRONMENT=production`, Spring rejects the de
 
 Spring records protected-route authorization decisions to SQLite in `spring_authorization_audit_events`. Audit persistence is best-effort: an audit write failure does not allow a blocked request or block an otherwise valid request.
 
-Spring owns the delivery REST port for durable JSONL outbox reads, dispatch creation, receiver acknowledgement, approval-decision receipts, and the delivery GCP adapter contract. Dispatch creation requires the `dispatch_live_action` role capability, enforces the tool-executor/policy-gate boundary, writes idempotency-keyed durable rows, and blocks fallback to Python for these routes:
+Spring owns the delivery REST port and canonical event-pipeline surface for durable JSONL outbox reads, dispatch creation, receiver acknowledgement, approval-decision receipts, partner retry receipts, receiver callbacks, Eventarc/Pub/Sub callback ingestion, and the delivery GCP adapter contract. Dispatch creation requires the `dispatch_live_action` role capability, enforces the tool-executor/policy-gate boundary, writes idempotency-keyed durable rows, and blocks fallback to Python for these routes:
 
 - `POST /api/park/delivery/guest-promotion`
 - `POST /api/park/delivery/worker-notification`
@@ -126,8 +139,15 @@ Spring owns the delivery REST port for durable JSONL outbox reads, dispatch crea
 - `GET /api/park/delivery/gcp-adapters/status`
 - `GET /api/park/delivery/partner-retries/status`
 - `POST /api/park/delivery/partner-retries/run`
+- `GET /api/park/events/contract`
+- `GET /api/park/events/status`
+- `GET /api/park/events/ledger`
+- `POST /api/park/events/receiver/guest-response`
+- `POST /api/park/events/receiver/worker-acknowledgement`
+- `POST /api/park/events/receiver/equipment-result`
+- `POST /api/park/events/eventarc/park-signal`
 
-Spring now emits component-level delivery adapter receipts for Pub/Sub, FCM or pseudo-Firebase, Firestore mirror/write, Dataflow mirror/export readiness, and operator workflow handoff. The safe default remains local mirror mode. Live Pub/Sub REST publish, FCM HTTP v1 send, Firestore REST document write, Workflows execution start, and partner receiver retries are only called when their explicit environment gates, receiver URLs, project config, and access token or ADC credentials are present. Partner retries replay eligible durable dispatch rows with idempotency headers and write a separate JSONL retry ledger. The remaining delivery work is a real Dataflow job launcher only if the platform needs to start or update Beam jobs from Spring.
+Spring now emits component-level delivery adapter receipts for Pub/Sub, FCM or pseudo-Firebase, Firestore mirror/write, Dataflow mirror/export readiness, and operator workflow handoff. It also writes canonical `parkpulse.event.v1` envelopes to `PARKPULSE_EVENT_LEDGER` for dispatches, acknowledgements, approval decisions, partner retries, receiver callbacks, and Eventarc/Pub/Sub signals. The safe default remains local mirror mode. Live Pub/Sub REST publish, FCM HTTP v1 send, Firestore REST document write, Workflows execution start, BigQuery `insertAll` event export, and partner receiver retries are only called when their explicit environment gates, receiver URLs, table config, project config, and access token or ADC credentials are present. Partner retries replay eligible durable dispatch rows with idempotency headers and write a separate JSONL retry ledger. The remaining delivery work is a real Dataflow job launcher only if the platform needs to start or update Beam jobs from Spring; the event schema, BigQuery event sink, and ingestion backbone are now Spring-owned.
 
 Agent-trust and handshake migration is also split. Spring owns the durable registry tables for partners, key metadata, onboarding registration records, delegation-token issuance, certification scoring and issuance, credential verification, revocation lists, issuer metadata, revocation writes, audit events, and the visit-planning handshake lifecycle: identity, session readback, capability, intent, proposal, counterproposal, commit, monitor, receipt, commerce-agent policy evaluation, and queue-agent reroute recommendations.
 

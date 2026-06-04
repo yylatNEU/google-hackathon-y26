@@ -131,6 +131,122 @@ def _write_records(records: list[dict[str, Any]]) -> None:
     temp.replace(path)
 
 
+EXPERIENCE_STUDIO_MEMORY_COLLECTIONS = [
+    "experience_studio_generation_runs",
+    "experience_studio_drafts",
+    "experience_studio_feedback",
+    "experience_studio_revision_events",
+    "experience_studio_learning_rules",
+]
+
+
+def _route_summary(draft: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "stop": item.get("stop"),
+            "purpose": item.get("purpose"),
+            "source": item.get("source"),
+            "profileIntelligenceNote": item.get("profileIntelligenceNote"),
+        }
+        for item in draft.get("route", [])
+        if isinstance(item, dict)
+    ]
+
+
+def _review_status_summary(draft: dict[str, Any]) -> dict[str, str]:
+    return {
+        str(item.get("agentId") or item.get("agentName") or "reviewer"): str(item.get("status") or "unknown")
+        for item in draft.get("studioReview", [])
+        if isinstance(item, dict)
+    }
+
+
+def _record_studio_memory(collection: str, event: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from mongo_memory import record_experience_studio_memory_event
+
+        return record_experience_studio_memory_event(collection, event)
+    except Exception as error:
+        return {
+            "status": "skipped",
+            "mode": "import_error",
+            "connected": False,
+            "collection": collection,
+            "memoryId": None,
+            "error": str(error)[:240],
+        }
+
+
+def _latest_studio_memory(collection: str, limit: int) -> list[dict[str, Any]]:
+    try:
+        from mongo_memory import get_latest_memory_documents_fast
+
+        return get_latest_memory_documents_fast(collection, max(1, min(limit, 100)))
+    except Exception:
+        return []
+
+
+def _memory_learning_policy() -> dict[str, Any]:
+    return {
+        "primaryMemory": "mongodb",
+        "analyticsMirror": "gcp_bigquery_later",
+        "rule": "Generated copy is evidence, not learning truth. Promote learning only from human review, approved drafts, rejected reasons, edited-before-approval diffs, or measured outcomes.",
+        "generatedTextLearningEligible": False,
+        "humanFeedbackLearningEligible": True,
+    }
+
+
+def _generation_memory_event(payload: dict[str, Any], draft: dict[str, Any], llm: dict[str, Any], venue_experience_data: dict[str, Any] | None) -> dict[str, Any]:
+    source_integrity = draft.get("sourceIntegrity", {}) if isinstance(draft.get("sourceIntegrity"), dict) else {}
+    creative_brief = draft.get("creativeBrief", {}) if isinstance(draft.get("creativeBrief"), dict) else {}
+    return {
+        "_id": f"exp_gen_{uuid.uuid4().hex[:12]}",
+        "eventType": "generation_run",
+        "templateId": payload.get("templateId") or payload.get("template"),
+        "audience": draft.get("audience"),
+        "creativeBrief": creative_brief,
+        "llm": llm,
+        "route": _route_summary(draft),
+        "sourceIntegrity": {
+            "readyForHandoff": source_integrity.get("readyForHandoff"),
+            "usesSeedData": source_integrity.get("usesSeedData"),
+            "usesInventedLocations": source_integrity.get("usesInventedLocations"),
+            "realInputSource": source_integrity.get("realInputSource"),
+            "realInputCount": source_integrity.get("realInputCount"),
+            "missingRealInputs": source_integrity.get("missingRealInputs", []),
+        },
+        "reviewStatuses": _review_status_summary(draft),
+        "venueExperienceDataStatus": venue_experience_data.get("status") if isinstance(venue_experience_data, dict) else None,
+        "learningEligible": False,
+        "learningSource": "generation_receipt_only",
+        "learningPolicy": _memory_learning_policy(),
+    }
+
+
+def list_experience_studio_memory(limit: int = 20) -> dict[str, Any]:
+    safe_limit = max(1, min(limit, 100))
+    collections = {
+        collection: _latest_studio_memory(collection, safe_limit)
+        for collection in EXPERIENCE_STUDIO_MEMORY_COLLECTIONS
+    }
+    receipts = [
+        row
+        for rows in collections.values()
+        for row in rows
+        if isinstance(row, dict)
+    ]
+    receipts = sorted(receipts, key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
+    return {
+        "status": "ready",
+        "mode": "experience_studio_memory",
+        "memoryLayer": "mongodb_primary_with_local_fallback",
+        "learningPolicy": _memory_learning_policy(),
+        "collections": collections,
+        "latestReceipts": receipts[:safe_limit],
+        "collectionCounts": {name: len(rows) for name, rows in collections.items()},
+    }
+
+
 def _compact_record(record: dict[str, Any]) -> dict[str, Any]:
     draft = record.get("draft", {}) if isinstance(record.get("draft"), dict) else {}
     review = draft.get("review", []) if isinstance(draft.get("review"), list) else []
@@ -270,7 +386,24 @@ def save_experience_studio_draft(payload: dict[str, Any]) -> dict[str, Any]:
         records = _read_records()
         records.insert(0, record)
         _write_records(records)
-    return {"status": "saved", "mode": "experience_studio_saved_draft", "draftRecord": record, "summary": _compact_record(record)}
+    memory = _record_studio_memory(
+        "experience_studio_drafts",
+        {
+            "_id": f"exp_draft_{record['id']}",
+            "eventType": "draft_saved",
+            "draftId": record["id"],
+            "templateId": record.get("templateId"),
+            "status": record.get("status"),
+            "summary": _compact_record(record),
+            "route": _route_summary(draft),
+            "sourceIntegrity": draft.get("sourceIntegrity", {}),
+            "reviewStatuses": _review_status_summary(draft),
+            "learningEligible": False,
+            "learningSource": "saved_draft_receipt",
+            "learningPolicy": _memory_learning_policy(),
+        },
+    )
+    return {"status": "saved", "mode": "experience_studio_saved_draft", "draftRecord": record, "summary": _compact_record(record), "memoryPersistence": memory}
 
 
 def update_experience_studio_draft_status(draft_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -287,6 +420,7 @@ def update_experience_studio_draft_status(draft_id: str, payload: dict[str, Any]
         for record in records:
             if str(record.get("id")) != draft_id:
                 continue
+            previous_status = str(record.get("status") or "draft")
             record["status"] = next_status
             record["updatedAt"] = now
             trail = record.setdefault("reviewTrail", [])
@@ -300,7 +434,35 @@ def update_experience_studio_draft_status(draft_id: str, payload: dict[str, Any]
                     }
                 )
             _write_records(records)
-            return {"status": "updated", "mode": "experience_studio_review_state", "draftRecord": record, "summary": _compact_record(record)}
+            feedback_memory = _record_studio_memory(
+                "experience_studio_feedback",
+                {
+                    "_id": f"exp_feedback_{draft_id}_{uuid.uuid4().hex[:8]}",
+                    "eventType": "draft_status_review",
+                    "draftId": draft_id,
+                    "reviewStatus": next_status,
+                    "actor": payload.get("actor") or "experience_reviewer",
+                    "note": _text(payload.get("note"), f"Moved to {next_status}."),
+                    "templateId": record.get("templateId"),
+                    "learningEligible": next_status in {"approved", "needs_changes"},
+                    "learningSource": "human_review_status",
+                    "learningPolicy": _memory_learning_policy(),
+                },
+            )
+            revision_memory = _record_studio_memory(
+                "experience_studio_revision_events",
+                {
+                    "_id": f"exp_revision_status_{draft_id}_{uuid.uuid4().hex[:8]}",
+                    "eventType": "status_changed",
+                    "draftId": draft_id,
+                    "fromStatus": previous_status,
+                    "toStatus": next_status,
+                    "actor": payload.get("actor") or "experience_reviewer",
+                    "learningEligible": False,
+                    "learningSource": "workflow_receipt",
+                },
+            )
+            return {"status": "updated", "mode": "experience_studio_review_state", "draftRecord": record, "summary": _compact_record(record), "memoryPersistence": {"feedback": feedback_memory, "revision": revision_memory}}
     return {"status": "not_found", "message": f"Draft {draft_id} was not found."}
 
 
@@ -348,11 +510,29 @@ def update_experience_studio_draft_content(draft_id: str, payload: dict[str, Any
                     }
                 )
             _write_records(records)
+            revision_memory = _record_studio_memory(
+                "experience_studio_revision_events",
+                {
+                    "_id": f"exp_revision_content_{draft_id}_{uuid.uuid4().hex[:8]}",
+                    "eventType": "content_updated",
+                    "draftId": draft_id,
+                    "actor": payload.get("actor") or "experience_designer",
+                    "note": _text(payload.get("note"), "Draft content updated."),
+                    "status": record.get("status", "draft"),
+                    "route": _route_summary(incoming_draft),
+                    "sourceIntegrity": integrity,
+                    "reviewStatuses": _review_status_summary(incoming_draft),
+                    "learningEligible": False,
+                    "learningSource": "revision_receipt",
+                    "learningPolicy": _memory_learning_policy(),
+                },
+            )
             return {
                 "status": "updated",
                 "mode": "experience_studio_draft_content",
                 "draftRecord": record,
                 "summary": _compact_record(record),
+                "memoryPersistence": revision_memory,
             }
     return {"status": "not_found", "message": f"Draft {draft_id} was not found."}
 
@@ -458,12 +638,29 @@ def create_experience_studio_handoff(draft_id: str, payload: dict[str, Any]) -> 
                     }
                 )
             _write_records(records)
+            handoff_memory = _record_studio_memory(
+                "experience_studio_revision_events",
+                {
+                    "_id": f"exp_handoff_{handoff['id']}",
+                    "eventType": "handoff_created",
+                    "draftId": draft_id,
+                    "handoffId": handoff["id"],
+                    "handoffStatus": handoff.get("status"),
+                    "requiresCommandCenterReview": handoff.get("requiresCommandCenterReview"),
+                    "operationalReviewReasons": handoff.get("operationalReviewReasons", []),
+                    "summary": _compact_handoff(record, handoff),
+                    "learningEligible": False,
+                    "learningSource": "handoff_receipt",
+                    "learningPolicy": _memory_learning_policy(),
+                },
+            )
             return {
                 "status": "created",
                 "mode": "experience_studio_command_center_handoff",
                 "handoff": handoff,
                 "summary": _compact_handoff(record, handoff),
                 "draftSummary": _compact_record(record),
+                "memoryPersistence": handoff_memory,
             }
     return {"status": "not_found", "message": f"Draft {draft_id} was not found."}
 
@@ -502,12 +699,28 @@ def update_experience_studio_handoff_status(handoff_id: str, payload: dict[str, 
                         }
                     )
                 _write_records(records)
+                feedback_memory = _record_studio_memory(
+                    "experience_studio_feedback",
+                    {
+                        "_id": f"exp_handoff_feedback_{handoff_id}_{uuid.uuid4().hex[:8]}",
+                        "eventType": "handoff_status_review",
+                        "draftId": record.get("id"),
+                        "handoffId": handoff_id,
+                        "reviewStatus": next_status,
+                        "actor": payload.get("actor") or "command_center",
+                        "note": handoff["commandCenterNote"],
+                        "learningEligible": next_status in {"accepted_for_channel_owner_review", "held_for_operations_changes", "blocked"},
+                        "learningSource": "command_center_review",
+                        "learningPolicy": _memory_learning_policy(),
+                    },
+                )
                 return {
                     "status": "updated",
                     "mode": "experience_studio_command_center_handoff_review",
                     "handoff": handoff,
                     "summary": _compact_handoff(record, handoff),
                     "draftSummary": _compact_record(record),
+                    "memoryPersistence": feedback_memory,
                 }
     return {"status": "not_found", "message": f"Handoff {handoff_id} was not found."}
 
@@ -1402,6 +1615,11 @@ async def build_experience_studio_payload(payload: dict[str, Any], state: dict[s
             for item in draft["reasoningTrace"]
         ]
 
+    memory_persistence = _record_studio_memory(
+        "experience_studio_generation_runs",
+        _generation_memory_event(payload, draft, llm, venue_experience_data),
+    )
+
     return {
         "status": "ready",
         "mode": "experience_studio_creative_draft",
@@ -1410,6 +1628,7 @@ async def build_experience_studio_payload(payload: dict[str, Any], state: dict[s
         "creativePrompt": creative_prompt,
         "llm": llm,
         "sourceContext": state_context,
+        "memoryPersistence": memory_persistence,
         "sourceIntegrity": {
             "usesSeedData": False,
             "usesSimulatedParkState": False,

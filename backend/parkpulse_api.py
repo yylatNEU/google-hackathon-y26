@@ -9589,6 +9589,162 @@ def _live_feed_metric_score(source: str, metric: str, delta: float) -> int:
     return 0 if abs(delta) < 0.0001 else -1
 
 
+def _bounded_reward(value: float) -> float:
+    return round(min(1.0, max(0.0, value)), 3)
+
+
+def _live_feed_reward_layers(
+    payload: dict[str, Any],
+    *,
+    rows: list[dict[str, Any]],
+    executed_departments: set[str],
+    receiver_delivery_proven: bool,
+    measurement_available: bool,
+    source_coverage: float,
+    department_coverage: float,
+    attribution_confidence: float,
+    improvement_points: int,
+    regression_points: int,
+    stable_points: int,
+) -> dict[str, Any]:
+    proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
+    proposal_rows = proposals.get("proposals", []) if isinstance(proposals.get("proposals"), list) else []
+    executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
+    follow_through = payload.get("hard_decision_follow_through", {}) if isinstance(payload.get("hard_decision_follow_through"), dict) else {}
+    receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
+    memory_priors = payload.get("live_feed_memory_priors", {}) if isinstance(payload.get("live_feed_memory_priors"), dict) else {}
+    memory_prior_use = proposals.get("memory_prior_use", {}) if isinstance(proposals.get("memory_prior_use"), dict) else {}
+
+    proposal_count = len([row for row in proposal_rows if isinstance(row, dict)])
+    evidence_argument_count = sum(
+        1
+        for row in proposal_rows
+        if isinstance(row, dict)
+        and isinstance(row.get("department_reasoning"), dict)
+        and row["department_reasoning"].get("evidence_argument")
+    )
+    concrete_policy_count = sum(
+        1
+        for row in proposal_rows
+        if isinstance(row, dict)
+        and (row.get("proposal_envelope", {}) if isinstance(row.get("proposal_envelope"), dict) else {}).get("policy_check")
+        and not str((row.get("proposal_envelope", {}) if isinstance(row.get("proposal_envelope"), dict) else {}).get("policy_check")).startswith("pending")
+    )
+    negotiation_rounds = proposals.get("negotiation_rounds", []) if isinstance(proposals.get("negotiation_rounds"), list) else []
+    receipts = executor.get("receipts", []) if isinstance(executor.get("receipts"), list) else []
+    executed_count = int(executor.get("executed_count") or 0)
+    held_count = int(executor.get("held_count") or 0)
+    held_disposition_count = int(executor.get("held_disposition_count") or 0)
+    ownerless_count = int(follow_through.get("unresolved_without_owner_count") or 0)
+    public_messages = int(receiver_delivery.get("public_guest_messages_sent") or 0)
+    material_mutation = bool(receiver_delivery.get("material_state_mutation"))
+    delivered_count = int(receiver_delivery.get("delivered_count") or 0)
+    acknowledged_count = int(receiver_delivery.get("acknowledged_count") or 0)
+
+    trace_components = [
+        1.0 if proposal_count and evidence_argument_count == proposal_count else evidence_argument_count / max(1, proposal_count),
+        1.0 if len(negotiation_rounds) >= 4 else len(negotiation_rounds) / 4,
+        1.0 if follow_through.get("status") == "routed" and ownerless_count == 0 else 0.4 if follow_through.get("status") == "routed" else 0.0,
+    ]
+    trace_reward = _bounded_reward(sum(trace_components) / len(trace_components))
+
+    policy_components = [
+        1.0 if proposal_count and concrete_policy_count == proposal_count else concrete_policy_count / max(1, proposal_count),
+        1.0 if held_count and held_disposition_count == held_count else 0.8 if held_count == 0 else held_disposition_count / max(1, held_count),
+        1.0 if public_messages == 0 and material_mutation is False else 0.0,
+    ]
+    policy_reward = _bounded_reward(sum(policy_components) / len(policy_components))
+    policy_hard_gate_passed = policy_reward >= 0.95 and ownerless_count == 0 and public_messages == 0 and material_mutation is False
+
+    execution_components = [
+        1.0 if executed_count > 0 else 0.0,
+        1.0 if receiver_delivery_proven and delivered_count == executed_count and acknowledged_count == executed_count and executed_count > 0 else 0.0,
+        1.0 if held_count == 0 or (follow_through.get("status") == "routed" and ownerless_count == 0) else 0.0,
+        round(executed_count / max(1, len(receipts)), 3) if receipts else 0.0,
+    ]
+    execution_reward = _bounded_reward(sum(execution_components) / len(execution_components))
+
+    directional_total = max(1, improvement_points + regression_points + stable_points)
+    operational_reward = _bounded_reward(
+        (0.25 if measurement_available else 0.05)
+        + (0.5 * (improvement_points / directional_total))
+        - (0.6 * (regression_points / directional_total))
+        + (0.05 * (stable_points / directional_total))
+    )
+
+    memory_applied = int(memory_prior_use.get("applied_count") or 0)
+    memory_prior_count = int(memory_priors.get("prior_count") or 0)
+    memory_used = memory_applied > 0
+    learning_reward = _bounded_reward(
+        0.35
+        + (0.25 if memory_used else 0.0)
+        + (0.15 if memory_prior_count > 0 else 0.0)
+        + (0.15 if regression_points == 0 else -0.2)
+        + (0.1 if improvement_points > 0 else 0.0)
+    )
+
+    promotion_eligible = (
+        policy_hard_gate_passed
+        and measurement_available
+        and attribution_confidence >= 0.7
+        and operational_reward >= 0.55
+        and regression_points == 0
+    )
+    composite_reward = _bounded_reward(
+        0.1 * trace_reward
+        + 0.2 * policy_reward
+        + 0.2 * execution_reward
+        + 0.4 * operational_reward
+        + 0.1 * learning_reward
+    )
+    return {
+        "version": "live_feed_reward_vector_v1",
+        "trace_reward": trace_reward,
+        "policy_reward": policy_reward,
+        "execution_reward": execution_reward,
+        "operational_reward": operational_reward,
+        "learning_reward": learning_reward,
+        "composite_reward": composite_reward,
+        "promotion_eligible": promotion_eligible,
+        "policy_hard_gate_passed": policy_hard_gate_passed,
+        "operational_lift_detected": improvement_points > regression_points and operational_reward >= 0.55,
+        "metrics": {
+            "proposal_count": proposal_count,
+            "evidence_argument_count": evidence_argument_count,
+            "concrete_policy_count": concrete_policy_count,
+            "negotiation_round_count": len(negotiation_rounds),
+            "executed_department_count": len(executed_departments),
+            "executed_count": executed_count,
+            "held_count": held_count,
+            "held_disposition_count": held_disposition_count,
+            "delivered_count": delivered_count,
+            "acknowledged_count": acknowledged_count,
+            "ownerless_follow_up_count": ownerless_count,
+            "source_coverage": source_coverage,
+            "department_coverage": department_coverage,
+            "attribution_confidence": attribution_confidence,
+            "improvement_points": improvement_points,
+            "regression_points": regression_points,
+            "stable_points": stable_points,
+            "measurement_source_count": len(rows),
+            "memory_prior_count": memory_prior_count,
+            "memory_applied_count": memory_applied,
+        },
+        "promotion_blockers": [
+            blocker
+            for blocker in [
+                None if policy_hard_gate_passed else "policy_or_authority_gate_not_clean",
+                None if measurement_available else "measured_outcome_missing",
+                None if attribution_confidence >= 0.7 else "low_attribution_confidence",
+                None if operational_reward >= 0.55 else "operational_reward_below_promotion_threshold",
+                None if regression_points == 0 else "operational_regression_detected",
+            ]
+            if blocker
+        ],
+        "boundary": "Trace, policy, and execution rewards may create training examples, but promotion requires operational_reward and policy_hard_gate_passed.",
+    }
+
+
 def _live_feed_rows_by_source(health_or_refresh: dict[str, Any]) -> dict[str, dict[str, Any]]:
     rows = health_or_refresh.get("feeds")
     if not isinstance(rows, list):
@@ -9687,20 +9843,26 @@ def _build_live_feed_outcome_measurement(payload: dict[str, Any], post_action_re
         3,
     )
     reward_ready = measurement_available and attribution_confidence >= 0.7
-    reward_value = round(
-        min(
-            1.0,
-            max(
-                0.0,
-                0.58
-                + (0.12 if receiver_delivery_proven else -0.2)
-                + (0.12 if measurement_available else -0.15)
-                + (0.04 * improvement_points)
-                + (0.01 * stable_points)
-                - (0.08 * regression_points),
-            ),
-        ),
-        3,
+    reward_layers = _live_feed_reward_layers(
+        payload,
+        rows=rows,
+        executed_departments=executed_departments,
+        receiver_delivery_proven=receiver_delivery_proven,
+        measurement_available=measurement_available,
+        source_coverage=source_coverage,
+        department_coverage=department_coverage,
+        attribution_confidence=attribution_confidence,
+        improvement_points=improvement_points,
+        regression_points=regression_points,
+        stable_points=stable_points,
+    )
+    reward_value = reward_layers["operational_reward"]
+    reward_label = (
+        "operational_lift_with_policy_safe_execution"
+        if reward_ready and reward_layers.get("promotion_eligible")
+        else "safe_handoff_measured_but_operational_lift_unproven"
+        if reward_ready
+        else "measurement_not_reward_ready"
     )
     return {
         "mode": "live_feed_post_action_outcome_measurement",
@@ -9719,7 +9881,9 @@ def _build_live_feed_outcome_measurement(payload: dict[str, Any], post_action_re
         "measured_outcome_available": measurement_available,
         "eligible_for_reward": reward_ready,
         "reward_value": reward_value if reward_ready else None,
-        "reward_label": "safe_controlled_handoff_with_measured_live_state" if reward_ready else "measurement_not_reward_ready",
+        "reward_label": reward_label,
+        "reward_layers": reward_layers,
+        "promotion_eligible": bool(reward_ready and reward_layers.get("promotion_eligible")),
         "material_state_mutation": False,
         "measurement_rows": rows,
         "boundary": "Measures post-action live-feed state and receiver acknowledgements only; it does not infer safety clearance, send public messages, mutate park state, start training, or promote a model.",
@@ -10047,6 +10211,7 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
     )
     measured_outcome_available = bool(outcome_measurement.get("measured_outcome_available"))
     eligible_for_reward = bool(outcome_measurement.get("eligible_for_reward"))
+    reward_layers = outcome_measurement.get("reward_layers", {}) if isinstance(outcome_measurement.get("reward_layers"), dict) else {}
     decision_basis = {
         "mode": "live_feed_controlled_executor_decision",
         "lead_source": live_case.get("lead_source"),
@@ -10079,6 +10244,8 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
             "measuredOutcomeAvailable": measured_outcome_available,
             "attributionConfidence": outcome_measurement.get("attribution_confidence"),
             "rewardValue": outcome_measurement.get("reward_value"),
+            "rewardLayers": reward_layers,
+            "promotionEligible": outcome_measurement.get("promotion_eligible"),
         },
         "state_impact": {
             "domain": "live_feed_controlled_executor",
@@ -10116,6 +10283,8 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
             "hard_decision_follow_through": 100 if follow_through.get("status") == "routed" and int(follow_through.get("unresolved_without_owner_count") or 0) == 0 else 50 if held else 100,
             "receiver_delivery": 100 if receiver_delivery_proven else 0,
             "post_action_measurement": 100 if measured_outcome_available else 0,
+            "operational_reward": round(float(reward_layers.get("operational_reward") or 0) * 100, 1) if reward_layers else 0,
+            "promotion_eligible": bool(outcome_measurement.get("promotion_eligible")),
         },
         "learning": {
             "label": "controlled_execute_vs_hold_supervision",
@@ -10123,6 +10292,8 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
             "eligible_for_reward": eligible_for_reward,
             "reward_label": outcome_measurement.get("reward_label"),
             "reward_value": outcome_measurement.get("reward_value"),
+            "reward_layers": reward_layers,
+            "promotion_eligible": outcome_measurement.get("promotion_eligible"),
             "profile_learning_context": {
                 "profile_version": proposals.get("profile_version") or park_profile_summary.get("profile_version"),
                 "profile_context_proposal_count": proposals.get("profile_context_proposal_count"),

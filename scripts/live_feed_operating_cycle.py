@@ -104,6 +104,7 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
     receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
     outcome_measurement = payload.get("live_feed_outcome_measurement", {}) if isinstance(payload.get("live_feed_outcome_measurement"), dict) else {}
     outcome_memory = payload.get("live_feed_outcome_memory", {}) if isinstance(payload.get("live_feed_outcome_memory"), dict) else {}
+    reward_layers = outcome_measurement.get("reward_layers", {}) if isinstance(outcome_measurement.get("reward_layers"), dict) else {}
     memory_priors = payload.get("live_feed_memory_priors", {}) if isinstance(payload.get("live_feed_memory_priors"), dict) else {}
     memory_prior_use = proposals.get("memory_prior_use", {}) if isinstance(proposals.get("memory_prior_use"), dict) else {}
     tradeoff = proposals.get("executive_tradeoff", {}) if isinstance(proposals.get("executive_tradeoff"), dict) else {}
@@ -188,6 +189,9 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
             "attribution_confidence": outcome_measurement.get("attribution_confidence"),
             "eligible_for_reward": outcome_measurement.get("eligible_for_reward"),
             "reward_value": outcome_measurement.get("reward_value"),
+            "reward_label": outcome_measurement.get("reward_label"),
+            "promotion_eligible": outcome_measurement.get("promotion_eligible"),
+            "reward_layers": reward_layers,
         },
         "training_closure": {
             "status": closure.get("status"),
@@ -291,6 +295,7 @@ async def _run_cycle(
     diversity_control: bool,
     case_bank_rows: list[dict[str, Any]],
     batch_summaries: list[dict[str, Any]],
+    agent_timeout_seconds: float,
 ) -> dict[str, Any]:
     import parkpulse_api
     from live_feed_training_closure import close_live_feed_training_loop
@@ -316,7 +321,7 @@ async def _run_cycle(
                 require_persisted_events=True,
             )
         ),
-        timeout=120,
+        timeout=agent_timeout_seconds,
     )
     run_path = output_dir / f"live-feed-operating-cycle-run-{cycle_index}.json"
     run_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n", encoding="utf-8")
@@ -386,12 +391,14 @@ def _deferred_training_status(min_rows: int, new_case_count: int, reward_case_co
 def _quality_blocked_training_status(min_rows: int, case_bank_summary: dict[str, Any]) -> dict[str, Any]:
     quality_gate = case_bank_summary.get("quality_gate", {}) if isinstance(case_bank_summary.get("quality_gate"), dict) else {}
     blockers = quality_gate.get("blockers", []) if isinstance(quality_gate.get("blockers"), list) else []
+    metrics = quality_gate.get("metrics", {}) if isinstance(quality_gate.get("metrics"), dict) else {}
+    measured_reward_vector_count = _safe_int(metrics.get("reward_vector_case_count"), _safe_int(case_bank_summary.get("closed_case_count")))
     return {
         "status": "deferred",
         "mode": "actual_outcome_training",
         "detail": "quality_gate",
         "source": "live_feed_operating_cycle_case_bank",
-        "sample_count": case_bank_summary.get("closed_case_count"),
+        "sample_count": measured_reward_vector_count,
         "min_sample_count": min_rows,
         "uses_generated_data": False,
         "model": {"status": "not_fit", "reason": "case-bank quality gate has not passed"},
@@ -399,7 +406,7 @@ def _quality_blocked_training_status(min_rows: int, case_bank_summary: dict[str,
             "promotion_gate": {
                 "status": "hold",
                 "decision": "improve_case_bank_quality",
-                "observed_rows": case_bank_summary.get("closed_case_count"),
+                "observed_rows": measured_reward_vector_count,
                 "minimum_rows": min_rows,
                 "reward_candidate_rows": case_bank_summary.get("reward_candidate_count"),
                 "quality_gate": quality_gate,
@@ -452,6 +459,7 @@ def _case_bank_row_from_summary(summary: dict[str, Any], *, batch_id: str, outpu
     agents = summary.get("agents", {}) if isinstance(summary.get("agents"), dict) else {}
     actions = summary.get("actions", {}) if isinstance(summary.get("actions"), dict) else {}
     measurement = summary.get("measurement", {}) if isinstance(summary.get("measurement"), dict) else {}
+    reward_layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
     training = summary.get("training_closure", {}) if isinstance(summary.get("training_closure"), dict) else {}
     artifacts = summary.get("artifacts", {}) if isinstance(summary.get("artifacts"), dict) else {}
     closed_case = (
@@ -516,7 +524,10 @@ def _case_bank_row_from_summary(summary: dict[str, Any], *, batch_id: str, outpu
             "status": measurement.get("status"),
             "attribution_confidence": measurement.get("attribution_confidence"),
             "reward_value": measurement.get("reward_value"),
+            "reward_label": measurement.get("reward_label"),
             "eligible_for_reward": measurement.get("eligible_for_reward"),
+            "promotion_eligible": measurement.get("promotion_eligible"),
+            "reward_layers": reward_layers,
         },
         "training_material": {
             "example_count": training.get("example_count"),
@@ -555,11 +566,33 @@ def _case_bank_quality_gate(
         if _safe_int((row.get("memory", {}) if isinstance(row.get("memory"), dict) else {}).get("applied_count")) > 0
     ]
     memory_applied_ratio = round(len(memory_applied_rows) / max(1, len(closed_rows)), 3)
+    reward_vector_rows: list[dict[str, Any]] = []
+    legacy_scalar_reward_rows: list[dict[str, Any]] = []
+    operational_rewards: list[float] = []
+    for row in reward_rows:
+        measurement = row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}
+        reward_layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
+        if reward_layers.get("version") == "live_feed_reward_vector_v1" and "operational_reward" in reward_layers:
+            reward_vector_rows.append(row)
+            operational_rewards.append(_safe_float(reward_layers.get("operational_reward"), 0.0))
+        else:
+            legacy_scalar_reward_rows.append(row)
+    promotion_eligible_rows = [
+        row
+        for row in reward_vector_rows
+        if (row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}).get("promotion_eligible") is True
+    ]
+    average_operational_reward = round(sum(operational_rewards) / max(1, len(operational_rewards)), 3)
     blockers: list[str] = []
     if len(closed_rows) < min_training_rows:
         blockers.append(f"Need {min_training_rows} closed cases; found {len(closed_rows)}.")
     if len(reward_rows) < min_training_rows:
         blockers.append(f"Need {min_training_rows} reward candidates; found {len(reward_rows)}.")
+    if len(reward_vector_rows) < min_training_rows:
+        blockers.append(
+            f"Need {min_training_rows} reward-vector cases with operational_reward; found {len(reward_vector_rows)}. "
+            f"Legacy scalar reward rows kept for trace/eval only: {len(legacy_scalar_reward_rows)}."
+        )
     if len(kind_counts) < min_issue_kinds:
         blockers.append(f"Need at least {min_issue_kinds} issue kinds; found {len(kind_counts)}.")
     if len(target_counts) < min_targets:
@@ -582,6 +615,11 @@ def _case_bank_quality_gate(
         "metrics": {
             "closed_case_count": len(closed_rows),
             "reward_candidate_count": len(reward_rows),
+            "reward_vector_case_count": len(reward_vector_rows),
+            "legacy_scalar_reward_case_count": len(legacy_scalar_reward_rows),
+            "promotion_eligible_case_count": len(promotion_eligible_rows),
+            "average_operational_reward": average_operational_reward,
+            "average_operational_reward_vector_only": average_operational_reward,
             "issue_kind_count": len(kind_counts),
             "target_count": len(target_counts),
             "dominant_issue_kind": dominant_kind,
@@ -639,7 +677,7 @@ def _case_bank_summary(
         "latest_outcome_ids": [row.get("outcome_id") for row in latest_rows if row.get("outcome_id")],
         "dedupe_key": "outcome_id",
         "append_only": True,
-        "training_threshold_uses": "historical closed_case_count and reward_candidate_count",
+        "training_threshold_uses": "historical closed_case_count plus reward-vector cases with operational_reward; legacy scalar reward rows are trace/eval material only",
         "quality_gate": quality_gate,
         "updated_at": _now_iso(),
     }
@@ -814,6 +852,7 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
         memory = cycle.get("memory", {}) if isinstance(cycle.get("memory"), dict) else {}
         agents = cycle.get("agents", {}) if isinstance(cycle.get("agents"), dict) else {}
         measurement = cycle.get("measurement", {}) if isinstance(cycle.get("measurement"), dict) else {}
+        reward_layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
         training = cycle.get("training_closure", {}) if isinstance(cycle.get("training_closure"), dict) else {}
         cycle_cards.append(
             f"""
@@ -831,7 +870,8 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
               <div class="decision">
                 <p><b>Why this was not scripted:</b> the event came from the current park simulation state, then live feeds were reloaded and agents grounded decisions in persisted feed event IDs.</p>
                 <p><b>Memory use:</b> prior status {html.escape(str(memory.get('prior_status')))}, prior count {html.escape(str(memory.get('prior_count')))}, applied {html.escape(str(memory.get('applied_count')))}. Accepted departments: {html.escape(', '.join(str(x) for x in memory.get('accepted_departments', [])[:8]) or 'none')}.</p>
-                <p><b>Measured outcome:</b> {html.escape(str(measurement.get('status')))} with attribution confidence {html.escape(str(measurement.get('attribution_confidence')))} and reward value {html.escape(str(measurement.get('reward_value')))}.</p>
+                <p><b>Measured outcome:</b> {html.escape(str(measurement.get('status')))} with attribution confidence {html.escape(str(measurement.get('attribution_confidence')))} and operational reward {html.escape(str(reward_layers.get('operational_reward', measurement.get('reward_value'))))}. Promotion eligible: {html.escape(str(measurement.get('promotion_eligible')))}.</p>
+                <p><b>Reward layers:</b> trace {html.escape(str(reward_layers.get('trace_reward')))}, policy {html.escape(str(reward_layers.get('policy_reward')))}, execution {html.escape(str(reward_layers.get('execution_reward')))}, operational {html.escape(str(reward_layers.get('operational_reward')))}, learning {html.escape(str(reward_layers.get('learning_reward')))}.</p>
               </div>
             </section>
             """
@@ -907,7 +947,7 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
       <div class="section-title"><h2>Historical Case Bank</h2>{_badge(case_bank.get('status'))}</div>
       <div class="grid four">
         <div><strong>Total cases</strong><span>{html.escape(str(case_bank.get('total_case_count')))}</span><small>Append-only, dedupe key: {html.escape(str(case_bank.get('dedupe_key')))}</small></div>
-        <div><strong>Closed cases</strong><span>{html.escape(str(case_bank.get('closed_case_count')))}</span><small>Used for the retraining threshold gate</small></div>
+        <div><strong>Closed cases</strong><span>{html.escape(str(case_bank.get('closed_case_count')))}</span><small>Historical memory, trace, and eval material</small></div>
         <div><strong>Reward candidates</strong><span>{html.escape(str(case_bank.get('reward_candidate_count')))}</span><small>Added this run: {html.escape(str(case_bank.get('added_count')))}, duplicates skipped: {html.escape(str(case_bank.get('duplicate_count')))}</small></div>
         <div><strong>Diversity</strong><span>{html.escape(str(case_bank.get('issue_kind_count')))} issue kinds</span><small>{html.escape(', '.join(str(x) for x in case_bank.get('issue_kinds', [])[:5]))}</small></div>
       </div>
@@ -915,7 +955,12 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
         <div><strong>Quality gate</strong><span>{html.escape(str(quality_gate.get('status')))}</span><small>Training can start only when this passes.</small></div>
         <div><strong>Targets</strong><span>{html.escape(str(quality_metrics.get('target_count')))}</span><small>Dominant issue: {html.escape(str(quality_metrics.get('dominant_issue_kind')))} ({html.escape(str(quality_metrics.get('dominant_issue_ratio')) )})</small></div>
         <div><strong>Memory use</strong><span>{html.escape(str(quality_metrics.get('memory_applied_ratio')))}</span><small>{html.escape(str(quality_metrics.get('memory_applied_case_count')))} cases used prior memory</small></div>
-        <div><strong>Gate blockers</strong><span>{html.escape(str(len(quality_blockers)))}</span><small>Rows, diversity, concentration, and memory-use checks</small></div>
+        <div><strong>Reward vectors</strong><span>{html.escape(str(quality_metrics.get('reward_vector_case_count')))}</span><small>{html.escape(str(quality_metrics.get('legacy_scalar_reward_case_count')))} legacy scalar rows kept for trace/eval</small></div>
+      </div>
+      <div class="grid three">
+        <div><strong>Operational reward</strong><span>{html.escape(str(quality_metrics.get('average_operational_reward_vector_only', quality_metrics.get('average_operational_reward'))))}</span><small>Vector-only average; scalar fallback is excluded</small></div>
+        <div><strong>Promotion evidence</strong><span>{html.escape(str(quality_metrics.get('promotion_eligible_case_count')))}</span><small>Cases with enough operational lift and policy gate pass</small></div>
+        <div><strong>Threshold basis</strong><span>reward vector</span><small>{html.escape(str(case_bank.get('training_threshold_uses')))}</small></div>
       </div>
       <div class="truth">
         <strong>Quality gate issues</strong>
@@ -971,6 +1016,7 @@ async def _async_main(args: argparse.Namespace) -> int:
             diversity_control=not args.no_diversity_control,
             case_bank_rows=starting_case_bank_rows,
             batch_summaries=[row["summary"] for row in cycles],
+            agent_timeout_seconds=args.agent_timeout_seconds,
         )
         cycles.append(result)
     cycle_summaries = [row["summary"] for row in cycles]
@@ -1030,6 +1076,7 @@ def main() -> int:
     parser.add_argument("--no-diversity-control", action="store_true", help="Use random unexpected events instead of case-bank diversity-directed issue selection.")
     parser.add_argument("--training-detail", choices=["readiness", "full"], default="full")
     parser.add_argument("--training-timeout-seconds", type=float, default=90.0)
+    parser.add_argument("--agent-timeout-seconds", type=float, default=180.0, help="Maximum seconds to wait for each live-feed agent cycle.")
     parser.add_argument("--no-ledger", action="store_true", help="Do not write review dispositions to the review training ledger.")
     args = parser.parse_args()
     if args.cycles < 1:

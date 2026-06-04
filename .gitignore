@@ -22,6 +22,7 @@ runtime-external
 # Generated reports/artifacts
 output/
 artifacts/*-latest.json
+artifacts/operating-loop-resilience-monitor/
 tmp/
 .arize-tmp-traces/
 

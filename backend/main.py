@@ -57,7 +57,7 @@ from agent_handshake import (
 )
 from accessibility_journey import build_accessibility_journey, build_accessibility_scope
 from customer_park_knowledge import build_customer_public_data_feed, customer_venue_export_template, validate_customer_venue_export
-from experience_studio import build_experience_studio_payload, create_experience_studio_handoff, get_experience_studio_draft, list_experience_studio_drafts, list_experience_studio_handoffs, save_experience_studio_draft, studio_layer_contract, update_experience_studio_draft_content, update_experience_studio_draft_status, update_experience_studio_handoff_status
+from experience_studio import build_experience_studio_payload, create_experience_studio_handoff, get_experience_studio_draft, list_experience_studio_drafts, list_experience_studio_handoffs, list_experience_studio_memory, save_experience_studio_draft, studio_layer_contract, update_experience_studio_draft_content, update_experience_studio_draft_status, update_experience_studio_handoff_status
 from venue_experience_data import activate_synthetic_venue_export, build_venue_experience_data, import_venue_experience_export, validate_venue_experience_export
 from venue_profile import activate_synthetic_venue_profile, approved_synthetic_venue_profile_export, build_venue_profile, import_venue_profile_export, preview_venue_profile_import, validate_venue_profile_export
 from park_ops_mcp import (
@@ -15790,6 +15790,15 @@ async def app(scope, receive, send):
 
     if method == "GET" and path == "/api/park/experience-studio/layer-contract":
         await _send_json(send, 200, studio_layer_contract())
+        return
+
+    if method == "GET" and path == "/api/park/experience-studio/memory":
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        try:
+            limit = int((query.get("limit") or ["20"])[0] or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        await _send_json(send, 200, list_experience_studio_memory(limit=limit))
         return
 
     if method == "GET" and path == "/api/park/experience-studio/venue-data":

@@ -224,6 +224,7 @@ def _run_level_examples(payload: dict[str, Any]) -> list[dict[str, Any]]:
         outcome = outcome_memory.get("outcome", {}) if isinstance(outcome_memory.get("outcome"), dict) else {}
         response_metrics = outcome.get("response_metrics", {}) if isinstance(outcome.get("response_metrics"), dict) else {}
         learning = outcome.get("learning", {}) if isinstance(outcome.get("learning"), dict) else {}
+        reward_layers = learning.get("reward_layers") if isinstance(learning.get("reward_layers"), dict) else response_metrics.get("rewardLayers") if isinstance(response_metrics.get("rewardLayers"), dict) else outcome_measurement.get("reward_layers") if isinstance(outcome_measurement.get("reward_layers"), dict) else {}
         reward_ready = bool(learning.get("eligible_for_reward")) and bool(response_metrics.get("measuredOutcomeAvailable"))
         rows.append(
             _training_example(
@@ -244,6 +245,8 @@ def _run_level_examples(payload: dict[str, Any]) -> list[dict[str, Any]]:
                     "label": learning.get("reward_label") or ("reward_ready_controlled_handoff" if reward_ready else "not_reward_ready_until_measured_outcome"),
                     "eligible_for_reward": reward_ready,
                     "reward_value": learning.get("reward_value") if reward_ready else None,
+                    "reward_layers": reward_layers,
+                    "promotion_eligible": bool(learning.get("promotion_eligible")) if "promotion_eligible" in learning else bool(outcome_measurement.get("promotion_eligible")),
                     "reason": (
                         "Controlled executor outcome memory, receiver delivery proof, and post-action live-feed measurements are present."
                         if reward_ready
@@ -268,6 +271,8 @@ def _run_level_examples(payload: dict[str, Any]) -> list[dict[str, Any]]:
                         "measurement_id": outcome_measurement.get("measurement_id"),
                         "attribution_confidence": outcome_measurement.get("attribution_confidence"),
                         "reward_value": outcome_measurement.get("reward_value"),
+                        "reward_layers": outcome_measurement.get("reward_layers"),
+                        "promotion_eligible": outcome_measurement.get("promotion_eligible"),
                         "measurement_rows": outcome_measurement.get("measurement_rows", []),
                     },
                 },
