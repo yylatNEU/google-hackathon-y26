@@ -183,6 +183,28 @@ def test_role_access_audit_records_session_and_mutation_decisions(monkeypatch, t
     assert all("token" not in event for event in audit["events"])
 
 
+def test_role_access_audit_persists_through_mongo_memory_contract(monkeypatch, tmp_path):
+    monkeypatch.setenv("PARKPULSE_ROLE_ACCESS_AUDIT_LOG", str(tmp_path / "role-access-audit.jsonl"))
+
+    import mongo_memory
+    import park_role_access_audit
+
+    event = park_role_access_audit.record_role_access_audit_event(
+        "mutation_denied",
+        role="ops_team",
+        subject="qa",
+        capability="dispatch_live_action",
+        resource="operator_command",
+        status="unauthenticated",
+        reason="Signed role session token is required.",
+    )
+
+    assert event["mongo_status"] in {"stored", "skipped"}
+    assert "mongo_error" not in event
+    rows = mongo_memory.get_latest_role_access_audit_events(limit=5)
+    assert any(row.get("event_type") == "mutation_denied" and row.get("resource") == "operator_command" for row in rows)
+
+
 def test_signed_role_session_status_and_dev_issuer_boundary(monkeypatch):
     token = sign_role_session("unit-test", "ml_ops_admin", main._role_auth_secret(), ttl_seconds=900)
     verified = verify_role_session(token, main._role_auth_secret())

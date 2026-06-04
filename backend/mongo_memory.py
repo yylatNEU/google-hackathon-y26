@@ -79,6 +79,7 @@ COLLECTION_PURPOSES = {
     "cache_accuracy_replays": "Replay evidence comparing fresh retrieval, fresh cache, stale cache, and dangerous drift behavior.",
     "customer_emergency_incidents": "Customer-submitted emergency incidents with redacted report text, lifecycle state, and operator ownership.",
     "customer_emergency_audit": "Append-style audit events for customer emergency report intake, classification, dispatch, and resolution.",
+    "role_access_audit": "Append-style audit events for role session issuance and protected mutation authorization decisions.",
     "agent_handshake_sessions": "Persisted agent-to-agent handshake sessions, permissions, intent, proposals, commitments, and session lifecycle.",
     "agent_handshake_policy_events": "Append-style policy enforcement decisions for delegated client-agent actions.",
     "executive_guest_feedback_monthly": "Curated aggregate monthly guest feedback for executive experience intelligence.",
@@ -978,6 +979,7 @@ class OperationalMemory:
             "cache_accuracy_replays": [],
             "customer_emergency_incidents": [],
             "customer_emergency_audit": [],
+            "role_access_audit": [],
             "evidence_refresh_jobs": [],
             "agent_handshake_sessions": [],
             "agent_handshake_policy_events": [],
@@ -1099,6 +1101,8 @@ class OperationalMemory:
         self._create_index(self.db.customer_emergency_incidents, [("idempotencyKey", ASCENDING)])
         self._create_index(self.db.customer_emergency_incidents, [("customer_report.text", TEXT), ("customer_report.location", TEXT), ("recommended_owner", TEXT)])
         self._create_index(self.db.customer_emergency_audit, [("createdAt", DESCENDING), ("incidentId", ASCENDING), ("eventType", ASCENDING)])
+        self._create_index(self.db.role_access_audit, [("createdAt", DESCENDING), ("event_type", ASCENDING), ("resource", ASCENDING)])
+        self._create_index(self.db.role_access_audit, [("capability", ASCENDING), ("status", ASCENDING), ("createdAt", DESCENDING)])
         self._create_index(self.db.evidence_refresh_jobs, [("kind", ASCENDING), ("status", ASCENDING), ("updatedAt", DESCENDING)])
         self._create_index(self.db.evidence_refresh_jobs, [("cacheKey", ASCENDING), ("updatedAt", DESCENDING)])
         self._create_index(self.db.experience_studio_generation_runs, [("createdAt", DESCENDING), ("templateId", ASCENDING)])
@@ -2735,6 +2739,43 @@ class OperationalMemory:
             self._fallback["customer_emergency_audit"].insert(0, document)
             self._fallback["customer_emergency_audit"] = self._fallback["customer_emergency_audit"][:250]
         return event_id
+
+    def record_role_access_audit_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        event_id = str(
+            event.get("_id")
+            or event.get("id")
+            or f"role_audit_{hashlib.sha1(_stable_json({**event, 'createdAt': now}).encode('utf-8')).hexdigest()[:16]}"
+        )
+        document = _clean_for_bson(
+            {
+                **event,
+                "_id": event_id,
+                "id": event_id,
+                "documentType": "role_access_audit",
+                "createdAt": event.get("createdAt") or event.get("created_at") or now,
+            }
+        )
+        collection = self._collection("role_access_audit")
+        if collection is not None:
+            collection.replace_one({"_id": event_id}, document, upsert=True)
+        else:
+            self._fallback["role_access_audit"] = [
+                row for row in self._fallback["role_access_audit"] if row.get("_id") != event_id
+            ]
+            self._fallback["role_access_audit"].insert(0, document)
+            self._fallback["role_access_audit"] = self._fallback["role_access_audit"][:500]
+        return {
+            "status": "stored",
+            "mode": self.mode,
+            "collection": "role_access_audit",
+            "id": event_id,
+        }
+
+    def get_latest_role_access_audit_events(self, limit: int = 20) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 20), 100))
+        return self.latest_documents("role_access_audit", safe_limit)
 
     def record_evidence_refresh_job(self, job: dict[str, Any]) -> str:
         self._invalidate_dashboard_cache()
@@ -4867,6 +4908,27 @@ def record_customer_emergency_audit_event(event: dict[str, Any]) -> str:
         "mongo.customer_emergency_audit.record",
         lambda: _memory.record_customer_emergency_audit_event(event),
         lambda error: f"skipped_customer_emergency_audit_{hashlib.sha1(str(error).encode('utf-8')).hexdigest()[:12]}",
+    )
+
+
+def record_role_access_audit_event(event: dict[str, Any]) -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.role_access_audit.record",
+        lambda: _memory.record_role_access_audit_event(event),
+        lambda error: {
+            "status": "skipped",
+            "mode": "mongo_error",
+            "collection": "role_access_audit",
+            "reason": str(error)[:160],
+        },
+    )
+
+
+def get_latest_role_access_audit_events(limit: int = 20) -> list[dict[str, Any]]:
+    return _safe_memory_call(
+        "mongo.role_access_audit.latest",
+        lambda: _memory.get_latest_role_access_audit_events(limit),
+        lambda error: [],
     )
 
 
