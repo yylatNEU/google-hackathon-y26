@@ -35,6 +35,7 @@ def test_policy_pack_exposes_governed_training_contract(monkeypatch, tmp_path):
 
     assert pack["status"] == "ready"
     assert pack["scoring_contract"]["llm_controls_score"] is False
+    assert pack["scoring_contract"]["golden_eval_case_count"] >= 40
     assert pack["llm_guest_contract"]["provider_status"]["llm_controls_score"] is False
     assert pack["data_boundary"]["feeds_actual_reward_model"] is False
     assert "lost_child_report" in pack["critical_scenarios"]
@@ -108,6 +109,20 @@ def test_common_policy_correct_responses_clear_shadowing_threshold(monkeypatch, 
         assert turn["critical_miss"] is False
         assert turn["turn_score"]["overall"] >= 75, (scenario_id, turn["turn_score"])
         assert turn["turn_score"]["turn_coaching"]["verdict"] in {"passing", "strong"}
+
+
+def test_golden_eval_passes_all_calibration_cases(monkeypatch, tmp_path):
+    reset_roleplay(monkeypatch, tmp_path)
+
+    payload = roleplay.staff_training_golden_eval()
+
+    assert payload["status"] == "pass"
+    assert payload["case_count"] >= 40
+    assert payload["scenario_count"] == 10
+    assert payload["fail_count"] == 0
+    assert payload["scoring_contract"]["llm_controls_score"] is False
+    assert payload["feeds_actual_reward_model"] is False
+    assert {row["label"] for row in payload["label_summary"]} == {"bad", "excellent", "partial", "passing"}
 
 
 def test_analytics_summarizes_finished_sessions_only(monkeypatch, tmp_path):
@@ -441,6 +456,23 @@ def test_staff_training_policy_pack_api_requires_ops_scope(monkeypatch, tmp_path
     assert status == 200
     assert pack["mode"] == "staff_roleplay_policy_pack"
     assert pack["data_boundary"]["writes_live_dispatch"] is False
+
+
+def test_staff_training_golden_eval_api_requires_ops_scope(monkeypatch, tmp_path):
+    reset_roleplay(monkeypatch, tmp_path)
+    worker_token = sign_role_session("test-worker", "onsite_worker", main._role_auth_secret())
+    ops_token = sign_role_session("test-ops", "ops_team", main._role_auth_secret())
+
+    blocked_status, blocked = asyncio.run(_call_app("GET", "/api/park/staff-training/golden-eval", token=worker_token))
+    assert blocked_status == 403
+    assert blocked["mode"] == "role_authorization_gate"
+
+    status, payload = asyncio.run(_call_app("GET", "/api/park/staff-training/golden-eval", token=ops_token))
+    assert status == 200
+    assert payload["status"] == "pass"
+    assert payload["case_count"] >= 40
+    assert payload["fail_count"] == 0
+    assert payload["scoring_contract"]["llm_controls_score"] is False
 
 
 def test_staff_training_manager_api_creates_assignment_and_reads_dashboard(monkeypatch, tmp_path):

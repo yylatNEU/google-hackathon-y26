@@ -1,4 +1,14 @@
 from operating_loop_resilience import build_operating_loop_resilience_report
+import importlib.util
+import json
+from pathlib import Path
+
+
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "monitor_operating_loop_resilience.py"
+SCRIPT_SPEC = importlib.util.spec_from_file_location("monitor_operating_loop_resilience", SCRIPT_PATH)
+monitor_operating_loop_resilience = importlib.util.module_from_spec(SCRIPT_SPEC)
+assert SCRIPT_SPEC and SCRIPT_SPEC.loader
+SCRIPT_SPEC.loader.exec_module(monitor_operating_loop_resilience)
 
 
 def _healthy_inputs():
@@ -63,3 +73,17 @@ def test_operating_loop_resilience_blocks_missing_strict_gcp_contract():
 
     assert report["status"] == "failed"
     assert "strict_gcp_gate_available" in report["summary"]["critical_failures"]
+
+
+def test_operating_loop_monitor_writes_timestamped_and_latest_artifacts(tmp_path):
+    report = build_operating_loop_resilience_report(inputs=_healthy_inputs(), write_artifact=False)
+
+    artifact = monitor_operating_loop_resilience._write_monitor_artifacts(report, artifact_dir=tmp_path)
+
+    run_path = Path(artifact["run_path"])
+    latest_path = Path(artifact["latest_path"])
+    assert run_path.exists()
+    assert latest_path.exists()
+    latest = json.loads(latest_path.read_text(encoding="utf-8"))
+    assert latest["report"]["decision"] == "allow_loop_claim"
+    assert latest["monitor_id"].startswith("operating-loop-resilience-")

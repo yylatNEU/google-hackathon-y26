@@ -248,6 +248,39 @@ export type GcpLiveReadinessStatus = {
   env_gates?: Record<string, boolean>;
 };
 
+export type OperatingLoopResilienceStatus = {
+  status?: "passed" | "passed_with_conditions" | "failed" | string;
+  mode?: string;
+  generated_at?: string;
+  decision?: "allow_loop_claim" | "allow_with_conditions" | "block_loop_claim" | string;
+  summary?: {
+    status?: string;
+    score?: number;
+    check_count?: number;
+    failed_count?: number;
+    critical_failed_count?: number;
+    critical_failures?: string[];
+    conditions?: string[];
+  };
+  artifact?: {
+    status?: string;
+    path?: string;
+    reason?: string;
+  };
+  sections?: Record<
+    string,
+    Array<{
+      name?: string;
+      status?: string;
+      passed?: boolean;
+      critical?: boolean;
+      issue?: string;
+      evidence?: Record<string, unknown>;
+    }>
+  >;
+  principles?: Record<string, string>;
+};
+
 export type GcpOperationsStatus = {
   platform?: string;
   project?: string | null;

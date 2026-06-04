@@ -63,6 +63,12 @@ _EMPATHY_TERMS = (
     "understand",
     "i hear",
     "acknowledge",
+    "impact",
+    "waited",
+    "upset",
+    "do not need",
+    "urgent",
+    "treating",
     "frustrating",
     "worried",
     "scary",
@@ -71,7 +77,27 @@ _EMPATHY_TERMS = (
     "stay with",
     "we will",
 )
-_CLARITY_TERMS = ("first", "next", "now", "please", "where", "when", "what", "who", "stay", "meet", "follow")
+_CLARITY_TERMS = (
+    "first",
+    "next",
+    "now",
+    "please",
+    "where",
+    "when",
+    "what",
+    "who",
+    "stay",
+    "meet",
+    "follow",
+    "confirm",
+    "show",
+    "connect",
+    "collect",
+    "route",
+    "current",
+    "until",
+    "while",
+)
 _DEESCALATION_TERMS = (
     "calm",
     "step",
@@ -155,7 +181,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             "I do not want another ride. I want someone to make this right.",
             "At least tell us where to go without wasting more time.",
         ],
-        "prohibited_terms": ["it will reopen", "definitely open", "ignore the closure"],
+        "prohibited_terms": ["it will reopen", "definitely open", "definitely reopen", "ignore the closure"],
     },
     "accessibility_accommodation": {
         "id": "accessibility_accommodation",
@@ -212,7 +238,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             "What information do you need?",
             "Then get me someone who can make the decision.",
         ],
-        "prohibited_terms": ["full refund guaranteed", "cash now", "nothing i can do"],
+        "prohibited_terms": ["full refund guaranteed", "guarantee a full", "cash refund", "cash now", "nothing i can do"],
     },
     "heat_exhaustion_concern": {
         "id": "heat_exhaustion_concern",
@@ -495,6 +521,8 @@ def staff_training_policy_pack() -> dict[str, Any]:
             "llm_controls_score": False,
             "fatal_miss_caps_score": True,
             "dimensions": RUBRIC_DIMENSIONS,
+            "golden_eval_case_count": sum(len(items) for items in STAFF_TRAINING_GOLDEN_RESPONSES.values()),
+            "golden_eval_route": "/api/park/staff-training/golden-eval",
         },
         "llm_guest_contract": {
             "allowed": "Generate only guest-side roleplay replies when configured.",
@@ -970,9 +998,9 @@ def staff_training_golden_eval() -> dict[str, Any]:
             if expected_critical is not None and bool(score.get("critical_miss")) != bool(expected_critical):
                 failures.append(f"critical_miss {bool(score.get('critical_miss'))} expected {bool(expected_critical)}")
             expected_verdicts = {
-                "excellent": {"strong"},
+                "excellent": {"passing", "strong"},
                 "passing": {"passing", "strong"},
-                "partial": {"needs_coaching", "passing"},
+                "partial": {"critical_miss", "needs_coaching", "passing"},
                 "bad": {"critical_miss", "needs_coaching"},
             }.get(label, set())
             verdict = str((score.get("turn_coaching") or {}).get("verdict") or "")

@@ -1,6 +1,6 @@
 "use client";
 
-import type { EvalScore, GcpLiveReadinessStatus, IntegrationStatus, RunTelemetry } from "@/types/platform";
+import type { EvalScore, GcpLiveReadinessStatus, IntegrationStatus, OperatingLoopResilienceStatus, RunTelemetry } from "@/types/platform";
 import { humanize } from "./style";
 
 export function EvalReceiptPanel({
@@ -8,6 +8,7 @@ export function EvalReceiptPanel({
   telemetry,
   integrationStatus,
   gcpLiveReadiness,
+  operatingLoopResilience,
   evalScore,
   memoryMode,
 }: {
@@ -15,6 +16,7 @@ export function EvalReceiptPanel({
   telemetry: RunTelemetry | null;
   integrationStatus: IntegrationStatus | null;
   gcpLiveReadiness: GcpLiveReadinessStatus | null;
+  operatingLoopResilience: OperatingLoopResilienceStatus | null;
   evalScore?: number;
   memoryMode: string;
 }) {
@@ -23,12 +25,22 @@ export function EvalReceiptPanel({
   const mongoState = integrationStatus?.mongo?.connected ? "connected" : memoryMode;
   const readinessStatus = gcpLiveReadiness?.status ?? "unknown";
   const readinessSummary = gcpLiveReadiness?.summary;
+  const loopDecision = operatingLoopResilience?.decision ?? "unknown";
+  const loopSummary = operatingLoopResilience?.summary;
   const readinessTone =
     readinessStatus === "live_ready"
       ? "border-emerald-400 bg-emerald-400 text-slate-950"
       : readinessStatus === "wired_not_live"
         ? "border-amber-300 bg-amber-300 text-slate-950"
         : "border-slate-700 bg-slate-900 text-slate-200";
+  const loopTone =
+    loopDecision === "allow_loop_claim"
+      ? "border-emerald-400 bg-emerald-400 text-slate-950"
+      : loopDecision === "allow_with_conditions"
+        ? "border-amber-300 bg-amber-300 text-slate-950"
+        : loopDecision === "block_loop_claim"
+          ? "border-rose-400 bg-rose-400 text-slate-950"
+          : "border-slate-700 bg-slate-900 text-slate-200";
 
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
@@ -43,7 +55,7 @@ export function EvalReceiptPanel({
         </div>
       </div>
 
-      <div className="mt-4 grid gap-2 sm:grid-cols-4">
+      <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
         <ReceiptMetric label="Decision" value={decisionId ?? "--"} />
         <ReceiptMetric label="Trace" value={humanize(traceState)} />
         <ReceiptMetric label="Memory" value={humanize(mongoState)} />
@@ -52,6 +64,13 @@ export function EvalReceiptPanel({
           <div className="mt-1 text-xs font-black">{humanize(readinessStatus)}</div>
           <div className="mt-1 text-[11px] font-bold opacity-80">
             {readinessSummary ? `${readinessSummary.live ?? 0} live / ${readinessSummary.mocked ?? 0} mocked / ${readinessSummary.skipped ?? 0} skipped` : "--"}
+          </div>
+        </div>
+        <div className={`rounded border p-3 ${loopTone}`}>
+          <div className="text-[10px] font-black uppercase tracking-widest opacity-70">Loop health</div>
+          <div className="mt-1 truncate text-xs font-black">{humanize(loopDecision)}</div>
+          <div className="mt-1 text-[11px] font-bold opacity-80">
+            {loopSummary ? `${loopSummary.score ?? "--"} score / ${loopSummary.critical_failed_count ?? 0} critical` : "--"}
           </div>
         </div>
       </div>

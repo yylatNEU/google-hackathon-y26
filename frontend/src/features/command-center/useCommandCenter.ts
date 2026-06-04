@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParkPulseState } from "@/hooks/useParkPulseState";
 import { fetchParkPulseApi, longRunningRequestTimeoutMs } from "@/lib/api";
 import { agentBriefsFromRuntime } from "@/lib/parkPulseAgents";
-import type { AgentBrief, DeliveryDispatch, EvalScore, GcpLiveReadinessStatus, IntegrationStatus, RunTelemetry } from "@/types/platform";
+import type { AgentBrief, DeliveryDispatch, EvalScore, GcpLiveReadinessStatus, IntegrationStatus, OperatingLoopResilienceStatus, RunTelemetry } from "@/types/platform";
 
 type RunPayload = RunTelemetry & {
   run_telemetry?: RunTelemetry;
@@ -223,6 +223,7 @@ export function useCommandCenter() {
   const [runTelemetry, setRunTelemetry] = useState<RunTelemetry | null>(null);
   const [integrationStatus, setIntegrationStatus] = useState<IntegrationStatus | null>(null);
   const [gcpLiveReadiness, setGcpLiveReadiness] = useState<GcpLiveReadinessStatus | null>(null);
+  const [operatingLoopResilience, setOperatingLoopResilience] = useState<OperatingLoopResilienceStatus | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [isDispatching, setIsDispatching] = useState(false);
   const [isApproving, setIsApproving] = useState(false);
@@ -298,6 +299,15 @@ export function useCommandCenter() {
     }
   }, []);
 
+  const refreshOperatingLoopResilience = useCallback(async () => {
+    try {
+      const response = await fetchParkPulseApi("/api/gcp/operating-loop-resilience", { timeoutMs: longRunningRequestTimeoutMs });
+      setOperatingLoopResilience((await response.json()) as OperatingLoopResilienceStatus);
+    } catch {
+      setOperatingLoopResilience(null);
+    }
+  }, []);
+
   const refreshActualTraining = useCallback(async (options?: { runGcpTraining?: boolean }) => {
     const runGcpTraining = options?.runGcpTraining === true;
     setIsTrainingLoading(true);
@@ -335,8 +345,9 @@ export function useCommandCenter() {
     } finally {
       setIsTrainingLoading(false);
       if (runGcpTraining) setIsStartingGcpTraining(false);
+      void refreshOperatingLoopResilience();
     }
-  }, []);
+  }, [refreshOperatingLoopResilience]);
 
   const refreshLiveFeedHealth = useCallback(async () => {
     setIsLiveFeedHealthLoading(true);
@@ -393,6 +404,7 @@ export function useCommandCenter() {
       setStatusMessage(`Live feed refresh ${payload.status ?? "complete"}: ${refreshedCount} refreshed / ${queuedCount} queued.`);
       await refreshLiveFeedHealth();
       void refreshActualTraining();
+      void refreshOperatingLoopResilience();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to refresh stale live feeds.";
       setErrorMessage(message);
@@ -400,7 +412,7 @@ export function useCommandCenter() {
     } finally {
       setIsRefreshingStaleFeeds(false);
     }
-  }, [refreshActualTraining, refreshLiveFeedHealth]);
+  }, [refreshActualTraining, refreshLiveFeedHealth, refreshOperatingLoopResilience]);
 
   const recordReviewDecision = useCallback(
     async (caseId: string, decision: "approve_for_state" | "request_corroboration" | "hold_for_review" | "escalate") => {
@@ -416,13 +428,14 @@ export function useCommandCenter() {
         setStatusMessage(`Review case ${decision.replaceAll("_", " ")}.`);
         await refreshLiveFeedHealth();
         void refreshActualTraining();
+        void refreshOperatingLoopResilience();
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "Unable to record review decision.");
       } finally {
         setIsLiveFeedHealthLoading(false);
       }
     },
-    [refreshActualTraining, refreshLiveFeedHealth],
+    [refreshActualTraining, refreshLiveFeedHealth, refreshOperatingLoopResilience],
   );
 
   const loadFeed = useCallback(
@@ -441,6 +454,7 @@ export function useCommandCenter() {
         setStatusMessage(`${label} feed ${payload.status ?? "loaded"}.`);
         await refreshLiveFeedHealth();
         void park.refreshParkState();
+        void refreshOperatingLoopResilience();
       } catch (error) {
         const message = error instanceof Error ? error.message : `Unable to load ${label} feed.`;
         setErrorMessage(message);
@@ -449,7 +463,7 @@ export function useCommandCenter() {
         setLoading(false);
       }
     },
-    [park, refreshLiveFeedHealth],
+    [park, refreshLiveFeedHealth, refreshOperatingLoopResilience],
   );
 
   const loadLiveWeatherFeed = useCallback(
@@ -485,6 +499,8 @@ export function useCommandCenter() {
       if (cancelled) return;
       await refreshGcpLiveReadiness();
       if (cancelled) return;
+      await refreshOperatingLoopResilience();
+      if (cancelled) return;
       await refreshLiveFeedHealth();
       if (cancelled) return;
       void refreshActualTraining();
@@ -497,7 +513,7 @@ export function useCommandCenter() {
     return () => {
       cancelled = true;
     };
-  }, [refreshActualTraining, refreshGcpLiveReadiness, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshLiveFeedHealth]);
+  }, [refreshActualTraining, refreshGcpLiveReadiness, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshLiveFeedHealth, refreshOperatingLoopResilience]);
 
   const runAgent = useCallback(async () => {
     setIsRunning(true);
@@ -524,6 +540,7 @@ export function useCommandCenter() {
       await park.refreshParkState();
       void refreshIntegrationStatus();
       void refreshGcpLiveReadiness();
+      void refreshOperatingLoopResilience();
       void refreshActualTraining();
       void refreshLiveAgentsSmoke();
     } catch (error) {
@@ -532,7 +549,7 @@ export function useCommandCenter() {
     } finally {
       setIsRunning(false);
     }
-  }, [park, refreshActualTraining, refreshGcpLiveReadiness, refreshIntegrationStatus, refreshLiveAgentsSmoke]);
+  }, [park, refreshActualTraining, refreshGcpLiveReadiness, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshOperatingLoopResilience]);
 
   const runDepartmentNegotiationDemo = useCallback(async () => {
     setIsRunning(true);
@@ -557,6 +574,7 @@ export function useCommandCenter() {
       setStatusMessage("Department negotiation demo complete. Review proposal envelopes and conflict resolution.");
       void refreshIntegrationStatus();
       void refreshGcpLiveReadiness();
+      void refreshOperatingLoopResilience();
       void refreshActualTraining();
       void refreshLiveAgentsSmoke();
     } catch (error) {
@@ -565,7 +583,7 @@ export function useCommandCenter() {
     } finally {
       setIsRunning(false);
     }
-  }, [refreshActualTraining, refreshGcpLiveReadiness, refreshIntegrationStatus, refreshLiveAgentsSmoke]);
+  }, [refreshActualTraining, refreshGcpLiveReadiness, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshOperatingLoopResilience]);
 
   const runLiveFeedAgent = useCallback(async () => {
     setIsRunning(true);
@@ -590,6 +608,7 @@ export function useCommandCenter() {
         setErrorMessage(telemetry.readiness_issues?.[0] ?? "Live-feed case is blocked until feed evidence is ready.");
         setStatusMessage(null);
         await refreshLiveFeedHealth();
+        void refreshOperatingLoopResilience();
         return;
       }
       setRunTelemetry(telemetry);
@@ -598,6 +617,7 @@ export function useCommandCenter() {
       await refreshLiveFeedHealth();
       void refreshIntegrationStatus();
       void refreshGcpLiveReadiness();
+      void refreshOperatingLoopResilience();
       void refreshActualTraining();
       void refreshLiveAgentsSmoke();
     } catch (error) {
@@ -606,7 +626,7 @@ export function useCommandCenter() {
     } finally {
       setIsRunning(false);
     }
-  }, [park, refreshActualTraining, refreshGcpLiveReadiness, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshLiveFeedHealth]);
+  }, [park, refreshActualTraining, refreshGcpLiveReadiness, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshLiveFeedHealth, refreshOperatingLoopResilience]);
 
   const executeSelectedAction = useCallback(async () => {
     setIsDispatching(true);
@@ -632,12 +652,13 @@ export function useCommandCenter() {
       setStatusMessage(payload.message ?? "Action sent through the policy-gated action path.");
       await park.refreshParkState();
       void refreshActualTraining();
+      void refreshOperatingLoopResilience();
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Unable to execute the selected action.");
     } finally {
       setIsDispatching(false);
     }
-  }, [park, refreshActualTraining, selectedAction?.action, selectedAction?.target]);
+  }, [park, refreshActualTraining, refreshOperatingLoopResilience, selectedAction?.action, selectedAction?.target]);
 
   const acknowledgeDispatch = useCallback(
     async (dispatch: DispatchView, choice: "approved" | "held_for_review" | "acknowledged") => {
@@ -663,13 +684,14 @@ export function useCommandCenter() {
         }
         setStatusMessage(`Receiver ${payload.status ?? choice}.`);
         void refreshActualTraining();
+        void refreshOperatingLoopResilience();
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "Unable to update receiver acknowledgement.");
       } finally {
         setIsApproving(false);
       }
     },
-    [park, refreshActualTraining],
+    [park, refreshActualTraining, refreshOperatingLoopResilience],
   );
 
   return {
@@ -685,6 +707,7 @@ export function useCommandCenter() {
     activeEvalScores,
     integrationStatus,
     gcpLiveReadiness,
+    operatingLoopResilience,
     actualTraining,
     selectedAction,
     policyGate,
@@ -716,6 +739,7 @@ export function useCommandCenter() {
     liveAgentsSmoke,
     refreshActualTraining,
     refreshGcpLiveReadiness,
+    refreshOperatingLoopResilience,
     refreshLiveAgentsSmoke,
     refreshLiveFeedHealth,
     refreshStaleLiveFeeds,

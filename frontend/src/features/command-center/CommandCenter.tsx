@@ -166,6 +166,7 @@ export function CommandCenter() {
             telemetry={command.runTelemetry}
             integrationStatus={command.integrationStatus}
             gcpLiveReadiness={command.gcpLiveReadiness}
+            operatingLoopResilience={command.operatingLoopResilience}
             evalScore={command.evalScore}
             memoryMode={command.memoryMode}
           />
