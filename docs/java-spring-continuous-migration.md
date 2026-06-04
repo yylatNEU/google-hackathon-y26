@@ -124,8 +124,10 @@ Spring owns the delivery REST port for durable JSONL outbox reads, dispatch crea
 - `POST /api/park/delivery/worker-notification`
 - `POST /api/park/delivery/equipment-command`
 - `GET /api/park/delivery/gcp-adapters/status`
+- `GET /api/park/delivery/partner-retries/status`
+- `POST /api/park/delivery/partner-retries/run`
 
-Spring now emits component-level delivery adapter receipts for Pub/Sub, FCM or pseudo-Firebase, Firestore mirror/write, Dataflow mirror/export readiness, and operator workflow handoff. The safe default remains local mirror mode. Live Pub/Sub REST publish, FCM HTTP v1 send, Firestore REST document write, and Workflows execution start are only called when their explicit environment gates, project config, and access token or ADC credentials are present. The remaining delivery work is partner receiver retry workers plus a real Dataflow job launcher if the platform needs to start or update Beam jobs from Spring.
+Spring now emits component-level delivery adapter receipts for Pub/Sub, FCM or pseudo-Firebase, Firestore mirror/write, Dataflow mirror/export readiness, and operator workflow handoff. The safe default remains local mirror mode. Live Pub/Sub REST publish, FCM HTTP v1 send, Firestore REST document write, Workflows execution start, and partner receiver retries are only called when their explicit environment gates, receiver URLs, project config, and access token or ADC credentials are present. Partner retries replay eligible durable dispatch rows with idempotency headers and write a separate JSONL retry ledger. The remaining delivery work is a real Dataflow job launcher only if the platform needs to start or update Beam jobs from Spring.
 
 Agent-trust and handshake migration is also split. Spring owns the durable registry tables for partners, key metadata, onboarding registration records, delegation-token issuance, certification scoring and issuance, credential verification, revocation lists, issuer metadata, revocation writes, audit events, and the visit-planning handshake lifecycle: identity, session readback, capability, intent, proposal, counterproposal, commit, monitor, receipt, commerce-agent policy evaluation, and queue-agent reroute recommendations.
 

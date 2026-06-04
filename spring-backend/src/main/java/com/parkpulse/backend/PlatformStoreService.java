@@ -144,6 +144,8 @@ public class PlatformStoreService {
             "/api/park/delivery/contract",
             "/api/park/delivery/outbox",
             "/api/park/delivery/gcp-adapters/status",
+            "/api/park/delivery/partner-retries/status",
+            "/api/park/delivery/partner-retries/run",
             "/api/park/delivery/guest-promotion",
             "/api/park/delivery/worker-notification",
             "/api/park/delivery/equipment-command",

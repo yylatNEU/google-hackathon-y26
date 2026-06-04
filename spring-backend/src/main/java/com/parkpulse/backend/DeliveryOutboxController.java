@@ -12,11 +12,13 @@ import org.springframework.web.bind.annotation.RestController;
 public class DeliveryOutboxController {
     private final DeliveryOutboxService deliveryOutboxService;
     private final DeliveryGcpAdapterService deliveryGcpAdapterService;
+    private final DeliveryPartnerRetryService deliveryPartnerRetryService;
     private final RoleAuthService roleAuthService;
 
-    public DeliveryOutboxController(DeliveryOutboxService deliveryOutboxService, DeliveryGcpAdapterService deliveryGcpAdapterService, RoleAuthService roleAuthService) {
+    public DeliveryOutboxController(DeliveryOutboxService deliveryOutboxService, DeliveryGcpAdapterService deliveryGcpAdapterService, DeliveryPartnerRetryService deliveryPartnerRetryService, RoleAuthService roleAuthService) {
         this.deliveryOutboxService = deliveryOutboxService;
         this.deliveryGcpAdapterService = deliveryGcpAdapterService;
+        this.deliveryPartnerRetryService = deliveryPartnerRetryService;
         this.roleAuthService = roleAuthService;
     }
 
@@ -36,6 +38,21 @@ public class DeliveryOutboxController {
     public Map<String, Object> gcpAdapterStatus(HttpServletRequest request) {
         roleAuthService.requireCapability(request, "read_ops_evidence");
         return deliveryGcpAdapterService.status();
+    }
+
+    @GetMapping(value = "/api/park/delivery/partner-retries/status", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> partnerRetryStatus(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_ops_evidence");
+        return deliveryPartnerRetryService.status();
+    }
+
+    @PostMapping(value = "/api/park/delivery/partner-retries/run", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> runPartnerRetries(
+        HttpServletRequest request,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        roleAuthService.requireCapability(request, "dispatch_live_action");
+        return deliveryPartnerRetryService.run(body == null ? Map.of() : body);
     }
 
     @PostMapping(value = "/api/park/delivery/guest-promotion", produces = MediaType.APPLICATION_JSON_VALUE)

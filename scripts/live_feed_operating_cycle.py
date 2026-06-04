@@ -8,6 +8,7 @@ import html
 import json
 import sys
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,31 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def _json_default(value: Any) -> str:
     return str(value)
+
+
+DIVERSITY_EVENT_CATALOG = [
+    {"kind": "ride_failure", "target_id": "dragonCoaster", "intensity": 84, "domain": "ride_ops"},
+    {"kind": "demand_spike", "target_id": "mainStreet", "intensity": 82, "domain": "guest_flow"},
+    {"kind": "food_spike", "target_id": "foodCourt1", "intensity": 86, "domain": "food_retail"},
+    {"kind": "staff_callout", "target_id": "coasterPlaza", "intensity": 74, "domain": "hr_labor"},
+    {"kind": "storm_risk", "target_id": "outdoor_park", "intensity": 82, "domain": "safety"},
+    {"kind": "energy_spike", "target_id": "indoorHub", "intensity": 78, "domain": "maintenance"},
+    {"kind": "show_dump", "target_id": "coasterPlaza", "intensity": 78, "domain": "guest_flow"},
+    {"kind": "mobile_order_outage", "target_id": "foodCourt1", "intensity": 72, "domain": "food_retail"},
+    {"kind": "payment_outage", "target_id": "foodCourt1", "intensity": 70, "domain": "finance"},
+    {"kind": "access_lane_block", "target_id": "coveredPlaza", "intensity": 76, "domain": "security"},
+    {"kind": "water_leak", "target_id": "coveredPlaza", "intensity": 68, "domain": "maintenance"},
+    {"kind": "sensor_anomaly", "target_id": "riverRafts", "intensity": 66, "domain": "maintenance"},
+    {"kind": "parade_route_conflict", "target_id": "mainStreet", "intensity": 76, "domain": "operations"},
+    {"kind": "ticketing_gate_surge", "target_id": "mainGate", "intensity": 74, "domain": "operations"},
+    {"kind": "parking_arrival_wave", "target_id": "mainGate", "intensity": 72, "domain": "operations"},
+    {"kind": "inventory_stockout", "target_id": "foodCourt1", "intensity": 68, "domain": "food_retail"},
+    {"kind": "restroom_closure", "target_id": "coveredPlaza", "intensity": 64, "domain": "guest_experience"},
+    {"kind": "radio_dead_zone", "target_id": "coasterPlaza", "intensity": 64, "domain": "security"},
+    {"kind": "security_perimeter", "target_id": "mainStreet", "intensity": 76, "domain": "security"},
+    {"kind": "heat_index_spike", "target_id": "outdoor_park", "intensity": 80, "domain": "safety"},
+    {"kind": "lightning_delay", "target_id": "outdoor_park", "intensity": 88, "domain": "safety"},
+]
 
 
 async def _load_all_live_feeds(parkpulse_api: Any) -> dict[str, Any]:
@@ -94,6 +120,7 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
         "status": "passed" if payload.get("status") == "complete" and closure.get("status") == "closed_loop_materialized" else "review",
         "issue": {
             "status": injected_issue.get("status"),
+            "selection_mode": injected_issue.get("selection_mode"),
             "kind": issue_event.get("kind"),
             "target_id": issue_event.get("targetId"),
             "intensity": issue_event.get("intensity"),
@@ -182,12 +209,100 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
     }
 
 
-async def _run_cycle(cycle_index: int, output_dir: Path, record_ledger: bool) -> dict[str, Any]:
+def _issue_counts(rows: list[dict[str, Any]], batch_summaries: list[dict[str, Any]] | None = None) -> tuple[Counter[str], Counter[str], Counter[str]]:
+    kind_counts: Counter[str] = Counter()
+    target_counts: Counter[str] = Counter()
+    domain_counts: Counter[str] = Counter()
+    for row in rows:
+        issue = row.get("issue", {}) if isinstance(row.get("issue"), dict) else {}
+        kind = str(issue.get("kind") or "")
+        target = str(issue.get("target_id") or issue.get("targetId") or "")
+        if kind:
+            kind_counts[kind] += 1
+        if target:
+            target_counts[target] += 1
+    for summary in batch_summaries or []:
+        issue = summary.get("issue", {}) if isinstance(summary.get("issue"), dict) else {}
+        kind = str(issue.get("kind") or "")
+        target = str(issue.get("target_id") or "")
+        if kind:
+            kind_counts[kind] += 1
+        if target:
+            target_counts[target] += 1
+    for item in DIVERSITY_EVENT_CATALOG:
+        domain = str(item.get("domain") or "")
+        kind = str(item.get("kind") or "")
+        if domain and kind_counts.get(kind, 0):
+            domain_counts[domain] += kind_counts[kind]
+    return kind_counts, target_counts, domain_counts
+
+
+def _select_diverse_issue_plan(case_bank_rows: list[dict[str, Any]], batch_summaries: list[dict[str, Any]], cycle_index: int) -> dict[str, Any]:
+    kind_counts, target_counts, domain_counts = _issue_counts(case_bank_rows, batch_summaries)
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for order, item in enumerate(DIVERSITY_EVENT_CATALOG):
+        kind = str(item["kind"])
+        target = str(item["target_id"])
+        domain = str(item.get("domain") or "")
+        score = (
+            kind_counts.get(kind, 0) * 100.0
+            + target_counts.get(target, 0) * 16.0
+            + domain_counts.get(domain, 0) * 5.0
+            + order * 0.01
+        )
+        scored.append((score, item))
+    selected = min(scored, key=lambda row: row[0])[1]
+    return {
+        **selected,
+        "selection_mode": "historical_case_bank_diversity",
+        "cycle_index": cycle_index,
+        "prior_kind_count": kind_counts.get(str(selected["kind"]), 0),
+        "prior_target_count": target_counts.get(str(selected["target_id"]), 0),
+        "prior_domain_count": domain_counts.get(str(selected.get("domain") or ""), 0),
+    }
+
+
+async def _inject_operating_issue(parkpulse_api: Any, *, cycle_index: int, diversity_control: bool, case_bank_rows: list[dict[str, Any]], batch_summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    if not diversity_control:
+        result = await parkpulse_api.park_simulation.inject_random_unexpected_event(f"live_feed_operating_cycle_{cycle_index}")
+        if isinstance(result, dict):
+            result["selection_mode"] = "random_unexpected_event"
+        return result
+    plan = _select_diverse_issue_plan(case_bank_rows, batch_summaries, cycle_index)
+    result = await parkpulse_api.park_simulation.inject_event(str(plan["kind"]), str(plan["target_id"]), _safe_int(plan.get("intensity"), 75))
+    if isinstance(result, dict):
+        event = result.get("event", {}) if isinstance(result.get("event"), dict) else {}
+        event.setdefault("reason", f"Diversity-directed operating stress for underrepresented {plan['kind']} cases.")
+        event.setdefault("source", "live_feed_operating_cycle_diversity")
+        event.setdefault("unexpected", True)
+        event.setdefault("signalReliabilityPct", 90)
+        event.setdefault("visibility", "clear")
+        result["event"] = event
+        result["selection_mode"] = plan["selection_mode"]
+        result["diversity_plan"] = plan
+    return result
+
+
+async def _run_cycle(
+    cycle_index: int,
+    output_dir: Path,
+    record_ledger: bool,
+    *,
+    diversity_control: bool,
+    case_bank_rows: list[dict[str, Any]],
+    batch_summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
     import parkpulse_api
     from live_feed_training_closure import close_live_feed_training_loop
 
     started = time.perf_counter()
-    injected_issue = await parkpulse_api.park_simulation.inject_random_unexpected_event(f"live_feed_operating_cycle_{cycle_index}")
+    injected_issue = await _inject_operating_issue(
+        parkpulse_api,
+        cycle_index=cycle_index,
+        diversity_control=diversity_control,
+        case_bank_rows=case_bank_rows,
+        batch_summaries=batch_summaries,
+    )
     await parkpulse_api.park_simulation.step()
     load_results = await _load_all_live_feeds(parkpulse_api)
     payload = await asyncio.wait_for(
@@ -268,6 +383,39 @@ def _deferred_training_status(min_rows: int, new_case_count: int, reward_case_co
     }
 
 
+def _quality_blocked_training_status(min_rows: int, case_bank_summary: dict[str, Any]) -> dict[str, Any]:
+    quality_gate = case_bank_summary.get("quality_gate", {}) if isinstance(case_bank_summary.get("quality_gate"), dict) else {}
+    blockers = quality_gate.get("blockers", []) if isinstance(quality_gate.get("blockers"), list) else []
+    return {
+        "status": "deferred",
+        "mode": "actual_outcome_training",
+        "detail": "quality_gate",
+        "source": "live_feed_operating_cycle_case_bank",
+        "sample_count": case_bank_summary.get("closed_case_count"),
+        "min_sample_count": min_rows,
+        "uses_generated_data": False,
+        "model": {"status": "not_fit", "reason": "case-bank quality gate has not passed"},
+        "model_ops": {
+            "promotion_gate": {
+                "status": "hold",
+                "decision": "improve_case_bank_quality",
+                "observed_rows": case_bank_summary.get("closed_case_count"),
+                "minimum_rows": min_rows,
+                "reward_candidate_rows": case_bank_summary.get("reward_candidate_count"),
+                "quality_gate": quality_gate,
+            },
+            "offline_training_path": {
+                "status": "not_started",
+                "reason": "Training is intentionally deferred until enough diverse, measured, memory-usable cases exist.",
+            },
+        },
+        "debug": {
+            "readiness_issues": blockers
+            or ["Case-bank quality gate did not pass; no model fit, GCP training, or promotion was started."]
+        },
+    }
+
+
 def _case_bank_paths(case_bank_dir: Path) -> dict[str, Path]:
     return {
         "index": case_bank_dir / "index.jsonl",
@@ -325,6 +473,7 @@ def _case_bank_row_from_summary(summary: dict[str, Any], *, batch_id: str, outpu
         "issue": {
             "kind": issue.get("kind"),
             "target_id": issue.get("target_id"),
+            "selection_mode": issue.get("selection_mode"),
             "intensity": issue.get("intensity"),
             "signal_reliability_pct": issue.get("signal_reliability_pct"),
             "visibility": issue.get("visibility"),
@@ -386,11 +535,90 @@ def _case_bank_row_from_summary(summary: dict[str, Any], *, batch_id: str, outpu
     }
 
 
-def _case_bank_summary(rows: list[dict[str, Any]], *, added_count: int, duplicate_count: int, case_bank_dir: Path) -> dict[str, Any]:
+def _case_bank_quality_gate(
+    rows: list[dict[str, Any]],
+    *,
+    min_training_rows: int,
+    min_issue_kinds: int,
+    min_targets: int,
+    max_dominant_issue_ratio: float,
+    min_memory_applied_ratio: float,
+) -> dict[str, Any]:
     closed_rows = [row for row in rows if row.get("closed_case") is True]
     reward_rows = [row for row in rows if row.get("reward_candidate") is True]
-    issue_kinds = sorted({str((row.get("issue", {}) if isinstance(row.get("issue"), dict) else {}).get("kind")) for row in rows if (row.get("issue", {}) if isinstance(row.get("issue"), dict) else {}).get("kind")})
+    kind_counts, target_counts, _domain_counts = _issue_counts(closed_rows)
+    dominant_kind, dominant_count = kind_counts.most_common(1)[0] if kind_counts else ("none", 0)
+    dominant_ratio = round(dominant_count / max(1, len(closed_rows)), 3)
+    memory_applied_rows = [
+        row
+        for row in closed_rows
+        if _safe_int((row.get("memory", {}) if isinstance(row.get("memory"), dict) else {}).get("applied_count")) > 0
+    ]
+    memory_applied_ratio = round(len(memory_applied_rows) / max(1, len(closed_rows)), 3)
+    blockers: list[str] = []
+    if len(closed_rows) < min_training_rows:
+        blockers.append(f"Need {min_training_rows} closed cases; found {len(closed_rows)}.")
+    if len(reward_rows) < min_training_rows:
+        blockers.append(f"Need {min_training_rows} reward candidates; found {len(reward_rows)}.")
+    if len(kind_counts) < min_issue_kinds:
+        blockers.append(f"Need at least {min_issue_kinds} issue kinds; found {len(kind_counts)}.")
+    if len(target_counts) < min_targets:
+        blockers.append(f"Need at least {min_targets} targets/zones; found {len(target_counts)}.")
+    if dominant_ratio > max_dominant_issue_ratio:
+        blockers.append(f"Dominant issue kind ratio too high: {dominant_kind}={dominant_ratio}, max={max_dominant_issue_ratio}.")
+    if memory_applied_ratio < min_memory_applied_ratio:
+        blockers.append(f"Memory-applied case ratio too low: {memory_applied_ratio}, min={min_memory_applied_ratio}.")
+    return {
+        "status": "passed" if not blockers else "blocked",
+        "ready_for_training": not blockers,
+        "blockers": blockers,
+        "requirements": {
+            "min_training_rows": min_training_rows,
+            "min_issue_kinds": min_issue_kinds,
+            "min_targets": min_targets,
+            "max_dominant_issue_ratio": max_dominant_issue_ratio,
+            "min_memory_applied_ratio": min_memory_applied_ratio,
+        },
+        "metrics": {
+            "closed_case_count": len(closed_rows),
+            "reward_candidate_count": len(reward_rows),
+            "issue_kind_count": len(kind_counts),
+            "target_count": len(target_counts),
+            "dominant_issue_kind": dominant_kind,
+            "dominant_issue_count": dominant_count,
+            "dominant_issue_ratio": dominant_ratio,
+            "memory_applied_case_count": len(memory_applied_rows),
+            "memory_applied_ratio": memory_applied_ratio,
+        },
+    }
+
+
+def _case_bank_summary(
+    rows: list[dict[str, Any]],
+    *,
+    added_count: int,
+    duplicate_count: int,
+    case_bank_dir: Path,
+    min_training_rows: int = 50,
+    min_issue_kinds: int = 12,
+    min_targets: int = 6,
+    max_dominant_issue_ratio: float = 0.3,
+    min_memory_applied_ratio: float = 0.45,
+) -> dict[str, Any]:
+    closed_rows = [row for row in rows if row.get("closed_case") is True]
+    reward_rows = [row for row in rows if row.get("reward_candidate") is True]
+    kind_counts, target_counts, _domain_counts = _issue_counts(rows)
+    issue_kinds = sorted(kind_counts)
+    targets = sorted(target_counts)
     latest_rows = sorted(rows, key=lambda row: str(row.get("created_at") or ""), reverse=True)[:10]
+    quality_gate = _case_bank_quality_gate(
+        rows,
+        min_training_rows=min_training_rows,
+        min_issue_kinds=min_issue_kinds,
+        min_targets=min_targets,
+        max_dominant_issue_ratio=max_dominant_issue_ratio,
+        min_memory_applied_ratio=min_memory_applied_ratio,
+    )
     return {
         "status": "ready",
         "mode": "append_only_live_feed_case_bank",
@@ -402,17 +630,33 @@ def _case_bank_summary(rows: list[dict[str, Any]], *, added_count: int, duplicat
         "reward_candidate_count": len(reward_rows),
         "issue_kind_count": len(issue_kinds),
         "issue_kinds": issue_kinds,
+        "issue_kind_counts": dict(sorted(kind_counts.items())),
+        "target_count": len(targets),
+        "targets": targets,
+        "target_counts": dict(sorted(target_counts.items())),
         "added_count": added_count,
         "duplicate_count": duplicate_count,
         "latest_outcome_ids": [row.get("outcome_id") for row in latest_rows if row.get("outcome_id")],
         "dedupe_key": "outcome_id",
         "append_only": True,
         "training_threshold_uses": "historical closed_case_count and reward_candidate_count",
+        "quality_gate": quality_gate,
         "updated_at": _now_iso(),
     }
 
 
-def _append_case_bank(cycle_summaries: list[dict[str, Any]], *, case_bank_dir: Path, batch_id: str, output_dir: Path) -> dict[str, Any]:
+def _append_case_bank(
+    cycle_summaries: list[dict[str, Any]],
+    *,
+    case_bank_dir: Path,
+    batch_id: str,
+    output_dir: Path,
+    min_training_rows: int = 50,
+    min_issue_kinds: int = 12,
+    min_targets: int = 6,
+    max_dominant_issue_ratio: float = 0.3,
+    min_memory_applied_ratio: float = 0.45,
+) -> dict[str, Any]:
     case_bank_dir.mkdir(parents=True, exist_ok=True)
     paths = _case_bank_paths(case_bank_dir)
     existing_rows = _read_case_bank_rows(case_bank_dir)
@@ -433,7 +677,17 @@ def _append_case_bank(cycle_summaries: list[dict[str, Any]], *, case_bank_dir: P
             for row in added_rows:
                 handle.write(json.dumps(row, sort_keys=True, default=_json_default) + "\n")
     all_rows = [*existing_rows, *added_rows]
-    summary = _case_bank_summary(all_rows, added_count=len(added_rows), duplicate_count=duplicate_count, case_bank_dir=case_bank_dir)
+    summary = _case_bank_summary(
+        all_rows,
+        added_count=len(added_rows),
+        duplicate_count=duplicate_count,
+        case_bank_dir=case_bank_dir,
+        min_training_rows=min_training_rows,
+        min_issue_kinds=min_issue_kinds,
+        min_targets=min_targets,
+        max_dominant_issue_ratio=max_dominant_issue_ratio,
+        min_memory_applied_ratio=min_memory_applied_ratio,
+    )
     paths["summary"].write_text(json.dumps(summary, indent=2, sort_keys=True, default=_json_default) + "\n", encoding="utf-8")
     return {"summary": summary, "added_rows": added_rows}
 
@@ -467,6 +721,7 @@ def _aggregate_report(cycles: list[dict[str, Any]], actual_training: dict[str, A
     model = actual_training.get("model", {}) if isinstance(actual_training.get("model"), dict) else {}
     actual_debug = actual_training.get("debug", {}) if isinstance(actual_training.get("debug"), dict) else {}
     case_bank_summary = case_bank.get("summary", {}) if isinstance(case_bank.get("summary"), dict) else {}
+    quality_gate = case_bank_summary.get("quality_gate", {}) if isinstance(case_bank_summary.get("quality_gate"), dict) else {}
     status = "passed" if summaries and all(summary.get("status") == "passed" for summary in summaries) and unresolved == 0 else "review"
     return {
         "created_at": _now_iso(),
@@ -488,6 +743,7 @@ def _aggregate_report(cycles: list[dict[str, Any]], actual_training: dict[str, A
             "case_bank_reward_candidate_count": case_bank_summary.get("reward_candidate_count"),
             "case_bank_added_count": case_bank_summary.get("added_count"),
             "case_bank_duplicate_count": case_bank_summary.get("duplicate_count"),
+            "case_bank_quality_status": quality_gate.get("status"),
             "memory_growth": memory_growth,
             "actual_training_status": actual_training.get("status"),
             "actual_training_sample_count": actual_training.get("sample_count"),
@@ -547,6 +803,9 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
     cycles = report.get("cycles", []) if isinstance(report.get("cycles"), list) else []
     actual = report.get("actual_training", {}) if isinstance(report.get("actual_training"), dict) else {}
     case_bank = report.get("case_bank", {}) if isinstance(report.get("case_bank"), dict) else {}
+    quality_gate = case_bank.get("quality_gate", {}) if isinstance(case_bank.get("quality_gate"), dict) else {}
+    quality_metrics = quality_gate.get("metrics", {}) if isinstance(quality_gate.get("metrics"), dict) else {}
+    quality_blockers = quality_gate.get("blockers", []) if isinstance(quality_gate.get("blockers"), list) else []
     memory_growth = summary.get("memory_growth", {}) if isinstance(summary.get("memory_growth"), dict) else {}
     cycle_cards = []
     for cycle in cycles:
@@ -581,6 +840,7 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
     if not isinstance(readiness_issues, list):
         readiness_issues = []
     issue_items = "".join(f"<li>{html.escape(str(item))}</li>" for item in readiness_issues[:10]) or "<li>No readiness blockers reported.</li>"
+    quality_items = "".join(f"<li>{html.escape(str(item))}</li>" for item in quality_blockers[:10]) or "<li>Quality gate passed.</li>"
     html_doc = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -651,6 +911,16 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
         <div><strong>Reward candidates</strong><span>{html.escape(str(case_bank.get('reward_candidate_count')))}</span><small>Added this run: {html.escape(str(case_bank.get('added_count')))}, duplicates skipped: {html.escape(str(case_bank.get('duplicate_count')))}</small></div>
         <div><strong>Diversity</strong><span>{html.escape(str(case_bank.get('issue_kind_count')))} issue kinds</span><small>{html.escape(', '.join(str(x) for x in case_bank.get('issue_kinds', [])[:5]))}</small></div>
       </div>
+      <div class="grid four">
+        <div><strong>Quality gate</strong><span>{html.escape(str(quality_gate.get('status')))}</span><small>Training can start only when this passes.</small></div>
+        <div><strong>Targets</strong><span>{html.escape(str(quality_metrics.get('target_count')))}</span><small>Dominant issue: {html.escape(str(quality_metrics.get('dominant_issue_kind')))} ({html.escape(str(quality_metrics.get('dominant_issue_ratio')) )})</small></div>
+        <div><strong>Memory use</strong><span>{html.escape(str(quality_metrics.get('memory_applied_ratio')))}</span><small>{html.escape(str(quality_metrics.get('memory_applied_case_count')))} cases used prior memory</small></div>
+        <div><strong>Gate blockers</strong><span>{html.escape(str(len(quality_blockers)))}</span><small>Rows, diversity, concentration, and memory-use checks</small></div>
+      </div>
+      <div class="truth">
+        <strong>Quality gate issues</strong>
+        <ul>{quality_items}</ul>
+      </div>
     </section>
 
     <section>
@@ -690,21 +960,39 @@ async def _async_main(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     started_at = _now_iso()
     batch_id = output_dir.name or f"operating-cycle-{started_at}"
+    case_bank_dir = Path(args.case_bank_dir)
+    starting_case_bank_rows = _read_case_bank_rows(case_bank_dir)
     cycles: list[dict[str, Any]] = []
     for index in range(1, args.cycles + 1):
-        cycles.append(await _run_cycle(index, output_dir, record_ledger=not args.no_ledger))
+        result = await _run_cycle(
+            index,
+            output_dir,
+            record_ledger=not args.no_ledger,
+            diversity_control=not args.no_diversity_control,
+            case_bank_rows=starting_case_bank_rows,
+            batch_summaries=[row["summary"] for row in cycles],
+        )
+        cycles.append(result)
     cycle_summaries = [row["summary"] for row in cycles]
     case_bank = _append_case_bank(
         cycle_summaries,
-        case_bank_dir=Path(args.case_bank_dir),
+        case_bank_dir=case_bank_dir,
         batch_id=batch_id,
         output_dir=output_dir,
+        min_training_rows=args.min_training_rows,
+        min_issue_kinds=args.min_issue_kinds,
+        min_targets=args.min_targets,
+        max_dominant_issue_ratio=args.max_dominant_issue_ratio,
+        min_memory_applied_ratio=args.min_memory_applied_ratio,
     )
     case_bank_summary = case_bank.get("summary", {}) if isinstance(case_bank.get("summary"), dict) else {}
     historical_case_count = _safe_int(case_bank_summary.get("closed_case_count"))
     historical_reward_count = _safe_int(case_bank_summary.get("reward_candidate_count"))
-    if historical_case_count >= args.min_training_rows and historical_reward_count >= args.min_training_rows:
+    quality_gate = case_bank_summary.get("quality_gate", {}) if isinstance(case_bank_summary.get("quality_gate"), dict) else {}
+    if historical_case_count >= args.min_training_rows and historical_reward_count >= args.min_training_rows and quality_gate.get("ready_for_training") is True:
         actual_training = _run_actual_training_status(args.min_training_rows, args.training_detail, args.training_timeout_seconds)
+    elif historical_case_count >= args.min_training_rows and historical_reward_count >= args.min_training_rows:
+        actual_training = _quality_blocked_training_status(args.min_training_rows, case_bank_summary)
     else:
         actual_training = _deferred_training_status(args.min_training_rows, historical_case_count, historical_reward_count)
     report = _aggregate_report(cycles, actual_training, started_at, case_bank)
@@ -735,6 +1023,11 @@ def main() -> int:
     parser.add_argument("--output-dir", default=str(REPO_ROOT / "output/qa"))
     parser.add_argument("--case-bank-dir", default=str(REPO_ROOT / "output/qa/live-feed-case-bank"), help="Append-only historical case bank directory.")
     parser.add_argument("--min-training-rows", type=int, default=50, help="Closed outcome/reward cases required before any model-training path is invoked.")
+    parser.add_argument("--min-issue-kinds", type=int, default=12, help="Minimum distinct issue kinds required before training.")
+    parser.add_argument("--min-targets", type=int, default=6, help="Minimum distinct targets/zones required before training.")
+    parser.add_argument("--max-dominant-issue-ratio", type=float, default=0.3, help="Maximum share allowed for the most common issue kind.")
+    parser.add_argument("--min-memory-applied-ratio", type=float, default=0.45, help="Minimum share of closed cases that must show memory use.")
+    parser.add_argument("--no-diversity-control", action="store_true", help="Use random unexpected events instead of case-bank diversity-directed issue selection.")
     parser.add_argument("--training-detail", choices=["readiness", "full"], default="full")
     parser.add_argument("--training-timeout-seconds", type=float, default=90.0)
     parser.add_argument("--no-ledger", action="store_true", help="Do not write review dispositions to the review training ledger.")

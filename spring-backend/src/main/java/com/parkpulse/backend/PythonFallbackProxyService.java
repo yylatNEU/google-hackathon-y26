@@ -33,6 +33,8 @@ public class PythonFallbackProxyService {
         new OwnedRoute("GET", "/api/park/delivery/contract"),
         new OwnedRoute("GET", "/api/park/delivery/outbox"),
         new OwnedRoute("GET", "/api/park/delivery/gcp-adapters/status"),
+        new OwnedRoute("GET", "/api/park/delivery/partner-retries/status"),
+        new OwnedRoute("POST", "/api/park/delivery/partner-retries/run"),
         new OwnedRoute("POST", "/api/park/delivery/guest-promotion"),
         new OwnedRoute("POST", "/api/park/delivery/worker-notification"),
         new OwnedRoute("POST", "/api/park/delivery/equipment-command"),

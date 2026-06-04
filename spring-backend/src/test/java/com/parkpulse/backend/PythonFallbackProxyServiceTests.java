@@ -128,5 +128,12 @@ class PythonFallbackProxyServiceTests {
         assertThat(adapterStatusResponse.getStatusCode().value()).isEqualTo(409);
         assertThat(new String(adapterStatusResponse.getBody(), StandardCharsets.UTF_8))
             .contains("GET /api/park/delivery/gcp-adapters/status");
+
+        MockHttpServletRequest partnerRetryRequest = new MockHttpServletRequest("POST", "/api/park/delivery/partner-retries/run");
+        ResponseEntity<byte[]> partnerRetryResponse = service.forward(partnerRetryRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(partnerRetryResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(partnerRetryResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/delivery/partner-retries/run");
     }
 }

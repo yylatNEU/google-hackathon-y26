@@ -182,6 +182,11 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(jsonPath("$.firestore.mirror.ready", equalTo(true)))
 			.andExpect(jsonPath("$.dataflow.contract.platform", equalTo("Google Cloud Dataflow")));
 
+		mockMvc.perform(get("/api/park/delivery/partner-retries/status").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("spring_partner_receiver_retry_worker")))
+			.andExpect(jsonPath("$.enabled", equalTo(false)));
+
 		mockMvc.perform(
 				post("/api/park/delivery/guest-promotion")
 					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
@@ -216,6 +221,17 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.status", equalTo("delivered")))
 			.andExpect(jsonPath("$.dispatch.deduplicated", equalTo(true)));
+
+		mockMvc.perform(
+				post("/api/park/delivery/partner-retries/run")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"limit\":20,\"dry_run\":true}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("completed")))
+			.andExpect(jsonPath("$.dry_run", equalTo(true)))
+			.andExpect(jsonPath("$.attempts[0].status", equalTo("receiver_not_configured")));
 
 		mockMvc.perform(
 				post("/api/park/delivery/worker-notification")
@@ -358,6 +374,61 @@ class ParkPulseSpringBackendApplicationTests {
 			org.assertj.core.api.Assertions.assertThat(pubsubCalls.get()).isEqualTo(1);
 			org.assertj.core.api.Assertions.assertThat(fcmCalls.get()).isEqualTo(1);
 			org.assertj.core.api.Assertions.assertThat(firestoreCalls.get()).isEqualTo(1);
+		} finally {
+			server.stop(0);
+		}
+	}
+
+	@Test
+	void deliveryPartnerRetryWorkerReplaysEligibleDispatchesWithIdempotencyHeaders() throws Exception {
+		Path runtime = Path.of("target/test-parkpulse-partner-retry");
+		Files.createDirectories(runtime);
+		Files.deleteIfExists(runtime.resolve("partner_retry_receipts.jsonl"));
+		Files.writeString(
+			runtime.resolve("delivery_outbox.jsonl"),
+			"{\"id\":\"dispatch-retry-1\",\"createdAt\":\"2026-06-03T00:00:00Z\",\"channel\":\"guest_app\",\"targetSystem\":\"guest-mobile-app\",\"method\":\"POST\",\"endpoint\":\"/partner/guest-app/promotions\",\"status\":\"delivered\",\"idempotencyKey\":\"retry-key-1\",\"payload\":{\"message\":\"hello\"},\"response\":{\"state\":\"observed\"},\"agentBoundary\":{\"allowed\":true}}\n",
+			StandardCharsets.UTF_8
+		);
+		HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+		AtomicInteger partnerCalls = new AtomicInteger();
+		server.createContext("/partner/guest-app/promotions", exchange -> {
+			partnerCalls.incrementAndGet();
+			org.assertj.core.api.Assertions.assertThat(exchange.getRequestHeaders().getFirst("idempotency-key")).isEqualTo("retry-key-1");
+			org.assertj.core.api.Assertions.assertThat(exchange.getRequestHeaders().getFirst("x-parkpulse-dispatch-id")).isEqualTo("dispatch-retry-1");
+			String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+			org.assertj.core.api.Assertions.assertThat(body).contains("dispatch-retry-1");
+			byte[] bytes = "{\"accepted\":true}".getBytes(StandardCharsets.UTF_8);
+			exchange.getResponseHeaders().add("content-type", "application/json");
+			exchange.sendResponseHeaders(202, bytes.length);
+			exchange.getResponseBody().write(bytes);
+			exchange.close();
+		});
+		server.start();
+		try {
+			DeliveryGcpAdapterService gcp = new DeliveryGcpAdapterService(new MockEnvironment().withProperty("PARKPULSE_RUNTIME_DIR", runtime.toString()), objectMapper);
+			DeliveryOutboxService outbox = new DeliveryOutboxService(new MockEnvironment().withProperty("PARKPULSE_RUNTIME_DIR", runtime.toString()), objectMapper, gcp);
+			DeliveryPartnerRetryService retry = new DeliveryPartnerRetryService(
+				new MockEnvironment()
+					.withProperty("PARKPULSE_RUNTIME_DIR", runtime.toString())
+					.withProperty("PARKPULSE_ENABLE_PARTNER_RECEIVER_RETRY", "true")
+					.withProperty("PARKPULSE_PARTNER_RECEIVER_BASE_URL", "http://127.0.0.1:" + server.getAddress().getPort()),
+				objectMapper,
+				outbox
+			);
+
+			Map<String, Object> result = retry.run(Map.of("limit", 5, "dry_run", false));
+
+			org.assertj.core.api.Assertions.assertThat(result.get("status")).isEqualTo("completed");
+			org.assertj.core.api.Assertions.assertThat(partnerCalls.get()).isEqualTo(1);
+			List<?> attempts = (List<?>) result.get("attempts");
+			org.assertj.core.api.Assertions.assertThat(((Map<?, ?>) attempts.get(0)).get("status")).isEqualTo("delivered_to_partner");
+			org.assertj.core.api.Assertions.assertThat(Files.readString(runtime.resolve("partner_retry_receipts.jsonl"))).contains("delivered_to_partner");
+
+			Map<String, Object> secondRun = retry.run(Map.of("limit", 5, "dry_run", false));
+			List<?> secondAttempts = (List<?>) secondRun.get("attempts");
+			org.assertj.core.api.Assertions.assertThat(partnerCalls.get()).isEqualTo(1);
+			org.assertj.core.api.Assertions.assertThat(((Map<?, ?>) secondAttempts.get(0)).get("status")).isEqualTo("skipped");
+			org.assertj.core.api.Assertions.assertThat(((Map<?, ?>) secondAttempts.get(0)).get("reason")).isEqualTo("Partner receiver already accepted this dispatch.");
 		} finally {
 			server.stop(0);
 		}

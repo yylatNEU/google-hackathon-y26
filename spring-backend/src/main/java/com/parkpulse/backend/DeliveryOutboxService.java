@@ -44,13 +44,15 @@ public class DeliveryOutboxService {
             Map.of("channel", "equipment_controller", "method", "POST", "endpoint", "/api/park/delivery/equipment-command", "runtime", "java_spring"),
             Map.of("channel", "receiver_acknowledgement", "method", "POST", "endpoint", "/api/park/delivery/acknowledge", "runtime", "java_spring"),
             Map.of("channel", "operator_approval", "method", "POST", "endpoint", "/api/park/delivery/approval-decision", "runtime", "java_spring"),
-            Map.of("channel", "gcp_adapter_status", "method", "GET", "endpoint", "/api/park/delivery/gcp-adapters/status", "runtime", "java_spring")
+            Map.of("channel", "gcp_adapter_status", "method", "GET", "endpoint", "/api/park/delivery/gcp-adapters/status", "runtime", "java_spring"),
+            Map.of("channel", "partner_retry_status", "method", "GET", "endpoint", "/api/park/delivery/partner-retries/status", "runtime", "java_spring"),
+            Map.of("channel", "partner_retry_worker", "method", "POST", "endpoint", "/api/park/delivery/partner-retries/run", "runtime", "java_spring")
         ));
         payload.put("guardrails", List.of(
             "Ride safety and maintenance clearances are never automated.",
             "Guest messages use aggregate segments, not guest PII.",
             "Equipment commands are limited to comfort and load settings; safety-critical commands require approval.",
-            "Spring creates dispatches only through the tool-executor boundary, requires policy-gate evidence, appends creation plus receiver receipts to the durable JSONL outbox, and records GCP adapter receipts in local mirror mode unless live cloud clients are explicitly enabled."
+            "Spring creates dispatches only through the tool-executor boundary, requires policy-gate evidence, appends creation plus receiver receipts to the durable JSONL outbox, records GCP adapter receipts in local mirror mode unless live cloud clients are explicitly enabled, and replays partner receiver retries from a separate JSONL retry ledger."
         ));
         payload.put("durability", durabilityStatus());
         return payload;
@@ -80,6 +82,16 @@ public class DeliveryOutboxService {
         payload.put("durability", durabilityStatus());
         payload.put("runtime", "java_spring");
         return payload;
+    }
+
+    public List<Map<String, Object>> dispatchesForRetry(int limit) {
+        return latestDispatches(limit).stream()
+            .map(row -> {
+                Map<String, Object> copy = orderedMap();
+                copy.putAll(row);
+                return copy;
+            })
+            .toList();
     }
 
     public Map<String, Object> acknowledge(String dispatchId, String actor, String choice, String channel) {
