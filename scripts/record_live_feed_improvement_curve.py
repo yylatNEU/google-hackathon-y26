@@ -4,12 +4,16 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+BACKEND_DIR = REPO_ROOT / "backend"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 DEFAULT_CASE_BANK = REPO_ROOT / "output" / "qa" / "live-feed-case-bank" / "index.jsonl"
 DEFAULT_PROGRESS_DIR = REPO_ROOT / "output" / "qa" / "sustainable-growth-progress"
 
@@ -105,6 +109,26 @@ def _memory_applied(row: dict[str, Any]) -> bool:
     return _safe_int(_memory(row).get("applied_count")) > 0
 
 
+def _scenario_from_issue(row: dict[str, Any]) -> str:
+    issue = _issue(row)
+    kind = str(issue.get("kind") or "").lower()
+    target = str(issue.get("target_id") or issue.get("targetId") or "").lower()
+    text = f"{kind} {target}"
+    if any(term in text for term in ("food", "inventory", "mobile_order", "payment")):
+        return "food_spike"
+    if any(term in text for term in ("staff", "callout", "labor")):
+        return "staff_shortage"
+    if any(term in text for term in ("storm", "lightning", "heat", "weather")):
+        return "storm_response"
+    if any(term in text for term in ("ride", "coaster", "queue", "show_dump")):
+        return "ride_down"
+    if any(term in text for term in ("parade", "parking", "gate", "access_lane")):
+        return "proactive_eventops"
+    if any(term in text for term in ("sensor", "energy", "water_leak", "radio_dead_zone", "security", "restroom")):
+        return "scan"
+    return "unknown"
+
+
 def _slice_metrics(rows: list[dict[str, Any]], label: str) -> dict[str, Any]:
     rewards = [_reward(row) for row in rows if _reward(row) > 0]
     issue_kinds = {str(_issue(row).get("kind")) for row in rows if _issue(row).get("kind")}
@@ -124,6 +148,43 @@ def _slice_metrics(rows: list[dict[str, Any]], label: str) -> dict[str, Any]:
         "memory_applied_ratio": round(memory_count / count, 3) if count else 0.0,
         "controlled_effect_projection_ratio": round(effect_count / count, 3) if count else 0.0,
     }
+
+
+def _case_bank_scenario_view(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    minimum_source_cases = 8
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(_scenario_from_issue(row), []).append(row)
+    result: dict[str, dict[str, Any]] = {}
+    for scenario, scenario_rows in sorted(grouped.items()):
+        rewards = [_reward(row) for row in scenario_rows if _reward(row) > 0]
+        split = max(1, len(rewards) // 2)
+        first_avg = round(sum(rewards[:split]) / len(rewards[:split]), 3) if rewards[:split] else 0.0
+        recent_rewards = rewards[-min(12, len(rewards)) :]
+        recent_avg = round(sum(recent_rewards) / len(recent_rewards), 3) if recent_rewards else 0.0
+        promotion_count = sum(1 for row in scenario_rows if _promotion_eligible(row))
+        promotion_ratio = round(promotion_count / len(scenario_rows), 3) if scenario_rows else 0.0
+        status = (
+            "strong"
+            if len(scenario_rows) >= minimum_source_cases and recent_avg >= 0.55 and promotion_ratio >= 0.25
+            else "watch"
+            if recent_avg >= 0.52
+            else "weak"
+        )
+        result[scenario] = {
+            "source": "case_bank_live_feed",
+            "scenario_key": scenario,
+            "case_count": len(scenario_rows),
+            "average_reward": round(sum(rewards) / len(rewards), 3) if rewards else 0.0,
+            "recent_average_reward": recent_avg,
+            "curve_delta": round(recent_avg - first_avg, 3),
+            "promotion_eligible_count": promotion_count,
+            "promotion_eligible_ratio": promotion_ratio,
+            "status": status,
+            "decision": "case_bank_supports_growth" if status == "strong" else "case_bank_watch" if status == "watch" else "case_bank_weak",
+            "minimum_source_cases": minimum_source_cases,
+        }
+    return result
 
 
 def _case_bank_curve(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -146,9 +207,11 @@ def _actual_training_summary(report: dict[str, Any]) -> dict[str, Any]:
     model_ops = actual.get("model_ops", {}) if isinstance(actual.get("model_ops"), dict) else {}
     promotion_gate = model_ops.get("promotion_gate", {}) if isinstance(model_ops.get("promotion_gate"), dict) else {}
     fitness = model_ops.get("fitness_curve", {}) if isinstance(model_ops.get("fitness_curve"), dict) else {}
+    scenario_fitness = model_ops.get("scenario_fitness", {}) if isinstance(model_ops.get("scenario_fitness"), dict) else {}
     points = fitness.get("points", []) if isinstance(fitness.get("points"), list) else []
     return {
         "status": actual.get("status"),
+        "source": actual.get("source"),
         "sample_count": actual.get("sample_count"),
         "promotion_gate_status": promotion_gate.get("status"),
         "promotion_gate_decision": promotion_gate.get("decision"),
@@ -158,6 +221,8 @@ def _actual_training_summary(report: dict[str, Any]) -> dict[str, Any]:
         "latest_reward": fitness.get("latest_reward"),
         "point_count": fitness.get("point_count", len(points)),
         "recent_points": points[-6:],
+        "label_quality": scenario_fitness.get("label_quality", {}),
+        "scenario_balanced_latest_average_reward": scenario_fitness.get("balanced_latest_average_reward"),
     }
 
 
@@ -199,6 +264,125 @@ def _scenario_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
     return cleaned
 
 
+def _training_scenario_view(report: dict[str, Any], source_label: str | None = None) -> dict[str, dict[str, Any]]:
+    actual = report.get("actual_training", {}) if isinstance(report.get("actual_training"), dict) else {}
+    source = str(source_label or actual.get("source") or "actual_training")
+    result: dict[str, dict[str, Any]] = {}
+    for row in _scenario_rows(report):
+        scenario = str(row.get("scenario_key") or "unknown")
+        decision = str(row.get("decision") or "")
+        latest = _safe_float(row.get("latest_average_reward"))
+        delta = _safe_float(row.get("curve_delta"))
+        status = "strong" if decision == "promote_slice" else "watch" if decision == "collect_more_evidence" else "weak"
+        result[scenario] = {
+            "source": source,
+            "scenario_key": scenario,
+            "case_count": row.get("sample_count"),
+            "average_reward": latest,
+            "recent_average_reward": latest,
+            "curve_delta": delta,
+            "promotion_eligible_count": None,
+            "promotion_eligible_ratio": None,
+            "status": status,
+            "decision": decision,
+            "reason": row.get("reason"),
+        }
+    return result
+
+
+def _source_reconciliation(report: dict[str, Any], case_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    source_views: dict[str, dict[str, dict[str, Any]]] = {
+        "case_bank_live_feed": _case_bank_scenario_view(case_rows),
+    }
+    active_source_names = {"case_bank_live_feed"}
+    historical_source_names: set[str] = set()
+    original = report.get("source_reconciliation", {}) if isinstance(report.get("source_reconciliation"), dict) else {}
+    original_actual = original.get("operating_report_actual_training") if isinstance(original.get("operating_report_actual_training"), dict) else None
+    refreshed_actual = original.get("refreshed_actual_training") if isinstance(original.get("refreshed_actual_training"), dict) else None
+    if original_actual:
+        source_views["operating_report_actual_training"] = _training_scenario_view({"actual_training": original_actual}, str(original_actual.get("source") or "operating_report_actual_training"))
+        historical_source_names.add("operating_report_actual_training")
+    else:
+        source_views["operating_report_actual_training"] = _training_scenario_view(report, str((_actual_training_summary(report).get("source") or "operating_report_actual_training")))
+        active_source_names.add("operating_report_actual_training")
+    if refreshed_actual:
+        source_views["refreshed_actual_training"] = _training_scenario_view({"actual_training": refreshed_actual}, str(refreshed_actual.get("source") or "refreshed_actual_training"))
+        active_source_names.add("refreshed_actual_training")
+    scenarios = sorted({scenario for view in source_views.values() for scenario in view})
+    rows: list[dict[str, Any]] = []
+    conflicts = 0
+    for scenario in scenarios:
+        cells = {name: view.get(scenario) for name, view in source_views.items() if view.get(scenario)}
+        active_cells = {name: cell for name, cell in cells.items() if name in active_source_names}
+        historical_cells = {name: cell for name, cell in cells.items() if name in historical_source_names}
+        statuses = {str(cell.get("status")) for cell in active_cells.values() if isinstance(cell, dict)}
+        decisions = {str(cell.get("decision")) for cell in active_cells.values() if isinstance(cell, dict)}
+        all_statuses = {str(cell.get("status")) for cell in cells.values() if isinstance(cell, dict)}
+        all_decisions = {str(cell.get("decision")) for cell in cells.values() if isinstance(cell, dict)}
+        has_strong = "strong" in statuses
+        has_weak = "weak" in statuses
+        conflict = has_strong and has_weak
+        historical_drift = bool(historical_cells) and bool(active_cells) and any(
+            str(historical.get("status")) not in statuses
+            for historical in historical_cells.values()
+            if isinstance(historical, dict)
+        )
+        conflict_priority = 0
+        if conflict and "hold_slice" in decisions and has_strong:
+            conflict_priority = 3
+        elif conflict and "hold_slice" in decisions:
+            conflict_priority = 2
+        elif conflict:
+            conflict_priority = 1
+        if conflict:
+            conflicts += 1
+        if conflict:
+            decision = "hold_source_conflicted_slice"
+            next_action = "Reconcile source labels/rewards before promotion; compare live-feed case-bank outcomes against heartbeat and exported training rows."
+        elif has_weak:
+            decision = "repair_weak_slice"
+            next_action = _next_action({"scenario_key": scenario, "decision": "hold_slice"})
+        elif has_strong and statuses == {"strong"}:
+            decision = "candidate_consistent_growth"
+            next_action = "Keep collecting measured outcomes and require rollback monitoring before promotion."
+        elif has_strong:
+            decision = "candidate_needs_more_current_evidence"
+            next_action = "Current sources do not conflict, but at least one source is still thin; collect measured rows before promotion."
+        else:
+            decision = "collect_more_source_evidence"
+            next_action = "Collect enough measured rows across sources before promotion."
+        rows.append(
+            {
+                "scenario_key": scenario,
+                "source_count": len(cells),
+                "statuses": sorted(statuses),
+                "decisions": sorted(decisions),
+                "all_statuses_including_history": sorted(all_statuses),
+                "all_decisions_including_history": sorted(all_decisions),
+                "conflict": conflict,
+                "active_conflict": conflict,
+                "historical_drift": historical_drift,
+                "conflict_priority": conflict_priority,
+                "reconciled_decision": decision,
+                "next_action": next_action,
+                "active_source_names": sorted(active_source_names),
+                "historical_source_names": sorted(historical_source_names),
+                "sources": cells,
+            }
+        )
+    rows.sort(key=lambda row: (bool(row.get("conflict")), _safe_int(row.get("conflict_priority")), str(row.get("scenario_key"))), reverse=True)
+    return {
+        "mode": "source_consistent_learning_reconciliation",
+        "source_names": sorted(source_views.keys()),
+        "active_source_names": sorted(active_source_names),
+        "historical_source_names": sorted(historical_source_names),
+        "scenario_count": len(rows),
+        "conflict_count": conflicts,
+        "promotion_boundary": "A slice cannot be promoted when current active observed-outcome sources disagree. Historical operating snapshots are retained as drift evidence, not as the current promotion gate.",
+        "rows": rows,
+    }
+
+
 def _next_action(row: dict[str, Any]) -> str:
     key = str(row.get("scenario_key") or "")
     decision = str(row.get("decision") or "")
@@ -211,6 +395,8 @@ def _next_action(row: dict[str, Any]) -> str:
         return "Improve Labor/HR reasoning: use skill matrix, fatigue risk, break timing, and overtime constraints to produce narrow shift moves with clear owners."
     if key == "food_spike":
         return "Stabilize Commerce decisions: separate restock, promo pause, and labor help, then score backlog/ETA deltas instead of treating every food action as equal."
+    if key == "storm_response":
+        return "Repair storm-response reward consistency: compare local heartbeat labels against BigQuery outcomes before promoting or demoting this slice."
     if key == "unknown":
         return "Classify unknown rows before training: map them to a scenario or quarantine them as eval-only so they do not hide weak policy behavior."
     if "proactive" in key and missing:
@@ -276,6 +462,8 @@ def _build_record(report: dict[str, Any], case_rows: list[dict[str, Any]], opera
     scenarios = _scenario_rows(report)
     case_curve = _case_bank_curve(case_rows)
     backlog = _priority_backlog(scenarios)
+    reconciliation = _source_reconciliation(report, case_rows)
+    conflict_rows = [row for row in reconciliation.get("rows", []) if isinstance(row, dict) and row.get("conflict")]
     latest_recent = case_curve["recent"][1] if len(case_curve["recent"]) > 1 else (case_curve["recent"][0] if case_curve["recent"] else {})
     cumulative = case_curve["cumulative"][-1] if case_curve["cumulative"] else {}
     return {
@@ -285,6 +473,7 @@ def _build_record(report: dict[str, Any], case_rows: list[dict[str, Any]], opera
         "case_bank_path": str(DEFAULT_CASE_BANK),
         "summary": {
             "case_count": len(case_rows),
+            "actual_training_source": _actual_training_summary(report).get("source"),
             "current_average_operational_reward": cumulative.get("average_operational_reward"),
             "recent_average_operational_reward": latest_recent.get("average_operational_reward"),
             "promotion_eligible_count": cumulative.get("promotion_eligible_count"),
@@ -293,12 +482,15 @@ def _build_record(report: dict[str, Any], case_rows: list[dict[str, Any]], opera
             "held_slice_count": sum(1 for row in scenarios if row.get("decision") == "hold_slice"),
             "thin_slice_count": sum(1 for row in scenarios if row.get("decision") == "collect_more_evidence"),
             "promotable_slice_count": sum(1 for row in scenarios if row.get("decision") == "promote_slice"),
-            "top_priority_slice": backlog[0].get("scenario_key") if backlog else None,
-            "top_priority_action": backlog[0].get("next_action") if backlog else None,
+            "source_conflict_count": reconciliation.get("conflict_count"),
+            "source_consistent_promotion_ready": reconciliation.get("conflict_count") == 0 and sum(1 for row in scenarios if row.get("decision") == "hold_slice") == 0,
+            "top_priority_slice": conflict_rows[0].get("scenario_key") if conflict_rows else backlog[0].get("scenario_key") if backlog else None,
+            "top_priority_action": conflict_rows[0].get("next_action") if conflict_rows else backlog[0].get("next_action") if backlog else None,
         },
         "case_bank_curve": case_curve,
         "actual_training_curve": _actual_training_summary(report),
         "scenario_slices": scenarios,
+        "source_reconciliation": reconciliation,
         "priority_backlog": backlog,
         "latest_cycle": _latest_cycle_summary(report),
         "recorded_boundary": [
@@ -307,6 +499,45 @@ def _build_record(report: dict[str, Any], case_rows: list[dict[str, Any]], opera
             "Held slices are not unresolved; each has an owner-style next action and remains blocked from promotion until the curve recovers.",
         ],
     }
+
+
+def _compact_actual_training_for_report(actual_training: dict[str, Any]) -> dict[str, Any]:
+    model_ops = actual_training.get("model_ops", {}) if isinstance(actual_training.get("model_ops"), dict) else {}
+    return {
+        "status": actual_training.get("status"),
+        "mode": actual_training.get("mode"),
+        "detail": actual_training.get("detail", "full"),
+        "source": actual_training.get("source"),
+        "sample_count": actual_training.get("sample_count"),
+        "min_sample_count": actual_training.get("min_sample_count"),
+        "uses_generated_data": actual_training.get("uses_generated_data"),
+        "model_ops": {
+            "version": model_ops.get("version"),
+            "current_policy_id": model_ops.get("current_policy_id"),
+            "promotion_gate": model_ops.get("promotion_gate"),
+            "fitness_curve": model_ops.get("fitness_curve"),
+            "scenario_fitness": model_ops.get("scenario_fitness"),
+            "offline_training_path": model_ops.get("offline_training_path"),
+        },
+    }
+
+
+def _refresh_actual_training(report: dict[str, Any], min_training_rows: int, detail: str) -> dict[str, Any]:
+    from park_actual_training import actual_training_status
+
+    refreshed = dict(report)
+    original_actual = report.get("actual_training", {}) if isinstance(report.get("actual_training"), dict) else {}
+    refreshed_actual = _compact_actual_training_for_report(actual_training_status(min_rows=min_training_rows, run_gcp_training=False, detail=detail))
+    refreshed["actual_training"] = refreshed_actual
+    refreshed["actual_training_refreshed_at"] = _now_iso()
+    refreshed["source_reconciliation"] = {
+        "operating_report_actual_training": original_actual,
+        "refreshed_actual_training": refreshed_actual,
+        "refresh_detail": detail,
+        "refresh_min_training_rows": min_training_rows,
+        "policy": "Keep both snapshots so source disagreement is visible and promotion can be held until reconciled.",
+    }
+    return refreshed
 
 
 def _badge(value: Any) -> str:
@@ -365,12 +596,49 @@ def _render_backlog_table(rows: list[dict[str, Any]]) -> str:
     """
 
 
+def _source_cell(cell: dict[str, Any] | None) -> str:
+    if not isinstance(cell, dict):
+        return '<span class="badge muted">missing</span>'
+    reward = cell.get("recent_average_reward", cell.get("average_reward"))
+    detail = f"{cell.get('status')} / {cell.get('decision')}"
+    count = cell.get("case_count")
+    return (
+        f"{_badge(cell.get('status'))}"
+        f"<small>{html.escape(str(detail))}<br>rows {html.escape(str(count))}; reward {html.escape(str(reward))}; delta {html.escape(str(cell.get('curve_delta')))}</small>"
+    )
+
+
+def _render_reconciliation_table(reconciliation: dict[str, Any]) -> str:
+    rows = reconciliation.get("rows", []) if isinstance(reconciliation.get("rows"), list) else []
+    body = "".join(
+        f"""
+        <tr>
+          <td>{html.escape(str(row.get('scenario_key')))}</td>
+          <td>{_badge('conflict' if row.get('conflict') else 'aligned')}</td>
+          <td>{_source_cell((row.get('sources', {}) if isinstance(row.get('sources'), dict) else {}).get('case_bank_live_feed'))}</td>
+          <td>{_source_cell((row.get('sources', {}) if isinstance(row.get('sources'), dict) else {}).get('operating_report_actual_training'))}</td>
+          <td>{_source_cell((row.get('sources', {}) if isinstance(row.get('sources'), dict) else {}).get('refreshed_actual_training'))}</td>
+          <td>{html.escape(str(row.get('reconciled_decision')))}<small>{html.escape(str(row.get('next_action')))}</small></td>
+        </tr>
+        """
+        for row in rows
+    )
+    return f"""
+    <table>
+      <thead><tr><th>Slice</th><th>Status</th><th>Case Bank</th><th>Report Training</th><th>Refreshed Training</th><th>Reconciled Decision</th></tr></thead>
+      <tbody>{body}</tbody>
+    </table>
+    """
+
+
 def _render_html(record: dict[str, Any], path: Path) -> None:
     summary = record.get("summary", {}) if isinstance(record.get("summary"), dict) else {}
     curve = record.get("case_bank_curve", {}) if isinstance(record.get("case_bank_curve"), dict) else {}
     actual = record.get("actual_training_curve", {}) if isinstance(record.get("actual_training_curve"), dict) else {}
     latest = record.get("latest_cycle", {}) if isinstance(record.get("latest_cycle"), dict) else {}
     backlog = record.get("priority_backlog", []) if isinstance(record.get("priority_backlog"), list) else []
+    reconciliation = record.get("source_reconciliation", {}) if isinstance(record.get("source_reconciliation"), dict) else {}
+    label_quality = actual.get("label_quality", {}) if isinstance(actual.get("label_quality"), dict) else {}
     boundaries = record.get("recorded_boundary", []) if isinstance(record.get("recorded_boundary"), list) else []
     boundary_items = "".join(f"<li>{html.escape(str(item))}</li>" for item in boundaries)
     recent_rewards = ", ".join(str(value) for value in curve.get("latest_rewards", []))
@@ -445,11 +713,23 @@ def _render_html(record: dict[str, Any], path: Path) -> None:
     <section>
       <h2>Actual Training Curve</h2>
       <div class="grid">
-        {_render_metric_card("Training rows", actual.get("sample_count"), f"Status {actual.get('status')}")}
+        {_render_metric_card("Training rows", actual.get("sample_count"), f"Status {actual.get('status')}; source {actual.get('source')}")}
         {_render_metric_card("Latest avg", actual.get("latest_average_reward"), f"Latest reward {actual.get('latest_reward')}")}
         {_render_metric_card("Curve delta", actual.get("curve_delta"), "Global curve is not the promotion decision by itself.")}
         {_render_metric_card("Promotion gate", actual.get("promotion_gate_decision"), f"Gate status {actual.get('promotion_gate_status')}")}
       </div>
+      <div class="note" style="margin-top: 12px;"><strong>Label quality</strong><p>Unknown quarantined rows: {html.escape(str(label_quality.get('unknown_quarantined_count', 0)))}. {html.escape(str(label_quality.get('policy') or 'No label-quality policy reported.'))}</p></div>
+    </section>
+
+    <section>
+      <h2>Source Reconciliation</h2>
+      <div class="grid">
+        {_render_metric_card("Source conflicts", reconciliation.get("conflict_count"), str(reconciliation.get("promotion_boundary") or ""))}
+        {_render_metric_card("Sources compared", len(reconciliation.get("source_names", []) if isinstance(reconciliation.get("source_names"), list) else []), ", ".join(str(item) for item in reconciliation.get("source_names", []) if isinstance(reconciliation.get("source_names"), list)))}
+        {_render_metric_card("Scenarios", reconciliation.get("scenario_count"), "Promotion requires source-consistent slice evidence.")}
+        {_render_metric_card("Ready", summary.get("source_consistent_promotion_ready"), "False means keep learning but do not promote globally.")}
+      </div>
+      <div style="margin-top: 12px;">{_render_reconciliation_table(reconciliation)}</div>
     </section>
 
     <section>
@@ -491,6 +771,9 @@ def main() -> int:
     parser.add_argument("--operating-report", type=Path, default=None, help="Path to live-feed-operating-cycle.json. Defaults to newest operating-cycle report.")
     parser.add_argument("--case-bank", type=Path, default=DEFAULT_CASE_BANK, help="Path to live-feed case-bank index.jsonl.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_PROGRESS_DIR, help="Directory for improvement-curve artifacts.")
+    parser.add_argument("--refresh-actual-training", action="store_true", help="Recompute actual-training diagnostics before recording, without generating a new operating case.")
+    parser.add_argument("--min-training-rows", type=int, default=50, help="Minimum observed rows for refreshed actual-training diagnostics.")
+    parser.add_argument("--training-detail", choices=["readiness", "full"], default="full", help="Actual-training detail level when refreshing diagnostics.")
     args = parser.parse_args()
 
     operating_report = args.operating_report or _latest_operating_report()
@@ -499,6 +782,8 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     report = _read_json(operating_report)
+    if args.refresh_actual_training:
+        report = _refresh_actual_training(report, args.min_training_rows, args.training_detail)
     case_rows = _read_jsonl(case_bank)
     record = _build_record(report, case_rows, operating_report)
 

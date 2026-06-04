@@ -4,6 +4,7 @@ import os
 import time
 import hashlib
 import json
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -16,6 +17,15 @@ from mongo_memory import get_latest_memory_documents, get_operational_memory_das
 MIN_ACTUAL_TRAINING_ROWS = 3
 GENERATED_SOURCE_PATTERNS = ("seed", "synthetic", "demo", "validation")
 _LAST_BQML_TRAINING: dict[str, Any] = {}
+KNOWN_TRAINING_SCENARIOS = {
+    "ride_down",
+    "food_spike",
+    "staff_shortage",
+    "storm_response",
+    "proactive_eventops",
+    "proactive_watchtower",
+    "scan",
+}
 
 
 def actual_training_status(min_rows: int = MIN_ACTUAL_TRAINING_ROWS, run_gcp_training: bool | None = None, detail: str = "full") -> dict[str, Any]:
@@ -24,14 +34,15 @@ def actual_training_status(min_rows: int = MIN_ACTUAL_TRAINING_ROWS, run_gcp_tra
 
     dashboard = get_operational_memory_dashboard("actual outcome training reward policy gate follow through")
     memory_rows = _bounded_memory_training_rows()
+    case_bank_rows = _live_feed_case_bank_training_rows()
     bq = bigquery_status()
     bq_rows, bq_error = _bigquery_training_rows(bq)
     heartbeat_rows = _dedupe_training_rows([*_heartbeat_training_signal_rows(), *_delayed_outcome_attribution_training_rows()])
     reasoning_audits = _reasoning_training_audits()
     causal_memories = _causal_reasoning_memories()
-    observed_rows = _sort_training_rows_latest_first(_dedupe_training_rows([*heartbeat_rows, *bq_rows, *memory_rows]))
+    observed_rows = _sort_training_rows_latest_first(_dedupe_training_rows([*heartbeat_rows, *bq_rows, *memory_rows, *case_bank_rows]))
     rows = _augment_rows_with_reasoning_features(observed_rows, reasoning_audits, causal_memories)
-    source = _training_source(heartbeat_rows, bq_rows, memory_rows)
+    source = _training_source(heartbeat_rows, bq_rows, memory_rows, case_bank_rows)
     sample_count = len(rows)
     gcp_training_enabled = _env_bool("PARKPULSE_ENABLE_GCP_ML_TRAINING")
     requested_gcp_training = bool(run_gcp_training)
@@ -136,6 +147,7 @@ def actual_training_status(min_rows: int = MIN_ACTUAL_TRAINING_ROWS, run_gcp_tra
         "debug": {
             "readiness_issues": readiness_issues,
             "memory_rows_available": len(memory_rows),
+            "case_bank_rows_available": len(case_bank_rows),
             "bigquery_rows_available": len(bq_rows),
             "heartbeat_training_signal_rows_available": len(heartbeat_rows),
             "memory_status": dashboard.get("status", {}),
@@ -147,11 +159,12 @@ def _actual_training_readiness_status(min_rows: int = MIN_ACTUAL_TRAINING_ROWS, 
     bq = bigquery_status()
     heartbeat_rows = _dedupe_training_rows([*_heartbeat_training_signal_rows(), *_delayed_outcome_attribution_training_rows()])
     memory_rows = _bounded_memory_training_rows()
+    case_bank_rows = _live_feed_case_bank_training_rows()
     bq_rows: list[dict[str, Any]] = []
     bq_error: str | None = None
     if _env_bool("PARKPULSE_READINESS_LOAD_BQ_ROWS"):
         bq_rows, bq_error = _bigquery_training_rows(bq, limit=int(_float(os.getenv("PARKPULSE_READINESS_BQ_ROW_LIMIT"), 80)))
-    observed_rows = _sort_training_rows_latest_first(_dedupe_training_rows([*heartbeat_rows, *bq_rows, *memory_rows]))
+    observed_rows = _sort_training_rows_latest_first(_dedupe_training_rows([*heartbeat_rows, *bq_rows, *memory_rows, *case_bank_rows]))
     rows = _augment_rows_with_reasoning_features(observed_rows, [], [])
     sample_count = len(rows)
     gcp_training_enabled = _env_bool("PARKPULSE_ENABLE_GCP_ML_TRAINING")
@@ -190,7 +203,7 @@ def _actual_training_readiness_status(min_rows: int = MIN_ACTUAL_TRAINING_ROWS, 
     for label, gate in (("staffing", live_staffing_gate), ("food ops", live_food_ops_gate), ("operator signal", live_operator_signal_gate)):
         if gate.get("eligible") is False:
             readiness_issues.append(f"Live {label} training gate blocked: {gate.get('reason')}")
-    source = _training_source(heartbeat_rows, bq_rows, memory_rows)
+    source = _training_source(heartbeat_rows, bq_rows, memory_rows, case_bank_rows)
     model_version = _model_version(source, model, rows)
     promotion_gate = {
         "status": "hold",
@@ -262,6 +275,7 @@ def _actual_training_readiness_status(min_rows: int = MIN_ACTUAL_TRAINING_ROWS, 
         "debug": {
             "readiness_issues": _dedupe_text(readiness_issues),
             "memory_rows_available": len(memory_rows),
+            "case_bank_rows_available": len(case_bank_rows),
             "bigquery_rows_available": len(bq_rows),
             "bigquery_rows_error": bq_error,
             "heartbeat_training_signal_rows_available": len(heartbeat_rows),
@@ -301,7 +315,41 @@ def _dedupe_text(values: list[Any]) -> list[str]:
 
 def _scenario_key(row: dict[str, Any]) -> str:
     state_scenario = row.get("stateScenario", {}) if isinstance(row.get("stateScenario"), dict) else {}
-    return str(row.get("scenario_key") or state_scenario.get("key") or row.get("scenario") or "unknown")
+    explicit = str(row.get("scenario_key") or state_scenario.get("key") or row.get("scenario") or "").strip()
+    if explicit and explicit.lower() != "unknown":
+        return explicit
+    return _infer_training_scenario_key(row)
+
+
+def _infer_training_scenario_key(row: dict[str, Any]) -> str:
+    text_fields = [
+        row.get("policy_key"),
+        row.get("decision_id"),
+        row.get("row_id"),
+        row.get("source"),
+        row.get("mode"),
+        row.get("action_type"),
+        row.get("reasoning_context"),
+        row.get("causal_context"),
+    ]
+    action = row.get("action", {}) if isinstance(row.get("action"), dict) else {}
+    text_fields.extend([action.get("action"), action.get("target"), action.get("label")])
+    learning = row.get("learning", {}) if isinstance(row.get("learning"), dict) else {}
+    text_fields.extend([learning.get("policy"), learning.get("take_rate_signal")])
+    text = " ".join(str(item or "").lower().replace("-", "_") for item in text_fields)
+    scenario_terms = [
+        ("food_spike", ("food", "inventory", "pos", "promo", "restock", "kitchen", "mobile_order", "pickup")),
+        ("staff_shortage", ("staff", "shift", "fatigue", "overtime", "callout", "break", "coverage")),
+        ("storm_response", ("storm", "weather", "lightning", "heat", "shelter", "indoor", "covered")),
+        ("proactive_eventops", ("proactive_eventops", "eventops", "event_ops")),
+        ("proactive_watchtower", ("watchtower", "proactive_watchtower")),
+        ("scan", ("scan", "triage_only", "read_only")),
+        ("ride_down", ("ride", "coaster", "queue", "reroute", "route", "capacity", "downtime", "outage", "reopen")),
+    ]
+    for scenario, terms in scenario_terms:
+        if any(term in text for term in terms):
+            return scenario
+    return "unknown"
 
 
 def _policy_key(row: dict[str, Any]) -> str:
@@ -603,7 +651,7 @@ def _heartbeat_training_signal_rows() -> list[dict[str, Any]]:
                 "row_id": signal.get("id") or f"heartbeat_signal_{signal.get('source_action_id')}",
                 "decision_id": signal.get("source_action_id"),
                 "source": "heartbeat_delayed_outcome_signal",
-                "scenario_key": signal.get("scenario_key") or "unknown",
+                "scenario_key": _scenario_key(signal),
                 "policy_key": str(action.get("action") or action.get("target") or "heartbeat_policy").lower().replace(" ", "_")[:90],
                 "reward": reward,
                 "overall": fitness,
@@ -639,7 +687,7 @@ def _training_row_from_delayed_attribution(row: dict[str, Any]) -> dict[str, Any
         "row_id": row.get("id") or f"delayed_outcome_{row.get('source_action_id')}",
         "decision_id": row.get("source_action_id"),
         "source": "heartbeat_delayed_outcome_attribution",
-        "scenario_key": row.get("scenario_key") or "unknown",
+        "scenario_key": _scenario_key(row),
         "policy_key": str(action.get("action") or action.get("target") or "heartbeat_policy").lower().replace(" ", "_")[:90],
         "reward": reward,
         "overall": fitness,
@@ -657,6 +705,116 @@ def _delayed_outcome_attribution_training_rows() -> list[dict[str, Any]]:
         training_row = _training_row_from_delayed_attribution(row)
         if training_row:
             rows.append(training_row)
+    return rows
+
+
+def _live_feed_case_bank_path() -> Path:
+    return Path(
+        os.getenv(
+            "PARKPULSE_LIVE_FEED_CASE_BANK_PATH",
+            str(Path(__file__).resolve().parents[1] / "output" / "qa" / "live-feed-case-bank" / "index.jsonl"),
+        )
+    )
+
+
+def _case_bank_issue_scenario(row: dict[str, Any]) -> str:
+    issue = row.get("issue", {}) if isinstance(row.get("issue"), dict) else {}
+    kind = str(issue.get("kind") or "").lower()
+    target = str(issue.get("target_id") or issue.get("targetId") or "").lower()
+    text = f"{kind} {target}"
+    if any(term in text for term in ("food", "inventory", "mobile_order", "payment")):
+        return "food_spike"
+    if any(term in text for term in ("staff", "callout", "labor")):
+        return "staff_shortage"
+    if any(term in text for term in ("storm", "lightning", "heat", "weather")):
+        return "storm_response"
+    if any(term in text for term in ("ride", "coaster", "queue", "show_dump")):
+        return "ride_down"
+    if any(term in text for term in ("parade", "parking", "gate", "access_lane")):
+        return "proactive_eventops"
+    if any(term in text for term in ("sensor", "energy", "water_leak", "radio_dead_zone", "security", "restroom")):
+        return "scan"
+    return "unknown"
+
+
+def _case_bank_operational_reward(row: dict[str, Any]) -> float:
+    measurement = row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}
+    layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
+    reward = layers.get("operational_reward")
+    if reward in {None, ""}:
+        return 0.0
+    return max(0.0, min(1.0, _float(reward)))
+
+
+def _case_bank_policy_key(row: dict[str, Any]) -> str:
+    actions = row.get("actions", {}) if isinstance(row.get("actions"), dict) else {}
+    executed = actions.get("executed_count")
+    issue = row.get("issue", {}) if isinstance(row.get("issue"), dict) else {}
+    kind = str(issue.get("kind") or "live_feed_case").lower()
+    if int(_float(executed)) > 0:
+        return f"live_feed_controlled_executor_{kind}"[:90]
+    return f"live_feed_trace_only_{kind}"[:90]
+
+
+def _case_bank_executed_tools(row: dict[str, Any]) -> list[str]:
+    measurement = row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}
+    projection = measurement.get("controlled_effect_projection", {}) if isinstance(measurement.get("controlled_effect_projection"), dict) else {}
+    tools = projection.get("executed_tools", [])
+    return [str(tool) for tool in tools if tool][:12] if isinstance(tools, list) else []
+
+
+def _live_feed_case_bank_training_rows(limit: int | None = None) -> list[dict[str, Any]]:
+    path = _live_feed_case_bank_path()
+    if not path.exists():
+        return []
+    max_rows = int(_float(limit if limit is not None else os.getenv("PARKPULSE_CASE_BANK_TRAINING_ROW_LIMIT"), 500))
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines()[-max_rows:]:
+        if not line.strip():
+            continue
+        try:
+            case = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(case, dict):
+            continue
+        reward = _case_bank_operational_reward(case)
+        if reward <= 0:
+            continue
+        measurement = case.get("measurement", {}) if isinstance(case.get("measurement"), dict) else {}
+        reward_100 = round(reward * 100, 2)
+        promotion_eligible = measurement.get("promotion_eligible") is True
+        eligible_for_reward = measurement.get("eligible_for_reward") is True
+        attribution_confidence = max(0.0, min(1.0, _float(measurement.get("attribution_confidence"), 0.0)))
+        rows.append(
+            {
+                "row_id": f"live_feed_case_bank:{case.get('outcome_id') or case.get('case_id')}",
+                "decision_id": case.get("decision_id") or case.get("decisionId"),
+                "source": "live_feed_case_bank_reward_vectors",
+                "scenario_key": _case_bank_issue_scenario(case),
+                "policy_key": _case_bank_policy_key(case),
+                "reward": reward_100,
+                "overall": reward_100,
+                "response_score": reward_100,
+                "take_rate": 1.0 if promotion_eligible else max(0.5, round(0.5 + reward / 2, 3)),
+                "follow_through_rate": attribution_confidence or (1.0 if eligible_for_reward else 0.5),
+                "created_at": case.get("created_at"),
+                "normalized_from": "operational_reward_0_1_to_training_0_100",
+                "original_operational_reward": reward,
+                "case_bank_outcome_id": case.get("outcome_id"),
+                "promotion_eligible": promotion_eligible,
+                "eligible_for_reward": eligible_for_reward,
+                "reward_label": measurement.get("reward_label"),
+                "controlled_effect_status": (
+                    measurement.get("controlled_effect_projection", {}).get("status")
+                    if isinstance(measurement.get("controlled_effect_projection"), dict)
+                    else None
+                ),
+                "executed_tools": _case_bank_executed_tools(case),
+                "llm_used_for_reward_or_label": False,
+                "labels_or_reward_changed": False,
+            }
+        )
     return rows
 
 
@@ -701,7 +859,12 @@ def _sort_training_rows_latest_first(rows: list[dict[str, Any]]) -> list[dict[st
     )
 
 
-def _training_source(heartbeat_rows: list[dict[str, Any]], bq_rows: list[dict[str, Any]], memory_rows: list[dict[str, Any]]) -> str:
+def _training_source(
+    heartbeat_rows: list[dict[str, Any]],
+    bq_rows: list[dict[str, Any]],
+    memory_rows: list[dict[str, Any]],
+    case_bank_rows: list[dict[str, Any]] | None = None,
+) -> str:
     sources = []
     if bq_rows:
         sources.append("bigquery_outcome_events")
@@ -709,6 +872,8 @@ def _training_source(heartbeat_rows: list[dict[str, Any]], bq_rows: list[dict[st
         sources.append("mongodb_outcome_events")
     if heartbeat_rows:
         sources.append("heartbeat_delayed_outcome_signals")
+    if case_bank_rows:
+        sources.append("live_feed_case_bank_reward_vectors")
     return "+".join(sources) if sources else "none"
 
 
@@ -930,8 +1095,13 @@ def _scenario_curve(rows: list[dict[str, Any]], bucket_size: int = 5) -> dict[st
 def _scenario_balanced_fitness(rows: list[dict[str, Any]]) -> dict[str, Any]:
     minimum_scenario_rows = int(_float(os.getenv("PARKPULSE_SCENARIO_PROMOTION_MIN_ROWS"), 12))
     by_scenario: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    quarantined_unknown_rows: list[dict[str, Any]] = []
     for row in rows:
-        by_scenario[str(row.get("scenario_key") or "unknown")].append(row)
+        scenario = _infer_training_scenario_key(row) if str(row.get("scenario_key") or "").strip().lower() == "unknown" else str(row.get("scenario_key") or "unknown")
+        if scenario == "unknown":
+            quarantined_unknown_rows.append(row)
+            continue
+        by_scenario[scenario].append({**row, "scenario_key": scenario})
     scenarios = []
     promotable_count = 0
     hold_count = 0
@@ -986,7 +1156,13 @@ def _scenario_balanced_fitness(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "promotable_slices": [item for item in scenarios if item.get("decision") == "promote_slice"],
         "held_slices": [item for item in scenarios if item.get("decision") == "hold_slice"],
         "thin_slices": [item for item in scenarios if item.get("decision") == "collect_more_evidence"],
-        "boundary": "Scenario gates use observed outcome rows only. They may promote bounded policy slices but do not let LLM text promote a model.",
+        "label_quality": {
+            "unknown_quarantined_count": len(quarantined_unknown_rows),
+            "unknown_quarantined_row_ids": [row.get("row_id") for row in quarantined_unknown_rows[:12]],
+            "policy": "Rows with unresolved scenario_key are excluded from scenario-slice promotion math until label repair maps them to a known slice.",
+            "known_scenarios": sorted(KNOWN_TRAINING_SCENARIOS),
+        },
+        "boundary": "Scenario gates use observed outcome rows only. They may promote bounded policy slices but do not let LLM text promote a model; unresolved scenario labels are quarantine-only.",
     }
 
 
@@ -1042,6 +1218,10 @@ def _model_promotion_gate(
     promotable_slices = scenario_fitness.get("promotable_slices", []) if isinstance(scenario_fitness.get("promotable_slices"), list) else []
     held_slices = scenario_fitness.get("held_slices", []) if isinstance(scenario_fitness.get("held_slices"), list) else []
     thin_slices = scenario_fitness.get("thin_slices", []) if isinstance(scenario_fitness.get("thin_slices"), list) else []
+    label_quality = scenario_fitness.get("label_quality", {}) if isinstance(scenario_fitness.get("label_quality"), dict) else {}
+    unknown_quarantined_count = int(_float(label_quality.get("unknown_quarantined_count")))
+    if unknown_quarantined_count:
+        warnings.append(f"Quarantined {unknown_quarantined_count} unresolved scenario-label rows from slice promotion math.")
     if held_slices:
         warnings.append(
             "Held scenario slices: "
@@ -1525,7 +1705,7 @@ def _bigquery_training_rows(status: dict[str, Any], limit: int = 200) -> tuple[l
                     "row_id": item.get("row_id"),
                     "decision_id": item.get("decision_id"),
                     "source": "bigquery_outcome_events",
-                    "scenario_key": item.get("scenario_key") or "unknown",
+                    "scenario_key": _scenario_key(item),
                     "policy_key": str(item.get("policy_key") or "observed_policy").lower().replace(" ", "_")[:90],
                     "reward": reward,
                     "overall": _float(item.get("overall")),

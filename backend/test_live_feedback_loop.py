@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import live_feedback_loop
 from live_feedback_loop import ingest_live_feed_event, live_feed_health, live_feed_storage_status, normalize_live_feed_event, record_review_decision, review_training_ledger
@@ -380,6 +381,15 @@ def test_live_feed_native_department_proposals_cover_enterprise_departments():
     assert result["negotiation_turns"]
     assert result["executive_tradeoff"]["decision"] == "approved_with_exclusions"
     assert len(result["executive_tradeoff"]["tradeoff_matrix"]) == result["proposal_count"]
+    ops_proposal = next(proposal for proposal in result["proposals"] if proposal["department"] == "operations")
+    ride_down_board = ops_proposal["department_reasoning"]["ride_down_recovery_board"]
+    assert ride_down_board["mode"] == "ride_down_recovery_decision_board"
+    assert ride_down_board["selected_branch_id"] == "split_route_hold_reopen"
+    assert ride_down_board["branch_count"] >= 5
+    assert "No ride reopening from an operations recommendation." in ride_down_board["explicit_rejections"]
+    ops_tradeoff = next(row for row in result["tradeoff_matrix"] if row["department"] == "operations")
+    assert ops_tradeoff["ride_down_selected_branch"] == "split_route_hold_reopen"
+    assert ops_tradeoff["ride_down_branch_count"] >= 5
     assert all(proposal["generated_from"] == "live_feed_case" for proposal in result["proposals"])
     assert all(not proposal["proposal_envelope"]["policy_check"].startswith("pending") for proposal in result["proposals"])
     for proposal in result["proposals"]:
@@ -464,6 +474,168 @@ def test_controlled_live_feed_tool_executor_executes_only_approved_low_risk():
     assert all(task["next_owner"] and task["exit_condition"] and task["fallback"] for task in follow["tasks"])
     assert all(task["review_inputs"]["live_feed_event_ids"] for task in follow["tasks"])
     assert all(row["live_feed_event_ids"] for row in result["receipts"])
+
+
+def test_actual_training_quarantines_unresolved_unknown_scenario_rows():
+    from park_actual_training import _scenario_balanced_fitness
+
+    rows = [
+        {
+            "row_id": "unknown-1",
+            "scenario_key": "unknown",
+            "policy_key": "observed_policy",
+            "reward": 30.96,
+            "created_at": "2026-06-04T17:00:00Z",
+        },
+        {
+            "row_id": "ride-1",
+            "scenario_key": "unknown",
+            "policy_key": "ride route capacity recovery",
+            "reward": 58.0,
+            "created_at": "2026-06-04T17:01:00Z",
+        },
+        {
+            "row_id": "food-1",
+            "scenario_key": "food_spike",
+            "policy_key": "pause promo",
+            "reward": 62.0,
+            "created_at": "2026-06-04T17:02:00Z",
+        },
+    ]
+
+    result = _scenario_balanced_fitness(rows)
+    scenarios = {row["scenario_key"] for row in result["scenarios"]}
+
+    assert "unknown" not in scenarios
+    assert {"ride_down", "food_spike"} <= scenarios
+    assert result["label_quality"]["unknown_quarantined_count"] == 1
+    assert result["label_quality"]["unknown_quarantined_row_ids"] == ["unknown-1"]
+
+
+def test_actual_training_exports_live_feed_case_bank_reward_vectors(monkeypatch, tmp_path):
+    from park_actual_training import _live_feed_case_bank_training_rows
+
+    case_bank = tmp_path / "case-bank.jsonl"
+    case_bank.write_text(
+        json.dumps(
+            {
+                "case_id": "live_feed_case:outcome_test_storm",
+                "outcome_id": "outcome_test_storm",
+                "decision_id": "decision_test_storm",
+                "created_at": "2026-06-04T17:05:20Z",
+                "issue": {"kind": "lightning_delay", "target_id": "outdoor_park"},
+                "actions": {"executed_count": 2},
+                "measurement": {
+                    "attribution_confidence": 0.95,
+                    "eligible_for_reward": True,
+                    "promotion_eligible": True,
+                    "reward_label": "operational_lift_with_policy_safe_execution",
+                    "reward_layers": {"operational_reward": 0.577},
+                    "controlled_effect_projection": {
+                        "status": "applied",
+                        "executed_tools": ["pause_launch_promo", "shift_adjustment_recommendation"],
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_CASE_BANK_PATH", str(case_bank))
+
+    rows = _live_feed_case_bank_training_rows()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["row_id"] == "live_feed_case_bank:outcome_test_storm"
+    assert row["source"] == "live_feed_case_bank_reward_vectors"
+    assert row["scenario_key"] == "storm_response"
+    assert row["reward"] == 57.7
+    assert row["normalized_from"] == "operational_reward_0_1_to_training_0_100"
+    assert row["take_rate"] == 1.0
+    assert row["follow_through_rate"] == 0.95
+    assert row["promotion_eligible"] is True
+    assert row["executed_tools"] == ["pause_launch_promo", "shift_adjustment_recommendation"]
+
+
+def test_progress_reconciliation_holds_source_conflicted_slice():
+    import importlib.util
+    from pathlib import Path
+
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "record_live_feed_improvement_curve.py"
+    spec = importlib.util.spec_from_file_location("record_live_feed_improvement_curve", script_path)
+    recorder = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(recorder)
+
+    case_rows = [
+        {
+            "issue": {"kind": "storm_risk", "target_id": "outdoor_park"},
+            "measurement": {"promotion_eligible": True, "reward_layers": {"operational_reward": 0.58}},
+        }
+        for _ in range(8)
+    ]
+    report = {
+        "actual_training": {
+            "source": "heartbeat_delayed_outcome_signals",
+            "model_ops": {
+                "scenario_fitness": {
+                    "scenarios": [
+                        {
+                            "scenario_key": "storm_response",
+                            "decision": "hold_slice",
+                            "sample_count": 20,
+                            "latest_average_reward": 36.0,
+                            "curve_delta": 0.1,
+                        }
+                    ]
+                }
+            },
+        },
+        "source_reconciliation": {
+            "operating_report_actual_training": {
+                "source": "bigquery_outcome_events",
+                "model_ops": {
+                    "scenario_fitness": {
+                        "scenarios": [
+                            {
+                                "scenario_key": "storm_response",
+                                "decision": "promote_slice",
+                                "sample_count": 85,
+                                "latest_average_reward": 86.0,
+                                "curve_delta": 28.0,
+                            }
+                        ]
+                    }
+                },
+            },
+            "refreshed_actual_training": {
+                "source": "heartbeat_delayed_outcome_signals",
+                "model_ops": {
+                    "scenario_fitness": {
+                        "scenarios": [
+                            {
+                                "scenario_key": "storm_response",
+                                "decision": "hold_slice",
+                                "sample_count": 20,
+                                "latest_average_reward": 36.0,
+                                "curve_delta": 0.1,
+                            }
+                        ]
+                    }
+                },
+            },
+        },
+    }
+
+    reconciliation = recorder._source_reconciliation(report, case_rows)
+    row = reconciliation["rows"][0]
+
+    assert reconciliation["conflict_count"] == 1
+    assert row["scenario_key"] == "storm_response"
+    assert row["conflict"] is True
+    assert row["reconciled_decision"] == "hold_source_conflicted_slice"
+    assert row["conflict_priority"] == 3
 
 
 def test_controlled_live_feed_receiver_delivery_proof_acknowledges_only_executed(monkeypatch):
