@@ -7701,12 +7701,25 @@ def _fast_agent_role_eval_report() -> dict[str, Any]:
 
 async def _real_agent_role_eval_report() -> dict[str, Any]:
     customer_route = route_agent_role("where should my family go next", "customer")
-    customer_payload = await _customer_support_agent_payload(
-        {
-            "question": "Where should my family go next with low waits and a calm route?",
-            "mode": "recommendation",
-            "station": {"id": "eval_customer_station", "name": "Customer support station"},
-        }
+    scan_task = asyncio.create_task(_agent_role_run_payload("scan vague guest complaints and worker taps for early crowd risk", "scan"))
+    react_task = asyncio.create_task(_agent_role_run_payload("food court is down and mobile orders are backing up near the west plaza", "auto"))
+    proact_task = asyncio.create_task(_agent_role_run_payload("Staff note: kids are crying near the barrier and the crowd stopped moving by the maze exit", "auto"))
+    qa_task = asyncio.create_task(_agent_role_run_payload("pre-deploy failure mode matrix", "qa"))
+    customer_task = asyncio.create_task(
+        _customer_support_agent_payload(
+            {
+                "question": "Where should my family go next with low waits and a calm route?",
+                "mode": "recommendation",
+                "station": {"id": "eval_customer_station", "name": "Customer support station"},
+            }
+        )
+    )
+    scan_payload, react_payload, proact_payload, qa_payload, customer_payload = await asyncio.gather(
+        scan_task,
+        react_task,
+        proact_task,
+        qa_task,
+        customer_task,
     )
     customer_trace = _role_tool_trace(customer_route, selected_role="customer", scenario_key="customer_public")
     customer_payload.update(
@@ -7743,11 +7756,11 @@ async def _real_agent_role_eval_report() -> dict[str, Any]:
         scenario_key="customer_public",
     )
     payloads = {
-        "scan": await _agent_role_run_payload("scan vague guest complaints and worker taps for early crowd risk", "scan"),
-        "react": await _agent_role_run_payload("food court is down and mobile orders are backing up near the west plaza", "auto"),
-        "proact": await _agent_role_run_payload("Staff note: kids are crying near the barrier and the crowd stopped moving by the maze exit", "auto"),
+        "scan": scan_payload,
+        "react": react_payload,
+        "proact": proact_payload,
         "customer": customer_payload,
-        "qa": await _agent_role_run_payload("pre-deploy failure mode matrix", "qa"),
+        "qa": qa_payload,
     }
     report = build_real_deliberate_role_eval_report(payloads)
     report["negative_fixtures"] = build_deliberate_role_negative_fixtures()
