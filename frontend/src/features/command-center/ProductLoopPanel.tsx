@@ -145,6 +145,73 @@ function profileConstraintSummary(proposal: RoleAgentProposal) {
   return (proposal.park_profile_context?.profile_constraints ?? []).slice(0, 2).map(constraintText).join(" | ");
 }
 
+type DepartmentConversationTurn = {
+  id: string;
+  speaker: string;
+  department: string;
+  status: string;
+  opening: string;
+  recommendation: string;
+  evidence: string[];
+  handoff?: string;
+};
+
+function departmentConversationTurns(proposals: RoleAgentProposal[], proposalArtifact: RunTelemetry["role_agent_proposals"]): DepartmentConversationTurn[] {
+  const proposalTurns = proposals.slice(0, 8).map((proposal, index) => {
+    const envelope = proposal.proposal_envelope;
+    const reasoning = proposal.department_reasoning;
+    const department = proposal.department_label ?? humanize(proposal.department ?? envelope?.department ?? "department");
+    const speaker = proposal.department_agent ?? envelope?.department_agent ?? proposal.role ?? proposal.agent_id ?? "Department agent";
+    const diagnosis = reasoning?.diagnosis ?? proposal.recommendation ?? envelope?.intent ?? "I have a department proposal ready for review.";
+    const forecast = reasoning?.forecast ? ` Forecast: ${reasoning.forecast}` : "";
+    const selectedRationale = reasoning?.selected_rationale ?? envelope?.expected_outcome ?? proposal.action_disposition?.reason;
+    return {
+      id: `${proposal.agent_id ?? proposal.role ?? speaker}-${proposal.requested_tool ?? envelope?.requested_tool ?? index}`,
+      speaker,
+      department,
+      status: proposalStatus(proposal),
+      opening: `${diagnosis}${forecast}`,
+      recommendation: selectedRationale ?? proposal.recommendation ?? envelope?.intent ?? "Hold until compliance, executive, or executor disposition is clear.",
+      evidence: [...(proposal.evidence ?? []), ...(envelope?.evidence ?? []), ...(proposal.policy_refs ?? [])].slice(0, 4),
+      handoff: proposal.handoff_to ?? envelope?.executor_agent ?? proposal.action_disposition?.next_owner,
+    };
+  });
+
+  const executive = proposalArtifact?.executive_tradeoff;
+  if (executive?.decision || executive?.rationale) {
+    proposalTurns.push({
+      id: "executive-tradeoff",
+      speaker: "Executive Agent",
+      department: "Executive",
+      status: executive.decision ?? "review",
+      opening: executive.rationale ?? "I am resolving cross-department tradeoffs.",
+      recommendation: [
+        executive.approved_departments?.length ? `Approve ${executive.approved_departments.map(humanize).join(", ")}.` : "",
+        executive.held_departments?.length ? `Hold ${executive.held_departments.map(humanize).join(", ")}.` : "",
+      ]
+        .filter(Boolean)
+        .join(" ") || "Executive tradeoff recorded.",
+      evidence: (executive.tradeoff_matrix ?? []).slice(0, 3).map((row) => `${humanize(row.department)}: ${humanize(row.verdict ?? row.decision)}`),
+      handoff: "tool_executor_agent",
+    });
+  }
+
+  if (proposalArtifact?.mediator_summary) {
+    proposalTurns.push({
+      id: "mediator-summary",
+      speaker: "Decision Bridge Agent",
+      department: "Mediation",
+      status: "resolved",
+      opening: proposalArtifact.mediator_summary,
+      recommendation: "Route approved work to the executor and keep held work in review with owner and exit condition.",
+      evidence: (proposalArtifact.conflicts ?? []).slice(0, 3).map((conflict) => conflict.summary ?? conflict.resolution ?? humanize(conflict.kind)),
+      handoff: "operator_review",
+    });
+  }
+
+  return proposalTurns;
+}
+
 function stageEvidence(stageId: string, props: ProductLoopPanelProps) {
   if (stageId === "signals") return signalSummary(props.parkState);
   if (stageId === "feature_pipeline") return featureSummary(props.runTelemetry);
@@ -236,6 +303,7 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
   const proposalArtifact = props.runTelemetry?.role_agent_proposals;
   const proposalSummary = proposalArtifact?.proposal_envelope_summary;
   const topProposals = proposalArtifact?.proposals?.slice(0, 4) ?? [];
+  const departmentTurns = departmentConversationTurns(proposalArtifact?.proposals ?? [], proposalArtifact);
   const smokeSummary = props.liveAgentsSmoke?.summary;
   const proactRun = props.liveAgentsSmoke?.role_runs?.find((row) => row.mode === "proact");
   const liveFeedCase = props.runTelemetry?.live_feed_case;
@@ -468,6 +536,67 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
           ) : (
             <div className="rounded border border-slate-800 bg-slate-950 p-3 text-xs leading-relaxed text-slate-400 xl:col-span-4">
               Department proposal envelopes will appear after the operating loop emits role-agent proposals.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-lg border border-cyan-400/25 bg-slate-900 p-4">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          <div>
+            <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Department agent conversation</div>
+            <h3 className="mt-1 text-lg font-black text-slate-100">Specialists speak in proposals, challenges, and handoffs</h3>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              ["Turns", departmentTurns.length || "--"],
+              ["Departments", proposalArtifact?.proposal_count ?? proposalSummary?.total],
+              ["Mediation", proposalArtifact?.conflicts?.length ?? "--"],
+              ["Executor", proposalSummary?.ready_for_executor],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded border border-slate-800 bg-slate-950 px-3 py-2 text-center">
+                <div className="text-[10px] font-black uppercase text-slate-500">{label}</div>
+                <div className="mt-1 text-sm font-black text-cyan-100">{compactValue(value)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="mt-4 grid gap-3 xl:grid-cols-2">
+          {departmentTurns.length ? (
+            departmentTurns.map((turn) => (
+              <div key={turn.id} className={`rounded border p-3 ${proposalStatusClass(turn.status)}`}>
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <div className="text-[10px] font-black uppercase opacity-70">{turn.department}</div>
+                    <div className="mt-1 text-sm font-black">{turn.speaker}</div>
+                  </div>
+                  <div className="rounded bg-slate-950/45 px-2 py-1 text-[10px] font-black uppercase">{humanize(turn.status)}</div>
+                </div>
+                <div className="mt-3 rounded border border-slate-950/35 bg-slate-950/35 px-3 py-2">
+                  <div className="text-[10px] font-black uppercase opacity-65">Says</div>
+                  <p className="mt-1 line-clamp-3 text-xs leading-relaxed opacity-90">{turn.opening}</p>
+                </div>
+                <div className="mt-2 rounded border border-slate-950/35 bg-slate-950/25 px-3 py-2">
+                  <div className="text-[10px] font-black uppercase opacity-65">Asks</div>
+                  <p className="mt-1 line-clamp-3 text-xs leading-relaxed opacity-90">{turn.recommendation}</p>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {turn.handoff && <span className="rounded bg-slate-950/40 px-2 py-1 text-[10px] font-black uppercase">To {humanize(turn.handoff)}</span>}
+                  {turn.evidence.length ? (
+                    turn.evidence.map((item) => (
+                      <span key={item} className="max-w-full truncate rounded bg-slate-950/40 px-2 py-1 text-[10px] font-black uppercase">
+                        {item}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="rounded bg-slate-950/40 px-2 py-1 text-[10px] font-black uppercase">Evidence pending</span>
+                  )}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="rounded border border-slate-800 bg-slate-950 p-3 text-xs leading-relaxed text-slate-400 xl:col-span-2">
+              Run the department negotiation or live-feed agent case to populate department conversation turns.
             </div>
           )}
         </div>

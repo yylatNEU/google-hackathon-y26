@@ -970,6 +970,20 @@ def test_live_feed_ml_policy_evidence_shapes_reasoning_without_execution_rights(
     assert enriched["negotiation_turns"][0]["agent"] == "actual_training_policy_gate"
 
 
+def test_live_feed_ml_policy_evidence_prefers_explicit_scenario_hint():
+    import parkpulse_api
+
+    live_case = {
+        "scenario_key": "staff_shortage",
+        "lead_source": "food_ops",
+        "lead_signal_type": "mobile_order_backlog",
+        "operator_message": "food_ops mobile order backlog is noisy but injected issue is staff_callout",
+        "evidence": [{"source": "food_ops", "signal_type": "mobile_order_backlog", "summary": "food backlog 20"}],
+    }
+
+    assert parkpulse_api._infer_live_feed_training_scenario(live_case) == "staff_shortage"
+
+
 def test_live_feed_controlled_outcome_memory_records_existing_memory_shape(monkeypatch):
     import parkpulse_api
 

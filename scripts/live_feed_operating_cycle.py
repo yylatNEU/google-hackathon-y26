@@ -46,6 +46,23 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _scenario_key_from_issue_kind(kind: Any) -> str | None:
+    text = str(kind or "").lower()
+    if any(term in text for term in ("food", "inventory", "mobile_order", "payment")):
+        return "food_spike"
+    if any(term in text for term in ("staff", "callout", "labor")):
+        return "staff_shortage"
+    if any(term in text for term in ("storm", "lightning", "heat", "weather")):
+        return "storm_response"
+    if any(term in text for term in ("ride", "coaster", "queue", "show_dump")):
+        return "ride_down"
+    if any(term in text for term in ("parade", "parking", "gate", "access_lane")):
+        return "proactive_eventops"
+    if any(term in text for term in ("sensor", "energy", "water_leak", "radio_dead_zone", "security", "restroom")):
+        return "scan"
+    return None
+
+
 DIVERSITY_EVENT_CATALOG = [
     {"kind": "ride_failure", "target_id": "dragonCoaster", "intensity": 84, "domain": "ride_ops"},
     {"kind": "demand_spike", "target_id": "mainStreet", "intensity": 82, "domain": "guest_flow"},
@@ -385,6 +402,8 @@ async def _run_cycle(
         forced_target_id=forced_target_id,
         forced_intensity=forced_intensity,
     )
+    issue_event = injected_issue.get("event", {}) if isinstance(injected_issue.get("event"), dict) else {}
+    scenario_key_hint = _scenario_key_from_issue_kind(issue_event.get("kind"))
     await parkpulse_api.park_simulation.step()
     load_results = await _load_all_live_feeds(parkpulse_api)
     payload = await asyncio.wait_for(
@@ -396,6 +415,7 @@ async def _run_cycle(
                 measure_post_action=True,
                 min_ready_feeds=4,
                 require_persisted_events=True,
+                scenario_key_hint=scenario_key_hint,
             )
         ),
         timeout=agent_timeout_seconds,

@@ -4979,6 +4979,7 @@ def record_controlled_training_eval(report: dict[str, Any]) -> dict[str, Any]:
             "collection": "controlled_training_evals",
             "reason": str(error)[:160],
         },
+        retry_operation_on_fallback=False,
     )
 
 

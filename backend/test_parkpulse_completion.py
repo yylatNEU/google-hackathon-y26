@@ -1773,6 +1773,33 @@ def test_mongo_memory_remaining_branch_paths(monkeypatch):
     assert result["fallback"] == "still down"
 
 
+def test_controlled_eval_durable_write_does_not_claim_fallback_storage(monkeypatch):
+    class FailingControlledEvalMemory:
+        mode = "mongodb"
+        errors = []
+        connected = True
+        db = object()
+        client = object()
+
+        def seed_defaults(self):
+            self.seeded = True
+
+        def record_controlled_training_eval(self, report):
+            raise RuntimeError("atlas timeout")
+
+    failing = FailingControlledEvalMemory()
+    monkeypatch.setattr(mongo_memory, "_memory", failing)
+    monkeypatch.setattr(mongo_memory, "_memory_initialized", True)
+
+    result = mongo_memory.record_controlled_training_eval({"id": "controlled-eval-timeout"})
+
+    assert result["status"] == "skipped"
+    assert result["mode"] == "mongo_error"
+    assert result["collection"] == "controlled_training_evals"
+    assert "atlas timeout" in result["reason"]
+    assert failing.mode == "demo_fallback_degraded"
+
+
 def test_memory_ops_agent_reports_depth_and_embedding_coverage(monkeypatch):
     monkeypatch.setenv("MONGODB_URI", "mongodb://example")
     monkeypatch.setattr(mongo_memory, "MongoClient", FakeMongoClient)

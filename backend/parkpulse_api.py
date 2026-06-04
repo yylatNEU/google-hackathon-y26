@@ -565,6 +565,7 @@ class LiveFeedAgentRunRequest(BaseModel):
     measure_post_action: bool = Field(default=True)
     min_ready_feeds: int = Field(default=4, ge=1, le=6)
     require_persisted_events: bool = Field(default=True)
+    scenario_key_hint: str | None = Field(default=None)
 
 
 class EvalScenarioSweepRequest(BaseModel):
@@ -10133,6 +10134,10 @@ def _live_feed_memory_prior_for_department(memory_priors: dict[str, Any], depart
 
 
 def _infer_live_feed_training_scenario(live_case: dict[str, Any]) -> str:
+    explicit = str((live_case or {}).get("scenario_key") or "").strip()
+    known = {"ride_down", "food_spike", "staff_shortage", "storm_response", "proactive_eventops", "proactive_watchtower", "scan"}
+    if explicit in known:
+        return explicit
     evidence = live_case.get("evidence", []) if isinstance(live_case, dict) and isinstance(live_case.get("evidence"), list) else []
     text_parts = [
         live_case.get("scenario_key") if isinstance(live_case, dict) else "",
@@ -10805,6 +10810,9 @@ async def park_live_feed_agent_run(request: LiveFeedAgentRunRequest):
             refresh = await _refresh_due_live_feeds_payload({"stale_only": True, "refresh_margin_seconds": 20})
     health = await _live_feed_health_payload(limit=500)
     live_case = _live_feed_case_from_health(health)
+    if request.scenario_key_hint:
+        live_case["scenario_key"] = request.scenario_key_hint
+        live_case["scenario_key_source"] = "request_hint"
     memory_priors = _live_feed_memory_priors_from_dashboard(live_case)
     ml_policy_evidence = _live_feed_ml_policy_evidence(live_case)
     live_case["memory_priors"] = memory_priors
