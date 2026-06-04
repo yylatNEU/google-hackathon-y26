@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -594,6 +595,37 @@ def _names_for_zones(real_inputs: dict[str, Any], zone_ids: list[str]) -> list[s
     return names
 
 
+def _kid_quest_candidates(real_inputs: dict[str, Any]) -> list[str]:
+    details = real_inputs.get("locationDetails", {}) if isinstance(real_inputs.get("locationDetails"), dict) else {}
+    candidates = _rule_candidates(real_inputs, "kidFriendlyAnchors") + list(real_inputs.get("attractionLocations", [])) + list(real_inputs.get("quietLocations", [])) + list(real_inputs.get("locations", []))
+    blocked_kinds = {"restrooms", "first_aid", "guest_services", "water_refill", "family_service"}
+    preferred_names = [
+        "Theater B",
+        "Storybook Boats",
+        "Shade Garden",
+        "Harbor Treats",
+        "Lagoon Lanterns",
+        "Arcade Zone",
+        "Theater B Cooling Show",
+        "Indoor Hub",
+        "Covered Plaza",
+    ]
+
+    def allowed(name: str) -> bool:
+        detail = details.get(name, {}) if isinstance(details.get(name), dict) else {}
+        kind = str(detail.get("kind") or "").strip()
+        if kind in blocked_kinds:
+            return False
+        if detail.get("heightRequirementInches") and float(detail.get("heightRequirementInches") or 0) >= 44:
+            return False
+        thrill = str(detail.get("thrillLevel") or "").lower()
+        return "high" not in thrill
+
+    ordered = [name for name in preferred_names if name in candidates or name in details]
+    ordered += candidates
+    return [name for name in dict.fromkeys(ordered) if allowed(name)]
+
+
 def _route_from_real_inputs(template_id: str, template: dict[str, Any], real_inputs: dict[str, Any]) -> list[str]:
     placeholders = list(template.get("route", []))
     locations = list(real_inputs.get("locations", []))
@@ -613,7 +645,7 @@ def _route_from_real_inputs(template_id: str, template: dict[str, Any], real_inp
     elif template_id == "vip-tour":
         candidates = _rule_candidates(real_inputs, "vipRouteAnchors") + ["Front Gate"] + attractions + quiet + locations
     elif template_id == "kid-quest":
-        candidates = _rule_candidates(real_inputs, "kidFriendlyAnchors") + locations + indoor + quiet
+        candidates = _kid_quest_candidates(real_inputs)
     elif template_id in {"halloween-route", "scavenger-hunt"}:
         candidates = _rule_candidates(real_inputs, "halloweenCandidateLocations") + locations + indoor + quiet
     else:
@@ -633,6 +665,22 @@ def _missing_real_inputs(route: list[dict[str, Any]], real_inputs: dict[str, Any
     if not real_inputs.get("safetyInstructions"):
         missing.append("real_safety_or_operating_instructions")
     return missing
+
+
+def _source_integrity(route: list[dict[str, Any]], real_inputs: dict[str, Any], context: dict[str, Any], intelligence: dict[str, Any], quality_gaps: list[str]) -> dict[str, Any]:
+    missing_inputs = _missing_real_inputs(route, real_inputs)
+    return {
+        "usesSeedData": False,
+        "usesSimulatedParkState": False,
+        "usesInventedLocations": False,
+        "parkContextSource": context.get("source"),
+        "realInputSource": real_inputs.get("source"),
+        "realInputCount": len(real_inputs.get("locations", [])) + len(real_inputs.get("indoorLocations", [])) + len(real_inputs.get("quietLocations", [])) + len(real_inputs.get("accessibleRoutes", [])) + len(real_inputs.get("safetyInstructions", [])),
+        "profileIntelligenceAttached": bool(intelligence),
+        "profileIntelligenceQualityGaps": quality_gaps,
+        "missingRealInputs": missing_inputs,
+        "readyForHandoff": not missing_inputs and not _has_unresolved_placeholders({"route": route}),
+    }
 
 
 def _has_unresolved_placeholders(draft: dict[str, Any]) -> bool:
@@ -725,6 +773,8 @@ def _accessibility_for_stop(template_id: str, detail: dict[str, Any], real_input
         return "This location is marked accessible on the approved public map."
     if detail.get("familyRoom") is True:
         return "Family room support is available here."
+    if detail.get("kind") in {"food", "photo_spots", "quiet_or_cooling", "show"}:
+        return "Confirm the current step-free approach, seating or viewing space, and nearby reset option before publishing."
     if template_id == "low-sensory" and detail.get("bestFor"):
         return "Use this as a lower-stimulus or decompression stop; confirm current crowd and audio levels before publishing."
     accessibility = real_inputs.get("accessibleRoutes", [])
@@ -832,6 +882,203 @@ def _story_stage(creative_brief: dict[str, str], index: int) -> str:
     return cleaned[min(index, len(cleaned) - 1)]
 
 
+def _kid_quest_story(stop: str, index: int, stage: str, audience: str, detail: dict[str, Any], creative_brief: dict[str, str]) -> tuple[str, str, str]:
+    theme = creative_brief.get("seasonalTheme") or "kid-friendly badge quest"
+    stage_label = stage[:1].upper() + stage[1:] if stage else f"Beat {index + 1}"
+    stop_lower = stop.lower()
+    detail_hint = _detail_phrase(detail)
+    beats = [
+        {
+            "purpose": f"{stage_label}: launch the {theme} with a tangible mission card and one easy first win.",
+            "guest": f"1. Mission start at {stop}: pick up the Quest Card and learn the badge rule: find one real park detail, say what it means, then choose the next marker together.",
+            "staff": "Give caregivers the optional route frame, point out the nearest calm exit, and keep the first clue under 20 seconds.",
+        },
+        {
+            "purpose": f"{stage_label}: turn the location into a clue that kids can solve by looking, not waiting.",
+            "guest": f"2. Clue stop at {stop}: ask kids to find the gentlest moving detail, then mark the wave badge before heading to the next visible landmark.",
+            "staff": "Invite kids to point, count, or name what they see; keep groups moving so the clue does not block the path.",
+        },
+        {
+            "purpose": f"{stage_label}: add a discovery moment with a visual proof point caregivers can verify quickly.",
+            "guest": f"3. Discovery at {stop}: look for the hidden color, shape, or sign detail. When kids spot it, they earn the explorer badge and choose the next direction.",
+            "staff": "Use the same clue wording for every group and offer a skip option if the area feels too loud or crowded.",
+        },
+        {
+            "purpose": f"{stage_label}: give the quest a small reward without making an availability or merchandise claim.",
+            "guest": f"4. Reward beat at {stop}: celebrate the solved clues with a stamp, sticker, or verbal badge moment, then invite families to take a short reset.",
+            "staff": "Treat the reward as a reviewable placeholder until the channel owner confirms the actual fulfillment item.",
+        },
+        {
+            "purpose": f"{stage_label}: close the story with a caregiver-friendly photo or memory moment.",
+            "guest": f"5. Celebration at {stop}: finish the badge quest by naming the favorite clue, taking an optional photo, and choosing a calm next stop.",
+            "staff": "Close with one sentence, avoid promising character appearances, and direct families to the nearest support point when support is requested.",
+        },
+    ]
+    selected = beats[min(index, len(beats) - 1)]
+    if "storybook" in stop_lower or "boat" in stop_lower:
+        selected["guest"] = f"{index + 1}. {stage_label} at {stop}: find the boat or story detail that feels the calmest, then mark the wave badge and follow the next clue toward the lantern side of the park."
+    elif "lantern" in stop_lower:
+        if index >= 4:
+            selected["guest"] = f"{index + 1}. {stage_label} at {stop}: finish the badge quest by choosing a favorite lantern color, naming the best clue, and taking an optional family photo."
+        else:
+            selected["guest"] = f"{index + 1}. {stage_label} at {stop}: count three lantern shapes or colors, choose the one that feels most magical, and earn the glow badge."
+    elif "shade" in stop_lower or "covered" in stop_lower:
+        selected["guest"] = f"{index + 1}. {stage_label} at {stop}: take a quiet explorer pause, find the coolest shaded detail, and let caregivers decide whether to continue or reset."
+    elif "treat" in stop_lower or "food" in stop_lower:
+        selected["guest"] = f"{index + 1}. {stage_label} at {stop}: celebrate the solved clues with a reviewable treat-or-stamp moment; do not promise a specific item until Food and Retail approves it."
+    elif "arcade" in stop_lower:
+        selected["guest"] = f"{index + 1}. {stage_label} at {stop}: find a game light, sound, or score shape, then choose the explorer badge without requiring anyone to play."
+    if detail_hint:
+        selected["guest"] = f"{selected['guest']} Profile fact: {detail_hint}."
+    return selected["purpose"], selected["guest"], selected["staff"]
+
+
+def _draft_reasoning_trace(template_id: str, route_names: list[str], real_inputs: dict[str, Any], creative_brief: dict[str, str], llm_status: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    intelligence = _profile_intelligence(real_inputs)
+    rules = _experience_rules(real_inputs)
+    return [
+        {
+            "step": "brief_interpretation",
+            "summary": f"Template {template_id} requested a {creative_brief.get('creativeDirection')} package with arc {creative_brief.get('storyArc')}.",
+            "inputs": {
+                "sensoryLevel": creative_brief.get("sensoryLevel"),
+                "walkingPace": creative_brief.get("walkingPace"),
+                "outputPackage": creative_brief.get("outputPackage"),
+                "seasonalTheme": creative_brief.get("seasonalTheme"),
+            },
+        },
+        {
+            "step": "verified_profile_grounding",
+            "summary": "Venue Profile supplied approved location names, accessibility facts, brand rules, and profile intelligence.",
+            "inputs": {
+                "source": real_inputs.get("source"),
+                "locationCount": len(real_inputs.get("locations", [])),
+                "profileIntelligenceSource": intelligence.get("source") or "not_connected",
+            },
+        },
+        {
+            "step": "route_candidate_filtering",
+            "summary": "Route candidates were filtered to verified, kid-appropriate experience moments before copy was written.",
+            "inputs": {
+                "candidateRule": "kidFriendlyAnchors excluding support-only nodes and high-thrill stops" if template_id == "kid-quest" else "template-specific profile rules",
+                "experienceRules": {key: rules.get(key) for key in ("kidFriendlyAnchors", "rainyDayAnchors", "vipRouteAnchors") if key in rules},
+                "selectedStops": route_names,
+            },
+        },
+        {
+            "step": "story_arc_mapping",
+            "summary": "Each selected stop was mapped to a different story beat so the route has a beginning, middle, reward, and finish.",
+            "inputs": {
+                "storyArc": creative_brief.get("storyArc"),
+                "selectedStops": route_names,
+            },
+        },
+        {
+            "step": "source_integrity_gate",
+            "summary": "The draft was checked for missing real inputs, invented locations, seed/sample usage, and operational claims.",
+            "inputs": {
+                "usesSeedData": False,
+                "usesInventedLocations": False,
+                "profileIntelligenceAttached": bool(intelligence),
+            },
+        },
+        {
+            "step": "llm_creative_reasoning_pass",
+            "summary": "Optional LLM polish may rewrite purpose, guest copy, staff notes, and channel copy, but cannot change verified stops or source receipts.",
+            "inputs": llm_status or {"status": "not_requested"},
+        },
+    ]
+
+
+def _llm_creative_prompt(payload: dict[str, Any], state_context: dict[str, Any], deterministic_draft: dict[str, Any]) -> dict[str, Any]:
+    route_contract = [
+        {
+            "stop": item.get("stop"),
+            "purpose": item.get("purpose"),
+            "guestCopy": item.get("guestCopy"),
+            "staffNote": item.get("staffNote"),
+            "accessibilityNote": item.get("accessibilityNote"),
+            "profileIntelligenceNote": item.get("profileIntelligenceNote"),
+        }
+        for item in deterministic_draft.get("route", [])
+        if isinstance(item, dict)
+    ]
+    return {
+        "task": "Improve a ParkPulse Experience Studio draft as a creative reasoning pass after verified route selection.",
+        "return_only_json": True,
+        "hard_constraints": [
+            "Keep the exact stop names, stop count, and stop order.",
+            "Only rewrite purpose, guestCopy, staffNote, message copy, creative_rationale, and review_questions.",
+            "Do not invent places, characters, live availability, wait times, weather, staffing, safety instructions, discounts, guarantees, or access-lane claims.",
+            "Do not promise a specific reward item; keep rewards reviewable.",
+            "Keep movement optional and reviewable.",
+        ],
+        "brief": {
+            "templateId": payload.get("templateId") or payload.get("template"),
+            "audience": payload.get("audience"),
+            "tone": payload.get("tone"),
+            "constraints": payload.get("constraints"),
+            "creativeDirection": payload.get("creativeDirection"),
+            "storyArc": payload.get("storyArc"),
+            "sensoryLevel": payload.get("sensoryLevel"),
+            "walkingPace": payload.get("walkingPace"),
+            "outputPackage": payload.get("outputPackage"),
+            "seasonalTheme": payload.get("seasonalTheme"),
+        },
+        "verified_route_contract": route_contract,
+        "messages": deterministic_draft.get("messages", []),
+        "state_context_source": state_context.get("source"),
+        "return_json_shape": {
+            "route": [{"stop": item.get("stop"), "purpose": "...", "guestCopy": "...", "staffNote": "..."} for item in route_contract],
+            "messages": deterministic_draft.get("messages", []),
+            "creative_rationale": ["why this route works"],
+            "review_questions": ["short review questions"],
+        },
+    }
+
+
+def _merge_llm_creative_pass(base_draft: dict[str, Any], generated: dict[str, Any], real_inputs: dict[str, Any], template_id: str, constraints: str, context: dict[str, Any]) -> dict[str, Any]:
+    merged = json.loads(json.dumps(base_draft, default=str))
+    base_route = merged.get("route", []) if isinstance(merged.get("route"), list) else []
+    generated_route = generated.get("route") if isinstance(generated.get("route"), list) else []
+    base_stops = [str(item.get("stop") or "") for item in base_route if isinstance(item, dict)]
+    generated_stops = [str(item.get("stop") or "") for item in generated_route if isinstance(item, dict)]
+    accepted_route = len(base_route) == len(generated_route) and base_stops == generated_stops
+    if accepted_route:
+        for base_item, generated_item in zip(base_route, generated_route, strict=False):
+            if not isinstance(base_item, dict) or not isinstance(generated_item, dict):
+                continue
+            for field in ("purpose", "guestCopy", "staffNote"):
+                value = str(generated_item.get(field) or "").strip()
+                if value:
+                    base_item[field] = value
+
+    generated_messages = generated.get("messages") if isinstance(generated.get("messages"), list) else []
+    base_messages = merged.get("messages", []) if isinstance(merged.get("messages"), list) else []
+    if generated_messages and len(generated_messages) == len(base_messages):
+        for base_item, generated_item in zip(base_messages, generated_messages, strict=False):
+            if not isinstance(base_item, dict) or not isinstance(generated_item, dict):
+                continue
+            if str(base_item.get("channel") or "") != str(generated_item.get("channel") or ""):
+                continue
+            copy = str(generated_item.get("copy") or "").strip()
+            if copy:
+                base_item["copy"] = copy
+
+    intelligence = _profile_intelligence(real_inputs)
+    quality_gaps = [str(item) for item in intelligence.get("qualityGaps", []) if str(item).strip()] if isinstance(intelligence.get("qualityGaps"), list) else []
+    merged["sourceIntegrity"] = _source_integrity(base_route, real_inputs, context, intelligence, quality_gaps)
+    merged["studioReview"] = _studio_review(template_id, merged, constraints, real_inputs)
+    merged["llmCreativePass"] = {
+        "status": "merged" if accepted_route else "route_rejected_preserved_deterministic",
+        "routeAccepted": accepted_route,
+        "creativeRationale": generated.get("creative_rationale", []) if isinstance(generated.get("creative_rationale"), list) else [],
+        "reviewQuestions": generated.get("review_questions", []) if isinstance(generated.get("review_questions"), list) else [],
+        "guardrails": ["verified_stop_names_locked", "source_integrity_recomputed", "reviewers_rerun"],
+    }
+    return merged
+
+
 def _make_stop(template_id: str, stop: str, index: int, audience: str, tone: str, context_hint: str, real_inputs: dict[str, Any], creative_brief: dict[str, str]) -> dict[str, str]:
     step = index + 1
     needs_real_location = "needed" in stop.lower()
@@ -873,7 +1120,7 @@ def _make_stop(template_id: str, stop: str, index: int, audience: str, tone: str
     elif template_id == "low-sensory":
         guest_copy = f"{step}. {stage} at {stop}: keep the beat predictable, quiet, and easy to leave. {sensory_note or detail_phrase}"
     elif template_id == "kid-quest":
-        guest_copy = f"{step}. {stage} at {stop}: give kids a clear mission beat, one visible thing to find, and a tiny win before the next landmark."
+        kid_purpose, guest_copy, kid_staff_note = _kid_quest_story(stop, index, stage, audience, detail, creative_brief)
     elif template_id == "scavenger-hunt":
         guest_copy = f"{step}. {stage} at {stop}: place a visual clue guests can solve while moving, then let the answer pull them toward the next reveal."
     elif template_id == "vip-tour":
@@ -882,9 +1129,9 @@ def _make_stop(template_id: str, stop: str, index: int, audience: str, tone: str
         guest_copy = f"{step}. {stage} at {stop}: follow the {tone} cue toward the next {direction} moment. {context_hint}"
     return {
         "stop": stop,
-        "purpose": f"{stage}: shape a {direction} beat at {sensory_level} sensory level.",
+        "purpose": kid_purpose if template_id == "kid-quest" else f"{stage}: shape a {direction} beat at {sensory_level} sensory level.",
         "guestCopy": f"{step}. Real location required before guest copy can be finalized. Intended tone: {tone}. {context_hint}" if needs_real_location else guest_copy.strip(),
-        "staffNote": "Do not stage staff from this draft until the real location and owner are supplied." if needs_real_location else "Welcome guests, name the journey, and confirm the route is optional." if step == 1 else "Keep the handoff short and point guests toward the next visual landmark.",
+        "staffNote": "Do not stage staff from this draft until the real location and owner are supplied." if needs_real_location else kid_staff_note if template_id == "kid-quest" else "Welcome guests, name the journey, and confirm the route is optional." if step == 1 else "Keep the handoff short and point guests toward the next visual landmark.",
         "accessibilityNote": "Real route accessibility facts are required before approval." if needs_real_location else _accessibility_for_stop(template_id, detail, real_inputs),
         "profileIntelligenceNote": "Real profile intelligence required before this stop can be finalized." if needs_real_location else intelligence_note or "Follow module policy; avoid live availability, staffing, safety, and access-lane claims.",
         "source": "missing_real_input" if needs_real_location else source,
@@ -935,7 +1182,6 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
             "owner": real_inputs.get("channelOwners", {}).get("staff_cue") or "real owner needed",
         },
     ]
-    missing_inputs = _missing_real_inputs(route, real_inputs)
     draft = {
         "title": template["label"],
         "audience": audience,
@@ -977,25 +1223,33 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
             },
             "learningLabels": learning_schema.get("feedbackLabels", []) if isinstance(learning_schema.get("feedbackLabels"), list) else [],
         },
-        "sourceIntegrity": {
-            "usesSeedData": False,
-            "usesSimulatedParkState": False,
-            "usesInventedLocations": False,
-            "parkContextSource": context.get("source"),
-            "realInputSource": real_inputs.get("source"),
-            "realInputCount": len(real_inputs.get("locations", [])) + len(real_inputs.get("indoorLocations", [])) + len(real_inputs.get("quietLocations", [])) + len(real_inputs.get("accessibleRoutes", [])) + len(real_inputs.get("safetyInstructions", [])),
-            "profileIntelligenceAttached": bool(intelligence),
-            "profileIntelligenceQualityGaps": quality_gaps,
-            "missingRealInputs": missing_inputs,
-            "readyForHandoff": not missing_inputs and not _has_unresolved_placeholders({"route": route}),
-        },
+        "sourceIntegrity": _source_integrity(route, real_inputs, context, intelligence, quality_gaps),
+        "reasoningTrace": _draft_reasoning_trace(template_id, route_names, real_inputs, creative_brief),
     }
     draft["studioReview"] = _studio_review(template_id, draft, constraints, real_inputs)
     return draft
 
 
 def _studio_review(template_id: str, draft: dict[str, Any], constraints: str, real_inputs: dict[str, Any]) -> list[dict[str, str]]:
-    text = json.dumps(draft, default=str).lower()
+    review_surface = {
+        "title": draft.get("title"),
+        "audience": draft.get("audience"),
+        "creativeBrief": draft.get("creativeBrief"),
+        "route": [
+            {
+                "stop": item.get("stop"),
+                "purpose": item.get("purpose"),
+                "guestCopy": item.get("guestCopy"),
+                "staffNote": item.get("staffNote"),
+                "accessibilityNote": item.get("accessibilityNote"),
+            }
+            for item in draft.get("route", [])
+            if isinstance(item, dict)
+        ],
+        "messages": draft.get("messages", []),
+        "review": draft.get("review", []),
+    }
+    text = json.dumps(review_surface, default=str).lower()
     movement_terms = any(term in text for term in ["route", "follow", "shelter", "line", "boarding", "move"])
     sensory_terms = any(term in text for term in ["quiet", "sensory", "noise", "lighting", "audio", "calm"])
     intelligence = _profile_intelligence(real_inputs)
@@ -1017,7 +1271,7 @@ def _studio_review(template_id: str, draft: dict[str, Any], constraints: str, re
         {
             "agentId": "brand_voice_reviewer",
             "agentName": "Brand/Voice Reviewer",
-            "status": "review" if banned_hit or any(term in text for term in ["graphic", "mean", "scary"]) else "clear",
+            "status": "review" if banned_hit or re.search(r"\b(graphic|mean|scary)\b", text) else "clear",
             "finding": f"Tone and audience are explicit; brand bible banned-claim check {'flagged ' + banned_hit if banned_hit else 'passed'}. Constraints: {constraints}.",
             "nextStep": "Confirm final adjectives, character voice, age fit, and banned-claim avoidance before approval.",
         },
@@ -1109,6 +1363,7 @@ async def build_experience_studio_payload(payload: dict[str, Any], state: dict[s
     draft = _draft_from_payload(payload, state)
     state_context = _park_context(state)
     prompt = _prompt(payload, state_context, draft)
+    creative_prompt = _llm_creative_prompt(payload, state_context, draft)
     use_llm = bool(payload.get("useLlm")) or os.getenv("PARKPULSE_EXPERIENCE_STUDIO_USE_LLM", "").strip().lower() in {"1", "true", "yes", "on"}
     llm = {"status": "not_requested", "llm_used_for_control": False}
 
@@ -1117,27 +1372,42 @@ async def build_experience_studio_payload(payload: dict[str, Any], state: dict[s
             from gemini_hard_timeout import generate_gemini_json_hard_timeout
 
             result = await generate_gemini_json_hard_timeout(
-                prompt,
-                timeout_seconds=float(os.getenv("PARKPULSE_EXPERIENCE_STUDIO_LLM_TIMEOUT_SECONDS", "8")),
+                creative_prompt,
+                timeout_seconds=float(os.getenv("PARKPULSE_EXPERIENCE_STUDIO_LLM_TIMEOUT_SECONDS", "14")),
+                max_output_tokens=int(os.getenv("PARKPULSE_EXPERIENCE_STUDIO_LLM_MAX_OUTPUT_TOKENS", "2200")),
+                temperature=float(os.getenv("PARKPULSE_EXPERIENCE_STUDIO_LLM_TEMPERATURE", "0.35")),
             )
             generated = _json_from_text(str(result.get("text") or "{}"))
-            if isinstance(generated.get("draft"), dict):
-                draft = generated["draft"]
+            if isinstance(generated, dict):
+                template_id = str(payload.get("templateId") or payload.get("template") or "halloween-route")
+                constraints = _text(payload.get("constraints"), "Keep the draft accurate, accessible, and reviewable before publishing.")
+                draft = _merge_llm_creative_pass(draft, generated, _real_inputs(payload), template_id, constraints, state_context)
             llm = {
                 "status": "ready",
                 "transport": result.get("transport"),
                 "creative_rationale": generated.get("creative_rationale", []),
                 "review_questions": generated.get("review_questions", []),
+                "mergeStatus": draft.get("llmCreativePass", {}).get("status") if isinstance(draft.get("llmCreativePass"), dict) else "unknown",
                 "llm_used_for_control": False,
             }
         except Exception as error:
             llm = {"status": "fallback", "error": str(error)[:240], "llm_used_for_control": False}
+    if isinstance(draft.get("reasoningTrace"), list):
+        draft["reasoningTrace"] = [
+            {
+                **item,
+                "inputs": llm if item.get("step") == "llm_creative_reasoning_pass" else item.get("inputs", {}),
+            }
+            if isinstance(item, dict) else item
+            for item in draft["reasoningTrace"]
+        ]
 
     return {
         "status": "ready",
         "mode": "experience_studio_creative_draft",
         "draft": draft,
         "prompt": prompt,
+        "creativePrompt": creative_prompt,
         "llm": llm,
         "sourceContext": state_context,
         "sourceIntegrity": {

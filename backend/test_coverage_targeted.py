@@ -92,6 +92,7 @@ def test_scenario_eval_sweep_edges_and_async_outcomes():
 
 def test_gemini_hard_timeout_subprocess_success_errors_and_worker(monkeypatch, capsys):
     monkeypatch.setenv("PARKPULSE_DISABLE_GEMINI_REST_FAST_PATH", "1")
+    monkeypatch.setenv("PARKPULSE_DISABLE_VERTEX_REST_FAST_PATH", "1")
 
     class FakeProcess:
         def __init__(self, stdout=b'{"ok":true,"text":"{}"}', stderr=b"", returncode=0, delay=0):
@@ -169,14 +170,38 @@ def test_gemini_hard_timeout_subprocess_success_errors_and_worker(monkeypatch, c
 
 def test_gemini_rest_fast_path_does_not_override_vertex_mode(monkeypatch):
     monkeypatch.delenv("PARKPULSE_DISABLE_GEMINI_REST_FAST_PATH", raising=False)
+    monkeypatch.delenv("PARKPULSE_DISABLE_VERTEX_REST_FAST_PATH", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "dev-key")
     monkeypatch.setenv("GOOGLE_API_KEY", "dev-google-key")
     monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "parkpulse-test")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 
     assert gemini_hard_timeout._gemini_rest_available() is False
+    assert gemini_hard_timeout._vertex_rest_available() is True
 
     monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
     assert gemini_hard_timeout._gemini_rest_available() is True
+    assert gemini_hard_timeout._vertex_rest_available() is False
+
+
+def test_gemini_worker_request_carries_timeout(monkeypatch):
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured["request"] = json.loads(kwargs["input"])
+        captured["timeout"] = kwargs["timeout"]
+        return SimpleNamespace(returncode=0, stdout='{"ok":true,"text":"{}"}', stderr="")
+
+    monkeypatch.setenv("PARKPULSE_DISABLE_GEMINI_REST_FAST_PATH", "1")
+    monkeypatch.setenv("PARKPULSE_DISABLE_VERTEX_REST_FAST_PATH", "1")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    from park_staff_roleplay import _generate_gemini_json_sync_hard_timeout
+
+    assert _generate_gemini_json_sync_hard_timeout({}, timeout_seconds=9, max_output_tokens=100, temperature=0.2)["ok"] is True
+    assert captured["request"]["timeout_seconds"] == 9
+    assert captured["timeout"] == 9.5
 
 
 def test_gcp_trace_eval_exporter_and_flush_paths(monkeypatch):

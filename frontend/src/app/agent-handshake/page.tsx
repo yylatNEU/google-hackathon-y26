@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { fetchParkPulseApi, getApiUrls } from "@/lib/api";
 
 type DelegationToken = Record<string, unknown> & {
@@ -397,6 +397,21 @@ type ScenarioRunConfig = {
   queueReason: string;
   planner: string;
 };
+type CounterpartyKind = "guest" | "supplier";
+type CustomRunConfig = {
+  counterparty: CounterpartyKind;
+  agentId: string;
+  represents: string;
+  requestedSession: string;
+  goal: string;
+  timeWindow: string;
+  constraintsJson: string;
+  scopeCsv: string;
+  cannotDoCsv: string;
+  counterRequest: string;
+  monitorEvent: string;
+  commerceAction: string;
+};
 const scenarioRunConfigs: Record<string, ScenarioRunConfig> = {
   visit_planning: {
     goal: "maximize_family_satisfaction",
@@ -495,6 +510,37 @@ const extensionMarkets = [
   { market: "Retail", example: "Shopper agent negotiates pickup, inventory alternatives, returns, and offers." },
   { market: "Supply chain", example: "Supplier agent negotiates restock, substitution, receiving windows, and procurement gates." },
 ];
+const supplyScenarioIds = new Set(["supply_replenishment", "cold_chain_incident", "maintenance_parts_shortage"]);
+const clientShareScopes = ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference", "inventory_position", "delivery_eta", "supplier_compliance", "cold_chain_status", "parts_availability"];
+const clientReceiveScopes = ["route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer", "demand_forecast", "restock_request", "dock_slot", "substitution_request", "purchase_order_notice", "maintenance_parts_request"];
+
+function parseCsv(value: string) {
+  return Array.from(new Set(value.split(",").map((item) => item.trim()).filter(Boolean)));
+}
+
+function defaultCustomRunConfig(scenario: ProtocolScenario, scenarioConfig: ScenarioRunConfig): CustomRunConfig {
+  const supplier = supplyScenarioIds.has(scenario.id);
+  const supplierIds: Record<string, [string, string]> = {
+    supply_replenishment: ["beverage_supplier_agent", "supplier_vendor_beverage_42"],
+    cold_chain_incident: ["cold_chain_supplier_agent", "supplier_vendor_cold_chain_42"],
+    maintenance_parts_shortage: ["parts_supplier_agent", "supplier_vendor_parts_42"],
+  };
+  const [agentId, represents] = supplierIds[scenario.id] ?? ["john_personal_agent", "guest_user_123"];
+  return {
+    counterparty: supplier ? "supplier" : "guest",
+    agentId,
+    represents,
+    requestedSession: `${supplier ? "supplier_session" : "park_visit"}_${scenario.id}_${Date.now()}`,
+    goal: scenarioConfig.goal,
+    timeWindow: supplier ? "2_hours" : "3_hours",
+    constraintsJson: JSON.stringify(scenarioConfig.constraints, null, 2),
+    scopeCsv: fullAgentScopes.join(", "),
+    cannotDoCsv: ["auto_purchase", "share_health_data", "accept_refund_without_user", "auto_accept_price_change", "bypass_food_safety", "release_vendor_payment_without_approval"].join(", "),
+    counterRequest: scenarioConfig.counterRequest,
+    monitorEvent: scenarioConfig.monitorEvent,
+    commerceAction: scenarioConfig.commerceAction,
+  };
+}
 
 function titleize(value: string) {
   return value.replace(/_/g, " ");
@@ -1286,6 +1332,80 @@ function PolicyChallengePanel({ report, running, onRun }: { report: PolicyChalle
   );
 }
 
+function CustomRunPanel({ config, scenario, onChange }: { config: CustomRunConfig; scenario: ProtocolScenario; onChange: (patch: Partial<CustomRunConfig>) => void }) {
+  const setField = (key: keyof CustomRunConfig) => (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => onChange({ [key]: event.target.value } as Partial<CustomRunConfig>);
+  return (
+    <section className="mx-auto max-w-7xl px-4 pb-6 md:px-8">
+      <div className="rounded-lg border border-slate-800 bg-[#11161a] p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-[11px] font-black uppercase tracking-normal text-slate-500">External counterparty payload</div>
+            <h2 className="mt-1 text-xl font-black text-slate-100">{scenario.mode} run input</h2>
+          </div>
+          <div className="rounded border border-cyan-300 px-3 py-2 text-xs font-black uppercase tracking-normal text-cyan-100">{config.counterparty}</div>
+        </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <label className="block">
+            <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Counterparty</span>
+            <select value={config.counterparty} onChange={setField("counterparty")} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-slate-100">
+              <option value="guest">Guest agent</option>
+              <option value="supplier">Supplier agent</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Agent id</span>
+            <input value={config.agentId} onChange={setField("agentId")} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-slate-100" />
+          </label>
+          <label className="block">
+            <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Represents</span>
+            <input value={config.represents} onChange={setField("represents")} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-slate-100" />
+          </label>
+          <label className="block">
+            <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Session</span>
+            <input value={config.requestedSession} onChange={setField("requestedSession")} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-slate-100" />
+          </label>
+          <label className="block md:col-span-2">
+            <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Goal</span>
+            <input value={config.goal} onChange={setField("goal")} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-slate-100" />
+          </label>
+          <label className="block">
+            <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Time window</span>
+            <input value={config.timeWindow} onChange={setField("timeWindow")} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-slate-100" />
+          </label>
+          <label className="block">
+            <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Commerce action</span>
+            <input value={config.commerceAction} onChange={setField("commerceAction")} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-slate-100" />
+          </label>
+          <label className="block">
+            <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Monitor event</span>
+            <input value={config.monitorEvent} onChange={setField("monitorEvent")} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-slate-100" />
+          </label>
+        </div>
+        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+          <label className="block">
+            <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Constraints JSON</span>
+            <textarea value={config.constraintsJson} onChange={setField("constraintsJson")} rows={8} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs leading-5 text-slate-100" />
+          </label>
+          <div className="grid gap-3">
+            <label className="block">
+              <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Scopes</span>
+              <textarea value={config.scopeCsv} onChange={setField("scopeCsv")} rows={4} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-bold leading-5 text-slate-100" />
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Cannot do</span>
+              <textarea value={config.cannotDoCsv} onChange={setField("cannotDoCsv")} rows={3} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-bold leading-5 text-slate-100" />
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-black uppercase tracking-normal text-slate-500">Counter request</span>
+              <textarea value={config.counterRequest} onChange={setField("counterRequest")} rows={2} className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-bold leading-5 text-slate-100" />
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function SessionPanels({ session }: { session: HandshakeSession }) {
   const proposal = session.proposal;
   const handoffs = [...(session.internal_handoffs ?? [])].slice(-10).reverse();
@@ -1407,6 +1527,7 @@ export default function AgentHandshakePage() {
   const parkItems = useMemo(() => ["Represents park operations", "Offers itinerary, queue, food, safety, and compensation options", "Requires approval for payment, refund, medical, and identity-sensitive action"], []);
   const selectedScenario = protocolScenarios.find((scenario) => scenario.id === selectedScenarioId) ?? protocolScenarios[0];
   const selectedScenarioConfig = scenarioRunConfigs[selectedScenario.id] ?? scenarioRunConfigs.visit_planning;
+  const [customRun, setCustomRun] = useState<CustomRunConfig>(() => defaultCustomRunConfig(protocolScenarios[0], scenarioRunConfigs.visit_planning));
 
   async function loadContract() {
     try {
@@ -1622,11 +1743,26 @@ export default function AgentHandshakePage() {
     setError(null);
     const scenario = selectedScenario;
     const scenarioConfig = selectedScenarioConfig;
+    let constraints: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(customRun.constraintsJson) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Constraints must be a JSON object.");
+      constraints = { ...(parsed as Record<string, unknown>), scenario_mode: scenario.id };
+    } catch (parseError) {
+      setError(parseError instanceof Error ? parseError.message : "Constraints JSON is invalid.");
+      setStatus("error");
+      setRunning(false);
+      return;
+    }
+    const requestedScopes = parseCsv(customRun.scopeCsv);
+    const cannotDo = parseCsv(customRun.cannotDoCsv);
+    const canShare = clientShareScopes.filter((scope) => requestedScopes.includes(scope));
+    const canReceive = clientReceiveScopes.filter((scope) => requestedScopes.includes(scope));
     const tokenRequest = {
-      subject: "guest_user_123",
-      agent_id: "john_personal_agent",
-      scope: fullAgentScopes,
-      cannot_do: ["auto_purchase", "share_health_data", "accept_refund_without_user", "auto_accept_price_change", "bypass_food_safety", "release_vendor_payment_without_approval"],
+      subject: customRun.represents,
+      agent_id: customRun.agentId,
+      scope: requestedScopes.length ? requestedScopes : fullAgentScopes,
+      cannot_do: cannotDo.length ? cannotDo : ["auto_purchase", "share_health_data", "accept_refund_without_user"],
       ttl_seconds: 10800,
     };
     const baseSteps: SimulatorStep[] = [
@@ -1650,20 +1786,20 @@ export default function AgentHandshakePage() {
       const identity = await callStep(
         "identity",
         "/api/park/handshake",
-        withToken({ agent_id: "john_personal_agent", represents: "guest_user_123", proof: "signed_token", requested_session: `park_visit_${Date.now()}` }),
+        withToken({ agent_id: customRun.agentId, represents: customRun.represents, proof: customRun.counterparty === "supplier" ? "signed_supplier_token" : "signed_token", requested_session: customRun.requestedSession || `${scenario.id}_${Date.now()}` }),
       );
       const sessionId = (identity.session as HandshakeSession).session_id;
       await callStep("capability", `/api/park/session/${sessionId}/capabilities`, withToken({
-        can_share: ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference", "inventory_position", "delivery_eta", "supplier_compliance", "cold_chain_status", "parts_availability"],
-        can_receive: ["route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer", "demand_forecast", "restock_request", "dock_slot", "substitution_request", "purchase_order_notice", "maintenance_parts_request"],
-        cannot_do: ["auto_purchase", "share_health_data", "accept_refund_without_user", "auto_accept_price_change", "bypass_food_safety", "release_vendor_payment_without_approval"],
+        can_share: canShare,
+        can_receive: canReceive,
+        cannot_do: tokenRequest.cannot_do,
       }));
-      await callStep("intent", `/api/park/session/${sessionId}/intent`, withToken({ goal: scenarioConfig.goal, time_window: "3_hours", constraints: scenarioConfig.constraints, scenario_mode: scenario.id }));
+      await callStep("intent", `/api/park/session/${sessionId}/intent`, withToken({ goal: customRun.goal, time_window: customRun.timeWindow, constraints, scenario_mode: scenario.id }));
       await callStep("propose", `/api/park/session/${sessionId}/propose`, withToken({ planner: scenarioConfig.planner, horizon: "3_hours", scenario_mode: scenario.id, expected_handoffs: scenario.handoffs }));
-      await callStep("counter", `/api/park/session/${sessionId}/counter`, withToken({ counter_request: scenarioConfig.counterRequest, priority_change: scenarioConfig.priorityChange, scenario_mode: scenario.id }));
-      await callStep("commit", `/api/park/session/${sessionId}/commit`, withToken({ accepted: true, notify_user: true }));
-      await callStep("monitor", `/api/park/session/${sessionId}/monitor`, withToken({ event: scenarioConfig.monitorEvent, scenario_mode: scenario.id, expected_outcome: scenario.outcome }));
-      await callStep("commerce", "/api/park/internal-agents/commerce/evaluate", withToken({ session_id: sessionId, action: scenarioConfig.commerceAction, amount: 42, reason: scenarioConfig.commerceReason, scenario_mode: scenario.id }));
+      await callStep("counter", `/api/park/session/${sessionId}/counter`, withToken({ counter_request: customRun.counterRequest, priority_change: scenarioConfig.priorityChange, scenario_mode: scenario.id }));
+      await callStep("commit", `/api/park/session/${sessionId}/commit`, withToken({ accepted: true, notify_user: customRun.counterparty === "guest", notify_supplier: customRun.counterparty === "supplier" }));
+      await callStep("monitor", `/api/park/session/${sessionId}/monitor`, withToken({ event: customRun.monitorEvent, scenario_mode: scenario.id, expected_outcome: scenario.outcome }));
+      await callStep("commerce", "/api/park/internal-agents/commerce/evaluate", withToken({ session_id: sessionId, action: customRun.commerceAction, amount: 42, reason: scenarioConfig.commerceReason, scenario_mode: scenario.id }));
       await callStep("queue", "/api/park/internal-agents/queue/reroute", withToken({ session_id: sessionId, walking_priority: scenarioConfig.priorityChange.walking_distance ?? "medium", reason: scenarioConfig.queueReason, scenario_mode: scenario.id, expected_handoffs: scenario.handoffs }));
       await callStep("receipt", `/api/park/session/${sessionId}/receipt`, withToken({ outcome: scenario.outcome, scenario_mode: scenario.id }));
       setStatus("ready");
@@ -1715,6 +1851,10 @@ export default function AgentHandshakePage() {
     void loadContract();
   }, []);
 
+  useEffect(() => {
+    setCustomRun(defaultCustomRunConfig(selectedScenario, selectedScenarioConfig));
+  }, [selectedScenarioId]);
+
   const activeState = session?.state ?? "verified";
 
   return (
@@ -1749,6 +1889,7 @@ export default function AgentHandshakePage() {
       <TrustAdminGatePanel probe={trustAdminProbe} running={trustAdminRunning} onRun={() => void runTrustAdminGate()} />
       <ScenarioEvalPanel report={scenarioEval} running={scenarioEvalRunning} onRun={() => void runScenarioEval()} />
       <PolicyChallengePanel report={policyChallenge} running={policyChallengeRunning} onRun={() => void runPolicyChallenges()} />
+      <CustomRunPanel config={customRun} scenario={selectedScenario} onChange={(patch) => setCustomRun((current) => ({ ...current, ...patch }))} />
       <Simulator steps={steps} running={running} scenario={selectedScenario} onRun={runClientAgent} onReject={runRejectionDemo} />
       {session ? <SessionPanels session={session} /> : null}
     </main>

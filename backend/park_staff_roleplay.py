@@ -61,6 +61,8 @@ _EMPATHY_TERMS = (
     "sorry",
     "i understand",
     "understand",
+    "i hear",
+    "acknowledge",
     "frustrating",
     "worried",
     "scary",
@@ -70,7 +72,29 @@ _EMPATHY_TERMS = (
     "we will",
 )
 _CLARITY_TERMS = ("first", "next", "now", "please", "where", "when", "what", "who", "stay", "meet", "follow")
-_DEESCALATION_TERMS = ("calm", "step", "safe", "together", "right now", "i can", "we can", "stay here", "work through")
+_DEESCALATION_TERMS = (
+    "calm",
+    "step",
+    "safe",
+    "together",
+    "right now",
+    "i can",
+    "we can",
+    "stay here",
+    "work through",
+    "listen",
+    "confirm",
+    "show",
+    "connect",
+    "collect",
+    "review",
+    "contact",
+    "call",
+    "bring",
+    "check",
+    "guide",
+    "explain",
+)
 _RUDE_TERMS = ("calm down", "not my problem", "can't help", "deal with", "your fault", "stop yelling", "whatever")
 
 
@@ -84,7 +108,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "opening_message": "This is ridiculous. My kid has been crying for twenty minutes because your staff sent us to a closed ride.",
         "context": "A parent is angry after a ride closure reroute failed. They want acknowledgement, a clear next step, and a supervisor if compensation is requested.",
         "objectives": ["Acknowledge the impact", "Confirm what happened", "Offer a concrete next step", "Escalate refund or compensation decisions"],
-        "policy_keywords": [["sorry", "understand", "frustrating"], ["ride", "closed", "what happened", "confirm"], ["next", "option", "guest services"], ["supervisor", "lead", "manager", "guest services"]],
+        "policy_keywords": [["sorry", "understand", "frustrating", "this happened"], ["ride", "closed", "what happened", "confirm", "communicated"], ["next", "option", "alternative", "open", "nearby", "guest services"], ["supervisor", "lead", "manager", "guest services"]],
         "safety_keywords": [["child", "kid", "family"], ["safe", "together", "stay"]],
         "escalation_keywords": [["supervisor", "lead", "manager", "guest services"]],
         "guest_followups": [
@@ -123,7 +147,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "opening_message": "We paid for tickets mostly for Dragon Coaster, and now it is closed. Nobody told us before we waited.",
         "context": "Guest complains about a closure. Staff should acknowledge, avoid unsafe reopen promises, explain available updates, and offer alternatives.",
         "objectives": ["Acknowledge wait impact", "Avoid promising reopen time", "Offer live alternatives", "Direct refund/compensation to approved channel"],
-        "policy_keywords": [["sorry", "understand", "frustrating"], ["cannot promise", "no exact", "updates", "temporary"], ["alternative", "nearby", "theater", "arcade"], ["guest services", "supervisor", "refund"]],
+        "policy_keywords": [["sorry", "understand", "frustrating"], ["cannot promise", "no exact", "updates", "temporary", "reopen time", "until clearance"], ["alternative", "nearby", "open", "theater", "arcade"], ["guest services", "supervisor", "refund"]],
         "safety_keywords": [["cannot promise", "safety", "clearance"], ["updates", "temporary"]],
         "escalation_keywords": [["guest services", "supervisor", "lead"]],
         "guest_followups": [
@@ -142,7 +166,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "opening_message": "My father cannot stand in this sun for the whole queue. We need help, but I do not want to explain his medical history in public.",
         "context": "A party requests accessibility support. Staff must preserve dignity, avoid medical probing, explain available assistance, and escalate to accessibility/guest services.",
         "objectives": ["Respect privacy", "Offer accessible route or waiting support", "Avoid asking for diagnosis", "Escalate to accessibility support"],
-        "policy_keywords": [["privacy", "private", "do not need medical"], ["accessible", "mobility", "route", "seating", "shade"], ["guest services", "accessibility", "support"], ["dignity", "respect"]],
+        "policy_keywords": [["privacy", "private", "do not need medical", "medical details", "without asking"], ["accessible", "accessibility", "mobility", "route", "seating", "shade"], ["guest services", "accessibility", "support"], ["dignity", "respect", "without asking"]],
         "safety_keywords": [["shade", "seating", "sun", "heat"], ["accessible", "mobility", "route"]],
         "escalation_keywords": [["guest services", "accessibility", "supervisor", "lead"]],
         "guest_followups": [
@@ -180,7 +204,7 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "opening_message": "I want a refund now. The ride was closed, the food line was terrible, and this day is not what we paid for.",
         "context": "Guest requests refund. Staff should empathize, avoid unauthorized promises, gather context, and route to Guest Services or supervisor.",
         "objectives": ["Acknowledge frustration", "Avoid promising refund", "Collect issue summary", "Escalate through approved channel"],
-        "policy_keywords": [["sorry", "understand", "frustrating"], ["cannot promise", "review", "policy"], ["what happened", "receipt", "ticket", "details"], ["guest services", "supervisor", "manager"]],
+        "policy_keywords": [["sorry", "understand", "frustrating"], ["cannot promise", "review", "policy"], ["what happened", "receipt", "ticket", "details", "collect", "issue summary"], ["guest services", "supervisor", "manager"]],
         "safety_keywords": [["calm", "safe", "help"], ["guest services", "supervisor"]],
         "escalation_keywords": [["guest services", "supervisor", "manager"]],
         "guest_followups": [
@@ -281,6 +305,69 @@ NEXT_RESPONSE_TEMPLATES = {
     "line_cutting_conflict": "I understand why that feels unfair. Please do not confront them; I need everyone to stay safe. I will check what happened and call a lead or Security if the conflict continues.",
     "safety_rule_refusal": "For safety, this ride cannot start until the loose strap is removed or secured in a locker. I can help you do that now, and if you still disagree I will call my ride lead.",
     "weather_evacuation_confusion": "Stay calm and follow me toward the covered shelter route. We will use the stroller-accessible path, and I will contact a lead if the route is blocked or weather risk changes.",
+}
+
+STAFF_TRAINING_GOLDEN_RESPONSES: dict[str, list[dict[str, Any]]] = {
+    "angry_parent": [
+        {"id": "angry_parent_bad", "label": "bad", "message": "Read the sign. There is nothing I can do.", "max_score": 55, "critical_miss": True},
+        {"id": "angry_parent_partial", "label": "partial", "message": "Sorry. You can try another ride nearby.", "min_score": 45, "max_score": 74},
+        {"id": "angry_parent_passing", "label": "passing", "message": "I am sorry this happened. I will confirm what was communicated, show nearby open options, and bring Guest Services into any compensation review.", "min_score": 75, "max_score": 89},
+        {"id": "angry_parent_excellent", "label": "excellent", "message": "I am sorry your child was sent to a closed ride. I will listen, confirm what happened, show the best open nearby option, and bring a supervisor or Guest Services into any compensation decision.", "min_score": 85},
+    ],
+    "lost_child_report": [
+        {"id": "lost_child_bad", "label": "bad", "message": "Go look around the carousel and come back if you cannot find her.", "max_score": 55, "critical_miss": True},
+        {"id": "lost_child_partial", "label": "partial", "message": "I am sorry. What is she wearing?", "min_score": 35, "max_score": 74},
+        {"id": "lost_child_passing", "label": "passing", "message": "I am sorry. Stay here while I call Security now. What is her name, age, clothing, and last seen location near the carousel?", "min_score": 75, "max_score": 92},
+        {"id": "lost_child_excellent", "label": "excellent", "message": "I am sorry. We are going to help right now. Please stay with me at this meeting point while I radio Security and Operations. What is her name, age, what is she wearing, and where was she last seen?", "min_score": 85},
+    ],
+    "ride_closure_complaint": [
+        {"id": "ride_closure_bad", "label": "bad", "message": "It will definitely reopen soon, just wait here.", "max_score": 55, "critical_miss": True},
+        {"id": "ride_closure_partial", "label": "partial", "message": "Sorry, it is closed. Try another ride.", "min_score": 35, "max_score": 74},
+        {"id": "ride_closure_passing", "label": "passing", "message": "I am sorry for the wait. I cannot promise a reopen time until clearance, but I can show open alternatives and connect Guest Services for refund questions.", "min_score": 75, "max_score": 90},
+        {"id": "ride_closure_excellent", "label": "excellent", "message": "I am sorry you waited without a clear update. I cannot promise a reopen time until safety clearance, but I can show current open alternatives and connect you with Guest Services for any refund or compensation review.", "min_score": 85},
+    ],
+    "accessibility_accommodation": [
+        {"id": "accessibility_bad", "label": "bad", "message": "He needs to prove his diagnosis before we can help.", "max_score": 55, "critical_miss": True},
+        {"id": "accessibility_partial", "label": "partial", "message": "I can help you find shade.", "min_score": 35, "max_score": 74},
+        {"id": "accessibility_passing", "label": "passing", "message": "I can help without asking for medical details. Let me get shade or seating and contact Accessibility or Guest Services to confirm the accommodation route.", "min_score": 75, "max_score": 92},
+        {"id": "accessibility_excellent", "label": "excellent", "message": "You do not need to explain medical details here. I can help your father get shade or seating and contact Accessibility or Guest Services to confirm the right route or accommodation while preserving privacy.", "min_score": 85},
+    ],
+    "language_barrier": [
+        {"id": "language_bad", "label": "bad", "message": "You need to speak English or figure it out.", "max_score": 55, "critical_miss": True},
+        {"id": "language_partial", "label": "partial", "message": "Ticket problem? Go to Guest Services.", "min_score": 35, "max_score": 74},
+        {"id": "language_passing", "label": "passing", "message": "I can help. Please stay here while I use translation support, confirm your family status, and show the next ticket or Guest Services step.", "min_score": 75, "max_score": 92},
+        {"id": "language_excellent", "label": "excellent", "message": "I can help. Please stay here with me. I will use translation support, confirm whether your family is inside, and show one clear ticket or Guest Services step at a time.", "min_score": 85},
+    ],
+    "refund_request": [
+        {"id": "refund_bad", "label": "bad", "message": "I guarantee a full cash refund right now.", "max_score": 55, "critical_miss": True},
+        {"id": "refund_partial", "label": "partial", "message": "I understand. Guest Services handles refunds.", "min_score": 35, "max_score": 74},
+        {"id": "refund_passing", "label": "passing", "message": "I understand. I cannot promise a refund myself, but I can collect the ticket details and bring Guest Services or a supervisor into the policy review.", "min_score": 75, "max_score": 92},
+        {"id": "refund_excellent", "label": "excellent", "message": "I understand why you are upset. I cannot promise a refund myself, but I can collect your ticket details and issue summary, then bring Guest Services or a supervisor into the approved policy review.", "min_score": 85},
+    ],
+    "heat_exhaustion_concern": [
+        {"id": "heat_bad", "label": "bad", "message": "She can probably walk it off after drinking something.", "max_score": 55, "critical_miss": True},
+        {"id": "heat_partial", "label": "partial", "message": "Have her sit in shade and drink water.", "min_score": 35, "max_score": 74},
+        {"id": "heat_passing", "label": "passing", "message": "This is urgent. Keep her seated in shade if safe while I call First Aid now. Do not walk her across the park until medical advises us.", "min_score": 75, "max_score": 92},
+        {"id": "heat_excellent", "label": "excellent", "message": "I am treating this as urgent. Please keep her seated in shade if it is safe while I call First Aid or medical now. Do not walk her across the park until they advise us.", "min_score": 85},
+    ],
+    "line_cutting_conflict": [
+        {"id": "line_bad", "label": "bad", "message": "Go confront them yourself if you are that mad.", "max_score": 55, "critical_miss": True},
+        {"id": "line_partial", "label": "partial", "message": "I understand. I will check what happened.", "min_score": 35, "max_score": 74},
+        {"id": "line_passing", "label": "passing", "message": "I understand why that feels unfair. Please do not confront them. I will check what happened and call a lead or Security if the conflict continues.", "min_score": 75, "max_score": 92},
+        {"id": "line_excellent", "label": "excellent", "message": "I understand why that feels unfair. Please do not confront them; I need everyone to stay safe. I will check what happened and call a lead or Security if the conflict continues.", "min_score": 85},
+    ],
+    "safety_rule_refusal": [
+        {"id": "safety_bad", "label": "bad", "message": "Fine, just this once I will start the ride.", "max_score": 55, "critical_miss": True},
+        {"id": "safety_partial", "label": "partial", "message": "Please remove the strap.", "min_score": 35, "max_score": 74},
+        {"id": "safety_passing", "label": "passing", "message": "For safety, the ride cannot start until the loose strap is removed or secured. I can help now and call my ride lead if you disagree.", "min_score": 75, "max_score": 92},
+        {"id": "safety_excellent", "label": "excellent", "message": "For safety, this ride cannot start until the loose strap is removed or secured in a locker. I can help you do that now, and if you still disagree I will call my ride lead.", "min_score": 85},
+    ],
+    "weather_evacuation_confusion": [
+        {"id": "weather_bad", "label": "bad", "message": "Everybody run to shelter now and take the stairs.", "max_score": 55, "critical_miss": True},
+        {"id": "weather_partial", "label": "partial", "message": "Stay calm and go to shelter.", "min_score": 35, "max_score": 74},
+        {"id": "weather_passing", "label": "passing", "message": "Stay calm and follow me to the covered shelter route. We will use the stroller-accessible path and I will contact a lead if the route is blocked.", "min_score": 75, "max_score": 92},
+        {"id": "weather_excellent", "label": "excellent", "message": "Stay calm and follow me toward the covered shelter route. We will use the stroller-accessible path, and I will contact a lead if the route is blocked or weather risk changes.", "min_score": 85},
+    ],
 }
 
 
@@ -855,6 +942,91 @@ def staff_training_analytics(limit: int = 200) -> dict[str, Any]:
     }
 
 
+def staff_training_golden_eval() -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    scenario_summary: dict[str, dict[str, Any]] = {}
+    label_summary: dict[str, dict[str, Any]] = {}
+    for scenario_id, examples in STAFF_TRAINING_GOLDEN_RESPONSES.items():
+        scenario = SCENARIOS.get(scenario_id)
+        if not scenario:
+            continue
+        scenario_summary.setdefault(
+            scenario_id,
+            {"scenario_id": scenario_id, "title": scenario.get("title", scenario_id), "case_count": 0, "pass_count": 0, "fail_count": 0},
+        )
+        for example in examples:
+            label = str(example.get("label") or "unknown")
+            label_summary.setdefault(label, {"label": label, "case_count": 0, "pass_count": 0, "fail_count": 0})
+            score = _score_employee_message(scenario, str(example.get("message") or ""), 1)
+            overall = int(score.get("overall") or 0)
+            expected_min = example.get("min_score")
+            expected_max = example.get("max_score")
+            expected_critical = example.get("critical_miss")
+            failures: list[str] = []
+            if isinstance(expected_min, int) and overall < expected_min:
+                failures.append(f"overall {overall} below min {expected_min}")
+            if isinstance(expected_max, int) and overall > expected_max:
+                failures.append(f"overall {overall} above max {expected_max}")
+            if expected_critical is not None and bool(score.get("critical_miss")) != bool(expected_critical):
+                failures.append(f"critical_miss {bool(score.get('critical_miss'))} expected {bool(expected_critical)}")
+            expected_verdicts = {
+                "excellent": {"strong"},
+                "passing": {"passing", "strong"},
+                "partial": {"needs_coaching", "passing"},
+                "bad": {"critical_miss", "needs_coaching"},
+            }.get(label, set())
+            verdict = str((score.get("turn_coaching") or {}).get("verdict") or "")
+            if expected_verdicts and verdict not in expected_verdicts:
+                failures.append(f"verdict {verdict or 'missing'} not in {sorted(expected_verdicts)}")
+
+            passed = not failures
+            rows.append(
+                {
+                    "id": example.get("id"),
+                    "scenario_id": scenario_id,
+                    "scenario_title": scenario.get("title", scenario_id),
+                    "label": label,
+                    "status": "pass" if passed else "fail",
+                    "overall": overall,
+                    "expected_min": expected_min,
+                    "expected_max": expected_max,
+                    "verdict": verdict,
+                    "critical_miss": bool(score.get("critical_miss")),
+                    "failures": failures,
+                    "weak_dimensions": (score.get("turn_coaching") or {}).get("weak_dimensions", []),
+                    "message": str(example.get("message") or "")[:500],
+                }
+            )
+            scenario_summary[scenario_id]["case_count"] += 1
+            scenario_summary[scenario_id]["pass_count"] += 1 if passed else 0
+            scenario_summary[scenario_id]["fail_count"] += 0 if passed else 1
+            label_summary[label]["case_count"] += 1
+            label_summary[label]["pass_count"] += 1 if passed else 0
+            label_summary[label]["fail_count"] += 0 if passed else 1
+
+    fail_count = sum(1 for row in rows if row["status"] == "fail")
+    return {
+        "status": "pass" if fail_count == 0 else "fail",
+        "mode": "staff_roleplay_golden_eval",
+        "case_count": len(rows),
+        "pass_count": len(rows) - fail_count,
+        "fail_count": fail_count,
+        "scenario_count": len(scenario_summary),
+        "scenario_summary": sorted(scenario_summary.values(), key=lambda item: str(item.get("scenario_id") or "")),
+        "label_summary": sorted(label_summary.values(), key=lambda item: str(item.get("label") or "")),
+        "failures": [row for row in rows if row["status"] == "fail"],
+        "cases": rows,
+        "scoring_contract": {
+            "authority": "deterministic_policy_and_safety_rubric",
+            "llm_controls_score": False,
+            "golden_cases_source": "hand-authored staff-training calibration fixtures",
+        },
+        "boundary": "Golden eval validates simulated training scoring only; it does not dispatch live work or create actual reward labels.",
+        "uses_generated_data": True,
+        "feeds_actual_reward_model": False,
+    }
+
+
 def _normalize_staff_role(value: str | None) -> str:
     role = str(value or "guest_services").strip().lower().replace("-", "_").replace(" ", "_")
     return role if role in STAFF_ROLE_ASSIGNMENT_SCENARIOS else "guest_services"
@@ -1140,7 +1312,7 @@ def _score_employee_message(scenario: dict[str, Any], message: str, turn_count: 
         "policy_correctness": _scale(policy_hits, len(scenario.get("policy_keywords", []))),
         "escalation_decision": _scale(escalation_hits, len(scenario.get("escalation_keywords", []))),
         "clarity": max(1, min(5, 2 + sum(1 for term in _CLARITY_TERMS if term in text))),
-        "safety_awareness": _scale(safety_hits, len(scenario.get("safety_keywords", []))),
+        "safety_awareness": _scale(safety_hits, len(scenario.get("safety_keywords", [])), base=1 if scenario.get("difficulty") == "critical" else 2),
         "de_escalation": max(1, min(5, 2 + sum(1 for term in _DEESCALATION_TERMS if term in text))) if not rude else 1,
         "brand_tone": 4 if not rude else 1,
     }
@@ -1430,6 +1602,7 @@ def _generate_gemini_json_sync_hard_timeout(
         "prompt": prompt,
         "max_output_tokens": max_output_tokens,
         "temperature": temperature,
+        "timeout_seconds": timeout_seconds,
     }
     try:
         completed = subprocess.run(

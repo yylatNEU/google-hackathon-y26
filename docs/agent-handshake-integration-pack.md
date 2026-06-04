@@ -104,6 +104,8 @@ curl -X POST http://127.0.0.1:8001/api/park/agent-handshake/scenario-eval -H 'co
 curl -X POST http://127.0.0.1:8001/api/park/agent-handshake/policy-challenges -H 'content-type: application/json' -d '{}'
 curl -X POST http://127.0.0.1:8001/api/park/agent-handshake/verify-artifact -H 'content-type: application/json' -d '{"artifact": {...}, "expected_artifact_type":"agent_handshake_session_receipt"}'
 curl -X POST http://127.0.0.1:8001/api/park/agent-handshake/supply-chain/demo -H 'content-type: application/json' -d '{"scenario_mode":"cold_chain_incident"}'
+python3 scripts/external_supplier_agent_client.py --api http://127.0.0.1:8001 --scenario-mode cold_chain_incident
+python3 scripts/verify_agent_handshake_mongo_persistence.py --api http://127.0.0.1:8001 --scenario-mode cold_chain_incident
 ```
 
 `/api/park/agent-handshake/scenario-eval` creates a real handshake session for every scenario and judges identity, capability, intent, proposal, counterproposal, commit, monitor, commerce-boundary, queue-reroute, policy, and internal-handoff evidence. Scenario behavior can be overridden with a JSON catalog file via `PARKPULSE_AHP_SCENARIO_CATALOG=/path/to/catalog.json`.
@@ -217,6 +219,26 @@ Supported `scenario_mode` values:
 - `maintenance_parts_shortage`
 
 This endpoint creates a supplier-agent session, verifies supplier delegation scope, negotiates the supply-chain plan, probes procurement/safety gates, and returns a signed `agent_handshake_session_receipt`.
+
+The standalone interoperability proof is:
+
+```bash
+python3 scripts/external_supplier_agent_client.py \
+  --api http://127.0.0.1:8001 \
+  --scenario-mode cold_chain_incident
+```
+
+That script imports no ParkPulse backend modules. It behaves like an outside supplier agent by calling only HTTP endpoints: register, certify, verify credential, run supply-chain handshake, verify receipt, and summarize policy gates.
+
+Mongo persistence proof:
+
+```bash
+python3 scripts/verify_agent_handshake_mongo_persistence.py \
+  --api http://127.0.0.1:8001 \
+  --scenario-mode cold_chain_incident
+```
+
+That verifier runs a supplier-agent handshake through HTTP, verifies the signed receipt through HTTP, then checks MongoDB directly for the `agent_handshake_sessions` document and matching `agent_handshake_policy_events`. If Atlas access was fixed while the backend was already running, restart the API once so the process leaves fallback memory mode.
 
 Reusable negotiation primitives:
 

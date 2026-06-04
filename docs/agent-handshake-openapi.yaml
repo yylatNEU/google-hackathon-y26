@@ -2,11 +2,12 @@ openapi: 3.1.0
 info:
   title: ParkPulse Agent Handshake Protocol
   version: parkpulse-ahp-0.1
-  summary: Agent-native contract for personal guest agents negotiating with ParkPulse.
+  summary: Agent-native contract for guest and supplier agents negotiating with ParkPulse.
   description: >
-    ParkPulse AHP lets an outside personal agent prove delegated authority,
-    declare permission scope, negotiate a park visit plan, invoke internal park
-    agents, and receive deterministic judge scorecards for conformance.
+    ParkPulse AHP lets an outside guest or supplier agent prove delegated
+    authority, declare permission scope, negotiate with the ParkPulse operating
+    layer, invoke internal park agents, receive deterministic judge scorecards
+    for conformance, and verify signed protocol artifacts.
 servers:
   - url: http://127.0.0.1:8001
     description: Local ParkPulse backend
@@ -274,7 +275,7 @@ paths:
           $ref: "#/components/responses/NotFound"
   /api/park/agent-onboarding/{agent_id}/certify:
     post:
-      summary: Run conformance certification for an outside personal agent.
+      summary: Run conformance certification for an outside guest or supplier agent.
       operationId: certifyAgentOnboarding
       parameters:
         - name: agent_id
@@ -293,6 +294,10 @@ paths:
                   type: array
                   items:
                     type: string
+                scenario_mode:
+                  type: string
+                  enum: [supply_replenishment, cold_chain_incident, maintenance_parts_shortage]
+                  description: Supply-chain certification scenario. Ignored for guest-route certification.
       responses:
         "200":
           description: Certification result with approved or blocked status.
@@ -302,6 +307,137 @@ paths:
                 $ref: "#/components/schemas/AgentCertificationResponse"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/park/agent-handshake/scenarios:
+    get:
+      summary: Read the signed protocol scenario catalog.
+      operationId: getAgentHandshakeScenarios
+      responses:
+        "200":
+          description: Signed scenario catalog covering guest and supply-chain modes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScenarioCatalog"
+  /api/park/agent-handshake/scenario-eval:
+    get:
+      summary: Run all protocol scenario evaluations.
+      operationId: getAgentHandshakeScenarioEval
+      responses:
+        "200":
+          description: Scenario evaluation report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScenarioEvalReport"
+    post:
+      summary: Run selected protocol scenario evaluations.
+      operationId: runAgentHandshakeScenarioEval
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scenarios:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Scenario evaluation report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScenarioEvalReport"
+  /api/park/agent-handshake/policy-challenges:
+    get:
+      summary: Run default negative policy probes.
+      operationId: getAgentHandshakePolicyChallenges
+      responses:
+        "200":
+          description: Signed policy challenge report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyChallengeReport"
+    post:
+      summary: Run selected negative policy probes.
+      operationId: runAgentHandshakePolicyChallenges
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                actions:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Signed policy challenge report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyChallengeReport"
+  /api/park/agent-handshake/verify-artifact:
+    post:
+      summary: Verify a signed protocol artifact.
+      operationId: verifyAgentHandshakeArtifact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [artifact]
+              properties:
+                artifact:
+                  type: object
+                  additionalProperties: true
+                expected_artifact_type:
+                  type: string
+                  enum: [agent_contract, agent_handshake_scenario_catalog, agent_handshake_policy_challenges, agent_handshake_session_receipt]
+      responses:
+        "200":
+          description: Artifact verification result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolArtifactVerification"
+  /api/park/agent-handshake/supply-chain/demo:
+    get:
+      summary: Run the default supplier-agent handshake demo.
+      operationId: getSupplyChainHandshakeDemo
+      responses:
+        "200":
+          description: Completed supply-chain handshake with signed receipt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SupplyChainHandshakeDemo"
+    post:
+      summary: Run a supplier-agent handshake demo for a selected supply-chain scenario.
+      operationId: runSupplyChainHandshakeDemo
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scenario_mode:
+                  type: string
+                  enum: [supply_replenishment, cold_chain_incident, maintenance_parts_shortage]
+      responses:
+        "200":
+          description: Completed supply-chain handshake with signed receipt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SupplyChainHandshakeDemo"
   /api/park/handshake:
     post:
       summary: Verify client-agent identity and create a handshake session.
@@ -738,7 +874,8 @@ components:
             type: string
         use_case:
           type: string
-          example: guest_route_planning
+          enum: [guest_route_planning, supply_chain_coordination]
+          example: supply_chain_coordination
     AgentOnboardingResponse:
       type: object
       required: [status, agent]
@@ -777,7 +914,15 @@ components:
           description: Stable credential id. Matches certification_id in the MVP credential.
         approval:
           type: string
-          example: approved_for_guest_route_planning
+          enum: [approved_for_guest_route_planning, approved_for_supply_chain_coordination]
+          example: approved_for_supply_chain_coordination
+        use_case:
+          type: string
+          enum: [guest_route_planning, supply_chain_coordination]
+        required_cases:
+          type: array
+          items:
+            type: string
         scope:
           type: array
           items:
@@ -862,6 +1007,180 @@ components:
         revocation:
           type: object
           additionalProperties: true
+    ProtocolSignature:
+      type: object
+      required: [artifact_type, protocol_version, issuer, iat, alg, kid, sha256, sig]
+      additionalProperties: true
+      properties:
+        artifact_type:
+          type: string
+        protocol_version:
+          type: string
+          example: parkpulse-ahp-0.1
+        issuer:
+          type: string
+          example: parkpulse_agent_onboarding_authority
+        iat:
+          type: integer
+        alg:
+          type: string
+          example: EdDSA
+        kid:
+          type: string
+        sha256:
+          type: string
+        sig:
+          type: string
+    SignedProtocolArtifact:
+      type: object
+      required: [signature]
+      additionalProperties: true
+      properties:
+        signature:
+          $ref: "#/components/schemas/ProtocolSignature"
+    ProtocolArtifactVerification:
+      type: object
+      required: [status, mode, digest_status, signature_status, issuer_status, type_status]
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          enum: [verified, rejected]
+        mode:
+          type: string
+          example: agent_handshake_artifact_verification
+        artifact_type:
+          type: string
+        expected_artifact_type:
+          type: string
+        digest_status:
+          type: string
+          enum: [valid, invalid]
+        signature_status:
+          type: string
+          enum: [valid, invalid]
+        issuer_status:
+          type: string
+          enum: [trusted, untrusted]
+        type_status:
+          type: string
+          enum: [valid, invalid]
+        failures:
+          type: array
+          items:
+            type: string
+    ScenarioCatalog:
+      allOf:
+        - $ref: "#/components/schemas/SignedProtocolArtifact"
+        - type: object
+          required: [status, mode, protocol_version, scenario_count, scenarios]
+          properties:
+            status:
+              type: string
+              enum: [ready]
+            mode:
+              type: string
+              example: agent_handshake_scenario_catalog
+            protocol_version:
+              type: string
+            scenario_count:
+              type: integer
+            scenarios:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+    ScenarioEvalReport:
+      type: object
+      required: [status, mode, protocol_version, scenario_count, passed, average_score, results]
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          enum: [passed, failed]
+        mode:
+          type: string
+          example: agent_handshake_protocol_scenario_eval
+        protocol_version:
+          type: string
+        scenario_count:
+          type: integer
+        passed:
+          type: integer
+        average_score:
+          type: number
+        results:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    PolicyChallengeReport:
+      allOf:
+        - $ref: "#/components/schemas/SignedProtocolArtifact"
+        - type: object
+          required: [status, mode, protocol_version, session_id, challenge_count, passed, results]
+          properties:
+            status:
+              type: string
+              enum: [passed, failed]
+            mode:
+              type: string
+              example: agent_handshake_policy_challenges
+            protocol_version:
+              type: string
+            session_id:
+              type: string
+            challenge_count:
+              type: integer
+            passed:
+              type: integer
+            results:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+    SessionReceipt:
+      allOf:
+        - $ref: "#/components/schemas/SignedProtocolArtifact"
+        - type: object
+          required: [receipt_id, session_id, protocol_version, final_status]
+          properties:
+            receipt_id:
+              type: string
+            session_id:
+              type: string
+            protocol_version:
+              type: string
+            final_status:
+              type: string
+            accepted_plan:
+              type: object
+              additionalProperties: true
+            policy_gates_triggered:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+    SupplyChainHandshakeDemo:
+      type: object
+      required: [status, mode, scenario_mode, session_id, receipt, session]
+      additionalProperties: true
+      properties:
+        status:
+          type: string
+          enum: [demo_complete]
+        mode:
+          type: string
+          example: supply_chain_agent_handshake
+        scenario_mode:
+          type: string
+          enum: [supply_replenishment, cold_chain_incident, maintenance_parts_shortage]
+        session_id:
+          type: string
+        receipt:
+          $ref: "#/components/schemas/SessionReceipt"
+        session:
+          $ref: "#/components/schemas/HandshakeSession"
     DelegationProof:
       type: object
       additionalProperties: true

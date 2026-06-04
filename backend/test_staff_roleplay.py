@@ -81,6 +81,35 @@ def test_good_lost_child_response_passes_debrief(monkeypatch, tmp_path):
     assert finished["session"]["feeds_actual_reward_model"] is False
 
 
+def test_common_policy_correct_responses_clear_shadowing_threshold(monkeypatch, tmp_path):
+    reset_roleplay(monkeypatch, tmp_path)
+    examples = {
+        "angry_parent": (
+            "I am sorry this happened. I will listen, confirm what was communicated, show you the nearest open alternatives, "
+            "and bring Guest Services into any compensation review."
+        ),
+        "ride_closure_complaint": (
+            "I am sorry for the wait. I cannot promise a reopen time until clearance, but I can show open alternatives "
+            "and connect Guest Services for refund questions."
+        ),
+        "accessibility_accommodation": (
+            "I can help without asking for medical details. Let me get shade or seating and contact Accessibility or "
+            "Guest Services to confirm the accommodation route."
+        ),
+        "refund_request": (
+            "I understand. I cannot promise a refund myself, but I can collect the ticket details and bring Guest Services "
+            "or a supervisor into the policy review."
+        ),
+    }
+
+    for scenario_id, message in examples.items():
+        session = roleplay.start_staff_training_session(scenario_id, "Policy QA")
+        turn = roleplay.advance_staff_training_turn(session["id"], message)
+        assert turn["critical_miss"] is False
+        assert turn["turn_score"]["overall"] >= 75, (scenario_id, turn["turn_score"])
+        assert turn["turn_score"]["turn_coaching"]["verdict"] in {"passing", "strong"}
+
+
 def test_analytics_summarizes_finished_sessions_only(monkeypatch, tmp_path):
     reset_roleplay(monkeypatch, tmp_path)
     failed = roleplay.start_staff_training_session("heat_exhaustion_concern", "One")

@@ -155,6 +155,18 @@ type ExperienceDraft = {
   route: DraftStop[];
   messages: Array<{ channel: string; copy: string; owner?: string }>;
   productionNotes: string[];
+  reasoningTrace?: Array<{
+    step?: string;
+    summary?: string;
+    inputs?: Record<string, unknown>;
+  }>;
+  llmCreativePass?: {
+    status?: string;
+    routeAccepted?: boolean;
+    creativeRationale?: string[];
+    reviewQuestions?: string[];
+    guardrails?: string[];
+  };
   studioReview?: Array<{
     agentId?: string;
     agentName?: string;
@@ -179,6 +191,13 @@ type DraftPayload = {
   status?: string;
   mode?: string;
   draft?: ExperienceDraft;
+  llm?: {
+    status?: string;
+    error?: string;
+    mergeStatus?: string;
+    creative_rationale?: string[];
+    review_questions?: string[];
+  };
   venueExperienceData?: VenueDataPayload;
   sourceIntegrity?: {
     venueExperienceDataAttached?: boolean;
@@ -388,6 +407,7 @@ export function ExperienceStudio() {
   const [walkingPace, setWalkingPace] = useState(rainyDayDefaults.walkingPace);
   const [outputPackage, setOutputPackage] = useState(rainyDayDefaults.outputPackage);
   const [seasonalTheme, setSeasonalTheme] = useState(rainyDayDefaults.seasonalTheme);
+  const [useCreativeReasoning, setUseCreativeReasoning] = useState(true);
   const [draftPayload, setDraftPayload] = useState<DraftPayload | null>(null);
   const [savedDrafts, setSavedDrafts] = useState<SavedDraft[]>([]);
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
@@ -478,7 +498,8 @@ export function ExperienceStudio() {
           walkingPace,
           outputPackage,
           seasonalTheme,
-          useLlm: false,
+          useLlm: useCreativeReasoning,
+          useCreativeReasoning,
           useRealParkContext: false,
           useVenueExperienceData: true,
         }),
@@ -910,6 +931,20 @@ export function ExperienceStudio() {
                   </select>
                 </div>
               </div>
+              <label className="mt-3 flex items-start gap-3 rounded border border-slate-800 bg-[#151914] p-3">
+                <input
+                  type="checkbox"
+                  checked={useCreativeReasoning}
+                  onChange={(event) => setUseCreativeReasoning(event.target.checked)}
+                  className="mt-1 h-4 w-4 accent-cyan-300"
+                />
+                <span>
+                  <span className="block text-[10px] font-black uppercase tracking-widest text-cyan-200">LLM creative reasoning pass</span>
+                  <span className="mt-1 block text-xs leading-relaxed text-slate-500">
+                    Runs after verified route selection. The backend can polish copy and rationale, but it cannot change verified stops, source receipts, accessibility notes, or reviewer gates.
+                  </span>
+                </span>
+              </label>
               <label className="mt-3 block">
                 <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Constraints</span>
                 <textarea
@@ -988,6 +1023,36 @@ export function ExperienceStudio() {
                             <div className="mt-1 text-xs font-bold text-slate-200">{value ?? "not set"}</div>
                           </div>
                         ))}
+                      </div>
+                    ) : null}
+                    {draft.reasoningTrace?.length ? (
+                      <div className="mt-4 border-t border-slate-800 pt-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <div className="text-[10px] font-black uppercase tracking-widest text-cyan-200">Reasoning trace</div>
+                            <div className="mt-1 text-xs leading-relaxed text-slate-500">Deterministic grounding first, optional LLM polish second, gates re-run last.</div>
+                          </div>
+                          <div className={`rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${draftPayload?.llm?.status === "ready" ? "border-emerald-400/40 bg-emerald-950/25 text-emerald-100" : draftPayload?.llm?.status === "fallback" ? "border-amber-400/40 bg-amber-950/25 text-amber-100" : "border-slate-700 bg-[#0d1115] text-slate-400"}`}>
+                            LLM {draftPayload?.llm?.status ?? "not requested"}
+                          </div>
+                        </div>
+                        <div className="mt-3 grid gap-2">
+                          {draft.reasoningTrace.map((item, index) => (
+                            <div key={`${item.step}-${index}`} className="rounded border border-slate-800 bg-[#0d1115] p-3">
+                              <div className="text-xs font-black text-slate-100">{index + 1}. {formatStatus(item.step)}</div>
+                              <div className="mt-1 text-xs leading-relaxed text-slate-400">{item.summary}</div>
+                            </div>
+                          ))}
+                        </div>
+                        {draft.llmCreativePass ? (
+                          <div className="mt-3 rounded border border-slate-800 bg-[#0d1115] p-3">
+                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">LLM merge guard</div>
+                            <div className="mt-2 text-xs leading-relaxed text-slate-300">
+                              Status: {formatStatus(draft.llmCreativePass.status)} / route accepted: {draft.llmCreativePass.routeAccepted ? "yes" : "no"}
+                            </div>
+                            {draft.llmCreativePass.creativeRationale?.length ? <div className="mt-2 text-[11px] leading-relaxed text-slate-500">Rationale: {compactList(draft.llmCreativePass.creativeRationale, 3)}</div> : null}
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                     <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-3">
