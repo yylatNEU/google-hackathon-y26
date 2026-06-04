@@ -56,7 +56,7 @@ if gcloud scheduler jobs describe "$JOB_NAME" --project "$PROJECT_ID" --location
     --http-method GET \
     --oidc-service-account-email "$SCHEDULER_SA_EMAIL" \
     --oidc-token-audience "$SERVICE_URL" \
-    --headers "Accept=application/json" \
+    --update-headers "Accept=application/json" \
     --quiet
 else
   gcloud scheduler jobs create http "$JOB_NAME" \
