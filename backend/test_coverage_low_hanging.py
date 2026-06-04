@@ -185,7 +185,7 @@ def test_evaluator_loop_rest_success_http_error_and_summary(monkeypatch):
         def read(self):
             return b'{"pointwiseMetricResult":{"score":0.9}}'
 
-    monkeypatch.setattr(loop.urllib.request, "urlopen", lambda request, timeout: Response())
+    monkeypatch.setattr(loop.urllib.request, "urlopen", lambda request, timeout, context=None: Response())
     result = loop.run_vertex_rest_evaluation({"selected_action": {"id": "a"}})
     assert result["status"] == "completed"
     assert result["result"]["score"] == 0.9
@@ -193,11 +193,21 @@ def test_evaluator_loop_rest_success_http_error_and_summary(monkeypatch):
     class ErrorResponse(io.BytesIO):
         pass
 
-    def raise_http_error(_request, timeout):
+    def raise_http_error(_request, timeout, context=None):
         raise urllib.error.HTTPError("url", 429, "quota", {}, ErrorResponse(b"quota exceeded"))
 
     monkeypatch.setattr(loop.urllib.request, "urlopen", raise_http_error)
-    assert "HTTP 429" in loop.run_vertex_rest_evaluation({})["reason"]
+    quota_result = loop.run_vertex_rest_evaluation({})
+    assert quota_result["status"] == "quota_failed"
+    assert "HTTP 429" in quota_result["reason"]
+
+    def raise_ssl_error(_request, timeout, context=None):
+        raise urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+
+    monkeypatch.setattr(loop.urllib.request, "urlopen", raise_ssl_error)
+    ssl_result = loop.run_vertex_rest_evaluation({})
+    assert ssl_result["status"] == "ssl_failed"
+    assert ssl_result["failure_class"] == "ssl_failed"
 
     class BadTable:
         def to_dict(self, orient):
@@ -213,6 +223,51 @@ def test_evaluator_loop_rest_success_http_error_and_summary(monkeypatch):
     assert summary["result"]["metrics_table"].startswith(
         "<test_coverage_low_hanging.test_evaluator_loop_rest_success_http_error_and_summary.<locals>.BadTable object at "
     )
+
+
+def test_evaluator_loop_defers_hosted_eval_by_default(monkeypatch):
+    import evaluator_loop as loop
+
+    monkeypatch.setenv("ENABLE_VERTEX_GENAI_EVAL", "true")
+    monkeypatch.setenv("VERTEX_GENAI_EVALUATOR_ID", "eval-1")
+    monkeypatch.setenv("PARKPULSE_ENABLE_HOSTED_EVAL_TRIGGER", "true")
+    monkeypatch.delenv("PARKPULSE_HOSTED_EVAL_BLOCKING", raising=False)
+    monkeypatch.delenv("PARKPULSE_REQUIRE_STRICT_LIVE_GCP", raising=False)
+
+    called = {"count": 0}
+
+    def fake_vertex_eval(_payload):
+        called["count"] += 1
+        return {"status": "completed"}
+
+    monkeypatch.setattr(loop, "run_vertex_hosted_evaluation", fake_vertex_eval)
+    result = loop.build_hosted_evaluator_loop(
+        scenario_key="ride_down",
+        scorecard={"overall": 90, "status": "passed"},
+        dimension_scores={},
+        dimension_explanations={},
+        failure_reasons=[],
+        response_metrics={},
+        trace_artifact={},
+    )
+
+    assert result["status"] == "vertex_deferred"
+    assert result["trigger"]["blocking"] is False
+    assert called["count"] == 0
+
+    monkeypatch.setenv("PARKPULSE_REQUIRE_STRICT_LIVE_GCP", "true")
+    strict_result = loop.build_hosted_evaluator_loop(
+        scenario_key="ride_down",
+        scorecard={"overall": 90, "status": "passed"},
+        dimension_scores={},
+        dimension_explanations={},
+        failure_reasons=[],
+        response_metrics={},
+        trace_artifact={},
+    )
+    assert strict_result["status"] == "vertex_completed"
+    assert strict_result["trigger"]["blocking"] is True
+    assert called["count"] == 1
 
 
 def test_evaluator_loop_gcloud_metadata_and_payload_branches(monkeypatch):

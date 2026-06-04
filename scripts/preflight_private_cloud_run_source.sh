@@ -51,8 +51,8 @@ require_text "$DEPLOY_FILE" "PARKPULSE_ROLE_SESSION_ISSUER_KEY" "trusted role is
 require_text "$DEPLOY_FILE" "PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION" "strict signed-role mutation deploy env"
 require_text "$DEPLOY_FILE" "PARKPULSE_LIVE_FEED_STORAGE=\${PARKPULSE_LIVE_FEED_STORAGE:-mongodb}" "MongoDB live-feed deploy default"
 require_text "$DEPLOY_FILE" "scripts/verify_private_cloud_run_deploy.sh" "post-deploy verifier call"
-require_text "$VERIFY_FILE" "/api/park/auth/operator-session" "trusted role issuer live verification"
-require_text "$VERIFY_FILE" "/api/park/auth/audit" "Mongo-backed role audit live verification"
+require_text "$VERIFY_FILE" "sign_role_session" "signed role session live verification"
+require_text "$VERIFY_FILE" "/api/park/role-authorization-log" "role authorization log live verification"
 require_text "$ROLLBACK_FILE" "PARKPULSE_ROLE_SESSION_ISSUER_KEY" "rollback preflight trusted issuer guard"
 
 PYTHONPATH="${ROOT_DIR}/backend" python3 -m py_compile \

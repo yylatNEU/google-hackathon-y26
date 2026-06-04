@@ -16,8 +16,8 @@ from typing import Any
 from urllib.parse import parse_qs, unquote
 
 from env_bootstrap import load_backend_env
-from agent_role_skills import build_deliberate_role_eval_report, build_deliberate_role_negative_fixtures, build_real_deliberate_role_eval_report, evaluate_agent_role_trace, list_agent_role_skills, route_agent_role
-from agent_role_trace_samples import record_agent_role_trace_sample
+from agent_role_skills import build_agent_role_product_readiness_report, build_deliberate_role_eval_report, build_deliberate_role_negative_fixtures, build_real_deliberate_role_eval_report, evaluate_agent_role_trace, list_agent_role_skills, route_agent_role
+from agent_role_trace_samples import build_adversarial_sampled_role_trace_eval_report, record_agent_role_trace_sample
 from agent_handshake import (
     agent_contract,
     agent_handshake_scenario_catalog,
@@ -30,6 +30,7 @@ from agent_handshake import (
     commit_plan,
     counter_proposal,
     demo_handshake,
+    demo_supply_chain_handshake,
     escalate_session as escalate_agent_session,
     evaluate_policy_action,
     get_session as get_agent_session,
@@ -52,6 +53,7 @@ from agent_handshake import (
     session_protocol_receipt,
     upsert_agent_trust_partner,
     verify_agent_certification_credential,
+    verify_protocol_artifact,
 )
 from accessibility_journey import build_accessibility_journey, build_accessibility_scope
 from customer_park_knowledge import build_customer_public_data_feed, customer_venue_export_template, validate_customer_venue_export
@@ -439,6 +441,8 @@ def _api_capability_registry() -> dict[str, Any]:
                     "/api/park/agent-handshake/scenarios",
                     "/api/park/agent-handshake/scenario-eval",
                     "/api/park/agent-handshake/policy-challenges",
+                    "/api/park/agent-handshake/verify-artifact",
+                    "/api/park/agent-handshake/supply-chain/demo",
                     "/api/park/handshake",
                     "/api/park/session/{id}/capabilities",
                     "/api/park/session/{id}/intent",
@@ -7637,6 +7641,13 @@ async def _real_agent_role_eval_report() -> dict[str, Any]:
             },
         }
     )
+    customer_payload = _attach_role_work_contract(
+        customer_payload,
+        message="Where should my family go next with low waits and a calm route?",
+        route=customer_route,
+        role="customer",
+        scenario_key="customer_public",
+    )
     payloads = {
         "scan": await _agent_role_run_payload("scan vague guest complaints and worker taps for early crowd risk", "scan"),
         "react": await _agent_role_run_payload("food court is down and mobile orders are backing up near the west plaza", "auto"),
@@ -7646,11 +7657,19 @@ async def _real_agent_role_eval_report() -> dict[str, Any]:
     }
     report = build_real_deliberate_role_eval_report(payloads)
     report["negative_fixtures"] = build_deliberate_role_negative_fixtures()
+    report["adversarial_sampled"] = build_adversarial_sampled_role_trace_eval_report()
+    report["product_readiness"] = build_agent_role_product_readiness_report(
+        report,
+        synthetic_report=build_deliberate_role_eval_report(),
+        adversarial_report=report["adversarial_sampled"],
+        negative_report=report["negative_fixtures"],
+    )
     report["release_gate"] = {
-        "status": "passed" if report["status"] == "passed" and report["negative_fixtures"]["status"] == "passed" else "failed",
+        "status": "passed" if report["status"] == "passed" and report["negative_fixtures"]["status"] == "passed" and report["product_readiness"]["status"] == "passed" else "failed",
         "required": [
             "all real role traces pass deliberate eval",
             "negative fixtures are caught",
+            "each role passes product-readiness checks",
             "read-only roles have zero dispatch tools",
             "dispatch-capable roles include validate_policy",
         ],
@@ -7760,6 +7779,188 @@ def _role_tool_trace(
     }
     trace["deliberate_eval"] = evaluate_agent_role_trace(route, trace)
     return trace
+
+
+ROLE_WORK_DESCRIPTIONS = {
+    "scan": {
+        "role_description": "Read-only sensing layer that turns noisy park signals into a grounded risk picture before any operating action.",
+        "reasoning_steps": [
+            "Read vague observations and live state without mutating receivers.",
+            "Separate weak signals from confirmed incidents.",
+            "Name affected zones and confidence limits.",
+            "Choose monitor, proact, or react as the next role based on evidence strength.",
+            "Explain what extra signal would reduce uncertainty.",
+        ],
+        "boundary": "Scan cannot dispatch guest messages, worker tasks, equipment commands, or memory writes.",
+        "stop_conditions": ["confirmed incident requires React Agent", "weak but rising risk requires Proact Agent", "medical facts stay non-diagnostic"],
+    },
+    "react": {
+        "role_description": "Incident responder for confirmed operator requests that prepares bounded receiver payloads after policy and simulation checks.",
+        "reasoning_steps": [
+            "Interpret the concrete incident from operator text.",
+            "Read live state and similar incidents before choosing actions.",
+            "Compare at least one action path against a hold/escalate alternative.",
+            "Simulate likely guest, staff, and equipment impact.",
+            "Validate policy before dispatch and attach idempotent receiver receipts.",
+        ],
+        "boundary": "React can dispatch only bounded, policy-gated receiver payloads and cannot automate safety clearance, diagnosis, security detention, or evacuation authority.",
+        "stop_conditions": ["policy blocks action", "human approval is required", "receiver acknowledgement fails", "second nudge would create secondary congestion"],
+    },
+    "proact": {
+        "role_description": "Preventive operating role that detects weak signals, compares baseline vs action, emits reversible nudges, observes response, and writes learning.",
+        "reasoning_steps": [
+            "Fuse weak signals and prior incidents.",
+            "Forecast baseline risk versus preventive action.",
+            "Prefer reversible guest, staff, and equipment nudges.",
+            "Validate policy before dispatch.",
+            "Measure take rate/follow-through before writing learning.",
+        ],
+        "boundary": "Proact cannot turn weak medical/security hints into diagnosis or enforcement and cannot claim learning without observed response.",
+        "stop_conditions": ["forecast confidence is too low", "policy requires review", "Gemini/runtime fallback must be disclosed", "observed response is missing"],
+    },
+    "customer": {
+        "role_description": "Guest-facing support role that answers with public park facts, wait-aware routes, privacy-safe language, and customer-only handoff actions.",
+        "reasoning_steps": [
+            "Read public wait times and public route options.",
+            "Choose a family-safe recommendation with a backup.",
+            "Avoid internal operations, staff, policy, or private incident details.",
+            "Offer only show-route or send-to-phone actions.",
+            "Keep medical, compensation, and purchase authority out of scope.",
+        ],
+        "boundary": "Customer role is public-only and cannot dispatch operator actions, write memory, promise compensation, or expose internal policy details.",
+        "stop_conditions": ["question asks for medical/security action", "request needs private data", "guest asks for refund or purchase authority", "public route evidence is missing"],
+    },
+    "qa": {
+        "role_description": "Read-only production reliability auditor that inspects runtime readiness, failure modes, policy gates, receipts, observability, and go/no-go risk.",
+        "reasoning_steps": [
+            "Inspect runtime and dependency readiness.",
+            "Enumerate failure modes beyond happy-path behavior.",
+            "Verify policy gates before any dispatch-capable role.",
+            "Check delivery idempotency and acknowledgement coverage.",
+            "Check observability, fallback, load, and deployment conditions before go/no-go.",
+        ],
+        "boundary": "QA cannot dispatch, mutate memory, approve safety authority, or treat missing failure evidence as production readiness.",
+        "stop_conditions": ["policy bypass risk", "missing idempotency evidence", "missing observability", "load/fallback coverage is incomplete"],
+    },
+}
+
+
+def _compact_tool_evidence(trace: dict[str, Any]) -> list[str]:
+    evidence: list[str] = []
+    for call in trace.get("tool_calls", []) if isinstance(trace.get("tool_calls"), list) else []:
+        if not isinstance(call, dict):
+            continue
+        tool = str(call.get("tool") or "tool")
+        output = call.get("output") if isinstance(call.get("output"), dict) else {}
+        summary = output.get("summary") or output.get("trigger") or output.get("gate_status") or output.get("status") or "output recorded"
+        evidence.append(f"{tool}: {summary}")
+    return evidence[:8]
+
+
+def _role_output_evidence(role: str, payload: dict[str, Any]) -> list[str]:
+    if role == "scan":
+        scan = payload.get("scan", {}) if isinstance(payload.get("scan"), dict) else {}
+        signals = scan.get("signals", []) if isinstance(scan.get("signals"), list) else []
+        evidence = scan.get("evidence", []) if isinstance(scan.get("evidence"), list) else []
+        return [f"signals={len(signals)}", f"top_risk={scan.get('top_risk') or 'reported'}", *[str(item) for item in evidence[:3]]]
+    if role in {"react", "proact"}:
+        telemetry = payload.get("run_telemetry", {}) if isinstance(payload.get("run_telemetry"), dict) else {}
+        delivery = telemetry.get("delivery", {}) if isinstance(telemetry.get("delivery"), dict) else payload.get("delivery", {})
+        dispatches = delivery.get("dispatches", []) if isinstance(delivery, dict) and isinstance(delivery.get("dispatches"), list) else []
+        governance = telemetry.get("governance", {}) if isinstance(telemetry.get("governance"), dict) else payload.get("trace_contract", {}).get("policy_gate", {})
+        response = delivery.get("response", {}) if isinstance(delivery, dict) and isinstance(delivery.get("response"), dict) else {}
+        return [
+            f"dispatches={len(dispatches)}",
+            f"channels={','.join(sorted({str(item.get('channel')) for item in dispatches if isinstance(item, dict) and item.get('channel')})) or 'none'}",
+            f"policy={governance.get('gate_status') or governance.get('policy_gate') or governance.get('allowed')}",
+            f"take_rate={response.get('takeRate', 0)}",
+        ]
+    if role == "customer":
+        recommendation = payload.get("recommendation", {}) if isinstance(payload.get("recommendation"), dict) else {}
+        actions = payload.get("actions", []) if isinstance(payload.get("actions"), list) else []
+        return [f"primary={recommendation.get('primary') or 'public route'}", f"backup={recommendation.get('backup') or 'available'}", f"actions={','.join(str(item.get('id')) for item in actions if isinstance(item, dict))}"]
+    if role == "qa":
+        return [
+            f"failure_modes={len(payload.get('failure_mode_matrix', []) if isinstance(payload.get('failure_mode_matrix'), list) else [])}",
+            f"scenario_tests={len(payload.get('scenario_test_plan', []) if isinstance(payload.get('scenario_test_plan'), list) else [])}",
+            f"go_no_go={(payload.get('go_no_go_recommendation', {}) if isinstance(payload.get('go_no_go_recommendation'), dict) else {}).get('decision')}",
+            f"overall={payload.get('overall_score')}",
+        ]
+    return ["role output recorded"]
+
+
+def _role_specific_work(role: str, payload: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
+    if role == "scan":
+        scan = payload.get("scan", {}) if isinstance(payload.get("scan"), dict) else {}
+        return {
+            "uncertainty_disclosure": f"confidence={scan.get('confidence', 0)}; scan remains read-only until stronger evidence appears.",
+            "recommended_next_role_condition": payload.get("role_run", {}).get("recommended_next_role") or scan.get("recommended_next_role"),
+        }
+    if role == "react":
+        telemetry = payload.get("run_telemetry", {}) if isinstance(payload.get("run_telemetry"), dict) else {}
+        delivery = telemetry.get("delivery", {}) if isinstance(telemetry.get("delivery"), dict) else {}
+        dispatches = delivery.get("dispatches", []) if isinstance(delivery.get("dispatches"), list) else []
+        return {
+            "alternatives_considered": ["bounded receiver action", "hold and monitor", "manager approval"],
+            "rejected_actions": ["stale scenario copy", "safety authority automation"],
+            "receiver_channels": sorted({str(item.get("channel")) for item in dispatches if isinstance(item, dict) and item.get("channel")}),
+        }
+    if role == "proact":
+        response = (payload.get("delivery", {}) if isinstance(payload.get("delivery"), dict) else {}).get("response", {})
+        learning = payload.get("role_receipt", {}).get("learning_update", {}) if isinstance(payload.get("role_receipt"), dict) else {}
+        return {
+            "baseline_vs_action": "Compared weak-signal baseline against reversible preventive guest/staff/equipment action.",
+            "observed_response": response or payload.get("outcome", {}).get("response_metrics", {}),
+            "learning_rule": learning.get("lesson") or learning.get("next_plan_bias") or "Learning requires observed response before plan bias changes.",
+        }
+    if role == "customer":
+        return {
+            "public_data_sources": ["public_wait_times", "public_route_options", "customer_public_park_details"],
+            "privacy_boundary": "No staff, medical, internal policy, compensation, or private incident data exposed.",
+            "allowed_customer_actions": [str(item.get("id")) for item in payload.get("actions", []) if isinstance(item, dict)],
+        }
+    if role == "qa":
+        return {
+            "failure_modes_checked": [str(item.get("mode")) for item in payload.get("failure_mode_matrix", []) if isinstance(item, dict)][:8],
+            "observability_checks": payload.get("observability_checklist", [])[:8] if isinstance(payload.get("observability_checklist"), list) else [],
+            "idempotency_check": "delivery receipts and duplicate prevention are release criteria",
+        }
+    return {}
+
+
+def _attach_role_work_contract(payload: dict[str, Any], *, message: str, route: dict[str, Any], role: str, scenario_key: str) -> dict[str, Any]:
+    trace = payload.get("digital_twin_tools", {}) if isinstance(payload.get("digital_twin_tools"), dict) else {}
+    description = ROLE_WORK_DESCRIPTIONS.get(role, ROLE_WORK_DESCRIPTIONS["scan"])
+    required_tools = route.get("deliberate_tool_use", {}).get("required_sequence", []) if isinstance(route.get("deliberate_tool_use"), dict) else []
+    payload["role_work_contract"] = {
+        "mode": "role_work_contract",
+        "role": role,
+        "scenario_key": scenario_key,
+        "role_description": description["role_description"],
+        "mission": route.get("why") or description["role_description"],
+        "operator_input": message,
+        "input_evidence": _compact_tool_evidence(trace),
+        "reasoning_steps": description["reasoning_steps"],
+        "tool_rationale": [
+            {
+                "tool": str(tool),
+                "why": "Required by the role contract before the role can make or withhold an operating recommendation.",
+                "evidence": next((item for item in _compact_tool_evidence(trace) if item.startswith(f"{tool}:")), "tool output recorded"),
+            }
+            for tool in required_tools
+        ],
+        "output_evidence": _role_output_evidence(role, payload),
+        "boundary": description["boundary"],
+        "escalation_or_stop_conditions": description["stop_conditions"],
+        "success_criteria": [
+            "role output is grounded in tool evidence",
+            "role boundary is explicit",
+            "policy and receiver receipts are present when dispatch is possible",
+            "next action or escalation is clear",
+        ],
+        "role_specific_work": _role_specific_work(role, payload, trace),
+    }
+    return payload
 
 
 def _copy_jsonable(value: Any) -> Any:
@@ -8259,6 +8460,7 @@ def _scan_role_payload(message: str, mode: str, route: dict[str, Any]) -> dict[s
     trace = _role_tool_trace(route, selected_role="scan", scenario_key="scan", outputs=_role_tool_outputs_from_payload(payload, role="scan", scenario_key="scan"))
     payload["digital_twin_tools"] = trace
     payload["run_telemetry"]["digital_twin_tools"] = trace
+    payload = _attach_role_work_contract(payload, message=message, route=route, role="scan", scenario_key="scan")
     return payload
 
 
@@ -8317,6 +8519,7 @@ async def _react_role_payload(message: str, mode: str, route: dict[str, Any]) ->
     trace = _role_tool_trace(route, selected_role="react", scenario_key=scenario_key, outputs=_role_tool_outputs_from_payload(payload, role="react", scenario_key=scenario_key))
     run_telemetry["digital_twin_tools"] = trace
     payload["digital_twin_tools"] = trace
+    payload = _attach_role_work_contract(payload, message=message, route=route, role="react", scenario_key=scenario_key)
     return payload
 
 
@@ -8661,6 +8864,7 @@ async def _proact_role_payload(message: str, mode: str, route: dict[str, Any]) -
     payload = _persist_role_receipt(payload, role="proact", route=route, scenario_key="proactive_watchtower")
     trace = _role_tool_trace(route, selected_role="proact", scenario_key="proactive_watchtower", outputs=_role_tool_outputs_from_payload(payload, role="proact", scenario_key="proactive_watchtower"))
     payload["digital_twin_tools"] = trace
+    payload = _attach_role_work_contract(payload, message=message, route=route, role="proact", scenario_key="proactive_watchtower")
     return payload
 
 
@@ -8721,6 +8925,7 @@ async def _qa_role_payload(message: str, mode: str, route: dict[str, Any]) -> di
         "go_no_go": report.get("go_no_go_recommendation", {}),
         "read_only": True,
     }
+    report = _attach_role_work_contract(report, message=message, route=route, role="qa", scenario_key="production_reliability_qa")
     return report
 
 
@@ -8753,6 +8958,7 @@ async def _agent_role_run_payload(message: str, mode: str = "auto") -> dict[str,
                 "role_receipt": {"role": "customer", "skill": route.get("skill"), "scenario_key": "customer_public", "dispatch_ids": [], "read_only": True},
             }
         )
+        payload = _attach_role_work_contract(payload, message=message, route=route, role="customer", scenario_key="customer_public")
         return payload
     return _scan_role_payload(message, mode, route)
 
@@ -11759,6 +11965,11 @@ async def app(scope, receive, send):
         await _send_json(send, 200, run_agent_handshake_policy_challenges(request_payload))
         return
 
+    if method == "POST" and path == "/api/park/agent-handshake/verify-artifact":
+        request_payload = await _read_json_body(receive)
+        await _send_json(send, 200, verify_protocol_artifact(request_payload))
+        return
+
     if method == "POST" and path == "/api/park/delegation-token":
         await _send_json(send, 200, issue_delegation_token(await _read_json_body(receive)))
         return
@@ -11876,6 +12087,11 @@ async def app(scope, receive, send):
             await _send_json(send, 200, demo_handshake(await _fast_park_state_lite()))
         except Exception:
             await _send_json(send, 200, demo_handshake())
+        return
+
+    if method in {"GET", "POST"} and path == "/api/park/agent-handshake/supply-chain/demo":
+        request_payload = await _read_json_body(receive) if method == "POST" else {}
+        await _send_json(send, 200, demo_supply_chain_handshake(str(request_payload.get("scenario_mode") or request_payload.get("scenarioMode") or "supply_replenishment")))
         return
 
     if method == "POST" and path == "/api/park/handshake":
@@ -15612,6 +15828,9 @@ async def app(scope, receive, send):
         message = str(payload.get("message") or payload.get("command") or "Custom park operating request.").strip()
         mode = str(payload.get("mode") or "auto")
         execute = str(payload.get("execute", "true")).lower() not in {"0", "false", "no"}
+        capability = "dispatch_live_action" if execute else "read_ops_evidence"
+        if not await _authorize_or_send(send, scope, capability, "operator_command", payload, default_role="ops_team"):
+            return
         response_payload = await _build_operator_payload_with_runtime(message, mode, execute, "post_full_runtime")
         await _send_json(send, 200, response_payload)
         return

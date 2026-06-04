@@ -23,6 +23,53 @@ import org.springframework.stereotype.Service;
 @Service
 public class PythonFallbackProxyService {
     private static final Set<String> NO_BODY_METHODS = Set.of("GET", "HEAD", "DELETE", "OPTIONS");
+    private static final Set<OwnedRoute> SPRING_OWNED_ROUTES = Set.of(
+        new OwnedRoute("POST", "/api/park/auth/dev-session"),
+        new OwnedRoute("GET", "/api/park/auth/status"),
+        new OwnedRoute("GET", "/api/park/role-access-contracts"),
+        new OwnedRoute("GET", "/api/park/reliability"),
+        new OwnedRoute("GET", "/api/park/latency-diagnostics"),
+        new OwnedRoute("GET", "/api/park/authorization-audit"),
+        new OwnedRoute("GET", "/api/park/delivery/contract"),
+        new OwnedRoute("GET", "/api/park/delivery/outbox"),
+        new OwnedRoute("GET", "/api/park/delivery/gcp-adapters/status"),
+        new OwnedRoute("POST", "/api/park/delivery/guest-promotion"),
+        new OwnedRoute("POST", "/api/park/delivery/worker-notification"),
+        new OwnedRoute("POST", "/api/park/delivery/equipment-command"),
+        new OwnedRoute("POST", "/api/park/delivery/acknowledge"),
+        new OwnedRoute("POST", "/api/park/delivery/approval-decision"),
+        new OwnedRoute("POST", "/api/park/delegation-token"),
+        new OwnedRoute("GET", "/api/park/agent-onboarding/issuer"),
+        new OwnedRoute("POST", "/api/park/agent-onboarding/register"),
+        new OwnedRoute("POST", "/api/park/agent-onboarding/{agent_id}/certify"),
+        new OwnedRoute("POST", "/api/park/agent-onboarding/verify-credential"),
+        new OwnedRoute("GET", "/api/park/agent-onboarding/{agent_id}"),
+        new OwnedRoute("POST", "/api/park/agent-onboarding/revoke-credential"),
+        new OwnedRoute("GET", "/api/park/agent-trust/status"),
+        new OwnedRoute("GET", "/api/park/agent-trust/partners"),
+        new OwnedRoute("POST", "/api/park/agent-trust/partners"),
+        new OwnedRoute("GET", "/api/park/agent-trust/keys"),
+        new OwnedRoute("POST", "/api/park/agent-trust/keys/rotate"),
+        new OwnedRoute("GET", "/api/park/agent-trust/revocations"),
+        new OwnedRoute("GET", "/api/park/agent-trust/audit"),
+        new OwnedRoute("POST", "/api/park/handshake"),
+        new OwnedRoute("GET", "/api/park/session/{session_id}"),
+        new OwnedRoute("POST", "/api/park/session/{session_id}/capabilities"),
+        new OwnedRoute("POST", "/api/park/session/{session_id}/intent"),
+        new OwnedRoute("POST", "/api/park/session/{session_id}/propose"),
+        new OwnedRoute("POST", "/api/park/session/{session_id}/counter"),
+        new OwnedRoute("POST", "/api/park/session/{session_id}/commit"),
+        new OwnedRoute("GET", "/api/park/session/{session_id}/monitor"),
+        new OwnedRoute("POST", "/api/park/session/{session_id}/monitor"),
+        new OwnedRoute("GET", "/api/park/session/{session_id}/receipt"),
+        new OwnedRoute("POST", "/api/park/session/{session_id}/receipt"),
+        new OwnedRoute("POST", "/api/park/internal-agents/commerce/evaluate"),
+        new OwnedRoute("POST", "/api/park/internal-agents/queue/reroute"),
+        new OwnedRoute("GET", "/api/park/platform-store"),
+        new OwnedRoute("POST", "/api/park/platform-store/migrate"),
+        new OwnedRoute("GET", "/api/park/migration/java-spring/status"),
+        new OwnedRoute("GET", "/api/park/backend-gateway/status")
+    );
     private static final Set<String> HOP_BY_HOP_HEADERS = Set.of(
         "connection",
         "content-length",
@@ -59,6 +106,10 @@ public class PythonFallbackProxyService {
             HttpHeaders headers = corsHeaders();
             return ResponseEntity.status(HttpStatus.NO_CONTENT).headers(headers).body(new byte[0]);
         }
+        OwnedRoute ownedRoute = springOwnedRoute(request);
+        if (ownedRoute != null) {
+            return blockedSpringOwnedRoute(request, ownedRoute);
+        }
         byte[] requestBody = body == null ? new byte[0] : body;
         if (requestBody.length > maxRequestBodyBytes) {
             return payloadTooLarge(requestBody.length);
@@ -90,6 +141,7 @@ public class PythonFallbackProxyService {
         payload.put("max_request_body_bytes", maxRequestBodyBytes);
         payload.put("native_spring_routes", "health/readiness/platform-store authority routes");
         payload.put("fallback_routes", "/api/** and /readyz/deep while route groups migrate one at a time");
+        payload.put("spring_owned_route_gate", Map.of("status", "enforced", "route_count", SPRING_OWNED_ROUTES.size(), "behavior", "Spring-owned routes are blocked from Python fallback."));
         payload.put("uptime_ms", Instant.now().toEpochMilli() - startedAt.toEpochMilli());
         payload.put("rollback", "Point clients back at Python directly or stop Spring; no data copy is required.");
         return payload;
@@ -170,6 +222,54 @@ public class PythonFallbackProxyService {
             .body(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
+    private ResponseEntity<byte[]> blockedSpringOwnedRoute(HttpServletRequest request, OwnedRoute ownedRoute) {
+        String payload = """
+            {"status":"blocked","mode":"spring_owned_route_fallback_gate","route":"%s %s","matched_owned_route":"%s %s","reason":"Spring-owned routes must be served by native Spring handlers and cannot fall back to Python."}
+            """.formatted(
+                sanitize(request.getMethod()),
+                sanitize(request.getRequestURI()),
+                ownedRoute.method(),
+                ownedRoute.pattern()
+            );
+        HttpHeaders headers = corsHeaders();
+        headers.add(HttpHeaders.CONTENT_TYPE, "application/json");
+        headers.add("x-parkpulse-spring-gateway", "spring-owned-route-blocked");
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+            .headers(headers)
+            .body(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private OwnedRoute springOwnedRoute(HttpServletRequest request) {
+        String method = request.getMethod() == null ? "" : request.getMethod().toUpperCase(Locale.ROOT);
+        String path = request.getRequestURI();
+        return SPRING_OWNED_ROUTES.stream()
+            .filter(route -> route.method().equals(method))
+            .filter(route -> pathMatches(route.pattern(), path))
+            .findFirst()
+            .orElse(null);
+    }
+
+    private boolean pathMatches(String pattern, String path) {
+        String[] patternSegments = trimSlashes(pattern).split("/");
+        String[] pathSegments = trimSlashes(path).split("/");
+        if (patternSegments.length != pathSegments.length) {
+            return false;
+        }
+        for (int index = 0; index < patternSegments.length; index++) {
+            String patternSegment = patternSegments[index];
+            if (patternSegment.startsWith("{") && patternSegment.endsWith("}")) {
+                if (pathSegments[index].isBlank()) {
+                    return false;
+                }
+                continue;
+            }
+            if (!patternSegment.equals(pathSegments[index])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private HttpHeaders corsHeaders() {
         HttpHeaders headers = new HttpHeaders();
         headers.add("access-control-allow-origin", "*");
@@ -224,6 +324,10 @@ public class PythonFallbackProxyService {
         return value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
     }
 
+    private String trimSlashes(String value) {
+        return value.replaceAll("^/+|/+$", "");
+    }
+
     private String sanitize(String value) {
         return value == null ? "upstream request failed" : value.replace("\"", "'");
     }
@@ -231,4 +335,6 @@ public class PythonFallbackProxyService {
     private static LinkedHashMap<String, Object> orderedMap() {
         return new LinkedHashMap<>();
     }
+
+    private record OwnedRoute(String method, String pattern) {}
 }

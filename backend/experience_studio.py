@@ -93,6 +93,12 @@ STUDIO_LAYER_AGENTS = [
         "job": "Confirm whether an approved creative package is ready for handoff, while preserving no-publish authority.",
         "authority": "handoff_only",
     },
+    {
+        "id": "profile_intelligence_reviewer",
+        "name": "Profile Intelligence Reviewer",
+        "job": "Check source freshness, derived-path warnings, capacity assumptions, brand bible claims, and learning labels.",
+        "authority": "review_flag",
+    },
 ]
 _STORE_LOCK = threading.Lock()
 
@@ -392,6 +398,7 @@ def _handoff_package(record: dict[str, Any], payload: dict[str, Any]) -> dict[st
                         "guestCopy": item.get("guestCopy"),
                         "staffNote": item.get("staffNote"),
                         "accessibilityNote": item.get("accessibilityNote"),
+                        "profileIntelligenceNote": item.get("profileIntelligenceNote"),
                     }
                     for item in route
                     if isinstance(item, dict)
@@ -537,6 +544,11 @@ def _real_inputs(payload: dict[str, Any]) -> dict[str, Any]:
     channel_owners = raw.get("channelOwners") if isinstance(raw.get("channelOwners"), dict) else {}
     venue_identity = raw.get("venueIdentity") if isinstance(raw.get("venueIdentity"), dict) else {}
     location_details = raw.get("locationDetails") if isinstance(raw.get("locationDetails"), dict) else {}
+    profile_intelligence = raw.get("profileIntelligence") if isinstance(raw.get("profileIntelligence"), dict) else {}
+    guest_segments = raw.get("guestSegments") if isinstance(raw.get("guestSegments"), list) else []
+    spatial_model = raw.get("spatialModel") if isinstance(raw.get("spatialModel"), dict) else {}
+    agent_context = raw.get("agentContext") if isinstance(raw.get("agentContext"), dict) else {}
+    learning_context = raw.get("learningContext") if isinstance(raw.get("learningContext"), dict) else {}
     source = _text(raw.get("source"), "manual_brief")
     return {
         "venueIdentity": venue_identity,
@@ -548,9 +560,38 @@ def _real_inputs(payload: dict[str, Any]) -> dict[str, Any]:
         "safetyInstructions": safety,
         "channelOwners": {str(key): str(value) for key, value in channel_owners.items() if str(value or "").strip()},
         "locationDetails": {str(key): value for key, value in location_details.items() if isinstance(value, dict)},
+        "profileIntelligence": profile_intelligence,
+        "guestSegments": [item for item in guest_segments if isinstance(item, dict)],
+        "spatialModel": spatial_model,
+        "agentContext": agent_context,
+        "learningContext": learning_context,
         "source": source,
         "hasRealInputs": bool(locations or indoor or quiet or attractions or accessible or safety or channel_owners),
     }
+
+
+def _profile_intelligence(real_inputs: dict[str, Any]) -> dict[str, Any]:
+    return real_inputs.get("profileIntelligence") if isinstance(real_inputs.get("profileIntelligence"), dict) else {}
+
+
+def _experience_rules(real_inputs: dict[str, Any]) -> dict[str, Any]:
+    intelligence = _profile_intelligence(real_inputs)
+    return intelligence.get("experienceRules") if isinstance(intelligence.get("experienceRules"), dict) else {}
+
+
+def _rule_candidates(real_inputs: dict[str, Any], key: str) -> list[str]:
+    value = _experience_rules(real_inputs).get(key)
+    return _as_text_list(value)
+
+
+def _names_for_zones(real_inputs: dict[str, Any], zone_ids: list[str]) -> list[str]:
+    details = real_inputs.get("locationDetails", {}) if isinstance(real_inputs.get("locationDetails"), dict) else {}
+    names: list[str] = []
+    zones = {str(zone_id) for zone_id in zone_ids if str(zone_id).strip()}
+    for name, detail in details.items():
+        if isinstance(detail, dict) and str(detail.get("zoneId") or "") in zones:
+            names.append(str(name))
+    return names
 
 
 def _route_from_real_inputs(template_id: str, template: dict[str, Any], real_inputs: dict[str, Any]) -> list[str]:
@@ -561,7 +602,8 @@ def _route_from_real_inputs(template_id: str, template: dict[str, Any], real_inp
     attractions = list(real_inputs.get("attractionLocations", []))
     safety = list(real_inputs.get("safetyInstructions", []))
     if template_id == "rainy-day":
-        candidates = indoor + quiet + locations
+        rule_zones = _rule_candidates(real_inputs, "rainyDayAnchors")
+        candidates = _names_for_zones(real_inputs, rule_zones) + indoor + quiet + locations
     elif template_id == "low-sensory":
         candidates = quiet + indoor + locations
     elif template_id == "safety-signage":
@@ -569,10 +611,14 @@ def _route_from_real_inputs(template_id: str, template: dict[str, Any], real_inp
     elif template_id == "attraction-copy":
         candidates = attractions + locations
     elif template_id == "vip-tour":
-        candidates = ["Front Gate"] + attractions + quiet + locations
+        candidates = _rule_candidates(real_inputs, "vipRouteAnchors") + ["Front Gate"] + attractions + quiet + locations
+    elif template_id == "kid-quest":
+        candidates = _rule_candidates(real_inputs, "kidFriendlyAnchors") + locations + indoor + quiet
+    elif template_id in {"halloween-route", "scavenger-hunt"}:
+        candidates = _rule_candidates(real_inputs, "halloweenCandidateLocations") + locations + indoor + quiet
     else:
         candidates = locations + indoor + quiet
-    result = candidates[: len(placeholders)]
+    result = list(dict.fromkeys(candidates))[: len(placeholders)]
     return result + placeholders[len(result) :]
 
 
@@ -687,7 +733,106 @@ def _accessibility_for_stop(template_id: str, detail: dict[str, Any], real_input
     return "Check path width, shade, seating, and step-free access before publishing."
 
 
-def _make_stop(template_id: str, stop: str, index: int, audience: str, tone: str, context_hint: str, real_inputs: dict[str, Any]) -> dict[str, str]:
+def _brand_bible(real_inputs: dict[str, Any]) -> dict[str, Any]:
+    intelligence = _profile_intelligence(real_inputs)
+    return intelligence.get("brandBible") if isinstance(intelligence.get("brandBible"), dict) else {}
+
+
+def _module_policy(real_inputs: dict[str, Any], module_id: str) -> dict[str, Any]:
+    intelligence = _profile_intelligence(real_inputs)
+    policies = intelligence.get("modulePolicy") if isinstance(intelligence.get("modulePolicy"), dict) else {}
+    return policies.get(module_id) if isinstance(policies.get(module_id), dict) else {}
+
+
+def _stop_intelligence_note(template_id: str, detail: dict[str, Any], real_inputs: dict[str, Any]) -> str:
+    intelligence = _profile_intelligence(real_inputs)
+    rules = _experience_rules(real_inputs)
+    zone_id = str(detail.get("zoneId") or "")
+    quality_gaps = [str(item) for item in intelligence.get("qualityGaps", []) if str(item).strip()] if isinstance(intelligence.get("qualityGaps"), list) else []
+    parts = []
+    if zone_id and zone_id in set(_as_text_list(rules.get("rainyDayAnchors"))):
+        parts.append("rainy-day anchor")
+    if detail.get("name") in set(_as_text_list(rules.get("kidFriendlyAnchors"))):
+        parts.append("kid-friendly anchor")
+    if detail.get("name") in set(_as_text_list(rules.get("vipRouteAnchors"))):
+        parts.append("VIP route anchor")
+    if template_id == "low-sensory" and quality_gaps:
+        parts.append("confirm derived path and capacity assumptions before publishing")
+    return "; ".join(parts)
+
+
+def _creative_brief(payload: dict[str, Any], template_id: str) -> dict[str, str]:
+    defaults = {
+        "halloween-route": {
+            "creativeDirection": "story-rich",
+            "storyArc": "Invitation -> clue -> reveal -> choice -> finale",
+            "sensoryLevel": "balanced",
+            "walkingPace": "moderate",
+            "outputPackage": "full package",
+            "seasonalTheme": "family-safe Halloween mystery",
+        },
+        "rainy-day": {
+            "creativeDirection": "comfort-first",
+            "storyArc": "Arrival reset -> dry discovery -> warm pause -> flexible choice -> covered close",
+            "sensoryLevel": "low",
+            "walkingPace": "compact",
+            "outputPackage": "full package",
+            "seasonalTheme": "rainy-day comfort route",
+        },
+        "low-sensory": {
+            "creativeDirection": "comfort-first",
+            "storyArc": "Orient -> quiet move -> reset -> optional delight -> easy return",
+            "sensoryLevel": "low",
+            "walkingPace": "compact",
+            "outputPackage": "route storyboard",
+            "seasonalTheme": "predictable low-sensory path",
+        },
+        "kid-quest": {
+            "creativeDirection": "playful mission",
+            "storyArc": "Mission start -> clue -> discovery -> reward -> celebration",
+            "sensoryLevel": "balanced",
+            "walkingPace": "moderate",
+            "outputPackage": "full package",
+            "seasonalTheme": "kid-friendly quest",
+        },
+        "vip-tour": {
+            "creativeDirection": "premium host-led",
+            "storyArc": "Welcome -> insider reveal -> signature moment -> relaxed pause -> closing keepsake",
+            "sensoryLevel": "balanced",
+            "walkingPace": "exploratory",
+            "outputPackage": "host script",
+            "seasonalTheme": "VIP hosted route",
+        },
+    }
+    base = defaults.get(template_id, {
+        "creativeDirection": "story-rich",
+        "storyArc": "Hook -> discovery -> transition -> payoff -> close",
+        "sensoryLevel": "balanced",
+        "walkingPace": "moderate",
+        "outputPackage": "full package",
+        "seasonalTheme": "park experience",
+    })
+    return {
+        key: _text(payload.get(key), fallback)
+        for key, fallback in base.items()
+    }
+
+
+def _story_stage(creative_brief: dict[str, str], index: int) -> str:
+    arc = creative_brief.get("storyArc") or ""
+    separators = ["->", ">", "|", ","]
+    beats = [arc]
+    for separator in separators:
+        if separator in arc:
+            beats = arc.split(separator)
+            break
+    cleaned = [beat.strip() for beat in beats if beat.strip()]
+    if not cleaned:
+        return f"Beat {index + 1}"
+    return cleaned[min(index, len(cleaned) - 1)]
+
+
+def _make_stop(template_id: str, stop: str, index: int, audience: str, tone: str, context_hint: str, real_inputs: dict[str, Any], creative_brief: dict[str, str]) -> dict[str, str]:
     step = index + 1
     needs_real_location = "needed" in stop.lower()
     source = str(real_inputs.get("source") or "manual_brief")
@@ -696,6 +841,11 @@ def _make_stop(template_id: str, stop: str, index: int, audience: str, tone: str
     detail = _detail_for_stop(real_inputs, stop)
     detail_phrase = _detail_phrase(detail)
     sensory_note = _text(detail.get("sensoryNote"), "")
+    intelligence_note = _stop_intelligence_note(template_id, detail, real_inputs)
+    stage = _story_stage(creative_brief, index)
+    direction = creative_brief.get("creativeDirection", "story-rich")
+    pace = creative_brief.get("walkingPace", "moderate")
+    sensory_level = creative_brief.get("sensoryLevel", "balanced")
     if template_id == "safety-signage":
         instruction_location, _, instruction = stop.partition(":")
         safety_copy = instruction.strip() or "Follow the posted instruction and ask a team member if you need help."
@@ -705,35 +855,38 @@ def _make_stop(template_id: str, stop: str, index: int, audience: str, tone: str
             "guestCopy": "Draft copy is blocked until the real safety instruction and location are provided." if needs_real_location else safety_copy,
             "staffNote": "Do not publish this message until the real operating instruction is supplied and approved." if needs_real_location else f"Confirm this wording matches the approved instruction source for {venue_name}.",
             "accessibilityNote": "Keep the final message readable at distance and pair it with a simple icon in production.",
+            "profileIntelligenceNote": "Safety/signage copy must follow module policy and source freshness rules.",
             "source": "missing_real_input" if needs_real_location else source,
         }
     if template_id == "attraction-copy":
         return {
             "stop": stop,
             "purpose": "Set expectations before the guest chooses the attraction.",
-            "guestCopy": "Draft copy is blocked until the real attraction facts are provided." if needs_real_location else f"{stop} is a {tone} fit for {audience}. {detail_phrase or 'Use the approved attraction facts to set expectations.'}",
+            "guestCopy": "Draft copy is blocked until the real attraction facts are provided." if needs_real_location else f"{stop} gives {audience} a {direction} moment with {tone} wording. {detail_phrase or 'Use the approved attraction facts to set expectations.'}",
             "staffNote": "Confirm the final description against current operating limits before publishing.",
             "accessibilityNote": _accessibility_for_stop(template_id, detail, real_inputs),
+            "profileIntelligenceNote": intelligence_note or "Use approved profile facts only; do not add availability claims.",
             "source": "missing_real_input" if needs_real_location else source,
         }
     if template_id == "rainy-day":
-        guest_copy = f"{step}. {stop}: keep the journey comfortable and weather-safe for {audience}. {detail_phrase}"
+        guest_copy = f"{step}. {stage} at {stop}: invite {audience} into a dry, {tone} reset with a {pace} pace. {detail_phrase}"
     elif template_id == "low-sensory":
-        guest_copy = f"{step}. {stop}: offer a predictable, lower-stimulation pause for {audience}. {sensory_note or detail_phrase}"
+        guest_copy = f"{step}. {stage} at {stop}: keep the beat predictable, quiet, and easy to leave. {sensory_note or detail_phrase}"
     elif template_id == "kid-quest":
-        guest_copy = f"{step}. {stop}: give kids a small discovery beat, then point caregivers to the next visible landmark."
+        guest_copy = f"{step}. {stage} at {stop}: give kids a clear mission beat, one visible thing to find, and a tiny win before the next landmark."
     elif template_id == "scavenger-hunt":
-        guest_copy = f"{step}. {stop}: place a visual clue that can be solved without blocking the path."
+        guest_copy = f"{step}. {stage} at {stop}: place a visual clue guests can solve while moving, then let the answer pull them toward the next reveal."
     elif template_id == "vip-tour":
-        guest_copy = f"{step}. {stop}: make this feel hosted and flexible, with a graceful alternate if the stop is unavailable."
+        guest_copy = f"{step}. {stage} at {stop}: give the host one insider detail, one graceful pause, and one alternate if the moment needs to flex."
     else:
-        guest_copy = f"{step}. {stop}: follow the {tone} cue toward the next moment. {context_hint}"
+        guest_copy = f"{step}. {stage} at {stop}: follow the {tone} cue toward the next {direction} moment. {context_hint}"
     return {
         "stop": stop,
-        "purpose": "Open the story and set expectations." if step == 1 else "Close with a memorable finish." if step == 5 else "Move guests forward with a clear emotional beat.",
+        "purpose": f"{stage}: shape a {direction} beat at {sensory_level} sensory level.",
         "guestCopy": f"{step}. Real location required before guest copy can be finalized. Intended tone: {tone}. {context_hint}" if needs_real_location else guest_copy.strip(),
         "staffNote": "Do not stage staff from this draft until the real location and owner are supplied." if needs_real_location else "Welcome guests, name the journey, and confirm the route is optional." if step == 1 else "Keep the handoff short and point guests toward the next visual landmark.",
         "accessibilityNote": "Real route accessibility facts are required before approval." if needs_real_location else _accessibility_for_stop(template_id, detail, real_inputs),
+        "profileIntelligenceNote": "Real profile intelligence required before this stop can be finalized." if needs_real_location else intelligence_note or "Follow module policy; avoid live availability, staffing, safety, and access-lane claims.",
         "source": "missing_real_input" if needs_real_location else source,
     }
 
@@ -747,21 +900,28 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
     real_inputs = _real_inputs(payload)
     context = _park_context(state)
     context_hint = f"Caller-supplied context: {'; '.join(context['facts'])}." if context["facts"] else "No park facts are attached; do not infer locations, wait times, weather, staffing, or availability."
+    creative_brief = _creative_brief(payload, template_id)
     route_names = _route_from_real_inputs(template_id, template, real_inputs)
-    route = [_make_stop(template_id, stop, index, audience, tone, context_hint, real_inputs) for index, stop in enumerate(route_names)]
+    route = [_make_stop(template_id, stop, index, audience, tone, context_hint, real_inputs, creative_brief) for index, stop in enumerate(route_names)]
     first_stop = route[0]["stop"] if route and "needed" not in str(route[0].get("stop") or "").lower() else "the verified start location"
     venue = real_inputs.get("venueIdentity", {}) if isinstance(real_inputs.get("venueIdentity"), dict) else {}
     venue_name = _text(venue.get("name"), "the venue")
     profile_type = _text(venue.get("profileType"), "venue_export")
+    intelligence = _profile_intelligence(real_inputs)
+    brand_bible = _brand_bible(real_inputs)
+    studio_policy = _module_policy(real_inputs, "experience_studio")
+    learning_schema = intelligence.get("learningSchema") if isinstance(intelligence.get("learningSchema"), dict) else {}
+    quality_gaps = [str(item) for item in intelligence.get("qualityGaps", []) if str(item).strip()] if isinstance(intelligence.get("qualityGaps"), list) else []
+    coverage = intelligence.get("coverage") if isinstance(intelligence.get("coverage"), dict) else {}
     messages = [
         {
             "channel": "Guest app",
-            "copy": f"{template['shortLabel']} at {venue_name}: a {tone} experience for {audience}. Start at {first_stop} and follow the posted prompts.",
+            "copy": f"{template['shortLabel']} at {venue_name}: a {creative_brief['creativeDirection']} experience for {audience}. Start at {first_stop}, follow the posted prompts, and move at a {creative_brief['walkingPace']} pace.",
             "owner": real_inputs.get("channelOwners", {}).get("guest_app") or "real owner needed",
         },
         {
             "channel": "Signage",
-            "copy": f"{template['shortLabel']} begins here. Follow the next marker, ask a team member for the accessible option, and move at your own pace.",
+            "copy": f"{template['shortLabel']} begins here. Follow the next marker, ask a team member for the accessible option, and keep the journey {creative_brief['sensoryLevel']} and optional.",
             "owner": real_inputs.get("channelOwners", {}).get("signage") or "real owner needed",
         },
         {
@@ -771,7 +931,7 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
         },
         {
             "channel": "Staff cue",
-            "copy": f"Position team members at the first and final stops. Use the guest-facing phrase consistently and flag constraints: {constraints}.",
+            "copy": f"Use the {creative_brief['storyArc']} arc. Position team members at the first and final stops. Use the guest-facing phrase consistently and flag constraints: {constraints}.",
             "owner": real_inputs.get("channelOwners", {}).get("staff_cue") or "real owner needed",
         },
     ]
@@ -780,6 +940,11 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
         "title": template["label"],
         "audience": audience,
         "intent": template["intent"],
+        "creativeBrief": {
+            **creative_brief,
+            "tone": tone,
+            "constraints": constraints,
+        },
         "route": route,
         "messages": messages,
         "review": [
@@ -791,9 +956,27 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
         "productionNotes": [
             f"Venue profile: {venue_name} ({profile_type}). Source: {real_inputs.get('source')}.",
             f"Constraint brief: {constraints}.",
+            f"Profile intelligence source: {intelligence.get('source', 'not connected')}; path records {coverage.get('certifiedPaths', 0)}, capacity zones {coverage.get('capacityZones', 0)}, source ledger rows {coverage.get('fieldSourceRows', 0)}.",
+            f"Brand rules: tone {', '.join(str(item) for item in brand_bible.get('tone', [])[:4]) if isinstance(brand_bible.get('tone'), list) else 'not connected'}; banned claims {', '.join(str(item) for item in brand_bible.get('bannedClaims', [])[:5]) if isinstance(brand_bible.get('bannedClaims'), list) else 'not connected'}.",
             "Validate final route against open attractions, blocked paths, lighting, sound levels, and crowd-control requirements.",
             "Send operational instructions to Command Center review before they become live guest-facing actions.",
         ],
+        "profileIntelligence": {
+            "source": intelligence.get("source") or "not_connected",
+            "coverage": coverage,
+            "qualityGaps": quality_gaps,
+            "experienceStudioPolicy": {
+                "mayDraft": studio_policy.get("mayDraft", []),
+                "mustReview": studio_policy.get("mustReview", []),
+                "neverClaim": studio_policy.get("neverClaim", []),
+            },
+            "brandBible": {
+                "tone": brand_bible.get("tone", []),
+                "bannedClaims": brand_bible.get("bannedClaims", []),
+                "supportedLocales": brand_bible.get("supportedLocales", []),
+            },
+            "learningLabels": learning_schema.get("feedbackLabels", []) if isinstance(learning_schema.get("feedbackLabels"), list) else [],
+        },
         "sourceIntegrity": {
             "usesSeedData": False,
             "usesSimulatedParkState": False,
@@ -801,18 +984,28 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
             "parkContextSource": context.get("source"),
             "realInputSource": real_inputs.get("source"),
             "realInputCount": len(real_inputs.get("locations", [])) + len(real_inputs.get("indoorLocations", [])) + len(real_inputs.get("quietLocations", [])) + len(real_inputs.get("accessibleRoutes", [])) + len(real_inputs.get("safetyInstructions", [])),
+            "profileIntelligenceAttached": bool(intelligence),
+            "profileIntelligenceQualityGaps": quality_gaps,
             "missingRealInputs": missing_inputs,
             "readyForHandoff": not missing_inputs and not _has_unresolved_placeholders({"route": route}),
         },
     }
-    draft["studioReview"] = _studio_review(template_id, draft, constraints)
+    draft["studioReview"] = _studio_review(template_id, draft, constraints, real_inputs)
     return draft
 
 
-def _studio_review(template_id: str, draft: dict[str, Any], constraints: str) -> list[dict[str, str]]:
+def _studio_review(template_id: str, draft: dict[str, Any], constraints: str, real_inputs: dict[str, Any]) -> list[dict[str, str]]:
     text = json.dumps(draft, default=str).lower()
     movement_terms = any(term in text for term in ["route", "follow", "shelter", "line", "boarding", "move"])
     sensory_terms = any(term in text for term in ["quiet", "sensory", "noise", "lighting", "audio", "calm"])
+    intelligence = _profile_intelligence(real_inputs)
+    brand_bible = _brand_bible(real_inputs)
+    policy = _module_policy(real_inputs, "experience_studio")
+    banned_claims = [str(item).lower() for item in brand_bible.get("bannedClaims", []) if str(item).strip()] if isinstance(brand_bible.get("bannedClaims"), list) else []
+    quality_gaps = intelligence.get("qualityGaps") if isinstance(intelligence.get("qualityGaps"), list) else []
+    policy_must_review = policy.get("mustReview") if isinstance(policy.get("mustReview"), list) else []
+    policy_never_claim = policy.get("neverClaim") if isinstance(policy.get("neverClaim"), list) else []
+    banned_hit = next((claim for claim in banned_claims if claim and claim in text), "")
     return [
         {
             "agentId": "experience_design_assistant",
@@ -824,23 +1017,30 @@ def _studio_review(template_id: str, draft: dict[str, Any], constraints: str) ->
         {
             "agentId": "brand_voice_reviewer",
             "agentName": "Brand/Voice Reviewer",
-            "status": "review" if any(term in text for term in ["graphic", "mean", "scary"]) else "clear",
-            "finding": f"Tone and audience are explicit; review against seasonal brand voice and constraints: {constraints}.",
-            "nextStep": "Confirm final adjectives, character voice, and age fit before approval.",
+            "status": "review" if banned_hit or any(term in text for term in ["graphic", "mean", "scary"]) else "clear",
+            "finding": f"Tone and audience are explicit; brand bible banned-claim check {'flagged ' + banned_hit if banned_hit else 'passed'}. Constraints: {constraints}.",
+            "nextStep": "Confirm final adjectives, character voice, age fit, and banned-claim avoidance before approval.",
         },
         {
             "agentId": "accessibility_reviewer",
             "agentName": "Accessibility Reviewer",
-            "status": "clear" if template_id == "low-sensory" or sensory_terms else "review",
-            "finding": "Accessibility notes are present, but physical path assumptions still need map verification.",
-            "nextStep": "Verify grade, seating, shade, step-free alternatives, audio, lighting, and decompression points.",
+            "status": "review" if quality_gaps else "clear" if template_id == "low-sensory" or sensory_terms else "review",
+            "finding": "Accessibility notes are present; profile intelligence quality gaps require review." if quality_gaps else "Accessibility notes are present and no profile intelligence quality gaps were returned.",
+            "nextStep": "Verify grade, seating, shade, step-free alternatives, audio, lighting, decompression points, and any derived path assumptions.",
         },
         {
             "agentId": "safety_messaging_reviewer",
             "agentName": "Safety Messaging Reviewer",
             "status": "review" if movement_terms or template_id in {"safety-signage", "rainy-day"} else "clear",
-            "finding": "Some guest copy may influence movement or safety behavior.",
-            "nextStep": "Send movement, shelter, boarding, or safety instructions to Command Center review before publishing.",
+            "finding": f"Some guest copy may influence movement or safety behavior. Module policy must-review items: {', '.join(str(item) for item in policy_must_review[:3]) or 'not connected'}.",
+            "nextStep": "Send movement, shelter, boarding, safety, accessibility, allergy, staffing, or availability claims to Command Center review before publishing.",
+        },
+        {
+            "agentId": "profile_intelligence_reviewer",
+            "agentName": "Profile Intelligence Reviewer",
+            "status": "review" if quality_gaps else "clear",
+            "finding": f"Profile intelligence attached with {len(quality_gaps)} quality gap(s). Never-claim policy: {', '.join(str(item) for item in policy_never_claim[:3]) or 'not connected'}.",
+            "nextStep": "Replace derived path, capacity, and timing assumptions with venue-owned feeds when available.",
         },
         {
             "agentId": "publish_readiness_checker",

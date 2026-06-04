@@ -19,9 +19,11 @@ def _truthy(value: str | None) -> bool:
 def _gemini_rest_available() -> bool:
     if _truthy(os.getenv("PARKPULSE_DISABLE_GEMINI_REST_FAST_PATH")):
         return False
+    if _truthy(os.getenv("GOOGLE_GENAI_USE_VERTEXAI")):
+        return False
     if os.getenv("GEMINI_API_KEY"):
         return True
-    return bool(os.getenv("GOOGLE_API_KEY")) and not _truthy(os.getenv("GOOGLE_GENAI_USE_VERTEXAI"))
+    return bool(os.getenv("GOOGLE_API_KEY"))
 
 
 def _generate_gemini_json_rest_sync(

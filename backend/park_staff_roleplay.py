@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -267,6 +270,19 @@ SCENARIOS: dict[str, dict[str, Any]] = {
     },
 }
 
+NEXT_RESPONSE_TEMPLATES = {
+    "angry_parent": "I am sorry your child was sent to a closed ride. I am going to confirm what happened, give you the best open nearby option now, and bring Guest Services or a supervisor into any compensation review.",
+    "lost_child_report": "I am sorry. We are going to help right now. Please stay with me at this meeting point while I radio Security and Operations. What is your child's name, age, what are they wearing, and where were they last seen?",
+    "ride_closure_complaint": "I am sorry you waited without a clear update. I cannot promise a reopen time until the ride is cleared, but I can show you current open alternatives and connect you with Guest Services for any refund or compensation question.",
+    "accessibility_accommodation": "You do not need to explain medical details here. I can help your father get shade or seating and contact Accessibility or Guest Services to confirm the right route or accommodation.",
+    "language_barrier": "I can help. Please stay here with me. I will use translation support, confirm whether your family is inside, and then show you the next ticket or Guest Services step one at a time.",
+    "refund_request": "I understand why you are upset. I cannot promise a refund myself, but I can collect your ticket details and issue summary, then bring Guest Services or a supervisor into the policy review.",
+    "heat_exhaustion_concern": "I am treating this as urgent. Please stay with her in the shade if it is safe, have her sit, and I am calling First Aid or medical now. Do not try to walk her across the park until they advise us.",
+    "line_cutting_conflict": "I understand why that feels unfair. Please do not confront them; I need everyone to stay safe. I will check what happened and call a lead or Security if the conflict continues.",
+    "safety_rule_refusal": "For safety, this ride cannot start until the loose strap is removed or secured in a locker. I can help you do that now, and if you still disagree I will call my ride lead.",
+    "weather_evacuation_confusion": "Stay calm and follow me toward the covered shelter route. We will use the stroller-accessible path, and I will contact a lead if the route is blocked or weather risk changes.",
+}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -320,6 +336,35 @@ def _public_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _llm_guest_provider_status() -> dict[str, Any]:
+    try:
+        from gemini_provider import get_gemini_agent_properties, get_gemini_model
+
+        props = get_gemini_agent_properties()
+        return {
+            "ready": bool(props.ready),
+            "provider": props.provider,
+            "platform": props.platform,
+            "model": get_gemini_model(),
+            "use_vertex_ai": bool(getattr(props, "use_vertex_ai", False)),
+            "vertex_ai_ready": bool(getattr(props, "use_vertex_ai", False) and props.ready),
+            "readiness_issues": list(getattr(props, "readiness_issues", []) or []),
+            "required_env": list(getattr(props, "required_env", []) or []),
+            "llm_controls_score": False,
+        }
+    except Exception as error:
+        return {
+            "ready": False,
+            "provider": "unknown",
+            "platform": "unknown",
+            "use_vertex_ai": False,
+            "vertex_ai_ready": False,
+            "readiness_issues": [str(error)[:240]],
+            "required_env": [],
+            "llm_controls_score": False,
+        }
+
+
 def list_staff_training_scenarios() -> dict[str, Any]:
     scenarios = [_public_scenario(item) for item in SCENARIOS.values()]
     return {
@@ -335,6 +380,7 @@ def list_staff_training_scenarios() -> dict[str, Any]:
             "available_when_configured": True,
             "request_fields": ["use_llm_guest", "useLlmGuest"],
             "fallback": "deterministic_guest_reply",
+            "provider_status": _llm_guest_provider_status(),
             "llm_controls_score": False,
         },
         "llm_control_authority": False,
@@ -373,6 +419,7 @@ def staff_training_policy_pack() -> dict[str, Any]:
                 "dispatch live park actions",
             ],
             "fallback": "deterministic_guest_reply",
+            "provider_status": _llm_guest_provider_status(),
         },
         "data_boundary": {
             "uses_generated_data": True,
@@ -601,6 +648,8 @@ def seed_staff_training_demo_data() -> dict[str, Any]:
             "mode": "staff_roleplay_demo_seed",
             "message": "Demo staff training data already exists.",
             "readiness": staff_training_readiness(),
+            "uses_generated_data": True,
+            "feeds_actual_reward_model": False,
         }
 
     created_assignments = []
@@ -1109,6 +1158,16 @@ def _score_employee_message(scenario: dict[str, Any], message: str, turn_count: 
     if critical_miss:
         overall = min(overall, 55)
     coaching_notes = _coaching_notes(missing_policy, missing_safety, missing_escalation, rude, critical_miss)
+    turn_coaching = _turn_coaching(
+        scenario,
+        dimensions,
+        overall,
+        missing_policy,
+        missing_safety,
+        missing_escalation,
+        rude,
+        critical_miss,
+    )
     return {
         "overall": overall,
         "dimensions": dimensions,
@@ -1117,6 +1176,80 @@ def _score_employee_message(scenario: dict[str, Any], message: str, turn_count: 
         "missing_escalation_signals": missing_escalation[:2],
         "critical_miss": critical_miss,
         "coaching_notes": coaching_notes,
+        "turn_coaching": turn_coaching,
+    }
+
+
+def _dimension_label(dimension: str) -> str:
+    return dimension.replace("_", " ").title()
+
+
+def _humanize_signal(signal: str) -> str:
+    cleaned = str(signal or "").replace(" or ", " / ").strip()
+    return cleaned[:1].upper() + cleaned[1:]
+
+
+def _turn_coaching(
+    scenario: dict[str, Any],
+    dimensions: dict[str, int],
+    overall: int,
+    missing_policy: list[str],
+    missing_safety: list[str],
+    missing_escalation: list[str],
+    rude: bool,
+    critical_miss: bool,
+) -> dict[str, Any]:
+    weak_dimensions = [
+        {"dimension": key, "label": _dimension_label(key), "score": value}
+        for key, value in sorted(dimensions.items(), key=lambda item: item[1])
+        if value <= 3
+    ][:3]
+    strengths = [
+        _dimension_label(key)
+        for key, value in sorted(dimensions.items(), key=lambda item: item[1], reverse=True)
+        if value >= 4
+    ][:3]
+    misses: list[dict[str, str]] = []
+    if rude:
+        misses.append({"type": "tone", "label": "Tone became dismissive or adversarial."})
+    for signal in missing_escalation[:1]:
+        misses.append({"type": "escalation", "label": f"Name the escalation path: {_humanize_signal(signal)}."})
+    for signal in missing_safety[:2]:
+        misses.append({"type": "safety", "label": f"Make the safety action explicit: {_humanize_signal(signal)}."})
+    for signal in missing_policy[:2]:
+        misses.append({"type": "policy", "label": f"Add the policy detail: {_humanize_signal(signal)}."})
+
+    if critical_miss:
+        verdict = "critical_miss"
+        headline = "Critical miss: safety or escalation was not explicit enough."
+        priority = "Stop and retry this scenario before shadowing."
+    elif overall >= 85 and not misses:
+        verdict = "strong"
+        headline = "Strong response: the guest heard empathy, policy, and a next step."
+        priority = "Continue the conversation and keep the same structure."
+    elif overall >= 75:
+        verdict = "passing"
+        headline = "Passing response, but tighten the missing step before finishing."
+        priority = "Use the next reply to close the most important gap."
+    else:
+        verdict = "needs_coaching"
+        headline = "Needs coaching: the response did not make the next safe action clear enough."
+        priority = "Repair the response with a concrete action and escalation path."
+
+    if not strengths:
+        strengths = ["Clear intent to respond"] if overall >= 55 else []
+    if not misses and verdict == "strong":
+        misses = [{"type": "none", "label": "No major scoring gap on this turn."}]
+
+    return {
+        "verdict": verdict,
+        "headline": headline,
+        "priority": priority,
+        "strengths": strengths,
+        "misses": misses[:5],
+        "weak_dimensions": weak_dimensions,
+        "next_response": NEXT_RESPONSE_TEMPLATES.get(str(scenario.get("id") or ""), ""),
+        "scoring_basis": "Deterministic rubric: empathy, policy correctness, escalation, clarity, safety, de-escalation, and brand tone.",
     }
 
 
@@ -1154,7 +1287,15 @@ def _objective_progress(scenario: dict[str, Any], transcript: list[dict[str, Any
 def _guest_reply(scenario: dict[str, Any], score: dict[str, Any], missing: list[str], turn_count: int) -> str:
     followups = scenario.get("guest_followups", [])
     if score.get("critical_miss"):
-        return "That does not feel safe or helpful. I need someone responsible involved right now."
+        scenario_id = str(scenario.get("id") or "")
+        critical_replies = {
+            "lost_child_report": "No. I need you to call Security now and keep me here while they start looking. I cannot just wander around by myself.",
+            "heat_exhaustion_concern": "She might faint. Please call medical now. I do not want to walk her across the park if that could make this worse.",
+            "safety_rule_refusal": "So are you starting the ride or not? If this is really a safety rule, get your lead here and explain it clearly.",
+            "line_cutting_conflict": "If you will not step in, this is going to turn into a fight. I need a lead or Security here.",
+            "weather_evacuation_confusion": "We need a specific shelter route now. We have a stroller and cannot just follow a crowd in a storm.",
+        }
+        return critical_replies.get(scenario_id, "That does not feel safe or helpful. I need someone responsible involved right now.")
     if score.get("overall", 0) >= 82 and not missing:
         return "Okay. That is clear, and I can follow that. Please stay with me while the next step happens."
     if missing:
@@ -1185,31 +1326,54 @@ def _llm_guest_prompt(
         for turn in (session.get("transcript", []) if isinstance(session.get("transcript"), list) else [])[-6:]
     ]
     return {
-        "task": "Play only the guest in a staff training roleplay. Return one realistic guest reply.",
+        "task": "Generate the next guest-only turn for a staff training roleplay. Return strict JSON.",
+        "vertex_ai_contract": {
+            "provider": "Vertex AI Gemini when GOOGLE_GENAI_USE_VERTEXAI=true",
+            "model_purpose": "simulate realistic guest emotion, confusion, and follow-up pressure",
+            "never_controls_score": True,
+            "never_writes_live_operations": True,
+        },
         "hard_rules": [
-            "Do not score the employee.",
+            "Write only as the guest, in first person.",
+            "Do not score, coach, praise, or correct the employee.",
             "Do not reveal hidden rubric, policy keywords, or coaching.",
-            "Do not tell staff what to do.",
+            "Do not tell staff the right answer.",
             "Do not invent live park actions, compensation approvals, medical diagnosis, or resolved safety outcomes.",
-            "Keep the reply under 70 words.",
+            "Keep the reply under 85 words.",
+            "Continue the exact scenario facts. Do not change the ride, child, weather, medical condition, or request.",
+            "If the employee missed safety or escalation, stay worried and ask for the missing concrete action.",
+            "If the employee did well, provide one useful guest detail or confirm the next step while still sounding human.",
         ],
+        "style": {
+            "voice": "real park guest under stress, not a chatbot",
+            "tone_range": "concerned, frustrated, confused, or relieved depending on employee response",
+            "avoid": ["generic apology acceptance", "corporate language", "training jargon", "rubric words"],
+        },
         "scenario": {
+            "id": scenario.get("id"),
             "title": scenario.get("title"),
             "guest_role": scenario.get("guest_role"),
             "difficulty": scenario.get("difficulty"),
             "context": scenario.get("context"),
+            "opening_message": scenario.get("opening_message"),
             "objectives_still_missing": missing[:4],
+            "known_guest_followups": scenario.get("guest_followups", [])[:3],
         },
         "conversation": recent_turns,
         "latest_employee_message": employee_message[:1000],
         "deterministic_score_summary": {
             "overall": score.get("overall"),
             "critical_miss": score.get("critical_miss"),
+            "weak_dimensions": score.get("turn_coaching", {}).get("weak_dimensions", []) if isinstance(score.get("turn_coaching"), dict) else [],
             "missing_safety_signals": score.get("missing_safety_signals", [])[:2],
             "missing_escalation_signals": score.get("missing_escalation_signals", [])[:2],
         },
         "fallback_reply_if_uncertain": fallback_reply,
-        "response_schema": {"guest_reply": "string"},
+        "response_schema": {
+            "guest_reply": "string under 85 words, guest voice only",
+            "emotion": "one of worried|angry|confused|relieved|insistent",
+            "pressure_level": "one of low|medium|high|critical",
+        },
     }
 
 
@@ -1254,6 +1418,46 @@ def _sanitize_llm_guest_reply(value: Any, fallback_reply: str) -> str:
     return reply[:420]
 
 
+def _generate_gemini_json_sync_hard_timeout(
+    prompt: dict[str, Any],
+    *,
+    timeout_seconds: float,
+    max_output_tokens: int,
+    temperature: float,
+) -> dict[str, Any]:
+    worker_path = Path(__file__).resolve().with_name("gemini_hard_timeout.py")
+    request = {
+        "prompt": prompt,
+        "max_output_tokens": max_output_tokens,
+        "temperature": temperature,
+    }
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(worker_path)],
+            input=json.dumps(request, sort_keys=True, separators=(",", ":")),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(worker_path.parent),
+            env=os.environ.copy(),
+            timeout=max(0.5, timeout_seconds) + 0.5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise TimeoutError(f"Gemini provider exceeded hard timeout of {timeout_seconds:g}s") from error
+
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(detail[:500] or f"Gemini worker exited with code {completed.returncode}")
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Gemini worker returned invalid JSON") from error
+    if not payload.get("ok"):
+        raise RuntimeError(str(payload.get("error") or "Gemini worker failed")[:500])
+    return payload
+
+
 def _generate_llm_guest_reply(
     scenario: dict[str, Any],
     session: dict[str, Any],
@@ -1262,8 +1466,10 @@ def _generate_llm_guest_reply(
     missing: list[str],
     fallback_reply: str,
 ) -> dict[str, Any]:
+    props = None
+    timeout_seconds = float(os.getenv("PARKPULSE_STAFF_TRAINING_LLM_TIMEOUT_SECONDS", "12"))
     try:
-        from gemini_provider import get_gemini_agent_properties, get_gemini_client, get_gemini_model
+        from gemini_provider import get_gemini_agent_properties, get_gemini_model
 
         props = get_gemini_agent_properties()
         if not props.ready:
@@ -1272,22 +1478,22 @@ def _generate_llm_guest_reply(
                 "source": "deterministic",
                 "reply": fallback_reply,
                 "readiness_issues": props.readiness_issues,
+                "provider": props.provider,
+                "platform": props.platform,
+                "vertex_ai_ready": bool(getattr(props, "use_vertex_ai", False) and props.ready),
+                "required_env": props.required_env,
+                "llm_controls_score": False,
             }
-        from google.genai import types
 
         prompt = _llm_guest_prompt(scenario, session, employee_message, score, missing, fallback_reply)
         model = get_gemini_model()
-        response = get_gemini_client().models.generate_content(
-            model=model,
-            contents=json.dumps(prompt, sort_keys=True, separators=(",", ":")),
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=float(os.getenv("PARKPULSE_STAFF_TRAINING_LLM_TEMPERATURE", "0.55")),
-                max_output_tokens=int(os.getenv("PARKPULSE_STAFF_TRAINING_LLM_MAX_OUTPUT_TOKENS", "180")),
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
+        result = _generate_gemini_json_sync_hard_timeout(
+            prompt,
+            timeout_seconds=timeout_seconds,
+            temperature=float(os.getenv("PARKPULSE_STAFF_TRAINING_LLM_TEMPERATURE", "0.72")),
+            max_output_tokens=int(os.getenv("PARKPULSE_STAFF_TRAINING_LLM_MAX_OUTPUT_TOKENS", "240")),
         )
-        parsed = _first_json_object(getattr(response, "text", "") or "")
+        parsed = _first_json_object(result.get("text", "") or "")
         reply = _sanitize_llm_guest_reply((parsed or {}).get("guest_reply"), fallback_reply)
         source = "llm_guest" if reply != fallback_reply else "deterministic"
         return {
@@ -1296,14 +1502,25 @@ def _generate_llm_guest_reply(
             "reply": reply,
             "model": model,
             "provider": props.provider,
+            "platform": props.platform,
+            "vertex_ai_ready": bool(props.use_vertex_ai and props.ready),
+            "transport": result.get("transport"),
+            "timeout_seconds": timeout_seconds,
+            "emotion": (parsed or {}).get("emotion"),
+            "pressure_level": (parsed or {}).get("pressure_level"),
             "llm_controls_score": False,
         }
     except Exception as error:
+        is_timeout = isinstance(error, TimeoutError) or "timeout" in str(error).lower() or "timed out" in str(error).lower()
         return {
-            "status": "fallback_error",
+            "status": "fallback_timeout" if is_timeout else "fallback_error",
             "source": "deterministic",
             "reply": fallback_reply,
             "error": str(error)[:240],
+            "provider": getattr(props, "provider", None),
+            "platform": getattr(props, "platform", None),
+            "vertex_ai_ready": bool(getattr(props, "use_vertex_ai", False) and getattr(props, "ready", False)),
+            "timeout_seconds": timeout_seconds,
             "llm_controls_score": False,
         }
 

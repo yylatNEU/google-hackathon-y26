@@ -78,9 +78,11 @@ fi
 
 if [[ "${PARKPULSE_SKIP_DEPLOY_VERIFY:-false}" != "true" ]]; then
   scripts/verify_private_cloud_run_deploy.sh "$PROJECT_ID" "$REGION" "$SERVICE"
+  scripts/verify_private_cloud_run_agent_roles.sh "$PROJECT_ID" "$REGION" "$SERVICE"
 fi
 
 echo "Private Cloud Run service deployed:"
 echo "$SERVICE_URL"
 echo "Test with:"
 echo "scripts/verify_private_cloud_run_deploy.sh ${PROJECT_ID} ${REGION} ${SERVICE}"
+echo "scripts/verify_private_cloud_run_agent_roles.sh ${PROJECT_ID} ${REGION} ${SERVICE}"

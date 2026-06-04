@@ -1,4 +1,4 @@
-const localApiUrls = ["http://127.0.0.1:8000"];
+const localApiUrls = ["http://127.0.0.1:8000", "http://127.0.0.1:8017"];
 const defaultRequestTimeoutMs = 12000;
 const transientTransportAttempts = 2;
 export const longRunningRequestTimeoutMs = 30000;
@@ -10,22 +10,27 @@ type ParkPulseRequestInit = RequestInit & {
 const roleTokenCache = new Map<string, { token: string; expiresAt: number }>();
 const roleTokenInflight = new Map<string, Promise<string>>();
 
-export function getApiUrls() {
+export function getApiUrls(): string[] {
   const urlOverride =
     typeof globalThis.location !== "undefined"
       ? new URLSearchParams(globalThis.location.search).get("api") || undefined
       : undefined;
-  if (urlOverride) return [urlOverride];
+  if (urlOverride) return Array.from(new Set([urlOverride, ...localApiUrls]));
   const viteEnv = import.meta.env as Record<string, string | undefined> | undefined;
   const configured = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.NEXT_PUBLIC_API_URL;
   const sameOrigin = typeof globalThis.location !== "undefined" ? globalThis.location.origin : undefined;
   const configuredUrls = [viteEnv?.VITE_API_URL, configured].filter(Boolean) as string[];
-  const localDevSameOrigin =
-    sameOrigin && (
-      sameOrigin.includes("127.0.0.1:5173") ||
-      sameOrigin.includes("localhost:5173")
-    );
-  if (localDevSameOrigin) return Array.from(new Set(localApiUrls));
+  const localDevSameOrigin = (() => {
+    if (!sameOrigin) return false;
+    try {
+      const url = new URL(sameOrigin);
+      if (!["127.0.0.1", "localhost", "::1"].includes(url.hostname)) return false;
+      return !["8000", "8017"].includes(url.port);
+    } catch {
+      return false;
+    }
+  })();
+  if (localDevSameOrigin && sameOrigin) return Array.from(new Set([sameOrigin, ...localApiUrls]));
   const fallbacks = [...localApiUrls, sameOrigin];
   return Array.from(new Set([...configuredUrls, ...fallbacks].filter(Boolean) as string[]));
 }
@@ -48,8 +53,7 @@ async function getSignedRoleToken(apiUrl: string, role: string, timeoutMs: numbe
   const nowSeconds = Math.floor(Date.now() / 1000);
   if (cached && cached.expiresAt - 30 > nowSeconds) return cached.token;
 
-  const inflight = roleTokenInflight.get(cacheKey);
-  if (inflight) return inflight;
+  roleTokenInflight.delete(cacheKey);
 
   const tokenPromise = (async () => {
     const response = await request(
@@ -75,6 +79,14 @@ async function getSignedRoleToken(apiUrl: string, role: string, timeoutMs: numbe
     return await tokenPromise;
   } finally {
     roleTokenInflight.delete(cacheKey);
+  }
+}
+
+async function getOptionalSignedRoleToken(apiUrl: string, role: string, timeoutMs: number) {
+  try {
+    return await getSignedRoleToken(apiUrl, role, timeoutMs);
+  } catch {
+    return undefined;
   }
 }
 
@@ -110,6 +122,9 @@ function requestWithXhr(url: string, init?: RequestInit, timeoutMs = defaultRequ
 }
 
 function request(url: string, init?: RequestInit, timeoutMs = defaultRequestTimeoutMs) {
+  if (url.includes("/api/park/staff-training") || url.includes("/api/park/auth/dev-session")) {
+    return requestWithXhr(url, init, timeoutMs);
+  }
   if (typeof globalThis.fetch === "function") {
     const controller = new AbortController();
     const timeout = globalThis.setTimeout(() => {
@@ -167,12 +182,11 @@ export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestIni
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         const headerEntries = headersToEntries(requestInit.headers);
-        const requestedRole = headerValue(headerEntries, "x-parkpulse-role");
-        const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
-        const signedHeaders =
-          requestedRole && !hasAuthorization && path !== "/api/park/auth/dev-session"
-            ? { ...Object.fromEntries(headerEntries), authorization: `Bearer ${await getSignedRoleToken(apiUrl, requestedRole, timeoutMs)}` }
-            : requestInit.headers;
+      const requestedRole = headerValue(headerEntries, "x-parkpulse-role");
+      const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
+      const localStaffTraining = path.startsWith("/api/park/staff-training") && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?/.test(apiUrl);
+      const token = requestedRole && !hasAuthorization && path !== "/api/park/auth/dev-session" && !localStaffTraining ? await getOptionalSignedRoleToken(apiUrl, requestedRole, timeoutMs) : undefined;
+      const signedHeaders = token ? { ...Object.fromEntries(headerEntries), authorization: `Bearer ${token}` } : requestInit.headers;
         const response = await request(`${apiUrl}${path}`, { ...requestInit, headers: signedHeaders }, timeoutMs);
         if (response.ok) {
           const contentType = responseContentType(response).toLowerCase();

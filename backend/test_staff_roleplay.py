@@ -1,5 +1,6 @@
 import asyncio
 import json
+import types
 
 import main
 import park_staff_roleplay as roleplay
@@ -22,6 +23,8 @@ def test_scenario_catalog_exposes_training_boundaries(monkeypatch, tmp_path):
     assert "lost_child_report" in {scenario["id"] for scenario in payload["scenarios"]}
     assert payload["feeds_actual_reward_model"] is False
     assert payload["llm_guest_mode"]["llm_controls_score"] is False
+    assert payload["llm_guest_mode"]["provider_status"]["llm_controls_score"] is False
+    assert "platform" in payload["llm_guest_mode"]["provider_status"]
     assert "use_llm_guest" in payload["llm_guest_mode"]["request_fields"]
 
 
@@ -32,6 +35,7 @@ def test_policy_pack_exposes_governed_training_contract(monkeypatch, tmp_path):
 
     assert pack["status"] == "ready"
     assert pack["scoring_contract"]["llm_controls_score"] is False
+    assert pack["llm_guest_contract"]["provider_status"]["llm_controls_score"] is False
     assert pack["data_boundary"]["feeds_actual_reward_model"] is False
     assert "lost_child_report" in pack["critical_scenarios"]
     assert "critical_miss_rate" in pack["manager_review"]["recommended_metrics"]
@@ -51,6 +55,9 @@ def test_lost_child_missing_escalation_is_critical_miss(monkeypatch, tmp_path):
     assert turn["turn_score"]["overall"] <= 55
     assert turn["session"]["critical_miss"] is True
     assert "Critical miss" in " ".join(turn["coaching_notes"])
+    assert turn["turn_score"]["turn_coaching"]["verdict"] == "critical_miss"
+    assert "Security" in turn["turn_score"]["turn_coaching"]["next_response"]
+    assert turn["turn_score"]["turn_coaching"]["misses"]
 
 
 def test_good_lost_child_response_passes_debrief(monkeypatch, tmp_path):
@@ -68,6 +75,8 @@ def test_good_lost_child_response_passes_debrief(monkeypatch, tmp_path):
 
     assert turn["critical_miss"] is False
     assert turn["turn_score"]["overall"] >= 80
+    assert turn["turn_score"]["turn_coaching"]["verdict"] in {"passing", "strong"}
+    assert turn["turn_score"]["turn_coaching"]["strengths"]
     assert finished["debrief"]["result"] == "pass"
     assert finished["session"]["feeds_actual_reward_model"] is False
 
@@ -199,6 +208,123 @@ def test_llm_guest_mode_uses_mocked_guest_reply_without_changing_score(monkeypat
     assert turn["turn_score"]["overall"] >= 80
     assert turn["session"]["guest_simulator"]["llm_controls_score"] is False
     assert turn["session"]["transcript"][-1]["message"].startswith("I am still upset")
+
+
+def test_vertex_guest_generator_uses_provider_without_changing_score(monkeypatch, tmp_path):
+    reset_roleplay(monkeypatch, tmp_path)
+
+    fake_props = types.SimpleNamespace(
+        ready=True,
+        provider="Vertex AI Gemini",
+        platform="vertex_ai",
+        use_vertex_ai=True,
+        readiness_issues=[],
+        required_env=[],
+    )
+    captured = {}
+
+    def fake_generate(prompt, *, timeout_seconds, max_output_tokens, temperature):
+        captured["prompt"] = prompt
+        captured["timeout_seconds"] = timeout_seconds
+        captured["max_output_tokens"] = max_output_tokens
+        captured["temperature"] = temperature
+        return {
+            "ok": True,
+            "transport": "google_genai_sdk",
+            "text": json.dumps(
+                {
+                    "guest_reply": "I am scared, but I hear you calling Security. She is wearing a pink shirt and light-up shoes.",
+                    "emotion": "worried",
+                    "pressure_level": "high",
+                }
+            ),
+        }
+
+    import gemini_provider
+
+    monkeypatch.setattr(gemini_provider, "get_gemini_agent_properties", lambda: fake_props)
+    monkeypatch.setattr(gemini_provider, "get_gemini_model", lambda: "gemini-2.5-flash")
+    monkeypatch.setattr(roleplay, "_generate_gemini_json_sync_hard_timeout", fake_generate)
+
+    session = roleplay.start_staff_training_session("lost_child_report", "Vertex trainee", use_llm_guest=True)
+    turn = roleplay.advance_staff_training_turn(
+        session["id"],
+        "I am sorry, I will help right now. Please stay here while I radio security. What is she wearing and where was she last seen?",
+        use_llm_guest=True,
+    )
+
+    assert turn["turn_score"]["overall"] >= 80
+    assert turn["guest_reply_source"] == "llm_guest"
+    assert turn["llm_guest"]["provider"] == "Vertex AI Gemini"
+    assert turn["llm_guest"]["platform"] == "vertex_ai"
+    assert turn["llm_guest"]["vertex_ai_ready"] is True
+    assert turn["llm_guest"]["transport"] == "google_genai_sdk"
+    assert turn["llm_guest"]["emotion"] == "worried"
+    assert turn["session"]["guest_simulator"]["llm_controls_score"] is False
+    assert captured["timeout_seconds"] == 12
+    assert captured["prompt"]["vertex_ai_contract"]["never_controls_score"] is True
+    assert captured["prompt"]["scenario"]["id"] == "lost_child_report"
+
+
+def test_vertex_guest_generator_timeout_falls_back_without_changing_score(monkeypatch, tmp_path):
+    reset_roleplay(monkeypatch, tmp_path)
+
+    import gemini_provider
+
+    fake_props = types.SimpleNamespace(
+        ready=True,
+        provider="Vertex AI Gemini",
+        platform="vertex_ai",
+        use_vertex_ai=True,
+        readiness_issues=[],
+        required_env=[],
+    )
+    monkeypatch.setattr(gemini_provider, "get_gemini_agent_properties", lambda: fake_props)
+    monkeypatch.setattr(gemini_provider, "get_gemini_model", lambda: "gemini-2.5-flash")
+    monkeypatch.setattr(roleplay, "_generate_gemini_json_sync_hard_timeout", lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("Gemini provider exceeded hard timeout of 1s")))
+
+    session = roleplay.start_staff_training_session("lost_child_report", "Vertex timeout", use_llm_guest=True)
+    turn = roleplay.advance_staff_training_turn(
+        session["id"],
+        "I am sorry. Stay here while I call security now. What is she wearing and where was she last seen?",
+        use_llm_guest=True,
+    )
+
+    assert turn["turn_score"]["overall"] >= 80
+    assert turn["guest_reply_source"] == "deterministic"
+    assert turn["llm_guest"]["status"] == "fallback_timeout"
+    assert turn["llm_guest"]["platform"] == "vertex_ai"
+    assert turn["llm_guest"]["vertex_ai_ready"] is True
+    assert turn["session"]["guest_simulator"]["llm_controls_score"] is False
+
+
+def test_vertex_guest_generator_falls_back_when_not_configured(monkeypatch, tmp_path):
+    reset_roleplay(monkeypatch, tmp_path)
+
+    import gemini_provider
+
+    fake_props = types.SimpleNamespace(
+        ready=False,
+        provider="Vertex AI Gemini",
+        platform="vertex_ai",
+        use_vertex_ai=True,
+        readiness_issues=["GOOGLE_CLOUD_PROJECT is missing."],
+        required_env=["GOOGLE_GENAI_USE_VERTEXAI=true", "GOOGLE_CLOUD_PROJECT"],
+    )
+    monkeypatch.setattr(gemini_provider, "get_gemini_agent_properties", lambda: fake_props)
+
+    session = roleplay.start_staff_training_session("lost_child_report", "Vertex fallback", use_llm_guest=True)
+    turn = roleplay.advance_staff_training_turn(
+        session["id"],
+        "I am sorry. Please stay here while I call security. What is she wearing?",
+        use_llm_guest=True,
+    )
+
+    assert turn["guest_reply_source"] == "deterministic"
+    assert turn["llm_guest"]["status"] == "fallback_not_configured"
+    assert turn["llm_guest"]["platform"] == "vertex_ai"
+    assert turn["llm_guest"]["vertex_ai_ready"] is False
+    assert "GOOGLE_CLOUD_PROJECT is missing." in turn["llm_guest"]["readiness_issues"]
 
 
 def test_llm_sanitizer_blocks_meta_or_authoritative_replies():

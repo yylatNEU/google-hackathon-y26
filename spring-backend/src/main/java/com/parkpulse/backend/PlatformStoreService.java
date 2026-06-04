@@ -130,7 +130,7 @@ public class PlatformStoreService {
         Map<String, Object> result = orderedMap();
         result.put("status", "active");
         result.put("mode", "continuous_java_spring_migration");
-        result.put("current_slice", "spring_backend_gateway_plus_platform_store_authority");
+        result.put("current_slice", "spring_backend_gateway_plus_agent_trust_handshake_authority");
         result.put("spring_owned_routes", List.of(
             "/",
             "/healthz",
@@ -143,21 +143,43 @@ public class PlatformStoreService {
             "/api/park/authorization-audit",
             "/api/park/delivery/contract",
             "/api/park/delivery/outbox",
+            "/api/park/delivery/gcp-adapters/status",
+            "/api/park/delivery/guest-promotion",
+            "/api/park/delivery/worker-notification",
+            "/api/park/delivery/equipment-command",
             "/api/park/delivery/acknowledge",
             "/api/park/delivery/approval-decision",
+            "/api/park/delegation-token",
+            "/api/park/agent-onboarding/issuer",
+            "/api/park/agent-onboarding/register",
+            "/api/park/agent-onboarding/{agent_id}/certify",
+            "/api/park/agent-onboarding/verify-credential",
+            "/api/park/agent-onboarding/{agent_id}",
+            "/api/park/agent-onboarding/revoke-credential",
             "/api/park/agent-trust/status",
             "/api/park/agent-trust/partners",
             "/api/park/agent-trust/keys",
             "/api/park/agent-trust/keys/rotate",
             "/api/park/agent-trust/revocations",
             "/api/park/agent-trust/audit",
+            "/api/park/handshake",
+            "/api/park/session/{session_id}",
+            "/api/park/session/{session_id}/capabilities",
+            "/api/park/session/{session_id}/intent",
+            "/api/park/session/{session_id}/propose",
+            "/api/park/session/{session_id}/counter",
+            "/api/park/session/{session_id}/commit",
+            "/api/park/session/{session_id}/monitor",
+            "/api/park/session/{session_id}/receipt",
+            "/api/park/internal-agents/commerce/evaluate",
+            "/api/park/internal-agents/queue/reroute",
             "/api/park/platform-store",
             "/api/park/platform-store/migrate",
             "/api/park/migration/java-spring/status",
             "/api/park/backend-gateway/status"
         ));
         result.put("spring_gateway_routes", List.of("/api/**", "/readyz/deep"));
-        result.put("python_owned_routes", "agent orchestration, Gemini/Vertex, Mongo memory, live feeds, delivery, simulation are reached through the Spring gateway until each route group is migrated natively.");
+        result.put("python_owned_routes", "agent orchestration, Gemini/Vertex, Mongo memory, live feeds, remaining simulation surfaces, and live GCP delivery adapters are reached through the Spring gateway until each route group is migrated natively.");
         result.put("handoff_rule", "Move one bounded route group at a time only after parity tests and SQLite authority checks pass.");
         result.put("rollback", "Stop the Spring service and keep Python serving the same SQLite-backed authority.");
         result.put("platform_store", compactStatus());
@@ -245,6 +267,7 @@ public class PlatformStoreService {
         Path replayPath = envPath("PARKPULSE_REPLAY_DB", runtimeDir.resolve("park_replay.db"));
         Path auditPath = envPath("PARKPULSE_AUDIT_DB", runtimeDir.resolve("park_audit.db"));
         Path trustPath = envPath("PARKPULSE_AGENT_TRUST_DB", runtimeDir.resolve("agent_trust.db"));
+        Path handshakePath = envPath("PARKPULSE_AGENT_HANDSHAKE_DB", runtimeDir.resolve("agent_handshake.db"));
         Path deliveryPath = envPath("PARKPULSE_DELIVERY_OUTBOX", runtimeDir.resolve("delivery_outbox.jsonl"));
         Path liveFeedPath = envPath("PARKPULSE_LIVE_FEED_PATH", runtimeDir.resolve("live_feed_events.jsonl"));
         Path legacyPath = legacyPlatformDbPath();
@@ -255,7 +278,8 @@ public class PlatformStoreService {
         records.add(storeRecord("platform_registry", "core_sqlite_store_registry", "sqlite_wal", platformDbPath(), "platform_metadata", false, true, "ready", null, Map.of("schema_version", SCHEMA_VERSION, "migration_id", MIGRATION_ID)));
         records.add(storeRecord("replay_store", "transactional_replay_and_action_audit", "sqlite_wal", replayPath, "operator_action_replay", false, true, Files.exists(replayPath) ? "ready" : "will_initialize_on_first_write", sqliteCount(replayPath, List.of("replay_runs", "replay_events")), Map.of("override_env", "PARKPULSE_REPLAY_DB")));
         records.add(storeRecord("audit_store", "policy_audit_findings", "sqlite_wal", auditPath, "operational_audit", false, true, Files.exists(auditPath) ? "ready" : "will_initialize_on_first_write", sqliteCount(auditPath, List.of("audit_events", "audit_findings")), Map.of("override_env", "PARKPULSE_AUDIT_DB")));
-        records.add(storeRecord("agent_trust_store", "agent_partner_trust_and_revocation_registry", "sqlite_wal", trustPath, "identity_authority_metadata", false, true, Files.exists(trustPath) ? "ready" : "will_initialize_on_first_write", sqliteCount(trustPath, List.of("agent_partners", "credential_revocations", "certification_keys", "trust_audit_events")), Map.of("override_env", "PARKPULSE_AGENT_TRUST_DB")));
+        records.add(storeRecord("agent_trust_store", "agent_partner_trust_and_revocation_registry", "sqlite_wal", trustPath, "identity_authority_metadata", false, true, Files.exists(trustPath) ? "ready" : "will_initialize_on_first_write", sqliteCount(trustPath, List.of("agent_partners", "credential_revocations", "certification_keys", "trust_audit_events", "agent_onboardings")), Map.of("override_env", "PARKPULSE_AGENT_TRUST_DB")));
+        records.add(storeRecord("agent_handshake_store", "agent_handshake_session_registry", "sqlite_wal", handshakePath, "agent_session_authority", false, true, Files.exists(handshakePath) ? "ready" : "will_initialize_on_first_write", sqliteCount(handshakePath, List.of("agent_handshake_sessions")), Map.of("override_env", "PARKPULSE_AGENT_HANDSHAKE_DB")));
         records.add(storeRecord("delivery_outbox", "append_first_receiver_dispatch_outbox", "jsonl_durable_outbox", deliveryPath, "receiver_dispatch_receipts", false, true, Files.exists(deliveryPath.getParent()) ? "ready" : "directory_missing", jsonlCount(deliveryPath), Map.of("override_env", "PARKPULSE_DELIVERY_OUTBOX")));
         records.add(storeRecord("live_feed_events", "local_live_feed_event_buffer", "jsonl_or_mongodb", liveFeedPath, "observed_operational_signals", liveFeedMongo, false, liveFeedMongo ? "mongodb_configured" : "local_jsonl", jsonlCount(liveFeedPath), Map.of("override_env", "PARKPULSE_LIVE_FEED_STORAGE")));
         String legacyStatus = !Files.exists(legacyPath) ? "not_present" : legacyTables.isEmpty() ? "legacy_empty" : "legacy_non_empty_preserved";

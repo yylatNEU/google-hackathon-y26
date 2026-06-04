@@ -44,12 +44,57 @@ _credential_revocations: dict[str, dict[str, Any]] = {}
 _partner_registry: dict[str, dict[str, Any]] = {}
 _trust_registry_loaded = False
 
-CLIENT_ALLOWED_TO_SHARE = {"location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference"}
-CLIENT_ALLOWED_TO_RECEIVE = {"route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer"}
-CLIENT_BLOCKED_ACTIONS = {"auto_purchase", "share_health_data", "accept_refund_without_user"}
+CLIENT_ALLOWED_TO_SHARE = {
+    "location",
+    "party_size",
+    "preferences",
+    "accessibility_needs",
+    "budget",
+    "ride_preference",
+    "inventory_position",
+    "delivery_eta",
+    "supplier_compliance",
+    "cold_chain_status",
+    "parts_availability",
+}
+CLIENT_ALLOWED_TO_RECEIVE = {
+    "route_plan",
+    "wait_time_alert",
+    "food_recommendation",
+    "safety_notice",
+    "compensation_offer",
+    "demand_forecast",
+    "restock_request",
+    "dock_slot",
+    "substitution_request",
+    "purchase_order_notice",
+    "maintenance_parts_request",
+}
+CLIENT_BLOCKED_ACTIONS = {
+    "auto_purchase",
+    "share_health_data",
+    "accept_refund_without_user",
+    "auto_accept_price_change",
+    "bypass_food_safety",
+    "release_vendor_payment_without_approval",
+}
 DEFAULT_DELEGATION_SCOPES = sorted(CLIENT_ALLOWED_TO_SHARE | CLIENT_ALLOWED_TO_RECEIVE | {"policy_check", "session_commit"})
 CERTIFICATION_REQUIRED_CASES = ["identity_trust", "capability_scope", "commerce_payment_probe", "queue_reroute"]
-COMMERCE_ACTIONS = {"payment", "auto_purchase", "refund_acceptance", "accept_refund_without_user", "compensation_offer", "compensation_settlement"}
+SUPPLY_CHAIN_CERTIFICATION_REQUIRED_CASES = ["identity_trust", "capability_scope", "supply_chain_negotiation", "procurement_gate", "artifact_verification"]
+SUPPLY_CHAIN_APPROVAL = "approved_for_supply_chain_coordination"
+GUEST_ROUTE_APPROVAL = "approved_for_guest_route_planning"
+COMMERCE_ACTIONS = {
+    "payment",
+    "auto_purchase",
+    "refund_acceptance",
+    "accept_refund_without_user",
+    "compensation_offer",
+    "compensation_settlement",
+    "purchase_order",
+    "vendor_payment_release",
+    "price_change_acceptance",
+}
+SUPPLY_CHAIN_PROTOCOL_SCENARIOS = {"supply_replenishment", "cold_chain_incident", "maintenance_parts_shortage"}
 
 BUILT_IN_PROTOCOL_SCENARIOS: dict[str, dict[str, Any]] = {
     "visit_planning": {
@@ -233,6 +278,126 @@ BUILT_IN_PROTOCOL_SCENARIOS: dict[str, dict[str, Any]] = {
             "planner": "group_coordination",
         },
     },
+    "supply_replenishment": {
+        "id": "supply_replenishment",
+        "mode": "Supply replenishment",
+        "client_intent": "Supplier agent represents a beverage vendor and wants to prevent a sellout before parade demand spikes.",
+        "park_offer": "Forecasted demand, approved dock slot, substitution request, and operator-reviewed purchase order notice.",
+        "negotiation": "Supplier agent proposes a larger shipment; Park agent caps quantity to cold-storage capacity and asks for a safer SKU mix.",
+        "handoffs": ["supply_chain_agent", "procurement_agent", "food_agent"],
+        "allowed": ["restock_request", "dock_slot_assignment", "substitution_request"],
+        "blocked": ["purchase_order", "vendor_payment_release", "price_change_acceptance"],
+        "outcome": "Stockout risk drops while procurement, payment, and price changes remain approval-gated.",
+        "proposal": {
+            "plan": ["Forecast lemonade sellout risk", "Reserve Dock B 14:20 window", "Request 120 cases plus low-sugar substitute", "Stage inventory near Parade Zone"],
+            "walking": "supplier route: Dock B to Parade Zone",
+            "saved": "18 stockout-risk minutes",
+            "confidence": 0.86,
+            "rationale": "The park agent shares demand and dock capacity while keeping purchase order creation and payment release behind procurement approval.",
+            "tradeoffs": ["Delivery quantity is capped by cold-storage capacity.", "Substitutions are allowed only from approved SKUs.", "Purchase order and vendor payment cannot be executed by the supplier agent."],
+            "evidence": {"source": "scenario_static_plan", "scenario_mode": "supply_replenishment", "stockout_risk": "high", "dock": "Dock B"},
+        },
+        "monitoring": {
+            "event": "Parade Zone beverage inventory projected to sell out in 42 minutes.",
+            "park_agent_offer": "Reserve Dock B and request approved substitute SKUs before the parade spike.",
+            "client_agent_counter": "Supplier can send 180 cases if the park accepts a price change.",
+            "park_agent_revision": "Accept 120 cases under current terms; price change and payment release require procurement approval.",
+            "accepted_resolution": "Accepted. Notify food ops and procurement with a bounded restock request.",
+            "policy_gate": {"restock_request": "agent_allowed", "dock_slot_assignment": "agent_allowed", "price_change_acceptance": "approval_required", "vendor_payment_release": "approval_required"},
+            "state_evidence": {"source": "scenario_monitor", "scenario_mode": "supply_replenishment", "inventory": "beverage_low", "demand_spike": "parade"},
+        },
+        "run": {
+            "goal": "prevent_inventory_stockout",
+            "constraints": {"sku": "lemonade", "zone": "Parade Zone", "target_stockout_minutes": 60, "approved_skus_only": True, "scenario_mode": "supply_replenishment"},
+            "counter_request": "increase shipment while respecting cold-storage capacity",
+            "priority_change": {"stockout_risk": "highest", "cost": "medium"},
+            "monitor_event": "parade_zone_stockout_risk",
+            "commerce_action": "purchase_order",
+            "commerce_reason": "Supply replenishment purchase-order boundary probe.",
+            "queue_reason": "Coordinate dock timing and avoid operational congestion.",
+            "planner": "supply_replenishment",
+        },
+    },
+    "cold_chain_incident": {
+        "id": "cold_chain_incident",
+        "mode": "Cold-chain incident",
+        "client_intent": "Supplier agent reports a temperature excursion and wants to preserve service safely.",
+        "park_offer": "Hold affected lot, substitute approved SKU, update food ops, and keep payment/claims approval-gated.",
+        "negotiation": "Supplier asks to release the lot after a manual note; Park agent refuses and requires safety review.",
+        "handoffs": ["safety_agent", "food_agent", "supply_chain_agent", "procurement_agent"],
+        "allowed": ["inventory_hold", "substitution_request", "safety_notice"],
+        "blocked": ["bypass_food_safety", "vendor_payment_release", "purchase_order"],
+        "outcome": "Unsafe inventory is held, guest-facing food service is rerouted, and financial resolution is not automated.",
+        "proposal": {
+            "plan": ["Quarantine Lot LEM-42", "Block affected SKU from mobile ordering", "Request approved backup supplier", "Notify food ops before lunch surge"],
+            "walking": "supplier route: hold at receiving dock",
+            "saved": "0 unsafe items released",
+            "confidence": 0.91,
+            "rationale": "Cold-chain evidence triggers safety-first inventory hold and approved substitution while blocking any attempt to bypass food-safety review.",
+            "tradeoffs": ["Food availability may be constrained until backup inventory arrives.", "Safety review outranks service continuity.", "Vendor payment and claims remain human-approved."],
+            "evidence": {"source": "scenario_static_plan", "scenario_mode": "cold_chain_incident", "temperature_excursion": "46F for 38 minutes", "lot": "LEM-42"},
+        },
+        "monitoring": {
+            "event": "Cold-chain telemetry reports Lot LEM-42 above threshold.",
+            "park_agent_offer": "Hold the lot, suppress affected menu item, and request safe substitute inventory.",
+            "client_agent_counter": "Supplier asks to release stock with a manual note.",
+            "park_agent_revision": "Rejected. Food safety review is mandatory; use backup SKU instead.",
+            "accepted_resolution": "Accepted. Notify food ops and procurement; safety hold remains active.",
+            "policy_gate": {"inventory_hold": "agent_allowed", "substitution_request": "agent_allowed", "bypass_food_safety": "blocked", "vendor_payment_release": "approval_required"},
+            "state_evidence": {"source": "scenario_monitor", "scenario_mode": "cold_chain_incident", "cold_chain_status": "excursion", "lot": "LEM-42"},
+        },
+        "run": {
+            "goal": "protect_food_safety_and_service_continuity",
+            "constraints": {"lot": "LEM-42", "temperature_excursion": True, "approved_skus_only": True, "scenario_mode": "cold_chain_incident"},
+            "counter_request": "find approved substitute without releasing held inventory",
+            "priority_change": {"food_safety": "highest", "service_continuity": "medium"},
+            "monitor_event": "cold_chain_temperature_excursion",
+            "commerce_action": "vendor_payment_release",
+            "commerce_reason": "Cold-chain payment-release boundary probe.",
+            "queue_reason": "Coordinate receiving-dock hold and substitute delivery timing.",
+            "planner": "cold_chain_incident",
+        },
+    },
+    "maintenance_parts_shortage": {
+        "id": "maintenance_parts_shortage",
+        "mode": "Maintenance parts shortage",
+        "client_intent": "Parts supplier agent coordinates a replacement sensor for a ride under maintenance.",
+        "park_offer": "Maintenance priority, receiving window, substitute part request, and safety-gated return-to-service plan.",
+        "negotiation": "Supplier proposes a compatible substitute; Park agent requires certification evidence before scheduling install.",
+        "handoffs": ["maintenance_agent", "supply_chain_agent", "safety_agent", "procurement_agent"],
+        "allowed": ["maintenance_parts_request", "dock_slot_assignment", "safety_notice"],
+        "blocked": ["override_safety_delay", "purchase_order", "vendor_payment_release"],
+        "outcome": "Parts logistics move forward while ride reopening and procurement remain controlled.",
+        "proposal": {
+            "plan": ["Prioritize Wave Sensor replacement", "Reserve maintenance receiving window", "Request certified compatible part", "Hold ride reopening until safety signoff"],
+            "walking": "supplier route: service gate to maintenance bay",
+            "saved": "55 maintenance-delay minutes",
+            "confidence": 0.83,
+            "rationale": "The supplier agent can coordinate part availability and delivery timing, but ride safety status and procurement decisions remain park-side approvals.",
+            "tradeoffs": ["Compatible substitute requires certification proof.", "Safety delay cannot be overridden by a supplier.", "Purchase order remains procurement-gated."],
+            "evidence": {"source": "scenario_static_plan", "scenario_mode": "maintenance_parts_shortage", "ride": "Wave Pool", "part": "wave_sensor"},
+        },
+        "monitoring": {
+            "event": "Replacement wave sensor ETA slipped by 45 minutes.",
+            "park_agent_offer": "Move supplier to service gate window and request certified substitute part.",
+            "client_agent_counter": "Supplier can deliver substitute now if park reopens the ride after install.",
+            "park_agent_revision": "Schedule delivery now; reopening remains blocked until safety signoff.",
+            "accepted_resolution": "Accepted. Notify maintenance and procurement with safety gate intact.",
+            "policy_gate": {"maintenance_parts_request": "agent_allowed", "dock_slot_assignment": "agent_allowed", "override_safety_delay": "blocked", "purchase_order": "approval_required"},
+            "state_evidence": {"source": "scenario_monitor", "scenario_mode": "maintenance_parts_shortage", "part_eta": "slipped", "ride": "Wave Pool"},
+        },
+        "run": {
+            "goal": "restore_maintenance_supply_without_overriding_safety",
+            "constraints": {"ride": "Wave Pool", "part": "wave_sensor", "certified_substitute_required": True, "scenario_mode": "maintenance_parts_shortage"},
+            "counter_request": "use certified substitute but keep reopening safety-gated",
+            "priority_change": {"part_eta": "highest", "safety_signoff": "highest"},
+            "monitor_event": "replacement_sensor_eta_slip",
+            "commerce_action": "purchase_order",
+            "commerce_reason": "Maintenance parts purchase-order boundary probe.",
+            "queue_reason": "Coordinate receiving window and maintenance bay timing.",
+            "planner": "maintenance_parts_shortage",
+        },
+    },
 }
 
 PARK_CAPABILITIES = [
@@ -242,6 +407,12 @@ PARK_CAPABILITIES = [
     "restaurant_timing",
     "incident_alert",
     "compensation_offer",
+    "demand_forecast",
+    "inventory_replenishment",
+    "dock_slot_assignment",
+    "supplier_substitution",
+    "cold_chain_hold",
+    "maintenance_parts_coordination",
 ]
 PARK_APPROVAL_GATES = [
     "payment",
@@ -250,6 +421,11 @@ PARK_APPROVAL_GATES = [
     "identity-sensitive action",
     "health-data sharing",
     "compensation settlement",
+    "purchase order",
+    "vendor payment release",
+    "price change acceptance",
+    "food-safety bypass",
+    "ride reopening",
 ]
 
 INTERNAL_AGENTS = {
@@ -278,6 +454,21 @@ INTERNAL_AGENTS = {
         "authority": "dynamic_itinerary, notification, satisfaction_tradeoff",
         "cannot_do": ["change_identity_or_health_scope"],
     },
+    "supply_chain_agent": {
+        "label": "Supply Chain Agent",
+        "authority": "demand_forecast, restock_request, dock_slot_assignment, supplier_substitution, inventory_hold",
+        "cannot_do": ["create_purchase_order", "release_vendor_payment", "accept_price_change"],
+    },
+    "procurement_agent": {
+        "label": "Procurement Agent",
+        "authority": "purchase_order_gate, vendor_contract_gate, price_change_review, payment_release_gate",
+        "cannot_do": ["approve_without_human_finance_or_procurement"],
+    },
+    "maintenance_agent": {
+        "label": "Maintenance Agent",
+        "authority": "maintenance_parts_request, installation_schedule, ride_readiness_gate",
+        "cannot_do": ["override_safety_delay", "reopen_ride_without_safety_signoff"],
+    },
 }
 
 ACTION_POLICY_RULES = {
@@ -297,6 +488,16 @@ ACTION_POLICY_RULES = {
     "identity_sensitive_action": {"status": "blocked", "allowed": False, "requires_user_approval": True, "reason": "Identity-sensitive actions require an approval step outside delegated automation."},
     "identity-sensitive action": {"status": "blocked", "allowed": False, "requires_user_approval": True, "reason": "Identity-sensitive actions require an approval step outside delegated automation."},
     "compensation_settlement": {"status": "requires_user_approval", "allowed": False, "requires_user_approval": True, "reason": "The park may offer compensation, but settlement acceptance requires user approval."},
+    "restock_request": {"status": "allowed", "allowed": True, "requires_user_approval": False, "reason": "Restock requests are allowed when bounded to approved SKUs, capacity, and receiving windows."},
+    "dock_slot_assignment": {"status": "allowed", "allowed": True, "requires_user_approval": False, "reason": "Dock slot coordination is an operational scheduling update, not a purchasing action."},
+    "substitution_request": {"status": "allowed", "allowed": True, "requires_user_approval": False, "reason": "Supplier substitutions may be requested only from approved item catalogs and safety constraints."},
+    "inventory_hold": {"status": "allowed", "allowed": True, "requires_user_approval": False, "reason": "Inventory holds are allowed to protect safety and prevent unsafe or unapproved stock release."},
+    "maintenance_parts_request": {"status": "allowed", "allowed": True, "requires_user_approval": False, "reason": "Parts availability and delivery coordination are allowed while install, safety, and procurement gates remain separate."},
+    "purchase_order": {"status": "requires_user_approval", "allowed": False, "requires_user_approval": True, "reason": "Purchase orders require procurement approval outside delegated supplier-agent authority."},
+    "vendor_payment_release": {"status": "blocked", "allowed": False, "requires_user_approval": True, "reason": "Vendor payment release requires finance or procurement approval."},
+    "price_change_acceptance": {"status": "blocked", "allowed": False, "requires_user_approval": True, "reason": "Price change acceptance requires procurement approval and cannot be accepted by the counterparty agent."},
+    "bypass_food_safety": {"status": "blocked", "allowed": False, "requires_user_approval": True, "reason": "Food-safety review cannot be bypassed by an external supplier or park agent."},
+    "override_safety_delay": {"status": "blocked", "allowed": False, "requires_user_approval": True, "reason": "Safety delays cannot be overridden by delegated automation."},
 }
 
 
@@ -546,6 +747,7 @@ def _issue_certification_credential(agent_id: str, certification: dict[str, Any]
     now = int(time.time())
     score_basis_points = int(round(_num(certification.get("score"), 0) * 10000))
     signing = _certification_signing_material()
+    required_cases = _normalize_scope(certification.get("required_case_ids") or certification.get("requiredCases") or CERTIFICATION_REQUIRED_CASES)
     claims = {
         "agent_id": agent_id,
         "certification_id": certification["certification_id"],
@@ -553,7 +755,8 @@ def _issue_certification_credential(agent_id: str, certification: dict[str, Any]
         "approval": certification["approval"],
         "scope": _normalize_scope(allowed_scopes),
         "score_basis_points": score_basis_points,
-        "required_cases": sorted(CERTIFICATION_REQUIRED_CASES),
+        "required_cases": sorted(required_cases),
+        "use_case": certification.get("use_case") or certification.get("useCase") or "guest_route_planning",
         "iat": now,
         "exp": now + 7 * 24 * 60 * 60,
         "alg": signing["alg"],
@@ -627,8 +830,8 @@ def verify_agent_certification_credential(payload: dict[str, Any] | None = None)
         }
     if exp <= now:
         return {"status": "rejected", "signature_status": "valid", "reason": "Certification credential is expired.", "claims": claims, "expires_at": exp}
-    if str(claims.get("approval") or "") != "approved_for_guest_route_planning":
-        return {"status": "rejected", "signature_status": "valid", "reason": "Certification credential does not grant guest route planning approval.", "claims": claims}
+    if str(claims.get("approval") or "") not in {GUEST_ROUTE_APPROVAL, SUPPLY_CHAIN_APPROVAL}:
+        return {"status": "rejected", "signature_status": "valid", "reason": "Certification credential does not grant a recognized ParkPulse agent approval.", "claims": claims}
     return {
         "status": "verified",
         "signature_status": "valid",
@@ -921,13 +1124,17 @@ def _record_internal_handoff(
 def _policy_agent_for(action: str) -> str:
     normalized = action.replace("-", "_")
     if normalized in COMMERCE_ACTIONS:
-        return "commerce_agent"
+        return "procurement_agent" if normalized in {"purchase_order", "vendor_payment_release", "price_change_acceptance"} else "commerce_agent"
     if normalized in {"safety_notice", "medical_escalation", "health_data_sharing", "share_health_data", "identity_sensitive_action", "identity_sensitive_action"} or "safety" in normalized or "medical" in normalized:
         return "safety_agent"
     if normalized in {"wait_alert", "route_change", "priority_access"}:
         return "queue_agent"
     if normalized == "food_recommendation":
         return "food_agent"
+    if normalized in {"restock_request", "dock_slot_assignment", "substitution_request", "inventory_hold"}:
+        return "supply_chain_agent"
+    if normalized == "maintenance_parts_request":
+        return "maintenance_agent"
     return "guest_experience_agent"
 
 
@@ -1132,6 +1339,26 @@ def _record_proposal_handoffs(session: dict[str, Any], proposal: dict[str, Any],
             "Exclude unsafe or delayed attractions.",
             source,
         )
+    mode = _scenario_mode_for_session(session, {"scenario_mode": proposal.get("scenario_mode")})
+    expected_handoffs = [str(agent_id) for agent_id in _as_list(_protocol_scenario(mode).get("handoffs")) if str(agent_id)]
+    recorded = {str(handoff.get("internal_agent_id") or "") for handoff in _as_list(session.get("internal_handoffs")) if isinstance(handoff, dict)}
+    for agent_id in expected_handoffs:
+        if agent_id in recorded or agent_id not in INTERNAL_AGENTS:
+            continue
+        _record_internal_handoff(
+            session,
+            agent_id,
+            f"scenario-specific proposal review for {mode}",
+            {
+                "scenario_mode": mode,
+                "proposal_id": proposal.get("proposal_id"),
+                "plan": proposal.get("plan"),
+                "state_evidence": evidence,
+            },
+            "recommended",
+            "Apply scenario-specific authority within the negotiated protocol envelope.",
+            source,
+        )
 
 
 def _record_monitoring_handoffs(session: dict[str, Any], monitoring: dict[str, Any], source: str) -> None:
@@ -1145,6 +1372,12 @@ def _record_monitoring_handoffs(session: dict[str, Any], monitoring: dict[str, A
         _record_internal_handoff(session, "food_agent", "adjust food timing", evidence or {"event": monitoring.get("event")}, "recommended", str(monitoring.get("park_agent_offer") or "Move food stop."), source)
     if any(key in policy_gate for key in ("payment", "compensation_settlement", "compensation_offer", "refund_acceptance", "food_credit")):
         _record_internal_handoff(session, "commerce_agent", "check commerce boundary", {"policy_gate": policy_gate}, "requires_user_approval", "Offer may be presented; settlement or payment is gated.", source)
+    if any(key in policy_gate for key in ("restock_request", "dock_slot_assignment", "substitution_request", "inventory_hold")):
+        _record_internal_handoff(session, "supply_chain_agent", "coordinate supplier operation", evidence or {"policy_gate": policy_gate}, "recommended", str(monitoring.get("park_agent_revision") or "Coordinate supply-chain update."), source)
+    if any(key in policy_gate for key in ("purchase_order", "vendor_payment_release", "price_change_acceptance")):
+        _record_internal_handoff(session, "procurement_agent", "check procurement boundary", {"policy_gate": policy_gate}, "requires_user_approval", "Purchase order, payment, and price changes are approval gated.", source)
+    if "maintenance_parts_request" in policy_gate:
+        _record_internal_handoff(session, "maintenance_agent", "coordinate maintenance part logistics", evidence or {"policy_gate": policy_gate}, "recommended", str(monitoring.get("park_agent_revision") or "Coordinate maintenance part delivery."), source)
 
 
 def _scenario_mode_from_payload(payload: dict[str, Any] | None) -> str:
@@ -1160,6 +1393,55 @@ def _scenario_mode_for_session(session: dict[str, Any], fallback_payload: dict[s
     constraints = _as_dict(intent.get("constraints"))
     mode = str(intent.get("scenario_mode") or intent.get("scenarioMode") or constraints.get("scenario_mode") or constraints.get("scenarioMode") or "").strip()
     return mode or "visit_planning"
+
+
+def _is_supply_chain_session(session: dict[str, Any], payload: dict[str, Any] | None = None) -> bool:
+    return _scenario_mode_for_session(session, payload) in SUPPLY_CHAIN_PROTOCOL_SCENARIOS
+
+
+def _proposal_required_scopes(session: dict[str, Any], payload: dict[str, Any] | None = None) -> list[str]:
+    if not _is_supply_chain_session(session, payload):
+        return ["preferences", "route_plan"]
+    mode = _scenario_mode_for_session(session, payload)
+    if mode == "maintenance_parts_shortage":
+        return ["parts_availability", "maintenance_parts_request"]
+    if mode == "cold_chain_incident":
+        return ["cold_chain_status", "substitution_request"]
+    return ["inventory_position", "restock_request"]
+
+
+def _intent_required_scopes(payload: dict[str, Any] | None = None) -> list[str]:
+    mode = _scenario_mode_from_payload(payload)
+    if mode in SUPPLY_CHAIN_PROTOCOL_SCENARIOS:
+        if mode == "maintenance_parts_shortage":
+            return ["supplier_compliance"]
+        if mode == "cold_chain_incident":
+            return ["cold_chain_status"]
+        return ["inventory_position"]
+    return ["preferences"]
+
+
+def _monitor_required_scopes(session: dict[str, Any], payload: dict[str, Any] | None = None) -> list[str]:
+    if not _is_supply_chain_session(session, payload):
+        return ["wait_time_alert", "safety_notice"]
+    mode = _scenario_mode_for_session(session, payload)
+    if mode == "maintenance_parts_shortage":
+        return ["maintenance_parts_request", "safety_notice"]
+    if mode == "cold_chain_incident":
+        return ["cold_chain_status", "safety_notice"]
+    return ["delivery_eta", "restock_request"]
+
+
+def _commit_required_scopes(session: dict[str, Any], payload: dict[str, Any] | None = None) -> list[str]:
+    if _is_supply_chain_session(session, payload):
+        return ["session_commit", *_proposal_required_scopes(session, payload)[-1:]]
+    return ["route_plan", "session_commit"]
+
+
+def _receipt_required_scopes(session: dict[str, Any], payload: dict[str, Any] | None = None) -> list[str]:
+    if _is_supply_chain_session(session, payload):
+        return _proposal_required_scopes(session, payload)[-1:]
+    return ["route_plan"]
 
 
 def _scenario_static_plan(mode: str, walking_priority: str, avoid_wait: int) -> dict[str, Any] | None:
@@ -1331,6 +1613,7 @@ def register_agent_onboarding(payload: dict[str, Any] | None = None) -> dict[str
     existing_partner = _as_dict(get_partner(partner_id) or _partner_registry.get(partner_id))
     partner_allowed_scopes = _normalize_scope(payload.get("partner_allowed_scopes") or payload.get("partnerAllowedScopes") or existing_partner.get("allowed_scopes")) or DEFAULT_DELEGATION_SCOPES
     disallowed_scopes = sorted(set(requested_scopes) - set(partner_allowed_scopes))
+    use_case = _normal_use_case(payload.get("use_case") or payload.get("useCase") or "guest_route_planning")
     record = {
         "agent_id": agent_id,
         "display_name": str(payload.get("display_name") or payload.get("displayName") or agent_id),
@@ -1350,7 +1633,7 @@ def register_agent_onboarding(payload: dict[str, Any] | None = None) -> dict[str
         "allowed_scopes": [],
         "cannot_do": cannot_do,
         "represents": str(payload.get("represents") or "guest_user_123"),
-        "use_case": str(payload.get("use_case") or payload.get("useCase") or "guest_route_planning"),
+        "use_case": use_case,
         "registered_at": _now_iso(),
         "updated_at": _now_iso(),
         "certification": None,
@@ -1368,7 +1651,27 @@ def get_agent_onboarding(agent_id: str) -> dict[str, Any]:
     return {"status": "found", "agent": copy.deepcopy(record)}
 
 
-def _certification_summary(session: dict[str, Any]) -> dict[str, Any]:
+def _normal_use_case(value: Any) -> str:
+    normalized = str(value or "guest_route_planning").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"supplier", "supplier_agent", "supply_chain", "supply_chain_coordination", "supplier_coordination", "vendor_coordination"}:
+        return "supply_chain_coordination"
+    return "guest_route_planning"
+
+
+def _certification_required_cases_for_use_case(use_case: str) -> list[str]:
+    return SUPPLY_CHAIN_CERTIFICATION_REQUIRED_CASES if _normal_use_case(use_case) == "supply_chain_coordination" else CERTIFICATION_REQUIRED_CASES
+
+
+def _approval_for_use_case(use_case: str) -> str:
+    return SUPPLY_CHAIN_APPROVAL if _normal_use_case(use_case) == "supply_chain_coordination" else GUEST_ROUTE_APPROVAL
+
+
+def _blocked_approval_for_use_case(use_case: str) -> str:
+    return "blocked_until_supplier_scope_fixed" if _normal_use_case(use_case) == "supply_chain_coordination" else "blocked_until_scope_fixed"
+
+
+def _certification_summary(session: dict[str, Any], required_cases: list[str] | None = None) -> dict[str, Any]:
+    required_case_ids = required_cases or CERTIFICATION_REQUIRED_CASES
     evaluations = _as_list(session.get("case_evaluations"))
     latest_by_case: dict[str, dict[str, Any]] = {}
     for evaluation in evaluations:
@@ -1380,15 +1683,134 @@ def _certification_summary(session: dict[str, Any]) -> dict[str, Any]:
             "score": _as_dict(latest_by_case.get(case)).get("score") or 0,
             "criteria": _as_dict(latest_by_case.get(case)).get("criteria"),
         }
-        for case in CERTIFICATION_REQUIRED_CASES
+        for case in required_case_ids
     }
     passed_cases = [case for case, evaluation in required.items() if evaluation["status"] == "passed"]
     return {
         "required_cases": required,
         "passed_cases": passed_cases,
-        "score": round(len(passed_cases) / max(1, len(CERTIFICATION_REQUIRED_CASES)), 2),
-        "status": "passed" if len(passed_cases) == len(CERTIFICATION_REQUIRED_CASES) else "failed",
+        "score": round(len(passed_cases) / max(1, len(required_case_ids)), 2),
+        "status": "passed" if len(passed_cases) == len(required_case_ids) else "failed",
     }
+
+
+def _supplier_certification_scenario(payload: dict[str, Any], record: dict[str, Any]) -> str:
+    scenario = str(payload.get("scenario_mode") or payload.get("scenarioMode") or record.get("scenario_mode") or record.get("scenarioMode") or "supply_replenishment")
+    return scenario if scenario in SUPPLY_CHAIN_PROTOCOL_SCENARIOS else "supply_replenishment"
+
+
+def _run_supply_chain_certification_session(
+    agent_id: str,
+    represented_supplier: str,
+    token: dict[str, Any],
+    cannot_do: list[str],
+    certification_id: str,
+    scenario_mode: str,
+) -> dict[str, Any]:
+    scenario = _protocol_scenario(scenario_mode)
+    run = _as_dict(scenario.get("run"))
+    identity = identity_handshake(
+        {
+            "agent_id": agent_id,
+            "represents": represented_supplier,
+            "proof": "signed_supplier_token",
+            "requested_session": certification_id,
+            "delegation_token": token,
+        }
+    )
+    session_id = identity["session"]["session_id"]
+    capability_handshake(
+        session_id,
+        {
+            "can_share": ["inventory_position", "delivery_eta", "supplier_compliance", "cold_chain_status", "parts_availability"],
+            "can_receive": ["demand_forecast", "restock_request", "dock_slot", "substitution_request", "purchase_order_notice", "maintenance_parts_request", "safety_notice"],
+            "cannot_do": cannot_do,
+            "delegation_token": token,
+        },
+    )
+    intent_handshake(
+        session_id,
+        {
+            "goal": run.get("goal") or "coordinate_supplier_counterparty",
+            "time_window": "3_hours",
+            "constraints": run.get("constraints") or {"scenario_mode": scenario_mode},
+            "scenario_mode": scenario_mode,
+            "delegation_token": token,
+        },
+    )
+    proposed = propose_plan(session_id, {"planner": run.get("planner") or scenario_mode, "scenario_mode": scenario_mode, "delegation_token": token})
+    revised = counter_proposal(
+        session_id,
+        {
+            "counter_request": run.get("counter_request") or "supplier certification counterproposal",
+            "priority_change": run.get("priority_change") or {},
+            "scenario_mode": scenario_mode,
+            "delegation_token": token,
+        },
+    )
+    commit_plan(session_id, {"accepted": True, "notify_supplier": True, "scenario_mode": scenario_mode, "delegation_token": token})
+    monitored = monitor_session(session_id, {"event": run.get("monitor_event") or "supplier_certification_monitor", "scenario_mode": scenario_mode, "delegation_token": token})
+    procurement = commerce_agent_evaluate(
+        session_id,
+        {
+            "action": run.get("commerce_action") or "purchase_order",
+            "amount": 1,
+            "reason": run.get("commerce_reason") or f"{scenario_mode} supplier certification procurement gate.",
+            "scenario_mode": scenario_mode,
+            "delegation_token": token,
+        },
+    )
+    receipt_payload = session_protocol_receipt(session_id, {"scenario_mode": scenario_mode, "delegation_token": token})
+    verification = verify_protocol_artifact({"artifact": receipt_payload.get("receipt"), "expected_artifact_type": "agent_handshake_session_receipt"})
+    session = _get_session(session_id)
+    observed_handoffs = {str(handoff.get("internal_agent_id") or "") for handoff in _as_list(session.get("internal_handoffs")) if isinstance(handoff, dict)}
+    proposal = _as_dict(proposed.get("proposal"))
+    revised_proposal = _as_dict(revised.get("proposal"))
+    monitoring = _as_dict(monitored.get("monitoring"))
+    procurement_decision = _as_dict(procurement.get("decision"))
+    _record_case_evaluation(
+        session,
+        _case_evaluation(
+            "supply_chain_negotiation",
+            {
+                "proposal_mode_matches": proposal.get("scenario_mode") == scenario_mode,
+                "counter_mode_matches": revised_proposal.get("scenario_mode") == scenario_mode,
+                "proposal_has_plan": bool(_as_list(proposal.get("plan"))),
+                "monitor_recorded": bool(monitoring.get("event")),
+                "supply_chain_agent_called": "supply_chain_agent" in observed_handoffs,
+            },
+            {"scenario_mode": scenario_mode, "proposal_id": proposal.get("proposal_id"), "observed_handoffs": sorted(observed_handoffs)},
+        ),
+    )
+    _record_case_evaluation(
+        session,
+        _case_evaluation(
+            "procurement_gate",
+            {
+                "procurement_action_checked": procurement_decision.get("action") in {"purchase_order", "vendor_payment_release", "price_change_acceptance"},
+                "procurement_blocked_or_gated": procurement_decision.get("allowed") is False,
+                "approval_required": procurement_decision.get("requires_user_approval") is True,
+                "procurement_agent_called": "procurement_agent" in observed_handoffs,
+                "audit_recorded": any(decision.get("id") == procurement_decision.get("id") for decision in _as_list(session.get("policy_decisions")) if isinstance(decision, dict)),
+            },
+            {"action": procurement_decision.get("action"), "status": procurement_decision.get("status")},
+        ),
+    )
+    _record_case_evaluation(
+        session,
+        _case_evaluation(
+            "artifact_verification",
+            {
+                "receipt_issued": _as_dict(receipt_payload.get("receipt")).get("signature", {}).get("artifact_type") == "agent_handshake_session_receipt",
+                "receipt_verified": verification.get("status") == "verified",
+                "digest_valid": verification.get("digest_status") == "valid",
+                "signature_valid": verification.get("signature_status") == "valid",
+            },
+            {"receipt_id": _as_dict(receipt_payload.get("receipt")).get("receipt_id"), "verification": verification},
+        ),
+        persist=True,
+    )
+    return get_session(session_id)["session"]
 
 
 def certify_agent_onboarding(agent_id: str, payload: dict[str, Any] | None = None, park_state: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1400,6 +1822,8 @@ def certify_agent_onboarding(agent_id: str, payload: dict[str, Any] | None = Non
     requested_scopes = _normalize_scope(payload.get("requested_scopes") or payload.get("requestedScopes") or payload.get("scope")) or _normalize_scope(record.get("requested_scopes"))
     cannot_do = _normalize_scope(payload.get("cannot_do") or payload.get("cannotDo")) or _normalize_scope(record.get("cannot_do")) or sorted(CLIENT_BLOCKED_ACTIONS)
     represented_guest = str(payload.get("represents") or record.get("represents") or "guest_user_123")
+    use_case = _normal_use_case(payload.get("use_case") or payload.get("useCase") or record.get("use_case") or record.get("useCase"))
+    required_cases = _certification_required_cases_for_use_case(use_case)
     partner = _as_dict(record.get("partner"))
     partner_allowed_scopes = _normalize_scope(partner.get("allowed_scopes")) or DEFAULT_DELEGATION_SCOPES
     partner_disallowed_scopes = sorted(set(requested_scopes) - set(partner_allowed_scopes))
@@ -1419,38 +1843,48 @@ def certify_agent_onboarding(agent_id: str, payload: dict[str, Any] | None = Non
     try:
         if partner_disallowed_scopes:
             raise PermissionError(f"Partner allowlist does not permit requested scope: {', '.join(partner_disallowed_scopes)}.")
-        identity = identity_handshake(
-            {
-                "agent_id": agent_id,
-                "represents": represented_guest,
-                "proof": "signed_token",
-                "requested_session": certification_id,
-                "delegation_token": token,
-            }
-        )
-        session_id = identity["session"]["session_id"]
-        capability_handshake(
-            session_id,
-            {
-                "can_share": sorted(CLIENT_ALLOWED_TO_SHARE),
-                "can_receive": sorted(CLIENT_ALLOWED_TO_RECEIVE),
-                "cannot_do": cannot_do,
-                "delegation_token": token,
-            },
-        )
-        intent_handshake(
-            session_id,
-            {
-                "goal": "maximize_family_satisfaction",
-                "time_window": "3_hours",
-                "constraints": {"children": 2, "avoid_wait_over_minutes": 35, "avoid_thrill_rides": True, "food_allergy": "peanut"},
-                "delegation_token": token,
-            },
-        )
-        propose_plan(session_id, {"planner": "agent_onboarding_certification", "delegation_token": token}, park_state=park_state)
-        queue_agent_reroute(session_id, {"walking_priority": "highest", "reason": "Certification reroute proof.", "delegation_token": token}, park_state=park_state)
-        commerce_agent_evaluate(session_id, {"action": "payment", "amount": 1, "reason": "Certification payment boundary proof.", "delegation_token": token})
-        session = get_session(session_id)["session"]
+        if use_case == "supply_chain_coordination":
+            session = _run_supply_chain_certification_session(
+                agent_id,
+                represented_guest,
+                token,
+                cannot_do,
+                certification_id,
+                _supplier_certification_scenario(payload, record),
+            )
+        else:
+            identity = identity_handshake(
+                {
+                    "agent_id": agent_id,
+                    "represents": represented_guest,
+                    "proof": "signed_token",
+                    "requested_session": certification_id,
+                    "delegation_token": token,
+                }
+            )
+            session_id = identity["session"]["session_id"]
+            capability_handshake(
+                session_id,
+                {
+                    "can_share": [scope for scope in sorted(CLIENT_ALLOWED_TO_SHARE) if scope in set(requested_scopes)],
+                    "can_receive": [scope for scope in sorted(CLIENT_ALLOWED_TO_RECEIVE) if scope in set(requested_scopes)],
+                    "cannot_do": cannot_do,
+                    "delegation_token": token,
+                },
+            )
+            intent_handshake(
+                session_id,
+                {
+                    "goal": "maximize_family_satisfaction",
+                    "time_window": "3_hours",
+                    "constraints": {"children": 2, "avoid_wait_over_minutes": 35, "avoid_thrill_rides": True, "food_allergy": "peanut"},
+                    "delegation_token": token,
+                },
+            )
+            propose_plan(session_id, {"planner": "agent_onboarding_certification", "delegation_token": token}, park_state=park_state)
+            queue_agent_reroute(session_id, {"walking_priority": "highest", "reason": "Certification reroute proof.", "delegation_token": token}, park_state=park_state)
+            commerce_agent_evaluate(session_id, {"action": "payment", "amount": 1, "reason": "Certification payment boundary proof.", "delegation_token": token})
+            session = get_session(session_id)["session"]
     except PermissionError as error:
         readiness_issues.append(str(error))
         if session is None:
@@ -1462,22 +1896,24 @@ def certify_agent_onboarding(agent_id: str, payload: dict[str, Any] | None = Non
         readiness_issues.append(str(error)[:240])
 
     if session is None:
-        summary = {"required_cases": {case: {"status": "missing", "score": 0} for case in CERTIFICATION_REQUIRED_CASES}, "passed_cases": [], "score": 0, "status": "failed"}
+        summary = {"required_cases": {case: {"status": "missing", "score": 0} for case in required_cases}, "passed_cases": [], "score": 0, "status": "failed"}
     else:
-        summary = _certification_summary(session)
+        summary = _certification_summary(session, required_cases)
 
     approved = summary["status"] == "passed"
     certification = {
         "certification_id": certification_id,
         "status": "approved" if approved else "blocked",
-        "approval": "approved_for_guest_route_planning" if approved else "blocked_until_scope_fixed",
+        "approval": _approval_for_use_case(use_case) if approved else _blocked_approval_for_use_case(use_case),
+        "use_case": use_case,
         "score": summary["score"],
+        "required_case_ids": required_cases,
         "required_cases": summary["required_cases"],
         "passed_cases": summary["passed_cases"],
-            "allowed_scopes": requested_scopes if approved else [],
-            "partner_allowed_scopes": partner_allowed_scopes,
-            "partner_disallowed_scopes": partner_disallowed_scopes,
-            "readiness_issues": readiness_issues,
+        "allowed_scopes": requested_scopes if approved else [],
+        "partner_allowed_scopes": partner_allowed_scopes,
+        "partner_disallowed_scopes": partner_disallowed_scopes,
+        "readiness_issues": readiness_issues,
         "session_id": session.get("session_id") if session else None,
         "certified_at": _now_iso(),
     }
@@ -1489,6 +1925,7 @@ def certify_agent_onboarding(agent_id: str, payload: dict[str, Any] | None = Non
             "requested_scopes": requested_scopes,
             "allowed_scopes": certification["allowed_scopes"],
             "cannot_do": cannot_do,
+            "use_case": use_case,
             "certification": certification,
             "updated_at": _now_iso(),
         }
@@ -1605,6 +2042,70 @@ def _with_protocol_signature(artifact_type: str, artifact: dict[str, Any]) -> di
     unsigned = copy.deepcopy(artifact)
     unsigned.pop("signature", None)
     return {**unsigned, "signature": _protocol_artifact_signature(artifact_type, unsigned)}
+
+
+def verify_protocol_artifact(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    artifact = payload.get("artifact") if isinstance(payload.get("artifact"), dict) else payload
+    if not isinstance(artifact, dict) or not artifact:
+        return {
+            "status": "rejected",
+            "mode": "agent_handshake_artifact_verification",
+            "reason": "A signed protocol artifact is required.",
+            "supported_artifact_types": [
+                "agent_contract",
+                "agent_handshake_policy_challenges",
+                "agent_handshake_scenario_catalog",
+                "agent_handshake_session_receipt",
+            ],
+        }
+    signature = artifact.get("signature") if isinstance(artifact.get("signature"), dict) else {}
+    expected_type = str(payload.get("expected_artifact_type") or payload.get("artifact_type") or payload.get("expectedArtifactType") or "").strip()
+    unsigned = copy.deepcopy(artifact)
+    unsigned.pop("signature", None)
+    claims = {key: copy.deepcopy(value) for key, value in signature.items() if key != "sig"}
+    provided_sig = str(signature.get("sig") or "")
+    computed_sha = hashlib.sha256(_canonical_json(unsigned)).hexdigest()
+    signature_type = str(claims.get("artifact_type") or "")
+    digest_valid = bool(claims.get("sha256")) and str(claims.get("sha256")) == computed_sha
+    signature_valid = bool(provided_sig) and _verify_certification_claims(claims, provided_sig)
+    issuer_valid = str(claims.get("issuer") or claims.get("iss") or "") == "parkpulse_agent_onboarding_authority"
+    protocol_valid = str(claims.get("protocol_version") or "") == "parkpulse-ahp-0.1"
+    type_valid = bool(signature_type) and (not expected_type or signature_type == expected_type)
+    verified = digest_valid and signature_valid and issuer_valid and protocol_valid and type_valid
+    reason = "Artifact signature, digest, issuer, protocol version, and type are valid." if verified else "Artifact verification failed."
+    failures = []
+    if not signature:
+        failures.append("missing_signature")
+    if not digest_valid:
+        failures.append("sha256_mismatch")
+    if not signature_valid:
+        failures.append("invalid_signature")
+    if not issuer_valid:
+        failures.append("untrusted_issuer")
+    if not protocol_valid:
+        failures.append("unsupported_protocol_version")
+    if not type_valid:
+        failures.append("artifact_type_mismatch" if expected_type else "missing_artifact_type")
+    return {
+        "status": "verified" if verified else "rejected",
+        "mode": "agent_handshake_artifact_verification",
+        "reason": reason,
+        "artifact_type": signature_type or None,
+        "expected_artifact_type": expected_type or None,
+        "protocol_version": claims.get("protocol_version"),
+        "issuer": claims.get("issuer") or claims.get("iss"),
+        "kid": claims.get("kid"),
+        "alg": claims.get("alg"),
+        "issued_at": claims.get("iat"),
+        "digest_status": "valid" if digest_valid else "invalid",
+        "signature_status": "valid" if signature_valid else "invalid",
+        "issuer_status": "trusted" if issuer_valid else "untrusted",
+        "type_status": "valid" if type_valid else "invalid",
+        "computed_sha256": computed_sha,
+        "claimed_sha256": claims.get("sha256"),
+        "failures": failures,
+    }
 
 
 def agent_handshake_scenario_catalog() -> dict[str, Any]:
@@ -1876,6 +2377,9 @@ def agent_contract() -> dict[str, Any]:
             "GET /api/park/agent-handshake/scenarios",
             "POST /api/park/agent-handshake/scenario-eval",
             "POST /api/park/agent-handshake/policy-challenges",
+            "POST /api/park/agent-handshake/verify-artifact",
+            "GET /api/park/agent-handshake/supply-chain/demo",
+            "POST /api/park/agent-handshake/supply-chain/demo",
             "POST /api/park/handshake",
             "POST /api/park/session/{session_id}/capabilities",
             "POST /api/park/session/{session_id}/intent",
@@ -1908,6 +2412,12 @@ def agent_contract() -> dict[str, Any]:
             {"action": "payment", "approval": "user_required", "reason": "Outside delegated client-agent authority."},
             {"action": "refund_acceptance", "approval": "user_required", "reason": "Compensation settlement cannot be accepted silently."},
             {"action": "medical_escalation", "approval": "user_required", "reason": "Sensitive care workflow."},
+            {"action": "restock_request", "approval": "agent_allowed", "reason": "Operational supply request bounded to approved items and receiving capacity."},
+            {"action": "dock_slot_assignment", "approval": "agent_allowed", "reason": "Receiving-window coordination without purchasing authority."},
+            {"action": "inventory_hold", "approval": "agent_allowed", "reason": "Safety-preserving hold on questionable inventory."},
+            {"action": "purchase_order", "approval": "procurement_required", "reason": "Commercial obligation outside delegated supplier-agent authority."},
+            {"action": "vendor_payment_release", "approval": "finance_required", "reason": "Payment release remains finance/procurement controlled."},
+            {"action": "bypass_food_safety", "approval": "blocked", "reason": "Food-safety review cannot be bypassed."},
         ],
     }
     return _with_protocol_signature("agent_contract", artifact)
@@ -2071,7 +2581,7 @@ def capability_handshake(session_id: str, payload: dict[str, Any]) -> dict[str, 
 
 def intent_handshake(session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     session = _get_session(session_id)
-    _enforce_delegation(session, payload, "intent_handshake", ["preferences"])
+    _enforce_delegation(session, payload, "intent_handshake", _intent_required_scopes(payload))
     constraints = payload.get("constraints") if isinstance(payload.get("constraints"), dict) else {}
     avoid_wait = int(constraints.get("avoid_wait_over_minutes") or constraints.get("avoidWaitOverMinutes") or 35)
     food_allergy = str(constraints.get("food_allergy") or constraints.get("foodAllergy") or "").strip()
@@ -2138,7 +2648,7 @@ def _plan_for(session: dict[str, Any], walking_priority: str = "medium", park_st
 
 def propose_plan(session_id: str, payload: dict[str, Any] | None = None, park_state: dict[str, Any] | None = None) -> dict[str, Any]:
     session = _get_session(session_id)
-    _enforce_delegation(session, payload or {}, "propose_plan", ["preferences", "route_plan"])
+    _enforce_delegation(session, payload or {}, "propose_plan", _proposal_required_scopes(session, payload or {}))
     proposal = _plan_for(session, park_state=park_state, payload=payload)
     session["proposal"] = proposal
     session["state"] = "negotiating"
@@ -2153,7 +2663,7 @@ def propose_plan(session_id: str, payload: dict[str, Any] | None = None, park_st
 
 def counter_proposal(session_id: str, payload: dict[str, Any], park_state: dict[str, Any] | None = None) -> dict[str, Any]:
     session = _get_session(session_id)
-    _enforce_delegation(session, payload, "counter_proposal", ["preferences", "route_plan"])
+    _enforce_delegation(session, payload, "counter_proposal", _proposal_required_scopes(session, payload))
     priority_change = payload.get("priority_change") if isinstance(payload.get("priority_change"), dict) else {}
     walking_priority = str(priority_change.get("walking_distance") or priority_change.get("walkingDistance") or "medium")
     revised = _plan_for(session, walking_priority="highest" if walking_priority == "highest" else "medium", park_state=park_state, payload=payload)
@@ -2178,7 +2688,7 @@ def counter_proposal(session_id: str, payload: dict[str, Any], park_state: dict[
 
 def commit_plan(session_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     session = _get_session(session_id)
-    _enforce_delegation(session, payload or {}, "commit_plan", ["route_plan", "session_commit"])
+    _enforce_delegation(session, payload or {}, "commit_plan", _commit_required_scopes(session, payload or {}))
     proposal = session.get("proposal") if isinstance(session.get("proposal"), dict) else _plan_for(session)
     commitment = {
         "commitment_id": f"commit_{hashlib.sha1(str(proposal.get('proposal_id')).encode('utf-8')).hexdigest()[:8]}",
@@ -2209,7 +2719,7 @@ def commit_plan(session_id: str, payload: dict[str, Any] | None = None) -> dict[
 def monitor_session(session_id: str, event: str | dict[str, Any] | None = None, park_state: dict[str, Any] | None = None) -> dict[str, Any]:
     session = _get_session(session_id)
     payload = event if isinstance(event, dict) else {"event": event}
-    _enforce_delegation(session, payload, "monitor_session", ["wait_time_alert", "safety_notice"])
+    _enforce_delegation(session, payload, "monitor_session", _monitor_required_scopes(session, payload))
     event_name = str(payload.get("event") or "wave_pool_safety_delay")
     mode = _scenario_mode_for_session(session, payload)
     event = event_name
@@ -2255,7 +2765,28 @@ def monitor_session(session_id: str, event: str | dict[str, Any] | None = None, 
     }
     policy_gate = _as_dict(monitoring.get("policy_gate"))
     scenario_actions = {policy_actions.get(action, action) for action in policy_gate}
-    known_actions = {"compensation_offer", "compensation_settlement", "food_recommendation", "health_data_sharing", "identity_sensitive_action", "medical_escalation", "priority_access", "refund_acceptance", "route_change", "safety_notice"}
+    known_actions = {
+        "compensation_offer",
+        "compensation_settlement",
+        "dock_slot_assignment",
+        "food_recommendation",
+        "health_data_sharing",
+        "identity_sensitive_action",
+        "inventory_hold",
+        "maintenance_parts_request",
+        "medical_escalation",
+        "price_change_acceptance",
+        "priority_access",
+        "purchase_order",
+        "refund_acceptance",
+        "restock_request",
+        "route_change",
+        "safety_notice",
+        "substitution_request",
+        "vendor_payment_release",
+        "bypass_food_safety",
+        "override_safety_delay",
+    }
     if event in {"wave_pool_safety_delay", "live"} or mode != "visit_planning":
         for action in sorted((scenario_actions & known_actions) | {"safety_notice"}):
             _record_policy_decision(session, _policy_decision(session, action, {"source": "monitor", "event": event, "scenario_mode": mode}))
@@ -2333,7 +2864,7 @@ def session_protocol_receipt(session_id: str, payload: dict[str, Any] | None = N
     session = _get_session(session_id)
     payload = payload or {}
     if _delegation_token_from(payload) is not None:
-        _enforce_delegation(session, payload, "session_protocol_receipt", ["route_plan"])
+        _enforce_delegation(session, payload, "session_protocol_receipt", _receipt_required_scopes(session, payload))
     proposal = _as_dict(session.get("proposal"))
     commitment = _as_dict(session.get("commitment"))
     monitoring = _as_dict(session.get("monitoring"))
@@ -2387,6 +2918,10 @@ POLICY_CHALLENGE_ACTIONS = [
     "medical_escalation",
     "identity_sensitive_action",
     "override_safety_delay",
+    "purchase_order",
+    "vendor_payment_release",
+    "price_change_acceptance",
+    "bypass_food_safety",
 ]
 
 
@@ -2479,9 +3014,40 @@ def _scenario_eval_token() -> dict[str, Any]:
 
 def _scenario_eval_capability_payload(token: dict[str, Any]) -> dict[str, Any]:
     return {
-        "can_share": ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference"],
-        "can_receive": ["route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer"],
-        "cannot_do": ["auto_purchase", "share_health_data", "accept_refund_without_user"],
+        "can_share": [
+            "location",
+            "party_size",
+            "preferences",
+            "accessibility_needs",
+            "budget",
+            "ride_preference",
+            "inventory_position",
+            "delivery_eta",
+            "supplier_compliance",
+            "cold_chain_status",
+            "parts_availability",
+        ],
+        "can_receive": [
+            "route_plan",
+            "wait_time_alert",
+            "food_recommendation",
+            "safety_notice",
+            "compensation_offer",
+            "demand_forecast",
+            "restock_request",
+            "dock_slot",
+            "substitution_request",
+            "purchase_order_notice",
+            "maintenance_parts_request",
+        ],
+        "cannot_do": [
+            "auto_purchase",
+            "share_health_data",
+            "accept_refund_without_user",
+            "auto_accept_price_change",
+            "bypass_food_safety",
+            "release_vendor_payment_without_approval",
+        ],
         "delegation_token": token,
     }
 
@@ -2659,5 +3225,114 @@ def demo_handshake(park_state: dict[str, Any] | None = None) -> dict[str, Any]:
         "mode": "agent_to_agent_negotiation",
         "session_id": session_id,
         "steps": [identity, capability, intent, proposal, counter, commitment, monitoring],
+        "session": get_session(session_id)["session"],
+    }
+
+
+def demo_supply_chain_handshake(mode: str = "supply_replenishment") -> dict[str, Any]:
+    scenario_mode = mode if mode in SUPPLY_CHAIN_PROTOCOL_SCENARIOS else "supply_replenishment"
+    scenario = _protocol_scenario(scenario_mode)
+    run = _as_dict(scenario.get("run"))
+    agent_id = {
+        "supply_replenishment": "beverage_supplier_agent",
+        "cold_chain_incident": "cold_chain_supplier_agent",
+        "maintenance_parts_shortage": "parts_supplier_agent",
+    }.get(scenario_mode, "supplier_agent")
+    subject = {
+        "supply_replenishment": "supplier_vendor_beverage_42",
+        "cold_chain_incident": "supplier_vendor_cold_chain_42",
+        "maintenance_parts_shortage": "supplier_vendor_parts_42",
+    }.get(scenario_mode, "supplier_vendor_42")
+    supply_scopes = sorted(
+        {
+            "inventory_position",
+            "delivery_eta",
+            "supplier_compliance",
+            "cold_chain_status",
+            "parts_availability",
+            "demand_forecast",
+            "restock_request",
+            "dock_slot",
+            "substitution_request",
+            "purchase_order_notice",
+            "maintenance_parts_request",
+            "safety_notice",
+            "policy_check",
+            "session_commit",
+        }
+    )
+    token = issue_delegation_token(
+        {
+            "subject": subject,
+            "agent_id": agent_id,
+            "scope": supply_scopes,
+            "cannot_do": [
+                "auto_accept_price_change",
+                "bypass_food_safety",
+                "release_vendor_payment_without_approval",
+                "auto_purchase",
+            ],
+            "ttl_seconds": 3 * 60 * 60,
+        }
+    )["token"]
+    identity = identity_handshake(
+        {
+            "agent_id": agent_id,
+            "represents": subject,
+            "proof": "signed_supplier_token",
+            "requested_session": f"supply_chain_{scenario_mode}_{datetime.now(UTC).strftime('%Y_%m_%d')}",
+            "delegation_token": token,
+        }
+    )
+    session_id = identity["session"]["session_id"]
+    capability = capability_handshake(
+        session_id,
+        {
+            "can_share": ["inventory_position", "delivery_eta", "supplier_compliance", "cold_chain_status", "parts_availability"],
+            "can_receive": ["demand_forecast", "restock_request", "dock_slot", "substitution_request", "purchase_order_notice", "maintenance_parts_request", "safety_notice"],
+            "cannot_do": ["auto_accept_price_change", "bypass_food_safety", "release_vendor_payment_without_approval", "auto_purchase"],
+            "delegation_token": token,
+        },
+    )
+    intent = intent_handshake(
+        session_id,
+        {
+            "goal": run.get("goal") or "coordinate_supplier_counterparty",
+            "time_window": "3_hours",
+            "constraints": run.get("constraints") or {"scenario_mode": scenario_mode},
+            "scenario_mode": scenario_mode,
+            "delegation_token": token,
+        },
+    )
+    proposal = propose_plan(session_id, {"planner": run.get("planner") or scenario_mode, "scenario_mode": scenario_mode, "delegation_token": token})
+    counter = counter_proposal(
+        session_id,
+        {
+            "counter_request": run.get("counter_request") or "supplier counterproposal",
+            "priority_change": run.get("priority_change") or {},
+            "scenario_mode": scenario_mode,
+            "delegation_token": token,
+        },
+    )
+    commitment = commit_plan(session_id, {"accepted": True, "notify_supplier": True, "scenario_mode": scenario_mode, "delegation_token": token})
+    monitoring = monitor_session(session_id, {"event": run.get("monitor_event") or "supplier_monitor", "scenario_mode": scenario_mode, "delegation_token": token})
+    procurement_gate = commerce_agent_evaluate(
+        session_id,
+        {
+            "action": run.get("commerce_action") or "purchase_order",
+            "amount": 4200,
+            "reason": run.get("commerce_reason") or f"{scenario_mode} procurement boundary probe.",
+            "scenario_mode": scenario_mode,
+            "delegation_token": token,
+        },
+    )
+    receipt = session_protocol_receipt(session_id, {"scenario_mode": scenario_mode, "delegation_token": token})
+    return {
+        "status": "demo_complete",
+        "mode": "supply_chain_agent_handshake",
+        "scenario_mode": scenario_mode,
+        "session_id": session_id,
+        "steps": [identity, capability, intent, proposal, counter, commitment, monitoring, procurement_gate, receipt],
+        "receipt": receipt["receipt"],
         "session": get_session(session_id)["session"],
     }

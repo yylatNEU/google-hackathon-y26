@@ -11,10 +11,12 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class DeliveryOutboxController {
     private final DeliveryOutboxService deliveryOutboxService;
+    private final DeliveryGcpAdapterService deliveryGcpAdapterService;
     private final RoleAuthService roleAuthService;
 
-    public DeliveryOutboxController(DeliveryOutboxService deliveryOutboxService, RoleAuthService roleAuthService) {
+    public DeliveryOutboxController(DeliveryOutboxService deliveryOutboxService, DeliveryGcpAdapterService deliveryGcpAdapterService, RoleAuthService roleAuthService) {
         this.deliveryOutboxService = deliveryOutboxService;
+        this.deliveryGcpAdapterService = deliveryGcpAdapterService;
         this.roleAuthService = roleAuthService;
     }
 
@@ -28,6 +30,39 @@ public class DeliveryOutboxController {
     public Map<String, Object> deliveryOutbox(HttpServletRequest request) {
         roleAuthService.requireCapability(request, "read_ops_evidence");
         return deliveryOutboxService.outbox(intParam(request.getParameter("limit"), 20));
+    }
+
+    @GetMapping(value = "/api/park/delivery/gcp-adapters/status", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> gcpAdapterStatus(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_ops_evidence");
+        return deliveryGcpAdapterService.status();
+    }
+
+    @PostMapping(value = "/api/park/delivery/guest-promotion", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> guestPromotion(
+        HttpServletRequest request,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        roleAuthService.requireCapability(request, "dispatch_live_action");
+        return deliveryOutboxService.guestPromotion(body == null ? Map.of() : body);
+    }
+
+    @PostMapping(value = "/api/park/delivery/worker-notification", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> workerNotification(
+        HttpServletRequest request,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        roleAuthService.requireCapability(request, "dispatch_live_action");
+        return deliveryOutboxService.workerNotification(body == null ? Map.of() : body);
+    }
+
+    @PostMapping(value = "/api/park/delivery/equipment-command", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> equipmentCommand(
+        HttpServletRequest request,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        roleAuthService.requireCapability(request, "dispatch_live_action");
+        return deliveryOutboxService.equipmentCommand(body == null ? Map.of() : body);
     }
 
     @PostMapping(value = "/api/park/delivery/acknowledge", produces = MediaType.APPLICATION_JSON_VALUE)

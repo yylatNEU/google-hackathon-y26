@@ -167,6 +167,18 @@ def test_gemini_hard_timeout_subprocess_success_errors_and_worker(monkeypatch, c
     assert json.loads(capsys.readouterr().out)["transport"] == "google_genai_sdk"
 
 
+def test_gemini_rest_fast_path_does_not_override_vertex_mode(monkeypatch):
+    monkeypatch.delenv("PARKPULSE_DISABLE_GEMINI_REST_FAST_PATH", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "dev-key")
+    monkeypatch.setenv("GOOGLE_API_KEY", "dev-google-key")
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+
+    assert gemini_hard_timeout._gemini_rest_available() is False
+
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
+    assert gemini_hard_timeout._gemini_rest_available() is True
+
+
 def test_gcp_trace_eval_exporter_and_flush_paths(monkeypatch):
     for key in ("BIGQUERY_PROJECT", "GOOGLE_CLOUD_PROJECT", "GCP_TRACE_PROJECT", "ENABLE_GCP_CLOUD_TRACE_EXPORT", "GCP_TRACE_URL_TEMPLATE", "ENABLE_VERTEX_GENAI_EVAL", "VERTEX_GENAI_EVALUATOR_ID"):
         monkeypatch.delenv(key, raising=False)

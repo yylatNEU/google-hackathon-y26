@@ -24,7 +24,27 @@ def test_live_gcp_judge_trace_eval_smoke():
         )
     )
 
+    strict_gate = result["strict_gate"]
+    if strict_gate["required"]:
+        assert strict_gate["passed"], strict_gate["failures"]
     assert result["status"] == "complete"
     assert result["readiness"]["judge_agent"]["agent_id"] == "gcp_eval_judge_agent"
     assert result["smoke"]["eval_present"] is True
     assert result["smoke"]["proof"]["local_scorecard"]["proof_mode"] == "live"
+    assert result["artifact"]["status"] == "written"
+
+    allowed_modes = {"live", "mocked", "skipped"}
+    readiness = result["readiness"]
+    checks = readiness["checks"]
+    required_live_checks = readiness["summary"]["required_live_checks"]
+    assert {"cloud_trace_export", "vertex_eval_trigger", "bigquery"} <= set(required_live_checks)
+    assert all(check["proof_mode"] in allowed_modes for check in checks.values())
+    assert readiness["status"] in {"live_ready", "wired_not_live"}
+    assert readiness["summary"]["required_live_ready"] is all(
+        checks[name]["proof_mode"] == "live" for name in required_live_checks
+    )
+    assert (readiness["status"] == "live_ready") is readiness["summary"]["required_live_ready"]
+
+    proof = result["smoke"]["proof"]
+    assert {"local_scorecard", "trace_artifact", "hosted_vertex_eval", "analytics_export"} <= set(proof)
+    assert all(proof[item]["proof_mode"] in allowed_modes for item in proof)

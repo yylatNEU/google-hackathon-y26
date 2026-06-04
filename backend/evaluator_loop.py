@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
+import ssl
 import subprocess
 import urllib.error
 import urllib.request
@@ -257,12 +259,14 @@ def run_vertex_hosted_evaluation(payload_preview: dict[str, Any]) -> dict[str, A
         eval_result = client.evals.evaluate(dataset=evaluation_dataset, metrics=metrics)
         return _summarize_vertex_eval_result(eval_result, metrics, project, location, evaluator_id)
     except Exception as error:
+        status = _vertex_exception_status(error)
         return {
-            "status": "failed",
+            "status": status,
             "provider": "vertex_genai_evaluation",
             "project": project,
             "location": location,
             "evaluator_id": evaluator_id,
+            "failure_class": status,
             "reason": str(error)[:800],
         }
 
@@ -331,7 +335,7 @@ def run_vertex_rest_evaluation(payload_preview: dict[str, Any]) -> dict[str, Any
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=float(os.getenv("VERTEX_EVAL_HTTP_TIMEOUT_SECONDS", "45"))) as response:
+        with urllib.request.urlopen(request, timeout=float(os.getenv("VERTEX_EVAL_HTTP_TIMEOUT_SECONDS", "45")), context=_vertex_eval_ssl_context()) as response:
             response_body = response.read().decode("utf-8")
             response_json = json.loads(response_body) if response_body else {}
         metric_result = response_json.get("pointwiseMetricResult") or response_json.get("rubricBasedMetricResult") or response_json
@@ -347,25 +351,83 @@ def run_vertex_rest_evaluation(payload_preview: dict[str, Any]) -> dict[str, Any
         }
     except urllib.error.HTTPError as error:
         details = error.read().decode("utf-8", errors="replace")[:1000]
+        status = _vertex_http_failure_status(error.code)
         return {
-            "status": "failed",
+            "status": status,
             "provider": "vertex_genai_evaluation",
             "transport": "rest",
             "project": project,
             "location": location,
             "evaluator_id": evaluator_id,
+            "failure_class": status,
             "reason": f"HTTP {error.code}: {details}",
         }
-    except Exception as error:
+    except urllib.error.URLError as error:
+        status = _vertex_exception_status(error)
         return {
-            "status": "failed",
+            "status": status,
             "provider": "vertex_genai_evaluation",
             "transport": "rest",
             "project": project,
             "location": location,
             "evaluator_id": evaluator_id,
+            "failure_class": status,
             "reason": str(error)[:800],
         }
+    except (TimeoutError, socket.timeout) as error:
+        return {
+            "status": "timeout",
+            "provider": "vertex_genai_evaluation",
+            "transport": "rest",
+            "project": project,
+            "location": location,
+            "evaluator_id": evaluator_id,
+            "failure_class": "timeout",
+            "reason": str(error)[:800],
+        }
+    except Exception as error:
+        status = _vertex_exception_status(error)
+        return {
+            "status": status,
+            "provider": "vertex_genai_evaluation",
+            "transport": "rest",
+            "project": project,
+            "location": location,
+            "evaluator_id": evaluator_id,
+            "failure_class": status,
+            "reason": str(error)[:800],
+        }
+
+
+def _vertex_eval_ssl_context() -> ssl.SSLContext | None:
+    if _env_bool("PARKPULSE_VERTEX_EVAL_DISABLE_CERTIFI"):
+        return None
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return None
+
+
+def _vertex_http_failure_status(code: int) -> str:
+    if code in {401, 403}:
+        return "auth_unavailable"
+    if code == 429:
+        return "quota_failed"
+    if code in {408, 504}:
+        return "timeout"
+    return "http_failed"
+
+
+def _vertex_exception_status(error: BaseException) -> str:
+    text = str(error).lower()
+    reason = getattr(error, "reason", None)
+    if isinstance(reason, ssl.SSLError) or "certificate_verify_failed" in text or "ssl:" in text:
+        return "ssl_failed"
+    if isinstance(reason, TimeoutError) or isinstance(reason, socket.timeout) or "timed out" in text or "timeout" in text:
+        return "timeout"
+    return "failed"
 
 
 def _vertex_access_token() -> dict[str, str]:
@@ -490,9 +552,12 @@ def build_hosted_evaluator_loop(
         "outcome": outcome or {},
     }
     trigger_result: dict[str, Any] | None = None
-    if status.get("provider") == "vertex_genai_evaluation" and hosted_configured and trigger_enabled:
+    blocking_trigger = _env_bool("PARKPULSE_HOSTED_EVAL_BLOCKING") or _env_bool("PARKPULSE_REQUIRE_STRICT_LIVE_GCP")
+    if status.get("provider") == "vertex_genai_evaluation" and hosted_configured and trigger_enabled and blocking_trigger:
         trigger_result = run_vertex_hosted_evaluation(payload_preview)
         run_status = f"vertex_{trigger_result.get('status', 'unknown')}"
+    elif status.get("provider") == "vertex_genai_evaluation" and hosted_configured and trigger_enabled:
+        run_status = "vertex_deferred"
 
     return {
         "status": run_status,
@@ -507,8 +572,11 @@ def build_hosted_evaluator_loop(
             "reason": trigger_result.get("reason")
             if trigger_result
             else None
+            if hosted_configured and trigger_enabled and blocking_trigger
+            else "Hosted evaluator trigger is configured but deferred; local scorecard returned first."
             if hosted_configured and trigger_enabled
             else "Hosted evaluator trigger is disabled or not configured; no hosted score has been fabricated.",
+            "blocking": blocking_trigger,
         },
         "vertex_result": trigger_result,
         "continuous_monitoring": status["continuous_monitoring"],

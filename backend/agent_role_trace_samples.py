@@ -57,6 +57,7 @@ def _bounded_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "actions": payload.get("actions"),
         "scan": payload.get("scan"),
         "role_receipt": payload.get("role_receipt"),
+        "role_work_contract": payload.get("role_work_contract"),
         "run_telemetry": {
             "scenario_key": telemetry.get("scenario_key"),
             "governance": telemetry.get("governance"),

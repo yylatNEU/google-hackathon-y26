@@ -64,6 +64,8 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(int(self.headers.get("content-length", "0") or 0))
         except TimeoutError:
             return
+        if self._run_experience_studio_fast_path(parsed.path, body):
+            return
         if self._run_agent_handshake_fast_path(parsed.path, body):
             return
         messages = [
@@ -176,12 +178,50 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_direct_options(self) -> None:
+        self.send_response(204)
+        self.send_header("access-control-allow-origin", "*")
+        self.send_header("access-control-allow-methods", "GET,POST,PUT,OPTIONS")
+        self.send_header("access-control-allow-headers", "authorization,content-type,x-parkpulse-role,x-parkpulse-role-token")
+        self.send_header("access-control-max-age", "600")
+        self.send_header("content-length", "0")
+        self.end_headers()
+
     def _json_body(self, body: bytes) -> dict[str, Any]:
         try:
             payload = json.loads(body.decode("utf-8") or "{}")
         except json.JSONDecodeError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    def _run_experience_studio_fast_path(self, path: str, body: bytes) -> bool:
+        try:
+            if path in {"/api/park/venue-profile", "/api/park/experience-studio/draft", "/api/park/experience-studio/drafts"} and self.command == "OPTIONS":
+                self._send_direct_options()
+                return True
+            if self.command == "GET" and path == "/api/park/venue-profile":
+                from venue_profile import build_venue_profile
+
+                self._send_direct_json(200, build_venue_profile())
+                return True
+            if self.command == "GET" and path == "/api/park/experience-studio/drafts":
+                from experience_studio import list_experience_studio_drafts
+
+                self._send_direct_json(200, list_experience_studio_drafts())
+                return True
+            if self.command == "POST" and path == "/api/park/experience-studio/draft":
+                from experience_studio import build_experience_studio_payload
+
+                payload = self._json_body(body)
+                if payload.get("useRealParkContext") is True:
+                    payload["useRealParkContext"] = False
+                    payload["realParkContextDeferred"] = True
+                self._send_direct_json(200, asyncio.run(build_experience_studio_payload(payload, None)))
+                return True
+        except Exception as error:
+            self._send_direct_json(500, {"status": "error", "mode": "experience_studio_fast_path", "message": str(error)[:240]})
+            return True
+        return False
 
     def _truthy(self, value: str | None, default: bool = False) -> bool:
         if value is None:
@@ -295,6 +335,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             commerce_agent_evaluate,
             commit_plan,
             counter_proposal,
+            demo_supply_chain_handshake,
             escalate_session,
             evaluate_policy_action,
             get_agent_onboarding,
@@ -317,6 +358,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             session_protocol_receipt,
             upsert_agent_trust_partner,
             verify_agent_certification_credential,
+            verify_protocol_artifact,
         )
         payload = self._json_body(body)
         try:
@@ -331,6 +373,12 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                 return True
             if self.command in {"GET", "POST"} and path == "/api/park/agent-handshake/policy-challenges":
                 self._send_direct_json(200, run_agent_handshake_policy_challenges(payload))
+                return True
+            if self.command == "POST" and path == "/api/park/agent-handshake/verify-artifact":
+                self._send_direct_json(200, verify_protocol_artifact(payload))
+                return True
+            if self.command in {"GET", "POST"} and path == "/api/park/agent-handshake/supply-chain/demo":
+                self._send_direct_json(200, demo_supply_chain_handshake(str(payload.get("scenario_mode") or payload.get("scenarioMode") or "supply_replenishment")))
                 return True
             if self.command == "POST" and path == "/api/park/delegation-token":
                 self._send_direct_json(200, issue_delegation_token(payload))

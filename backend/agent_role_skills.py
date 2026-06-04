@@ -42,6 +42,70 @@ ROLE_UNDERSTANDING_CONTRACTS: dict[str, dict[str, Any]] = {
     },
 }
 
+ROLE_PRODUCT_READY_CHECKS: dict[str, tuple[str, ...]] = {
+    "scan": (
+        "role_setup_complete",
+        "role_work_depth_passed",
+        "trace_eval_passed",
+        "output_eval_passed",
+        "read_only_no_dispatch",
+        "has_scan_output",
+        "has_signal_evidence",
+        "no_dispatch_tools_called",
+        "negative_fixture_covered",
+        "adversarial_fixture_covered",
+    ),
+    "react": (
+        "role_setup_complete",
+        "role_work_depth_passed",
+        "trace_eval_passed",
+        "output_eval_passed",
+        "has_receiver_payloads",
+        "policy_gate_present",
+        "dispatch_receipts_present",
+        "receipt_has_dispatch_ids",
+        "negative_fixture_covered",
+        "adversarial_fixture_covered",
+    ),
+    "proact": (
+        "role_setup_complete",
+        "role_work_depth_passed",
+        "trace_eval_passed",
+        "output_eval_passed",
+        "has_receiver_payloads",
+        "learning_observed",
+        "policy_gate_present",
+        "dispatch_receipts_present",
+        "negative_fixture_covered",
+        "adversarial_fixture_covered",
+    ),
+    "customer": (
+        "role_setup_complete",
+        "role_work_depth_passed",
+        "trace_eval_passed",
+        "output_eval_passed",
+        "customer_read_only",
+        "has_customer_answer",
+        "no_operator_dispatch",
+        "public_actions_only",
+        "negative_fixture_covered",
+        "adversarial_fixture_covered",
+    ),
+    "qa": (
+        "role_setup_complete",
+        "role_work_depth_passed",
+        "trace_eval_passed",
+        "output_eval_passed",
+        "read_only_no_dispatch",
+        "has_go_no_go",
+        "qa_receipt_read_only",
+        "inspection_evidence_present",
+        "has_failure_mode_matrix",
+        "negative_fixture_covered",
+        "adversarial_fixture_covered",
+    ),
+}
+
 
 ROLE_SKILLS: list[dict[str, Any]] = [
     {
@@ -687,6 +751,53 @@ def build_deliberate_role_eval_report() -> dict[str, Any]:
     }
 
 
+def _list_len(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _role_work_depth_checks(role: str, payload: dict[str, Any], trace_eval: dict[str, Any]) -> dict[str, bool]:
+    route = payload.get("role_route") if isinstance(payload.get("role_route"), dict) else payload.get("route", {})
+    route = route if isinstance(route, dict) else {}
+    work = payload.get("role_work_contract") if isinstance(payload.get("role_work_contract"), dict) else {}
+    role_specific = work.get("role_specific_work") if isinstance(work.get("role_specific_work"), dict) else {}
+    required_tools = trace_eval.get("required_sequence", []) if isinstance(trace_eval.get("required_sequence"), list) else []
+    tool_rationale = work.get("tool_rationale", []) if isinstance(work.get("tool_rationale"), list) else []
+    tool_rationale_tools = {str(item.get("tool")) for item in tool_rationale if isinstance(item, dict) and item.get("tool")}
+    checks: dict[str, bool] = {
+        "has_role_description": bool(work.get("role_description")),
+        "has_mission": bool(work.get("mission")),
+        "has_boundary": bool(work.get("boundary")),
+        "has_input_evidence": _list_len(work.get("input_evidence")) >= 2,
+        "has_reasoning_steps": _list_len(work.get("reasoning_steps")) >= 4,
+        "has_tool_rationale": len(tool_rationale_tools.intersection({str(tool) for tool in required_tools})) >= min(len(required_tools), max(2, int(route.get("deliberate_tool_use", {}).get("minimum_tool_coverage", 2) or 2))),
+        "has_output_evidence": _list_len(work.get("output_evidence")) >= 2,
+        "has_success_criteria": _list_len(work.get("success_criteria")) >= 2,
+        "has_escalation_or_stop": _list_len(work.get("escalation_or_stop_conditions")) >= 2,
+        "route_has_understanding": _list_len((route.get("understanding_contract", {}) if isinstance(route.get("understanding_contract"), dict) else {}).get("must_understand")) >= 4,
+        "route_has_tool_sequence": _list_len((route.get("deliberate_tool_use", {}) if isinstance(route.get("deliberate_tool_use"), dict) else {}).get("required_sequence")) >= 3,
+    }
+    if role == "scan":
+        checks["scan_uncertainty_explained"] = bool(role_specific.get("uncertainty_disclosure"))
+        checks["scan_next_role_condition"] = bool(role_specific.get("recommended_next_role_condition"))
+    elif role == "react":
+        checks["react_alternatives_considered"] = _list_len(role_specific.get("alternatives_considered")) >= 2
+        checks["react_rejected_actions_named"] = _list_len(role_specific.get("rejected_actions")) >= 1
+        checks["react_receivers_named"] = _list_len(role_specific.get("receiver_channels")) >= 1
+    elif role == "proact":
+        checks["proact_baseline_compared"] = bool(role_specific.get("baseline_vs_action"))
+        checks["proact_observed_response_used"] = bool(role_specific.get("observed_response"))
+        checks["proact_learning_rule_present"] = bool(role_specific.get("learning_rule"))
+    elif role == "customer":
+        checks["customer_public_sources_named"] = _list_len(role_specific.get("public_data_sources")) >= 2
+        checks["customer_privacy_boundary_named"] = bool(role_specific.get("privacy_boundary"))
+        checks["customer_actions_bounded"] = _list_len(role_specific.get("allowed_customer_actions")) >= 1
+    elif role == "qa":
+        checks["qa_failure_modes_named"] = _list_len(role_specific.get("failure_modes_checked")) >= 4
+        checks["qa_observability_named"] = _list_len(role_specific.get("observability_checks")) >= 3
+        checks["qa_idempotency_named"] = bool(role_specific.get("idempotency_check"))
+    return checks
+
+
 def _role_output_checks(role: str, payload: dict[str, Any], trace_eval: dict[str, Any]) -> dict[str, Any]:
     telemetry = payload.get("run_telemetry", {}) if isinstance(payload.get("run_telemetry"), dict) else {}
     delivery = telemetry.get("delivery", {}) if isinstance(telemetry.get("delivery"), dict) else payload.get("delivery", {})
@@ -703,6 +814,18 @@ def _role_output_checks(role: str, payload: dict[str, Any], trace_eval: dict[str
         "required_tools_have_outputs": not trace_eval.get("required_without_output"),
         "selected_role_matches": str(payload.get("selected_role") or receipt.get("role") or role) == role,
     }
+    depth_checks = _role_work_depth_checks(role, payload, trace_eval)
+    checks["role_setup_complete"] = all(
+        depth_checks.get(name) is True
+        for name in (
+            "has_role_description",
+            "has_mission",
+            "has_boundary",
+            "route_has_understanding",
+            "route_has_tool_sequence",
+        )
+    )
+    checks["role_work_depth_passed"] = all(depth_checks.values())
     if role == "scan":
         checks["read_only_no_dispatch"] = dispatch_count == 0
         checks["has_scan_output"] = bool(payload.get("scan") or payload.get("operator_response"))
@@ -745,6 +868,7 @@ def _role_output_checks(role: str, payload: dict[str, Any], trace_eval: dict[str
         "status": "passed" if score >= 88 and not issues else "failed" if score < 70 or issues else "warning",
         "score": score,
         "checks": checks,
+        "role_work_depth_checks": depth_checks,
         "dispatch_count": dispatch_count,
         "readiness_issues": issues,
     }
@@ -785,6 +909,113 @@ def build_real_deliberate_role_eval_report(role_payloads: dict[str, dict[str, An
         "roles": results,
         "readiness_issues": sorted({issue for row in results for issue in row.get("readiness_issues", [])}),
         "decision": "allow_real_trace_role_agent_tool_use_claim" if not failed and average >= 88 else "block_until_real_role_traces_pass",
+    }
+
+
+def _fixture_roles(report: dict[str, Any]) -> set[str]:
+    fixtures = report.get("fixtures", []) if isinstance(report.get("fixtures"), list) else []
+    return {
+        str(row.get("role"))
+        for row in fixtures
+        if isinstance(row, dict)
+        and row.get("role")
+        and row.get("expected_failures_met") is True
+        and (row.get("eval", {}) if isinstance(row.get("eval"), dict) else row).get("status") != "passed"
+    }
+
+
+def _sample_status_by_role(sampled_report: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(sampled_report, dict) or not isinstance(sampled_report.get("samples"), list):
+        return {}
+    by_role: dict[str, dict[str, Any]] = {}
+    for row in sampled_report.get("samples", []):
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("role") or "")
+        if not role:
+            continue
+        current = by_role.setdefault(role, {"count": 0, "failed_count": 0, "scores": []})
+        current["count"] += 1
+        current["failed_count"] += 0 if row.get("status") == "passed" else 1
+        current["scores"].append(float(row.get("score") or 0))
+    for role, summary in by_role.items():
+        scores = summary.get("scores", [])
+        summary["average_score"] = round(sum(scores) / max(1, len(scores)), 2)
+        summary["status"] = "passed" if summary.get("count", 0) > 0 and summary.get("failed_count", 0) == 0 and summary["average_score"] >= 88 else "failed"
+    return by_role
+
+
+def build_agent_role_product_readiness_report(
+    real_report: dict[str, Any],
+    *,
+    synthetic_report: dict[str, Any] | None = None,
+    sampled_report: dict[str, Any] | None = None,
+    adversarial_report: dict[str, Any] | None = None,
+    negative_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    synthetic_roles = {
+        str(row.get("role")): row
+        for row in (synthetic_report or {}).get("roles", [])
+        if isinstance(row, dict) and row.get("role")
+    }
+    real_roles = {
+        str(row.get("role")): row
+        for row in real_report.get("roles", [])
+        if isinstance(row, dict) and row.get("role")
+    }
+    negative_roles = _fixture_roles(negative_report or {})
+    adversarial_roles = _fixture_roles(adversarial_report or {})
+    sample_by_role = _sample_status_by_role(sampled_report)
+    sample_report_status = (sampled_report or {}).get("status")
+
+    role_results = []
+    for role in ("scan", "react", "proact", "customer", "qa"):
+        real = real_roles.get(role, {})
+        trace_eval = real.get("trace_eval", {}) if isinstance(real.get("trace_eval"), dict) else {}
+        output_eval = real.get("output_eval", {}) if isinstance(real.get("output_eval"), dict) else {}
+        output_checks = output_eval.get("checks", {}) if isinstance(output_eval.get("checks"), dict) else {}
+        synthetic = synthetic_roles.get(role, {})
+        sample = sample_by_role.get(role)
+        checks: dict[str, bool] = {
+            "synthetic_eval_passed": synthetic.get("status") == "passed" if synthetic_report else True,
+            "real_eval_passed": real.get("status") == "passed",
+            "trace_eval_passed": trace_eval.get("status") == "passed",
+            "trace_no_critical_failures": not trace_eval.get("critical_failures"),
+            "trace_required_outputs_present": not trace_eval.get("required_without_output"),
+            "output_eval_passed": output_eval.get("status") == "passed",
+            "negative_fixture_covered": role in negative_roles,
+            "adversarial_fixture_covered": role in adversarial_roles,
+            "sampled_evidence_passed": sample is None if sample_report_status in {None, "skipped"} else bool(sample and sample.get("status") == "passed"),
+        }
+        for name in ROLE_PRODUCT_READY_CHECKS[role]:
+            if name in output_checks:
+                checks[name] = output_checks[name] is True
+            elif name not in checks:
+                checks[name] = False
+        failed_checks = [name for name, passed in checks.items() if not passed]
+        score = max(0, min(100, int(round(float(real.get("score") or 0))) - len(failed_checks) * 8))
+        role_results.append(
+            {
+                "role": role,
+                "status": "product_ready" if not failed_checks and score >= 88 else "not_ready",
+                "score": score,
+                "required_checks": list(ROLE_PRODUCT_READY_CHECKS[role]),
+                "checks": checks,
+                "failed_checks": failed_checks,
+                "sample_evidence": sample or {"status": "skipped" if sample_report_status in {None, "skipped"} else "missing"},
+                "readiness_issues": [f"{role}:{check}" for check in failed_checks],
+            }
+        )
+    not_ready = [row for row in role_results if row["status"] != "product_ready"]
+    return {
+        "status": "passed" if not not_ready else "failed",
+        "mode": "agent_role_product_readiness_report",
+        "role_count": len(role_results),
+        "product_ready_role_count": len(role_results) - len(not_ready),
+        "not_ready_role_count": len(not_ready),
+        "roles": role_results,
+        "readiness_issues": sorted({issue for row in role_results for issue in row.get("readiness_issues", [])}),
+        "decision": "all_agent_roles_product_ready" if not not_ready else "block_until_each_agent_role_is_product_ready",
     }
 
 

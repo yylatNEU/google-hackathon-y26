@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { fetchParkPulseApi } from "@/lib/api";
 
 type Scenario = {
@@ -67,6 +67,16 @@ type TurnScore = {
   dimensions?: Record<string, number>;
   coaching_notes?: string[];
   critical_miss?: boolean;
+  turn_coaching?: {
+    verdict?: string;
+    headline?: string;
+    priority?: string;
+    strengths?: string[];
+    misses?: Array<{ type?: string; label?: string }>;
+    weak_dimensions?: Array<{ dimension?: string; label?: string; score?: number }>;
+    next_response?: string;
+    scoring_basis?: string;
+  };
 };
 
 type Analytics = {
@@ -155,6 +165,109 @@ const difficultyClass: Record<string, string> = {
   critical: "border-rose-300 bg-rose-300 text-slate-950",
 };
 
+const fallbackScenarios: Scenario[] = [
+  {
+    id: "lost_child_report",
+    title: "Lost Child Report",
+    category: "Safety",
+    difficulty: "critical",
+    guest_role: "panicked guardian",
+    opening_message: "I cannot find my six-year-old. She was next to me near the carousel and now she is gone.",
+    context: "A guardian reports a missing child. Staff must show empathy, collect key details, keep the guardian reachable, and escalate immediately to security/ops.",
+    objectives: ["Reassure without minimizing", "Collect child description and last seen location", "Keep guardian at a meeting point", "Escalate to security immediately"],
+  },
+  {
+    id: "heat_exhaustion_concern",
+    title: "Heat Exhaustion Concern",
+    category: "Safety",
+    difficulty: "critical",
+    guest_role: "concerned friend",
+    opening_message: "My friend is dizzy and looks pale. We have been in the sun for an hour and she says she might faint.",
+    context: "Possible heat exhaustion. Staff must prioritize safety, move to shade if safe, call first aid/medical, and avoid medical diagnosis.",
+    objectives: ["Treat as urgent", "Call first aid or medical", "Move to shade/cooling if safe", "Avoid diagnosis or delay"],
+  },
+  {
+    id: "safety_rule_refusal",
+    title: "Guest Refusing Safety Rule",
+    category: "Ride Safety",
+    difficulty: "critical",
+    guest_role: "defiant ride guest",
+    opening_message: "I am not taking off my loose backpack strap. I have ridden like this before. Just start the ride.",
+    context: "Guest refuses a ride safety rule. Staff must stay firm, explain safety requirement, avoid bargaining, and escalate to ride lead/security if refusal continues.",
+    objectives: ["State rule clearly", "Do not start ride unless compliant", "Explain safety reason", "Escalate persistent refusal"],
+  },
+  {
+    id: "angry_parent",
+    title: "Angry Parent At Guest Services",
+    category: "Guest Recovery",
+    difficulty: "medium",
+    guest_role: "angry parent",
+    opening_message: "This is ridiculous. My kid has been crying for twenty minutes because your staff sent us to a closed ride.",
+    context: "A parent is angry after a ride closure reroute failed. They want acknowledgement, a clear next step, and a supervisor if compensation is requested.",
+    objectives: ["Acknowledge the impact", "Confirm what happened", "Offer a concrete next step", "Escalate refund or compensation decisions"],
+  },
+  {
+    id: "ride_closure_complaint",
+    title: "Ride Closure Complaint",
+    category: "Ride Ops",
+    difficulty: "medium",
+    guest_role: "disappointed coaster fan",
+    opening_message: "We paid for tickets mostly for Dragon Coaster, and now it is closed. Nobody told us before we waited.",
+    context: "Guest complains about a closure. Staff should acknowledge, avoid unsafe reopen promises, explain available updates, and offer alternatives.",
+    objectives: ["Acknowledge wait impact", "Avoid promising reopen time", "Offer live alternatives", "Direct refund/compensation to approved channel"],
+  },
+  {
+    id: "accessibility_accommodation",
+    title: "Accessibility Accommodation Request",
+    category: "Accessibility",
+    difficulty: "high",
+    guest_role: "guest requesting mobility accommodation",
+    opening_message: "My father cannot stand in this sun for the whole queue. We need help, but I do not want to explain his medical history in public.",
+    context: "A party requests accessibility support. Staff must preserve dignity, avoid medical probing, explain available assistance, and escalate to accessibility/guest services.",
+    objectives: ["Respect privacy", "Offer accessible route or waiting support", "Avoid asking for diagnosis", "Escalate to accessibility support"],
+  },
+  {
+    id: "language_barrier",
+    title: "Language Barrier At Entry",
+    category: "Guest Support",
+    difficulty: "medium",
+    guest_role: "confused multilingual family",
+    opening_message: "No English good. Ticket problem. Family inside? We do not understand where to go.",
+    context: "A guest has a language barrier and possible party separation. Staff should simplify, use translation resources, confirm safety, and guide one step at a time.",
+    objectives: ["Use simple language", "Offer translation support", "Confirm party status", "Give one clear next step"],
+  },
+  {
+    id: "refund_request",
+    title: "Refund Request",
+    category: "Guest Recovery",
+    difficulty: "medium",
+    guest_role: "upset purchaser",
+    opening_message: "I want a refund now. The ride was closed, the food line was terrible, and this day is not what we paid for.",
+    context: "Guest requests refund. Staff should empathize, avoid unauthorized promises, gather context, and route to Guest Services or supervisor.",
+    objectives: ["Acknowledge frustration", "Avoid promising refund", "Collect issue summary", "Escalate through approved channel"],
+  },
+  {
+    id: "line_cutting_conflict",
+    title: "Line-Cutting Conflict",
+    category: "Crowd Conflict",
+    difficulty: "high",
+    guest_role: "angry guest in queue",
+    opening_message: "Those people cut the entire line. If you do not do something, I am going to handle it myself.",
+    context: "Queue conflict with possible escalation. Staff should acknowledge, separate tension, avoid blame, call lead/security if needed, and keep the queue moving safely.",
+    objectives: ["Acknowledge concern", "Discourage confrontation", "Call lead/security if threat escalates", "Investigate without public blame"],
+  },
+  {
+    id: "weather_evacuation_confusion",
+    title: "Weather Evacuation Confusion",
+    category: "Weather Response",
+    difficulty: "high",
+    guest_role: "confused family during storm hold",
+    opening_message: "The alert says move to shelter, but everyone is walking different directions. We have a stroller and do not know where to go.",
+    context: "Storm shelter movement. Staff should give calm clear route, preserve accessibility, avoid panic language, and direct to assigned shelter/lead.",
+    objectives: ["Use calm evacuation language", "Give specific shelter route", "Preserve accessible/stroller route", "Escalate blocked-route or lightning risk"],
+  },
+];
+
 function label(value?: string) {
   if (!value) return "--";
   return dimensionLabels[value] ?? value.replaceAll("_", " ");
@@ -167,15 +280,25 @@ function scoreClass(value?: number) {
   return "text-rose-200";
 }
 
+function verdictClass(value?: string) {
+  if (value === "strong") return "border-emerald-300 bg-emerald-300 text-slate-950";
+  if (value === "passing") return "border-teal-300 bg-teal-300 text-slate-950";
+  if (value === "critical_miss") return "border-rose-300 bg-rose-300 text-slate-950";
+  return "border-amber-300 bg-amber-300 text-slate-950";
+}
+
 function barWidth(value?: number) {
   return `${Math.max(0, Math.min(100, (Number(value ?? 0) / 5) * 100))}%`;
 }
 
 export function StaffTrainingPage() {
-  const [scenarios, setScenarios] = useState<Scenario[]>([]);
+  const liveRoleplayRef = useRef<HTMLElement | null>(null);
+  const [activeView, setActiveView] = useState<"roleplay" | "manager">("roleplay");
+  const [managerLoaded, setManagerLoaded] = useState(false);
+  const [scenarios, setScenarios] = useState<Scenario[]>(fallbackScenarios);
   const [selectedScenarioId, setSelectedScenarioId] = useState("lost_child_report");
   const [traineeName, setTraineeName] = useState("Seasonal staff trainee");
-  const [useLlmGuest, setUseLlmGuest] = useState(false);
+  const [useLlmGuest, setUseLlmGuest] = useState(true);
   const [session, setSession] = useState<TrainingSession | null>(null);
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
@@ -188,6 +311,8 @@ export function StaffTrainingPage() {
   const [employeeMessage, setEmployeeMessage] = useState("");
   const [lastTurnScore, setLastTurnScore] = useState<TurnScore | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isStartingSession, setIsStartingSession] = useState(false);
+  const [isSendingTurn, setIsSendingTurn] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
 
@@ -197,6 +322,7 @@ export function StaffTrainingPage() {
   );
   const transcript = session?.transcript ?? [];
   const scorecard = session?.scorecard;
+  const turnCoaching = lastTurnScore?.turn_coaching;
   const objectives = session?.scenario?.objectives ?? selectedScenario?.objectives ?? [];
   const completedObjectives = new Set(session?.completed_objectives ?? []);
   const activeAssignment = assignments.find((assignment) => assignment.id === activeAssignmentId);
@@ -209,7 +335,7 @@ export function StaffTrainingPage() {
     });
     const payload = (await response.json()) as { scenarios?: Scenario[] };
     const nextScenarios = payload.scenarios ?? [];
-    setScenarios(nextScenarios);
+    if (nextScenarios.length) setScenarios(nextScenarios);
     if (nextScenarios.length && !nextScenarios.some((scenario) => scenario.id === selectedScenarioId)) {
       setSelectedScenarioId(nextScenarios[0].id);
     }
@@ -249,7 +375,7 @@ export function StaffTrainingPage() {
   useEffect(() => {
     let cancelled = false;
     setIsLoading(true);
-    Promise.all([loadScenarios(), loadAnalytics(), loadManagerWorkflow()])
+    loadScenarios()
       .catch((nextError: Error) => {
         if (!cancelled) setError(nextError.message);
       })
@@ -261,8 +387,27 @@ export function StaffTrainingPage() {
     };
   }, []);
 
-  async function startSession(scenarioId = selectedScenarioId, options?: { assignment?: Assignment; retryOfSessionId?: string }) {
+  useEffect(() => {
+    if (activeView !== "manager" || managerLoaded) return;
+    let cancelled = false;
     setIsLoading(true);
+    Promise.all([loadAnalytics(), loadManagerWorkflow()])
+      .then(() => {
+        if (!cancelled) setManagerLoaded(true);
+      })
+      .catch((nextError: Error) => {
+        if (!cancelled) setError(nextError.message);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeView, managerLoaded]);
+
+  async function startSession(scenarioId = selectedScenarioId, options?: { assignment?: Assignment; retryOfSessionId?: string }) {
+    setIsStartingSession(true);
     setError("");
     setStatus("");
     setLastTurnScore(null);
@@ -287,10 +432,13 @@ export function StaffTrainingPage() {
       setTraineeName(payload.trainee_name ?? nextTraineeName);
       setActiveAssignmentId(payload.assignment_id ?? assignment?.id ?? "");
       setStatus("Roleplay session active.");
+      window.setTimeout(() => {
+        liveRoleplayRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 0);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Unable to start roleplay.");
     } finally {
-      setIsLoading(false);
+      setIsStartingSession(false);
     }
   }
 
@@ -298,7 +446,7 @@ export function StaffTrainingPage() {
     event.preventDefault();
     const outbound = employeeMessage.trim();
     if (!session?.id || !outbound || session.status === "finished") return;
-    setIsLoading(true);
+    setIsSendingTurn(true);
     setError("");
     setEmployeeMessage("");
     try {
@@ -315,7 +463,7 @@ export function StaffTrainingPage() {
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Unable to score response.");
     } finally {
-      setIsLoading(false);
+      setIsSendingTurn(false);
     }
   }
 
@@ -460,9 +608,22 @@ export function StaffTrainingPage() {
               </p>
             </div>
             <nav className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setActiveView("roleplay")}
+                className={`rounded border px-3 py-2 text-xs font-black transition ${activeView === "roleplay" ? "border-teal-300 bg-teal-300 text-slate-950" : "border-slate-700 bg-slate-950 text-slate-200 hover:border-teal-300"}`}
+              >
+                Trainer
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveView("manager")}
+                className={`rounded border px-3 py-2 text-xs font-black transition ${activeView === "manager" ? "border-amber-300 bg-amber-300 text-slate-950" : "border-slate-700 bg-slate-950 text-slate-200 hover:border-amber-300"}`}
+              >
+                Manager review
+              </button>
               <a href="/" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-teal-300">Command</a>
               <a href="/human" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-teal-300">Human view</a>
-              <a href="/experience-studio" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-teal-300">Experience Studio</a>
             </nav>
           </div>
         </header>
@@ -474,7 +635,7 @@ export function StaffTrainingPage() {
           </section>
         )}
 
-        <section className="grid gap-4 rounded-lg border border-teal-400/20 bg-[#0d171b] p-4 xl:grid-cols-[360px_minmax(0,1fr)_360px]">
+        {activeView === "manager" && <section className="grid gap-4 rounded-lg border border-teal-400/20 bg-[#0d171b] p-4 xl:grid-cols-[360px_minmax(0,1fr)_360px]">
           <div>
             <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Manager assignments</div>
             <h2 className="mt-1 text-xl font-black text-slate-50">Seasonal onboarding queue</h2>
@@ -657,9 +818,40 @@ export function StaffTrainingPage() {
               </div>
             )}
           </div>
-        </section>
+        </section>}
 
-        <section className="grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)_360px]">
+        {activeView === "roleplay" && <section className="grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)_340px]">
+          <div className="rounded-lg border border-teal-300/40 bg-[#0d171b] p-4 xl:col-span-3">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Training workspace</div>
+                <h2 className="mt-1 text-2xl font-black text-slate-50">{session?.scenario?.title ?? selectedScenario?.title ?? "Lost Child Report"}</h2>
+                <p className="mt-2 max-w-4xl text-sm font-semibold leading-relaxed text-slate-400">
+                  {session?.id ? "Roleplay is active. Read the guest message, answer in the employee response box, then use the coaching feedback to improve the next turn." : selectedScenario?.context}
+                </p>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-[220px_180px]">
+                <input
+                  value={traineeName}
+                  onChange={(event) => setTraineeName(event.target.value)}
+                  className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-slate-100 outline-none focus:border-teal-300"
+                  aria-label="Trainee name"
+                />
+                <label className="flex min-h-10 items-center gap-2 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200">
+                  <input type="checkbox" checked={useLlmGuest} onChange={(event) => setUseLlmGuest(event.target.checked)} />
+                  Vertex AI guest
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void startSession()}
+                  disabled={!selectedScenario || isStartingSession}
+                  className="rounded border border-teal-300 bg-teal-300 px-4 py-2 text-sm font-black text-slate-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50 sm:col-span-2"
+                >
+                  {isStartingSession ? "Starting..." : session?.id && session.status !== "finished" ? "Restart roleplay" : "Start roleplay"}
+                </button>
+              </div>
+            </div>
+          </div>
           <aside className="space-y-4">
             <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
               <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Scenario queue</div>
@@ -670,7 +862,7 @@ export function StaffTrainingPage() {
                     type="button"
                     onClick={() => {
                       setSelectedScenarioId(scenario.id);
-                      void startSession(scenario.id);
+                      setLastTurnScore(null);
                     }}
                     className={`w-full rounded border p-3 text-left transition ${
                       selectedScenarioId === scenario.id ? "border-teal-300 bg-teal-300/10" : "border-slate-800 bg-slate-950 hover:border-teal-400"
@@ -689,7 +881,7 @@ export function StaffTrainingPage() {
               </div>
             </div>
 
-            <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
+            <div className="hidden rounded-lg border border-slate-800 bg-[#0d171b] p-4" style={{ display: "none" }}>
               <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Assignment launcher</div>
               <div className="mt-3 space-y-2">
                 {assignments.slice(-6).reverse().map((assignment) => {
@@ -713,51 +905,34 @@ export function StaffTrainingPage() {
               </div>
             </div>
 
-            <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
-              <label className="text-[10px] font-black uppercase tracking-widest text-slate-400" htmlFor="trainee-name">Trainee</label>
-              <input
-                id="trainee-name"
-                value={traineeName}
-                onChange={(event) => setTraineeName(event.target.value)}
-                className="mt-2 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-bold text-slate-100 outline-none focus:border-teal-300"
-              />
-              <label className="mt-3 flex items-center gap-2 rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm font-bold text-slate-300">
-                <input type="checkbox" checked={useLlmGuest} onChange={(event) => setUseLlmGuest(event.target.checked)} />
-                LLM guest voice
-              </label>
-              <div className="mt-2 text-xs font-semibold leading-relaxed text-slate-500">
-                The LLM can vary the guest reply. Scoring, fatal-miss caps, and pass/fail stay deterministic.
-              </div>
-              <button
-                type="button"
-                onClick={() => void startSession()}
-                disabled={!selectedScenario}
-                className="mt-3 w-full rounded border border-teal-300 bg-teal-300 px-3 py-2 text-sm font-black text-slate-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Start selected roleplay
-              </button>
-            </div>
           </aside>
 
-          <section className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
+          <section ref={liveRoleplayRef} className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
             <div className="flex flex-col gap-3 border-b border-slate-800 pb-4 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Live roleplay</div>
                 <h2 className="mt-1 text-2xl font-black text-slate-50">{session?.scenario?.title ?? selectedScenario?.title ?? "Select a scenario"}</h2>
                 <p className="mt-2 max-w-3xl text-sm font-semibold leading-relaxed text-slate-400">{session?.scenario?.context ?? selectedScenario?.context ?? "Start a session to open the transcript."}</p>
+                {session?.id && session.status !== "finished" && (
+                  <div className="mt-3 rounded border border-teal-300/40 bg-teal-300/10 px-3 py-2 text-sm font-black text-teal-100">
+                    Session active. Read the guest message below, then reply as the employee.
+                  </div>
+                )}
               </div>
               <div className="flex flex-wrap gap-2">
-                <span className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-300">{session?.status ?? "not started"}</span>
+                <span className={`rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${session?.status === "active" ? "border-teal-300 bg-teal-300 text-slate-950" : "border-slate-700 bg-slate-950 text-slate-300"}`}>
+                  {session?.status ?? "not started"}
+                </span>
                 {session?.critical_miss && <span className="rounded border border-rose-300 bg-rose-300 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-950">critical miss</span>}
               </div>
             </div>
 
-            <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_240px]">
+            <div className="mt-4 grid gap-4 2xl:grid-cols-[1fr_240px]">
               <div className="min-h-[430px] space-y-3 rounded border border-slate-800 bg-slate-950 p-3">
                 {transcript.length ? (
                   transcript.map((turn, index) => (
                     <div key={`${index}-${turn.speaker}`} className={`flex ${turn.speaker === "employee" ? "justify-end" : "justify-start"}`}>
-                      <div className={`max-w-[82%] rounded-lg border px-3 py-2 ${turn.speaker === "employee" ? "border-teal-300/40 bg-teal-300/10 text-teal-50" : "border-slate-700 bg-[#111b20] text-slate-100"}`}>
+                      <div className={`max-w-[92%] rounded-lg border px-3 py-2 sm:max-w-[82%] ${turn.speaker === "employee" ? "border-teal-300/40 bg-teal-300/10 text-teal-50" : "border-slate-700 bg-[#111b20] text-slate-100"}`}>
                         <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">
                           {turn.speaker === "employee" ? "Employee" : `Guest${turn.source === "llm_guest" ? " / LLM" : ""}`}
                         </div>
@@ -767,7 +942,7 @@ export function StaffTrainingPage() {
                   ))
                 ) : (
                   <div className="flex h-full min-h-[360px] items-center justify-center rounded border border-dashed border-slate-700 text-center text-sm font-bold text-slate-500">
-                    Select a scenario to open the roleplay transcript.
+                    {session?.id ? "Loading the guest opening message..." : "Select a scenario to open the roleplay transcript."}
                   </div>
                 )}
               </div>
@@ -794,26 +969,84 @@ export function StaffTrainingPage() {
               </div>
             </div>
 
-            <form onSubmit={sendTurn} className="mt-4 flex flex-col gap-2 sm:flex-row">
-              <input
-                value={employeeMessage}
-                onChange={(event) => setEmployeeMessage(event.target.value)}
-                disabled={!session?.id || session.status === "finished"}
-                placeholder="Employee response"
-                className="min-h-11 flex-1 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-semibold text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-teal-300 disabled:opacity-50"
-              />
-              <button
-                type="submit"
-                disabled={!session?.id || !employeeMessage.trim() || session.status === "finished"}
-                className="rounded border border-teal-300 bg-teal-300 px-4 py-2 text-sm font-black text-slate-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isLoading && employeeMessage ? "Scoring" : "Send"}
-              </button>
+            <form onSubmit={sendTurn} className="mt-4 rounded border border-slate-800 bg-slate-950 p-3">
+              <label className="text-[10px] font-black uppercase tracking-widest text-teal-300" htmlFor="staff-training-employee-response">
+                Employee response
+              </label>
+              <div className="mt-2 flex flex-col gap-3 xl:flex-row xl:items-end">
+                <textarea
+                  id="staff-training-employee-response"
+                  value={employeeMessage}
+                  onChange={(event) => setEmployeeMessage(event.target.value)}
+                  disabled={!session?.id || session.status === "finished"}
+                  placeholder={session?.id ? "Type what the employee would say to the guest..." : "Start a roleplay to unlock the response box."}
+                  rows={4}
+                  className="min-h-[104px] flex-1 resize-y rounded border border-slate-700 bg-[#0d171b] px-3 py-2 text-sm font-semibold leading-relaxed text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-teal-300 disabled:cursor-not-allowed disabled:opacity-50"
+                />
+                <button
+                  type="submit"
+                  disabled={!session?.id || !employeeMessage.trim() || session.status === "finished" || isSendingTurn}
+                  className="min-h-11 rounded border border-teal-300 bg-teal-300 px-4 py-2 text-sm font-black text-slate-950 transition hover:bg-teal-200 disabled:cursor-not-allowed disabled:opacity-50 xl:w-44"
+                >
+                  {isSendingTurn ? "Scoring..." : "Send reply"}
+                </button>
+              </div>
             </form>
+
+            <div className="mt-4 rounded border border-slate-800 bg-slate-950 p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Turn coaching</div>
+                  <div className="mt-2 text-xl font-black text-slate-50">
+                    {turnCoaching?.headline ?? "Awaiting employee response."}
+                  </div>
+                  <div className="mt-2 text-sm font-semibold leading-relaxed text-slate-400">
+                    {turnCoaching?.priority ?? "Start the exchange, then respond to the guest's first message."}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <div className={`text-4xl font-black ${scoreClass(lastTurnScore?.overall)}`}>{lastTurnScore?.overall ?? "--"}</div>
+                  <div className={`rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${verdictClass(turnCoaching?.verdict)}`}>
+                    {turnCoaching?.verdict?.replaceAll("_", " ") ?? "not scored"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 xl:grid-cols-2">
+                <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-emerald-300">What worked</div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {(turnCoaching?.strengths?.length ? turnCoaching.strengths : ["No scored turn yet"]).map((item) => (
+                      <span key={item} className="rounded border border-emerald-300/30 bg-emerald-300/10 px-2 py-1 text-xs font-black text-emerald-100">
+                        {item}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-amber-300">Fix now</div>
+                  <div className="mt-3 space-y-2">
+                    {(turnCoaching?.misses?.length ? turnCoaching.misses : [{ label: "No misses to review yet." }]).map((item) => (
+                      <div key={item.label} className="rounded border border-amber-300/25 bg-amber-300/10 p-2 text-sm font-semibold leading-relaxed text-amber-100">
+                        {item.label}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {turnCoaching?.next_response && (
+                <div className="mt-3 rounded border border-teal-300/30 bg-teal-300/10 p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Say next</div>
+                  <div className="mt-2 text-sm font-semibold leading-relaxed text-teal-50">{turnCoaching.next_response}</div>
+                </div>
+              )}
+            </div>
           </section>
 
           <aside className="space-y-4">
-            <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
+            <div className="hidden rounded-lg border border-slate-800 bg-[#0d171b] p-4" style={{ display: "none" }}>
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Scorecard</div>
@@ -837,11 +1070,24 @@ export function StaffTrainingPage() {
             </div>
 
             <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
-              <div className="text-[10px] font-black uppercase tracking-widest text-amber-300">Coach notes</div>
+              <div className="text-[10px] font-black uppercase tracking-widest text-amber-300">Weakest scoring signals</div>
               <div className="mt-3 space-y-2">
-                {(lastTurnScore?.coaching_notes ?? ["Turn notes appear after the first employee response."]).map((note) => (
-                  <div key={note} className="rounded border border-slate-800 bg-slate-950 p-2 text-sm font-semibold leading-relaxed text-slate-300">{note}</div>
+                {(turnCoaching?.weak_dimensions?.length ? turnCoaching.weak_dimensions : []).map((item) => (
+                  <div key={item.dimension ?? item.label} className="rounded border border-slate-800 bg-slate-950 p-2">
+                    <div className="flex items-center justify-between gap-2 text-xs font-bold">
+                      <span className="text-slate-300">{item.label ?? label(item.dimension)}</span>
+                      <span className="text-slate-500">{item.score}/5</span>
+                    </div>
+                    <div className="mt-1 h-2 overflow-hidden rounded bg-slate-900">
+                      <div className="h-full rounded bg-amber-300" style={{ width: barWidth(item.score) }} />
+                    </div>
+                  </div>
                 ))}
+                {!turnCoaching?.weak_dimensions?.length && (
+                  <div className="rounded border border-slate-800 bg-slate-950 p-2 text-sm font-semibold leading-relaxed text-slate-400">
+                    Weak signals appear after the first scored response.
+                  </div>
+                )}
               </div>
             </div>
 
@@ -872,35 +1118,8 @@ export function StaffTrainingPage() {
               </div>
             )}
 
-            <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Manager pulse</div>
-                <button type="button" onClick={() => void loadAnalytics()} className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[10px] font-black text-slate-300 hover:border-teal-300">Refresh</button>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <div className="rounded border border-slate-800 bg-slate-950 p-3">
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Sessions</div>
-                  <div className="mt-1 text-xl font-black text-slate-100">{analytics?.session_count ?? 0}</div>
-                </div>
-                <div className="rounded border border-slate-800 bg-slate-950 p-3">
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Weakest</div>
-                  <div className="mt-1 truncate text-sm font-black text-slate-100">{label(analytics?.weakest_dimensions?.[0]?.dimension)}</div>
-                </div>
-              </div>
-              <div className="mt-3 space-y-2">
-                {(analytics?.scenario_summary ?? []).slice(0, 4).map((row) => (
-                  <div key={row.scenario_id} className="rounded border border-slate-800 bg-slate-950 px-2 py-2 text-xs">
-                    <div className="flex items-center justify-between gap-2 font-black text-slate-200">
-                      <span className="truncate">{row.title}</span>
-                      <span>{row.average_overall ?? "--"}</span>
-                    </div>
-                    <div className="mt-1 font-bold text-slate-500">{row.session_count ?? 0} sessions / {row.critical_miss_count ?? 0} critical misses</div>
-                  </div>
-                ))}
-              </div>
-            </div>
           </aside>
-        </section>
+        </section>}
       </div>
     </main>
   );

@@ -217,7 +217,7 @@ DEPARTMENT_AGENT_MAP: list[dict[str, Any]] = [
         "department": "security",
         "label": "Security",
         "canonical_agent": "Security Agent",
-        "implementation_agents": ["safety_policy_agent", "staffing_agent"],
+        "implementation_agents": ["security_agent", "safety_policy_agent", "staffing_agent"],
         "main_job": "crowd control, lost child, access control, and escalation",
         "tool_families": ["incident tools", "access-control tools", "escalation tools"],
     },
@@ -263,6 +263,7 @@ AGENT_DEPARTMENT_OVERRIDES: dict[str, str] = {
     "placement_agent": "operations",
     "safety_policy_agent": "safety",
     "finance_agent": "finance",
+    "security_agent": "security",
     "decision_bridge_agent": "executive",
     "logic_audit_agent": "compliance",
     "memory_ops_agent": "maintenance",
@@ -407,6 +408,15 @@ AGENT_REGISTRY: list[dict[str, Any]] = [
         "owns": ["cost/revenue tradeoff", "premium product protection", "voucher budget"],
         "blocked": ["cost-only optimization", "destroying guest trust for short-term savings"],
         "policy_refs": ["PARK-FIN-001", "PARK-EVAL-004"],
+    },
+    {
+        "agent_id": "security_agent",
+        "name": "Security Agent",
+        "role": "Checks crowd-control, access-control, incident escalation, lost-child, and perimeter pressure signals.",
+        "mode": ["reactive", "proactive", "event_planning"],
+        "owns": ["zone control recommendation", "security escalation", "lost-child and access-control risk"],
+        "blocked": ["public guest messaging", "equipment commands", "staff redeployment outside security scope"],
+        "policy_refs": ["PARK-SEC-001", "PARK-SAFE-001", "PARK-CARE-001"],
     },
     {
         "agent_id": "decision_bridge_agent",
@@ -775,6 +785,7 @@ AGENT_POLICY_SCOPES: dict[str, list[dict[str, str]]] = {
         {"target": "guest", "action": "message"},
     ],
     "finance_agent": [{"target": "guest", "action": "promotion"}, {"target": "food", "action": "suppress_item"}],
+    "security_agent": [{"target": "security", "action": "zone_control"}, {"target": "security", "action": "escalation"}],
     "decision_bridge_agent": [{"target": "scenario", "action": "proactive_commit"}],
     "logic_audit_agent": [{"target": "scenario", "action": ""}],
     "memory_ops_agent": [{"target": "scenario", "action": ""}],
@@ -805,6 +816,7 @@ AGENT_BUILDER_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "placement_agent": ["get_park_state", "simulate_action", "validate_policy"],
     "safety_policy_agent": ["get_incident_reports", "get_ride_inspection_status", "get_zone_density", "get_weather", "get_policy_book", "policy_gate", "validate_policy", "inspect_runtime_status", "inspect_delivery_receipts", "safety_alert", "close_reopen_recommendation", "require_human_approval"],
     "finance_agent": ["get_ticket_sales", "get_refund_data", "get_labor_cost", "get_pos_revenue", "get_outage_impact", "score_decision_quality", "score_outcome", "revenue_impact_report", "refund_recommendation", "budget_alert"],
+    "security_agent": ["get_zone_density", "get_incident_reports", "get_access_logs", "get_lost_child_reports", "validate_policy", "dispatch_alert", "escalation_request", "zone_control_recommendation"],
     "decision_bridge_agent": ["get_department_summaries", "get_risk_scores", "get_financial_impact", "get_guest_impact", "compare_action_candidates", "policy_gate", "validate_policy", "write_decision_memory", "approve_action", "reject_action", "set_priority", "choose_tradeoff"],
     "logic_audit_agent": ["get_policy_books", "get_privacy_rules", "get_safety_rules", "get_labor_rules", "get_audit_logs", "inspect_runtime_status", "inspect_observability_contract", "score_decision_quality", "block_action", "require_approval", "generate_compliance_note"],
     "memory_ops_agent": ["retrieve_similar_incidents", "inspect_runtime_status"],
@@ -834,6 +846,7 @@ AGENT_BUILDER_BLOCKED_TOOLS: dict[str, list[str]] = {
     "event_creative_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command"],
     "safety_policy_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command"],
     "finance_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command"],
+    "security_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "draft_guest_message"],
     "logic_audit_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "write_decision_memory"],
     "memory_ops_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command"],
     "delivery_proof_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "write_decision_memory"],
@@ -1240,6 +1253,8 @@ def _proposal_tool_for_action(agent_id: str, proposed_action: dict[str, Any]) ->
     department = _department_for_agent(agent_id)
     target = str(proposed_action.get("target", "")).lower()
     action = str(proposed_action.get("action", "")).lower()
+    if agent_id == "park_understanding_agent":
+        return "get_park_state"
     if agent_id == "ride_ops_agent" or target == "ride":
         if "route" in action or "reroute" in action or "traffic" in target:
             return "recommend_route_change"
@@ -1262,6 +1277,12 @@ def _proposal_tool_for_action(agent_id: str, proposed_action: dict[str, Any]) ->
         return "require_human_approval" if proposed_action.get("requires_human_review") else "safety_alert"
     if agent_id == "finance_agent":
         return "revenue_impact_report"
+    if agent_id == "security_agent" or target == "security":
+        if "escalation" in action or "escalate" in action:
+            return "escalation_request"
+        if "dispatch" in action or "alert" in action:
+            return "dispatch_alert"
+        return "zone_control_recommendation"
     if agent_id == "logic_audit_agent":
         return "generate_compliance_note"
     if agent_id == "gcp_eval_judge_agent":
@@ -1442,6 +1463,1240 @@ def role_alignment_report() -> dict[str, Any]:
     }
 
 
+def _live_feed_proposal_evidence_rows(live_feed_case: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(live_feed_case, dict):
+        return []
+    rows = live_feed_case.get("evidence", [])
+    return [row for row in rows if isinstance(row, dict) and row.get("source")]
+
+
+def _live_feed_proposal_evidence_label(row: dict[str, Any]) -> str:
+    source = row.get("source") or "live_feed"
+    signal_type = row.get("signal_type") or "signal"
+    event_id = row.get("event_id") or "unpersisted"
+    confidence = row.get("confidence")
+    age_seconds = row.get("age_seconds")
+    summary = str(row.get("summary") or "").strip()
+    label = f"live_feed:{source}:{signal_type}:event={event_id}"
+    if confidence is not None:
+        label += f":confidence={confidence}"
+    if age_seconds is not None:
+        label += f":age_seconds={age_seconds}"
+    return f"{label}:summary={summary[:96]}" if summary else label
+
+
+def _live_feed_rows_for_sources(rows: list[dict[str, Any]], sources: set[str], fallback_count: int = 3) -> list[dict[str, Any]]:
+    matched = [row for row in rows if str(row.get("source") or "") in sources]
+    if not matched:
+        matched = rows[:fallback_count]
+    return matched[:fallback_count]
+
+
+def _live_feed_grounded_evidence(rows: list[dict[str, Any]]) -> list[str]:
+    return [_live_feed_proposal_evidence_label(row) for row in rows]
+
+
+def _compact_live_feed_evidence_snapshot(rows: list[dict[str, Any]], limit: int = 3) -> list[dict[str, Any]]:
+    snapshot: list[dict[str, Any]] = []
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        snapshot.append(
+            {
+                "event_id": row.get("event_id"),
+                "source": row.get("source"),
+                "signal_type": row.get("signal_type"),
+                "confidence": row.get("confidence"),
+                "age_seconds": row.get("age_seconds"),
+                "summary": str(row.get("summary") or row.get("label") or "").strip(),
+            }
+        )
+    return snapshot
+
+
+def _evidence_argument_from_rows(department: str, rows: list[dict[str, Any]], policy_status: str = "") -> str:
+    snapshot = _compact_live_feed_evidence_snapshot(rows, 2)
+    if not snapshot:
+        return f"{department or 'department'} had no department-specific live event rows, so the action stays review-only until fresh evidence is attached."
+    parts = []
+    for row in snapshot:
+        event = row.get("event_id") or "unpersisted"
+        source = row.get("source") or "live_feed"
+        signal = row.get("signal_type") or "signal"
+        confidence = row.get("confidence")
+        age = row.get("age_seconds")
+        summary = row.get("summary") or signal
+        freshness = f", age {age}s" if age is not None else ""
+        conf = f", confidence {confidence}" if confidence is not None else ""
+        parts.append(f"event {event} from {source}/{signal}{conf}{freshness}: {summary}")
+    policy_clause = f" Policy status is {policy_status}." if policy_status else ""
+    return f"{department or 'department'} decision is grounded in {' | '.join(parts)}.{policy_clause}"
+
+
+def _evidence_argument_from_proposal(proposal: dict[str, Any]) -> str:
+    reasoning = proposal.get("department_reasoning", {}) if isinstance(proposal.get("department_reasoning"), dict) else {}
+    evidence_snapshot = reasoning.get("evidence_snapshot", []) if isinstance(reasoning.get("evidence_snapshot"), list) else []
+    department = str(proposal.get("department") or "")
+    policy = proposal.get("policy_judge", {}) if isinstance(proposal.get("policy_judge"), dict) else {}
+    policy_status = str(policy.get("status") or "")
+    if evidence_snapshot:
+        rows = [
+            {
+                "event_id": row.get("event_id"),
+                "source": row.get("source"),
+                "signal_type": row.get("signal_type"),
+                "confidence": row.get("confidence"),
+                "age_seconds": row.get("age_seconds"),
+                "summary": row.get("summary"),
+            }
+            for row in evidence_snapshot
+            if isinstance(row, dict)
+        ]
+        return _evidence_argument_from_rows(department, rows, policy_status)
+    grounding = proposal.get("live_feed_grounding", {}) if isinstance(proposal.get("live_feed_grounding"), dict) else {}
+    event_ids = grounding.get("event_ids", []) if isinstance(grounding.get("event_ids"), list) else []
+    sources = grounding.get("sources", []) if isinstance(grounding.get("sources"), list) else []
+    return f"{department or 'department'} decision cites events {', '.join(str(item) for item in event_ids[:4]) or 'none'} from {', '.join(str(item) for item in sources[:4]) or 'no live source'} with policy status {policy_status or 'pending'}."
+
+
+def _attach_native_live_feed_grounding(proposal: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    event_ids = [row.get("event_id") for row in rows if row.get("event_id")]
+    sources = list(dict.fromkeys(str(row.get("source")) for row in rows if row.get("source")))
+    confidence_values = [float(row.get("confidence") or 0) for row in rows]
+    proposal["generated_from"] = "live_feed_case"
+    proposal["live_feed_grounding"] = {
+        "source": "live_feed_health",
+        "event_ids": event_ids,
+        "sources": sources,
+        "source_count": len(sources),
+        "max_confidence": round(max(confidence_values), 3) if confidence_values else None,
+        "evidence_count": len(rows),
+    }
+    proposal["input_signals"] = {
+        "orchestration_source": "live_feed",
+        "live_feed_event_ids": event_ids,
+        "live_feed_sources": sources,
+    }
+    envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+    if envelope:
+        envelope["live_feed_event_ids"] = event_ids
+        envelope["live_feed_sources"] = sources
+        proposal["proposal_envelope"] = envelope
+    return proposal
+
+
+def _native_live_feed_policy_check(proposal: dict[str, Any]) -> dict[str, Any]:
+    envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+    department = str(proposal.get("department") or envelope.get("department") or "")
+    agent_id = str(proposal.get("agent_id") or envelope.get("proposed_by") or "")
+    tool = str(envelope.get("requested_tool") or proposal.get("requested_tool") or "")
+    risk = str(envelope.get("risk_level") or proposal.get("risk_level") or "medium").lower()
+    boundary = envelope.get("boundary", {}) if isinstance(envelope.get("boundary"), dict) else {}
+    if agent_id == "park_understanding_agent":
+        return {
+            "policy_check": "passed_context_grounding_read_only",
+            "status": "trace_only",
+            "reason": "Park Understanding reads live context and writes trace evidence only; no receiver action is executable.",
+            "human_approval_required": False,
+        }
+    if boundary and not boundary.get("allowed", True):
+        return {
+            "policy_check": "blocked_agent_tool_boundary",
+            "status": "blocked",
+            "reason": boundary.get("reason") or "Agent tool boundary blocked proposal.",
+            "human_approval_required": True,
+        }
+    if department == "operations" and risk == "high":
+        return {
+            "policy_check": "requires_executive_approval_ops_reroute",
+            "status": "requires_executive",
+            "reason": "High-risk routing or ride-flow proposal needs Executive tradeoff approval.",
+            "human_approval_required": False,
+        }
+    if department in {"safety", "security"}:
+        return {
+            "policy_check": f"requires_human_approval_{department}",
+            "status": "requires_human_approval",
+            "reason": "Safety or security-sensitive action must be reviewed by an authorized park lead.",
+            "human_approval_required": True,
+        }
+    if department == "guest_experience" or tool in {"draft_guest_message", "issue_recovery_offer"}:
+        return {
+            "policy_check": "requires_compliance_guest_message_privacy",
+            "status": "requires_compliance",
+            "reason": "Guest-facing message must avoid private data, medical detail, and compensation promises.",
+            "human_approval_required": False,
+        }
+    if department == "hr_labor":
+        return {
+            "policy_check": "passed_labor_rules_role_compatible_only",
+            "status": "passed",
+            "reason": "Proposal is recommendation-only and constrained to certified staff, fatigue, overtime, and break rules.",
+            "human_approval_required": False,
+        }
+    if department == "food_retail":
+        return {
+            "policy_check": "passed_food_inventory_no_unavailable_promo",
+            "status": "passed",
+            "reason": "Food/Retail action is alert or promo pause, not a promise of unavailable capacity.",
+            "human_approval_required": False,
+        }
+    if department == "marketing":
+        return {
+            "policy_check": "passed_marketing_redirect_only_no_crowd_creation",
+            "status": "passed",
+            "reason": "Marketing may redirect or pause offers but cannot change crowd routing or increase pressure in constrained zones.",
+            "human_approval_required": False,
+        }
+    if department == "finance":
+        return {
+            "policy_check": "passed_finance_no_refund_commitment",
+            "status": "passed",
+            "reason": "Finance output is an impact report or recommendation, not an automatic refund or compensation commitment.",
+            "human_approval_required": False,
+        }
+    if department == "maintenance":
+        return {
+            "policy_check": "requires_maintenance_clearance_before_reopen",
+            "status": "requires_compliance",
+            "reason": "Maintenance may open work orders and update repair status, but ride reopen remains blocked until inspection clearance.",
+            "human_approval_required": False,
+        }
+    if department == "compliance":
+        return {
+            "policy_check": "passed_compliance_note_generated",
+            "status": "passed",
+            "reason": "Compliance proposal records policy constraints and approval requirements for downstream executor gating.",
+            "human_approval_required": False,
+        }
+    if department == "qa_judge" or agent_id == JUDGE_TRACE_EVAL_CONTRACT["owner_agent"]:
+        return {
+            "policy_check": "passed_trace_eval_contract",
+            "status": "passed",
+            "reason": "QA Judge owns trace/eval scoring and regression-test recommendations; no receiver action is dispatched.",
+            "human_approval_required": False,
+        }
+    if department == "executive":
+        return {
+            "policy_check": "approved_safe_low_risk_only_requires_blocks_respected",
+            "status": "approved_with_exclusions",
+            "reason": "Executive may select only proposals with passed policy checks and must leave safety/security/guest-message actions gated.",
+            "human_approval_required": False,
+        }
+    return {
+        "policy_check": "requires_policy_review",
+        "status": "requires_compliance",
+        "reason": "Proposal requires generic policy review before Tool Executor can act.",
+        "human_approval_required": False,
+    }
+
+
+def _apply_native_live_feed_policy(proposal: dict[str, Any]) -> dict[str, Any]:
+    policy = _native_live_feed_policy_check(proposal)
+    proposal["policy_check"] = policy["policy_check"]
+    proposal["policy_judge"] = policy
+    envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+    if envelope:
+        envelope["policy_check"] = policy["policy_check"]
+        envelope["policy_judge"] = policy
+        if policy["status"] in {"passed", "approved_with_exclusions"} and envelope.get("executor_status") == "awaiting_compliance":
+            envelope["executor_status"] = "ready_for_executor"
+            proposal["executor_status"] = "ready_for_executor"
+        if policy["status"] in {"requires_human_approval", "blocked"}:
+            envelope["executor_status"] = "blocked" if policy["status"] == "blocked" else "awaiting_human_approval"
+            proposal["executor_status"] = envelope["executor_status"]
+        if policy["status"] == "trace_only":
+            envelope["executor_status"] = "trace_only"
+            proposal["executor_status"] = "trace_only"
+        proposal["proposal_envelope"] = envelope
+    return proposal
+
+
+def _live_feed_reasoning_alternative_tools(department: str, requested_tool: str, action_name: str) -> list[str]:
+    fallback_by_department = {
+        "operations": ["recommend_route_change", "monitor_ride_flow", "hold_for_executive_tradeoff"],
+        "safety": ["require_human_approval", "safety_alert", "monitor_only"],
+        "maintenance": ["create_work_order", "inspect_only", "hold_reopen_until_clearance"],
+        "guest_experience": ["draft_guest_message", "create_support_ticket", "hold_public_message"],
+        "food_retail": ["inventory_alert", "restock_request", "pause_promo"],
+        "finance": ["revenue_impact_report", "refund_recommendation_hold", "budget_alert"],
+        "hr_labor": ["shift_adjustment_recommendation", "overtime_warning", "break_reminder"],
+        "marketing": ["redirect_offer", "pause_promo", "hold_campaign"],
+        "security": ["zone_control_recommendation", "escalation_request", "monitor_only"],
+        "compliance": ["generate_compliance_note", "block_action", "require_approval"],
+        "executive": ["choose_tradeoff", "set_priority", "reject_or_hold_sensitive_action"],
+        "qa_judge": ["score_decision", "flag_failure", "create_regression_test"],
+    }
+    candidates = [requested_tool, action_name]
+    candidates.extend(fallback_by_department.get(department, ["monitor_only", "require_review"]))
+    result: list[str] = []
+    for item in candidates:
+        normalized = str(item or "").strip()
+        if normalized and normalized not in result:
+            result.append(normalized)
+    while len(result) < 3:
+        result.append(f"review_option_{len(result) + 1}")
+    return result[:3]
+
+
+def _live_feed_reasoning_failure_modes(department: str, policy_status: str, constraints: list[str]) -> list[str]:
+    common = [
+        "Live feed changes after proposal and invalidates the selected action.",
+        "Receiver executes outside the approved department boundary.",
+    ]
+    department_modes = {
+        "operations": ["Routing relief moves too much demand into another constrained zone.", "Ride status changes before the route recommendation is withdrawn."],
+        "safety": ["Approval is inferred from weak signals instead of confirmed safety clearance.", "Weather or crowd risk worsens before a human lead reviews the hold."],
+        "maintenance": ["Work-order creation is mistaken for ride reopen clearance.", "Inspection history is stale relative to the current asset signal."],
+        "guest_experience": ["Draft message implies compensation, private detail, or reopening certainty.", "Guest communication increases demand in a constrained area."],
+        "food_retail": ["Promo pause reduces demand but restock still arrives too late.", "Inventory signal lags the actual pickup queue."],
+        "finance": ["Revenue estimate is treated as permission to override safety or guest-care gates.", "Refund exposure changes after updated outage duration data arrives."],
+        "hr_labor": ["Staff move violates certification, break, fatigue, or overtime rules.", "Coverage improves one zone while exposing another needed role."],
+        "marketing": ["Offer redirect creates unintended crowd pressure in the destination zone.", "Campaign action conflicts with Operations or Safety constraints."],
+        "security": ["Zone-control recommendation is dispatched without authorized security review.", "Crowd condition changes faster than the escalation path."],
+        "compliance": ["Policy note misses a privacy, labor, or safety approval dependency.", "Blocked scope is reintroduced downstream by another department."],
+        "executive": ["Tradeoff approves an action whose policy status changed after review.", "Financial or guest-impact pressure masks a safety hold."],
+        "qa_judge": ["Trace score misses a missing evidence row or unsupported tool call.", "Regression material is too shallow to catch the same failure later."],
+    }
+    modes = list(department_modes.get(department, common))
+    if policy_status not in {"passed", "approved_with_exclusions", "trace_only"}:
+        modes.append("Approval-gated proposal is accidentally routed to execution.")
+    for constraint in constraints[:2]:
+        modes.append(f"Constraint not enforced: {constraint}")
+    modes.extend(common)
+    deduped: list[str] = []
+    for mode in modes:
+        if mode and mode not in deduped:
+            deduped.append(mode)
+    return deduped[:4]
+
+
+def _live_feed_department_reasoning(proposal: dict[str, Any], evidence_rows: list[dict[str, Any]], constraints: list[str], confidence: float) -> dict[str, Any]:
+    envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+    proposed_action = proposal.get("proposed_action", {}) if isinstance(proposal.get("proposed_action"), dict) else {}
+    grounding = proposal.get("live_feed_grounding", {}) if isinstance(proposal.get("live_feed_grounding"), dict) else {}
+    policy = proposal.get("policy_judge", {}) if isinstance(proposal.get("policy_judge"), dict) else {}
+    department = str(proposal.get("department") or envelope.get("department") or "")
+    requested_tool = str(envelope.get("requested_tool") or proposal.get("requested_tool") or proposed_action.get("action") or "")
+    action_name = str(proposed_action.get("action") or requested_tool or "review")
+    sources = grounding.get("sources", []) if isinstance(grounding.get("sources"), list) else []
+    event_ids = grounding.get("event_ids", []) if isinstance(grounding.get("event_ids"), list) else []
+    evidence_summaries = [str(row.get("summary") or row.get("signal_type") or row.get("source") or "live signal") for row in evidence_rows[:3]]
+    evidence_snapshot = _compact_live_feed_evidence_snapshot(evidence_rows, 4)
+    max_age = max([float(row.get("age_seconds") or 0) for row in evidence_rows] or [0])
+    confidence_values = [float(row.get("confidence") or 0) for row in evidence_rows]
+    evidence_confidence = round(sum(confidence_values) / len(confidence_values), 3) if confidence_values else None
+    policy_status = str(policy.get("status") or envelope.get("executor_status") or "pending")
+    evidence_argument = _evidence_argument_from_rows(department, evidence_rows, policy_status)
+    alternatives = _live_feed_reasoning_alternative_tools(department, requested_tool, action_name)
+    candidate_actions = []
+    for index, option in enumerate(alternatives):
+        selected = option in {requested_tool, action_name}
+        candidate_actions.append(
+            {
+                "rank": index + 1,
+                "action": option,
+                "selected": selected and index == 0,
+                "expected_effect": str(proposed_action.get("expected_outcome") or envelope.get("expected_outcome") or proposal.get("recommendation")) if selected else "lower-risk fallback or hold path if live evidence or policy changes",
+                "evidence_basis": evidence_argument,
+                "risk": envelope.get("risk_level") if selected else "lower" if "hold" in option or "monitor" in option else "medium",
+                "score": round(max(0.1, min(0.99, float(confidence) - (index * 0.08))), 2),
+            }
+        )
+    event_clause = f"events {', '.join(str(item) for item in event_ids[:4])}" if event_ids else "no persisted event ids"
+    observe = f"Read {len(evidence_rows)} live feed rows from {', '.join(sources) if sources else 'available sources'} with {event_clause}."
+    interpret = f"{department or 'department'} pressure is tied to {evidence_summaries[0] if evidence_summaries else 'the live feed case'}; evidence argument: {evidence_argument}"
+    predict = str(proposed_action.get("expected_outcome") or envelope.get("expected_outcome") or proposal.get("recommendation"))
+    recommend = f"Select {requested_tool or action_name} and keep execution behind policy and Tool Executor gates."
+    justify = f"Uses event ids {', '.join(str(item) for item in event_ids[:4]) if event_ids else 'none'} with policy status {policy_status}; top live evidence says {evidence_summaries[0] if evidence_summaries else 'no summary'}."
+    trace = "Record diagnosis, candidate comparison, forecast, failure modes, policy result, and executor outcome for memory."
+    return {
+        "contract": "observe_interpret_predict_recommend_justify_trace",
+        "diagnosis": {
+            "department": department,
+            "live_sources": sources,
+            "event_ids": event_ids[:8],
+            "evidence_count": len(evidence_rows),
+            "evidence_confidence": evidence_confidence,
+            "max_evidence_age_seconds": max_age,
+            "primary_signal": evidence_summaries[0] if evidence_summaries else None,
+            "evidence_snapshot": evidence_snapshot,
+            "evidence_argument": evidence_argument,
+            "constraints_considered": constraints[:5],
+        },
+        "evidence_snapshot": evidence_snapshot,
+        "evidence_argument": evidence_argument,
+        "agent_loop": {
+            "observe": observe,
+            "interpret": interpret,
+            "predict": predict,
+            "recommend": recommend,
+            "justify": justify,
+            "trace": trace,
+        },
+        "candidate_actions": candidate_actions,
+        "forecast": {
+            "horizon_minutes": 45 if department in {"food_retail", "operations", "guest_experience"} else 30,
+            "expected_outcome": predict,
+            "confidence": round(max(0.0, min(1.0, confidence)), 2),
+            "measurement_signals": sources,
+            "rollback_trigger": envelope.get("rollback") or proposed_action.get("rollback"),
+        },
+        "failure_modes": _live_feed_reasoning_failure_modes(department, policy_status, constraints),
+        "selected_rationale": f"{requested_tool or action_name} best matches {department or 'the department'} write authority while preserving policy status {policy_status}; live basis: {evidence_argument}",
+        "memory_carry_forward": {
+            "carry": ["evidence_source_relevance", "policy_outcome", "executor_result", "measured_outcome"],
+            "do_better_next_time": ["compare fallback action outcomes", "tighten failure-mode detection", "adjust memory priors only for policy-eligible departments"],
+        },
+        "depth_score": round(min(0.98, 0.58 + min(len(candidate_actions), 3) * 0.08 + min(len(evidence_rows), 4) * 0.04 + min(len(constraints), 3) * 0.03), 2),
+    }
+
+
+def _proposal_has_deep_department_reasoning(proposal: dict[str, Any]) -> bool:
+    reasoning = proposal.get("department_reasoning", {}) if isinstance(proposal.get("department_reasoning"), dict) else {}
+    loop = proposal.get("agent_loop", {}) if isinstance(proposal.get("agent_loop"), dict) else {}
+    return (
+        bool(reasoning.get("diagnosis"))
+        and isinstance(reasoning.get("candidate_actions"), list)
+        and len(reasoning.get("candidate_actions", [])) >= 2
+        and bool(reasoning.get("forecast"))
+        and isinstance(reasoning.get("failure_modes"), list)
+        and len(reasoning.get("failure_modes", [])) >= 2
+        and bool(reasoning.get("selected_rationale"))
+        and all(step in loop and loop.get(step) for step in DEPARTMENT_AGENT_LOOP)
+    )
+
+
+def _live_feed_action_disposition(proposal: dict[str, Any]) -> dict[str, Any]:
+    envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+    policy = proposal.get("policy_judge", {}) if isinstance(proposal.get("policy_judge"), dict) else {}
+    department = str(proposal.get("department") or envelope.get("department") or "")
+    tool = str(envelope.get("requested_tool") or proposal.get("requested_tool") or "")
+    policy_status = str(policy.get("status") or "")
+    executor_status = str(envelope.get("executor_status") or proposal.get("executor_status") or "")
+    evidence_argument = _evidence_argument_from_proposal(proposal)
+    grounding = proposal.get("live_feed_grounding", {}) if isinstance(proposal.get("live_feed_grounding"), dict) else {}
+    event_ids = grounding.get("event_ids", []) if isinstance(grounding.get("event_ids"), list) else []
+    if department in {"food_retail", "hr_labor", "marketing"} and policy_status == "passed" and executor_status == "ready_for_executor":
+        return {
+            "decision": "execute_controlled_internal",
+            "next_owner": "tool_executor_agent",
+            "evidence_argument": evidence_argument,
+            "live_feed_event_ids": event_ids,
+            "why_not_undecided": f"Low-risk bounded internal action passed policy and has a configured controlled receiver. Live basis: {evidence_argument}",
+            "exit_condition": "Receiver acknowledges the controlled internal handoff or live feed normalizes and rollback supersedes it.",
+            "fallback": "Withdraw controlled action if post-action feed measurement worsens.",
+        }
+    if department == "operations":
+        return {
+            "decision": "reject_execution_hold_recommendation",
+            "next_owner": "operations_lead_with_executive",
+            "evidence_argument": evidence_argument,
+            "live_feed_event_ids": event_ids,
+            "why_not_undecided": f"Routing can change crowd safety, so execution is rejected until Executive selects a safe route. Live basis: {evidence_argument}",
+            "exit_condition": f"Executive approves a specific route after Safety confirms destination density stays below threshold for events {', '.join(str(item) for item in event_ids[:4]) or 'attached live-feed evidence'}.",
+            "fallback": "Keep monitoring ride and guest-flow pressure; do not send guest routing directly.",
+        }
+    if department == "guest_experience":
+        return {
+            "decision": "hold_message_for_compliance",
+            "next_owner": "compliance_agent_then_executive",
+            "evidence_argument": evidence_argument,
+            "live_feed_event_ids": event_ids,
+            "why_not_undecided": f"The draft is useful, but public communication is rejected until privacy, promise, and crowd-pressure checks pass. Live basis: {evidence_argument}",
+            "exit_condition": "Compliance approves wording and Executive approves the destination demand effect.",
+            "fallback": "Keep internal support ticket context only; send no public message.",
+        }
+    if department == "maintenance":
+        return {
+            "decision": "open_review_do_not_reopen",
+            "next_owner": "maintenance_lead_and_safety",
+            "evidence_argument": evidence_argument,
+            "live_feed_event_ids": event_ids,
+            "why_not_undecided": f"Work-order review can proceed, but reopen authority is denied without inspection clearance. Live basis: {evidence_argument}",
+            "exit_condition": f"Inspection log clears the asset and Safety removes the hold for events {', '.join(str(item) for item in event_ids[:4]) or 'attached live-feed evidence'}.",
+            "fallback": "Keep ride reopen blocked and continue capacity mitigation.",
+        }
+    if department in {"safety", "security"}:
+        return {
+            "decision": "require_authorized_human_approval",
+            "next_owner": f"{department}_lead",
+            "evidence_argument": evidence_argument,
+            "live_feed_event_ids": event_ids,
+            "why_not_undecided": f"{department.title()} action is not left open; execution is denied until an authorized lead approves it. Live basis: {evidence_argument}",
+            "exit_condition": f"Authorized lead approves the specific action with current live-feed evidence attached: {', '.join(str(item) for item in event_ids[:4]) or 'event ids pending'}.",
+            "fallback": "Maintain monitoring and escalation note; Tool Executor dispatch remains blocked.",
+        }
+    if department == "finance":
+        return {
+            "decision": "report_only_no_comp_commitment",
+            "next_owner": "executive_agent",
+            "evidence_argument": evidence_argument,
+            "live_feed_event_ids": event_ids,
+            "why_not_undecided": f"Finance impact can inform the tradeoff, but compensation or refund commitment is rejected for automatic execution. Live basis: {evidence_argument}",
+            "exit_condition": "Executive chooses a guest-recovery policy inside budget and compliance constraints.",
+            "fallback": "Use impact report as context only.",
+        }
+    if department == "compliance":
+        return {
+            "decision": "policy_note_committed",
+            "next_owner": "executive_agent",
+            "evidence_argument": evidence_argument,
+            "live_feed_event_ids": event_ids,
+            "why_not_undecided": f"Compliance writes the approval requirements that narrow the remaining choices. Live basis: {evidence_argument}",
+            "exit_condition": "All downstream actions cite the compliance note and satisfy its required approvals.",
+            "fallback": "Block any action that lacks the named approval chain.",
+        }
+    if department == "qa_judge":
+        return {
+            "decision": "score_trace_and_flag_regression",
+            "next_owner": "qa_judge_agent",
+            "evidence_argument": evidence_argument,
+            "live_feed_event_ids": event_ids,
+            "why_not_undecided": f"QA does not execute park actions; it scores trace quality and creates regression material for failures. Live basis: {evidence_argument}",
+            "exit_condition": "Trace, policy, executor, delivery, measurement, and memory artifacts are complete.",
+            "fallback": "Flag failed contract and create a regression case.",
+        }
+    return {
+        "decision": "tradeoff_review_only",
+        "next_owner": "decision_bridge_agent",
+        "evidence_argument": evidence_argument,
+        "live_feed_event_ids": event_ids,
+        "why_not_undecided": f"Proposal remains a bounded tradeoff input, not an executable action. Live basis: {evidence_argument}",
+        "exit_condition": "Executive records approve, reject, or hold with policy evidence.",
+        "fallback": "Keep proposal in trace only.",
+    }
+
+
+def _live_feed_native_proposal(
+    agent_id: str,
+    recommendation: str,
+    proposed_action: dict[str, Any],
+    evidence_rows: list[dict[str, Any]],
+    constraints: list[str],
+    confidence: float,
+    proposal_type: str,
+) -> dict[str, Any]:
+    proposal = _role_proposal(
+        agent_id,
+        recommendation,
+        proposed_action,
+        _live_feed_grounded_evidence(evidence_rows),
+        constraints,
+        confidence,
+        proposal_type,
+    )
+    proposal = _attach_native_live_feed_grounding(proposal, evidence_rows)
+    proposal = _apply_native_live_feed_policy(proposal)
+    reasoning = _live_feed_department_reasoning(proposal, evidence_rows, constraints, confidence)
+    proposal["department_reasoning"] = reasoning
+    proposal["agent_loop"] = reasoning["agent_loop"]
+    disposition = _live_feed_action_disposition(proposal)
+    proposal["action_disposition"] = disposition
+    envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+    if envelope:
+        envelope["department_reasoning_summary"] = {
+            "contract": reasoning["contract"],
+            "candidate_action_count": len(reasoning["candidate_actions"]),
+            "failure_mode_count": len(reasoning["failure_modes"]),
+            "depth_score": reasoning["depth_score"],
+        }
+        envelope["action_disposition"] = disposition
+        proposal["proposal_envelope"] = envelope
+    return proposal
+
+
+def _live_feed_deep_reasoning_summary(proposals: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "deep_reasoning_proposal_count": sum(1 for proposal in proposals if _proposal_has_deep_department_reasoning(proposal)),
+        "candidate_action_count": sum(len((proposal.get("department_reasoning", {}) if isinstance(proposal.get("department_reasoning"), dict) else {}).get("candidate_actions", [])) for proposal in proposals),
+        "failure_mode_count": sum(len((proposal.get("department_reasoning", {}) if isinstance(proposal.get("department_reasoning"), dict) else {}).get("failure_modes", [])) for proposal in proposals),
+    }
+
+
+def _park_profile_from_context(retrieved_context: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(retrieved_context, dict):
+        return {}
+    for key in ("park_profile", "venue_profile", "venueProfile", "venueExperienceData"):
+        value = retrieved_context.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _profile_real_inputs(profile: dict[str, Any]) -> dict[str, Any]:
+    return profile.get("realInputs", {}) if isinstance(profile.get("realInputs"), dict) else {}
+
+
+def _profile_intelligence(profile: dict[str, Any]) -> dict[str, Any]:
+    real_inputs = _profile_real_inputs(profile)
+    return real_inputs.get("profileIntelligence", {}) if isinstance(real_inputs.get("profileIntelligence"), dict) else {}
+
+
+def _profile_version(profile: dict[str, Any]) -> str:
+    identity = profile.get("venueIdentity", {}) if isinstance(profile.get("venueIdentity"), dict) else {}
+    readiness = profile.get("readiness", {}) if isinstance(profile.get("readiness"), dict) else {}
+    source = profile.get("sourceIntegrity", {}) if isinstance(profile.get("sourceIntegrity"), dict) else {}
+    return ":".join(
+        str(item or "unknown")
+        for item in [
+            identity.get("venueId"),
+            identity.get("profileType") or source.get("profileType"),
+            readiness.get("loadedFrom"),
+        ]
+    )
+
+
+def _profile_zone_role_index(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    real_inputs = _profile_real_inputs(profile)
+    zones = real_inputs.get("zoneDetails", {}) if isinstance(real_inputs.get("zoneDetails"), dict) else {}
+    capacity_rows = ((_profile_intelligence(profile).get("capacityModel", {}) if isinstance(_profile_intelligence(profile).get("capacityModel"), dict) else {}).get("zoneComfort", []))
+    capacity_by_zone = {
+        str(row.get("zoneId")): row
+        for row in capacity_rows
+        if isinstance(row, dict) and row.get("zoneId")
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for zone_id, zone in zones.items():
+        if not isinstance(zone, dict):
+            continue
+        merged = deepcopy(zone)
+        if str(zone_id) in capacity_by_zone:
+            merged["capacity"] = capacity_by_zone[str(zone_id)]
+        result[str(zone_id)] = merged
+    return result
+
+
+def _profile_locations_for_department(profile: dict[str, Any], department: str) -> list[dict[str, Any]]:
+    details = _profile_real_inputs(profile).get("locationDetails", {})
+    if not isinstance(details, dict):
+        return []
+    allowed_kinds = {
+        "operations": {"attraction", "show", "quiet_or_cooling", "food", "family_service"},
+        "safety": {"first_aid", "guest_services", "family_service", "quiet_or_cooling"},
+        "security": {"guest_services", "family_service", "restrooms", "first_aid"},
+        "maintenance": {"attraction", "show"},
+        "guest_experience": {"guest_services", "family_service", "quiet_or_cooling", "show", "food"},
+        "food_retail": {"food"},
+        "finance": {"food", "attraction", "show"},
+        "hr_labor": {"food", "attraction", "show", "guest_services"},
+        "marketing": {"food", "show", "attraction", "quiet_or_cooling"},
+        "compliance": {"guest_services", "first_aid", "food", "attraction"},
+        "executive": {"food", "show", "attraction", "guest_services", "quiet_or_cooling"},
+        "qa_judge": {"food", "show", "attraction", "guest_services", "quiet_or_cooling"},
+    }.get(department, set())
+    rows = []
+    for name, item in details.items():
+        if not isinstance(item, dict):
+            continue
+        if allowed_kinds and str(item.get("kind") or "") not in allowed_kinds:
+            continue
+        rows.append(
+            {
+                "name": item.get("name") or name,
+                "kind": item.get("kind"),
+                "zoneId": item.get("zoneId"),
+                "covered": item.get("covered"),
+                "indoor": item.get("indoor"),
+                "accessibilityNote": item.get("accessibilityNote"),
+                "sensoryNote": item.get("sensoryNote"),
+            }
+        )
+    return rows[:6]
+
+
+def _profile_module_policy_for_department(profile: dict[str, Any], department: str) -> dict[str, Any]:
+    intelligence = _profile_intelligence(profile)
+    module_policy = intelligence.get("modulePolicy", {}) if isinstance(intelligence.get("modulePolicy"), dict) else {}
+    if department in {"operations", "safety", "security", "maintenance", "hr_labor", "executive", "compliance", "qa_judge"}:
+        return module_policy.get("command_center_review", {}) if isinstance(module_policy.get("command_center_review"), dict) else {}
+    if department == "guest_experience":
+        return module_policy.get("accessibility_journey", {}) if isinstance(module_policy.get("accessibility_journey"), dict) else {}
+    if department in {"marketing", "food_retail", "finance"}:
+        return module_policy.get("experience_studio", {}) if isinstance(module_policy.get("experience_studio"), dict) else {}
+    return {}
+
+
+def _profile_slice_for_department(profile: dict[str, Any], department: str, proposal: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(profile, dict) or not profile:
+        return {
+            "status": "missing",
+            "profile_version": None,
+            "profile_fields_used": [],
+            "profile_constraints": ["No active park profile was attached; use live feed and policy only."],
+            "reasoning_effect": "No profile effect.",
+            "precedence": "live_feed_over_profile_policy_over_both",
+        }
+    real_inputs = _profile_real_inputs(profile)
+    intelligence = _profile_intelligence(profile)
+    readiness = profile.get("readiness", {}) if isinstance(profile.get("readiness"), dict) else {}
+    identity = profile.get("venueIdentity", {}) if isinstance(profile.get("venueIdentity"), dict) else {}
+    agent_context = real_inputs.get("agentContext", {}) if isinstance(real_inputs.get("agentContext"), dict) else {}
+    operating_priors = real_inputs.get("operatingPriors", {}) if isinstance(real_inputs.get("operatingPriors"), dict) else {}
+    learning_context = real_inputs.get("learningContext", {}) if isinstance(real_inputs.get("learningContext"), dict) else {}
+    zone_index = _profile_zone_role_index(profile)
+    locations = _profile_locations_for_department(profile, department)
+    policy = _profile_module_policy_for_department(profile, department)
+    capacity_model = intelligence.get("capacityModel", {}) if isinstance(intelligence.get("capacityModel"), dict) else {}
+    live_bindings = intelligence.get("liveFeedBindings", {}) if isinstance(intelligence.get("liveFeedBindings"), dict) else {}
+    relevant_zone_ids = list(
+        dict.fromkeys(
+            [
+                str(item.get("zoneId"))
+                for item in locations
+                if item.get("zoneId")
+            ]
+        )
+    )[:5]
+    relevant_zones = [zone_index[zone_id] for zone_id in relevant_zone_ids if zone_id in zone_index]
+    fields_used = [
+        "venueIdentity",
+        "realInputs.locationDetails",
+        "realInputs.zoneDetails",
+        "realInputs.spatialModel.paths",
+        "realInputs.operatingPriors.zoneDemandPriors",
+        "realInputs.profileIntelligence.capacityModel",
+        "realInputs.profileIntelligence.modulePolicy",
+        "realInputs.profileIntelligence.liveFeedBindings",
+        "realInputs.learningContext",
+    ]
+    constraints = [
+        *(policy.get("mustReview", []) if isinstance(policy.get("mustReview"), list) else []),
+        *(policy.get("neverClaim", []) if isinstance(policy.get("neverClaim"), list) else []),
+        *(capacity_model.get("blockedClaims", []) if isinstance(capacity_model.get("blockedClaims"), list) else []),
+        *(agent_context.get("humanReviewTriggers", [])[:3] if isinstance(agent_context.get("humanReviewTriggers"), list) else []),
+    ]
+    reasoning_effect = (
+        f"{department} uses profile zones, locations, path/capacity priors, and module policy to narrow candidates; "
+        "live feed still decides current pressure and policy still controls authority."
+    )
+    return {
+        "status": "attached",
+        "profile_version": _profile_version(profile),
+        "venue_name": identity.get("name"),
+        "readiness_status": readiness.get("status"),
+        "source_integrity": profile.get("sourceIntegrity", {}),
+        "profile_fields_used": fields_used,
+        "profile_constraints": list(dict.fromkeys(str(item) for item in constraints if str(item or "").strip()))[:10],
+        "relevant_locations": locations,
+        "relevant_zones": [
+            {
+                "id": zone.get("id"),
+                "name": zone.get("name"),
+                "role": zone.get("role"),
+                "indoorOrSheltered": zone.get("indoorOrSheltered"),
+                "quietOrCooling": zone.get("quietOrCooling"),
+                "spillbackRisk": (zone.get("capacity", {}) if isinstance(zone.get("capacity"), dict) else {}).get("spillbackRisk"),
+                "comfortCapacityEstimate": (zone.get("capacity", {}) if isinstance(zone.get("capacity"), dict) else {}).get("comfortCapacityEstimate"),
+                "agentReasoningHints": zone.get("agentReasoningHints", []),
+            }
+            for zone in relevant_zones[:5]
+        ],
+        "operating_priors": (operating_priors.get("zoneDemandPriors", []) if isinstance(operating_priors.get("zoneDemandPriors"), list) else [])[:5],
+        "live_feed_bindings": live_bindings,
+        "learning_schema": {
+            "observationKeys": (learning_context.get("observationKeys", []) if isinstance(learning_context.get("observationKeys"), list) else [])[:8],
+            "feedbackLabels": (learning_context.get("feedbackLabels", []) if isinstance(learning_context.get("feedbackLabels"), list) else [])[:8],
+        },
+        "reasoning_effect": reasoning_effect,
+        "precedence": "live_feed_over_profile_policy_over_both",
+        "live_state_override_rule": "When live feed contradicts profile priors, use live feed for current operating state and retain profile only as context.",
+    }
+
+
+def _attach_park_profile_context(proposals: list[dict[str, Any]], profile: dict[str, Any]) -> dict[str, Any]:
+    attached = 0
+    fields: set[str] = set()
+    scored_candidates = 0
+    for proposal in proposals:
+        if not isinstance(proposal, dict):
+            continue
+        department = str(proposal.get("department") or "")
+        profile_context = _profile_slice_for_department(profile, department, proposal)
+        proposal["park_profile_context"] = profile_context
+        proposal["profile_precedence"] = profile_context.get("precedence")
+        if profile_context.get("status") == "attached":
+            attached += 1
+        fields.update(str(item) for item in profile_context.get("profile_fields_used", []) if item)
+        reasoning = proposal.get("department_reasoning", {}) if isinstance(proposal.get("department_reasoning"), dict) else {}
+        if reasoning:
+            scored_candidates += _attach_profile_counterfactuals_to_reasoning(reasoning, profile_context, department)
+            reasoning["park_profile_context"] = {
+                "status": profile_context.get("status"),
+                "profile_version": profile_context.get("profile_version"),
+                "profile_fields_used": profile_context.get("profile_fields_used", []),
+                "profile_constraints": profile_context.get("profile_constraints", []),
+                "profile_counterfactual_summary": reasoning.get("profile_counterfactual_summary", {}),
+                "reasoning_effect": profile_context.get("reasoning_effect"),
+                "precedence": profile_context.get("precedence"),
+            }
+            forecast = reasoning.get("forecast", {}) if isinstance(reasoning.get("forecast"), dict) else {}
+            if forecast:
+                forecast["profile_adjustment"] = profile_context.get("reasoning_effect")
+            proposal["department_reasoning"] = reasoning
+        envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+        if envelope:
+            envelope["park_profile_context_summary"] = {
+                "status": profile_context.get("status"),
+                "profile_version": profile_context.get("profile_version"),
+                "field_count": len(profile_context.get("profile_fields_used", [])),
+                "constraint_count": len(profile_context.get("profile_constraints", [])),
+                "precedence": profile_context.get("precedence"),
+            }
+            proposal["proposal_envelope"] = envelope
+    return {
+        "park_profile_context_status": "attached" if attached else "missing",
+        "profile_context_proposal_count": attached,
+        "profile_counterfactual_candidate_count": scored_candidates,
+        "profile_field_count": len(fields),
+        "profile_version": _profile_version(profile) if profile else None,
+        "precedence": "live_feed_over_profile_policy_over_both",
+    }
+
+
+def _profile_counterfactual_for_action(action: str, profile_context: dict[str, Any], department: str) -> dict[str, Any]:
+    action_text = str(action or "").lower()
+    relevant_zones = profile_context.get("relevant_zones", []) if isinstance(profile_context.get("relevant_zones"), list) else []
+    constraints = profile_context.get("profile_constraints", []) if isinstance(profile_context.get("profile_constraints"), list) else []
+    sheltered_count = sum(1 for zone in relevant_zones if isinstance(zone, dict) and zone.get("indoorOrSheltered"))
+    quiet_count = sum(1 for zone in relevant_zones if isinstance(zone, dict) and zone.get("quietOrCooling"))
+    high_spillback_count = sum(1 for zone in relevant_zones if isinstance(zone, dict) and str(zone.get("spillbackRisk") or "").lower() == "high")
+    capacity_values = [
+        float(zone.get("comfortCapacityEstimate"))
+        for zone in relevant_zones
+        if isinstance(zone, dict) and isinstance(zone.get("comfortCapacityEstimate"), (int, float))
+    ]
+    avg_capacity = round(sum(capacity_values) / len(capacity_values), 1) if capacity_values else None
+    score = 0.5
+    reasons: list[str] = []
+    if profile_context.get("status") == "attached":
+        score += 0.08
+        reasons.append("profile attached")
+    if "redirect" in action_text or "route" in action_text or "message" in action_text:
+        if high_spillback_count:
+            score -= 0.12
+            reasons.append("profile shows high spillback risk in relevant zones")
+        if sheltered_count or quiet_count:
+            score += 0.08
+            reasons.append("profile has sheltered or reset zones for safer demand shaping")
+    if "hold" in action_text or "monitor" in action_text or "approval" in action_text:
+        score += 0.1
+        reasons.append("profile policy favors review/hold for sensitive actions")
+    if "promo" in action_text or "inventory" in action_text or "restock" in action_text:
+        if department == "food_retail":
+            score += 0.1
+            reasons.append("profile identifies food locations and dining zones")
+        if high_spillback_count:
+            score -= 0.05
+            reasons.append("food/dwell zones have spillback sensitivity")
+    if "staff" in action_text or "shift" in action_text or "break" in action_text:
+        score -= 0.04
+        reasons.append("profile excludes live staffing truth; live feed and labor policy must decide")
+    if "safety" in action_text or "security" in action_text or "reopen" in action_text:
+        score -= 0.1
+        reasons.append("profile cannot authorize safety/security/reopen decisions")
+    if constraints:
+        score -= min(0.12, len(constraints) * 0.01)
+        reasons.append(f"{len(constraints)} profile policy constraints apply")
+    return {
+        "score": round(max(0.05, min(0.95, score)), 2),
+        "relevant_zone_count": len(relevant_zones),
+        "sheltered_zone_count": sheltered_count,
+        "quiet_zone_count": quiet_count,
+        "high_spillback_zone_count": high_spillback_count,
+        "avg_comfort_capacity": avg_capacity,
+        "constraint_count": len(constraints),
+        "profile_effect": "supports_candidate" if score >= 0.62 else "penalizes_candidate" if score <= 0.42 else "context_only",
+        "reasons": reasons[:5] or ["profile provides neutral context"],
+        "precedence": profile_context.get("precedence"),
+    }
+
+
+def _attach_profile_counterfactuals_to_reasoning(reasoning: dict[str, Any], profile_context: dict[str, Any], department: str) -> int:
+    candidates = reasoning.get("candidate_actions", []) if isinstance(reasoning.get("candidate_actions"), list) else []
+    scored = 0
+    best_action = None
+    best_score = -1.0
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        counterfactual = _profile_counterfactual_for_action(str(candidate.get("action") or ""), profile_context, department)
+        base_score = float(candidate.get("score") or 0)
+        combined = round(max(0.05, min(0.99, (base_score * 0.7) + (float(counterfactual["score"]) * 0.3))), 2)
+        candidate["profile_counterfactual"] = counterfactual
+        candidate["profile_adjusted_score"] = combined
+        candidate["profile_score_delta"] = round(combined - base_score, 2)
+        scored += 1
+        if combined > best_score:
+            best_score = combined
+            best_action = candidate.get("action")
+    reasoning["profile_counterfactual_summary"] = {
+        "candidate_count": scored,
+        "best_profile_adjusted_action": best_action,
+        "best_profile_adjusted_score": round(best_score, 2) if scored else None,
+        "precedence": profile_context.get("precedence"),
+        "rule": "Profile adjusts candidate ranking as context; live feed remains current-state authority and policy remains execution authority.",
+    }
+    return scored
+
+
+def _live_feed_tradeoff_score(proposal: dict[str, Any]) -> dict[str, Any]:
+    department = str(proposal.get("department") or "")
+    policy = proposal.get("policy_judge", {}) if isinstance(proposal.get("policy_judge"), dict) else {}
+    policy_status = str(policy.get("status") or "")
+    confidence = float(proposal.get("confidence") or 0)
+    safety_weight = {
+        "safety": 5,
+        "security": 5,
+        "maintenance": 4,
+        "operations": 4,
+        "guest_experience": 3,
+        "hr_labor": 3,
+        "food_retail": 2,
+        "marketing": 2,
+        "finance": 1,
+        "compliance": 5,
+        "qa_judge": 4,
+        "executive": 5,
+    }.get(department, 3)
+    guest_value = {
+        "guest_experience": 5,
+        "operations": 4,
+        "food_retail": 3,
+        "marketing": 3,
+        "hr_labor": 2,
+        "finance": 2,
+    }.get(department, 1)
+    revenue_value = {"finance": 5, "food_retail": 4, "marketing": 4, "operations": 2}.get(department, 1)
+    labor_value = {"hr_labor": 5, "operations": 3, "food_retail": 2, "safety": 2, "security": 2}.get(department, 1)
+    blocked = policy_status not in {"passed", "approved_with_exclusions", "trace_only"}
+    decision = (proposal.get("action_disposition", {}) if isinstance(proposal.get("action_disposition"), dict) else {}).get("decision")
+    profile_context = proposal.get("park_profile_context", {}) if isinstance(proposal.get("park_profile_context"), dict) else {}
+    profile_constraints = profile_context.get("profile_constraints", []) if isinstance(profile_context.get("profile_constraints"), list) else []
+    reasoning = proposal.get("department_reasoning", {}) if isinstance(proposal.get("department_reasoning"), dict) else {}
+    profile_counterfactual = reasoning.get("profile_counterfactual_summary", {}) if isinstance(reasoning.get("profile_counterfactual_summary"), dict) else {}
+    evidence_argument = reasoning.get("evidence_argument") or _evidence_argument_from_proposal(proposal)
+    disposition = proposal.get("action_disposition", {}) if isinstance(proposal.get("action_disposition"), dict) else {}
+    return {
+        "agent": proposal.get("agent_id"),
+        "department": department,
+        "requested_tool": (proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}).get("requested_tool") or proposal.get("requested_tool"),
+        "policy_status": policy_status,
+        "safety_risk_weight": safety_weight,
+        "guest_value": guest_value,
+        "revenue_value": revenue_value,
+        "labor_value": labor_value,
+        "confidence": round(confidence, 2),
+        "profile_constraint_count": len(profile_constraints),
+        "profile_counterfactual_action": profile_counterfactual.get("best_profile_adjusted_action"),
+        "profile_counterfactual_score": profile_counterfactual.get("best_profile_adjusted_score"),
+        "profile_precedence": profile_context.get("precedence"),
+        "evidence_argument": evidence_argument,
+        "live_feed_event_ids": disposition.get("live_feed_event_ids") or (proposal.get("live_feed_grounding", {}) if isinstance(proposal.get("live_feed_grounding"), dict) else {}).get("event_ids", []),
+        "decision": decision,
+        "verdict": "approved_for_controlled_execution" if decision == "execute_controlled_internal" else "trace_or_review_only" if policy_status in {"passed", "approved_with_exclusions", "trace_only"} else "blocked_until_exit_condition",
+        "rationale": (
+            f"Approved because it is low-risk, bounded, and policy-passed. {evidence_argument}"
+            if decision == "execute_controlled_internal"
+            else f"Held with an owner and exit condition because policy or safety boundary outranks utility. {evidence_argument}"
+            if blocked
+            else f"Kept as tradeoff context or trace evidence; not a receiver action. {evidence_argument}"
+        ),
+    }
+
+
+def _build_live_feed_negotiation_rounds(proposals: list[dict[str, Any]], conflicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_agent = {str(proposal.get("agent_id")): proposal for proposal in proposals if isinstance(proposal, dict)}
+    rounds: list[dict[str, Any]] = [
+        {
+            "round": 1,
+            "name": "local_department_positions",
+            "claims": [
+                {
+                    "agent": proposal.get("agent_id"),
+                    "department": proposal.get("department"),
+                    "wants": proposal.get("recommendation"),
+                    "tool": (proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}).get("requested_tool") or proposal.get("requested_tool"),
+                    "disposition": (proposal.get("action_disposition", {}) if isinstance(proposal.get("action_disposition"), dict) else {}).get("decision"),
+                }
+                for proposal in proposals
+            ],
+        }
+    ]
+    challenge_rows = []
+    for conflict in conflicts:
+        agents = conflict.get("agents", []) if isinstance(conflict.get("agents"), list) else []
+        challenge_rows.append(
+            {
+                "conflict": conflict.get("conflict"),
+                "challengers": agents,
+                "objections": [
+                    {
+                        "agent": agent,
+                        "department": by_agent.get(str(agent), {}).get("department"),
+                        "position": by_agent.get(str(agent), {}).get("recommendation"),
+                    }
+                    for agent in agents
+                    if by_agent.get(str(agent))
+                ],
+                "concession": conflict.get("resolution"),
+                "status": conflict.get("status"),
+            }
+        )
+    rounds.append({"round": 2, "name": "cross_department_challenges", "challenges": challenge_rows})
+    rounds.append(
+        {
+            "round": 3,
+            "name": "policy_and_eval_judge",
+            "decisions": [
+                {
+                    "agent": proposal.get("agent_id"),
+                    "department": proposal.get("department"),
+                    "policy_status": (proposal.get("policy_judge", {}) if isinstance(proposal.get("policy_judge"), dict) else {}).get("status"),
+                    "policy_reason": (proposal.get("policy_judge", {}) if isinstance(proposal.get("policy_judge"), dict) else {}).get("reason"),
+                    "next_owner": (proposal.get("action_disposition", {}) if isinstance(proposal.get("action_disposition"), dict) else {}).get("next_owner"),
+                    "exit_condition": (proposal.get("action_disposition", {}) if isinstance(proposal.get("action_disposition"), dict) else {}).get("exit_condition"),
+                }
+                for proposal in proposals
+            ],
+        }
+    )
+    score_rows = [_live_feed_tradeoff_score(proposal) for proposal in proposals]
+    rounds.append(
+        {
+            "round": 4,
+            "name": "executive_tradeoff_resolution",
+            "tradeoff_matrix": score_rows,
+            "selected": [row for row in score_rows if row.get("verdict") == "approved_for_controlled_execution"],
+            "rejected_or_held": [row for row in score_rows if row.get("verdict") != "approved_for_controlled_execution"],
+        }
+    )
+    return rounds
+
+
+def _build_live_feed_native_role_agent_proposals(
+    park_state: dict[str, Any],
+    route: dict[str, Any],
+    operator_constraints: dict[str, Any] | None,
+    retrieved_context: dict[str, Any] | None,
+    scenario_key: str,
+    live_feed_case: dict[str, Any],
+    evidence_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    flow = park_state.get("guestFlow", {}) if isinstance(park_state, dict) else {}
+    rides = flow.get("rides", []) if isinstance(flow, dict) else []
+    zones = flow.get("zones", []) if isinstance(flow, dict) else []
+    staffing = park_state.get("staffing", {}) if isinstance(park_state, dict) else {}
+    disrupted_ride = _top_ride(rides)
+    crowded_zone = _top_zone(zones)
+    food_zone = _top_zone([zone for zone in zones if zone.get("processType") == "food"] or zones)
+    open_callouts = int(staffing.get("openCallouts", 0) or 0)
+    all_sources = {str(row.get("source")) for row in evidence_rows if row.get("source")}
+    context_rows = _live_feed_rows_for_sources(evidence_rows, all_sources, 4)
+    ride_rows = _live_feed_rows_for_sources(evidence_rows, {"ride_ops", "guest_flow", "weather"})
+    guest_rows = _live_feed_rows_for_sources(evidence_rows, {"guest_flow", "operator_signal", "ride_ops"})
+    food_rows = _live_feed_rows_for_sources(evidence_rows, {"food_ops", "guest_flow", "weather"})
+    staffing_rows = _live_feed_rows_for_sources(evidence_rows, {"staffing", "ride_ops", "food_ops"})
+    safety_rows = _live_feed_rows_for_sources(evidence_rows, {"ride_ops", "guest_flow", "weather", "operator_signal"})
+    maintenance_rows = _live_feed_rows_for_sources(evidence_rows, {"ride_ops", "weather"})
+    finance_rows = _live_feed_rows_for_sources(evidence_rows, {"ride_ops", "food_ops", "staffing", "guest_flow"})
+    marketing_rows = _live_feed_rows_for_sources(evidence_rows, {"guest_flow", "food_ops", "weather", "operator_signal"})
+    security_rows = _live_feed_rows_for_sources(evidence_rows, {"guest_flow", "operator_signal", "ride_ops"})
+    proposals = [
+        _live_feed_native_proposal(
+            "park_understanding_agent",
+            "Build the live-feed operating picture before any department acts",
+            {"target": "live_feed", "action": "ground_context", "lead_source": live_feed_case.get("lead_source"), "lead_signal_type": live_feed_case.get("lead_signal_type"), "expected_outcome": "shared context contains live feed event IDs, source confidence, and stale-feed issues"},
+            context_rows,
+            ["No seeded scenario facts can override current live-feed evidence."],
+            0.9,
+            "context",
+        ),
+        _live_feed_native_proposal(
+            "ride_ops_agent",
+            "Hold or meter the affected ride-flow pressure while directing guests to lower-pressure options",
+            {"target": "ride", "action": "recommend_route_change", "ride": disrupted_ride.get("id") or disrupted_ride.get("name"), "expected_outcome": "reduce queue spillback and avoid reopening promises before clearance", "rollback": "cancel routing recommendation if ride_ops and guest_flow feeds normalize"},
+            ride_rows,
+            ["Ops can recommend routing, but cannot send public guest messages or execute receiver changes."],
+            0.9,
+            "action",
+        ),
+        _live_feed_native_proposal(
+            "facilities_energy_agent",
+            "Open a maintenance work-order review for the ride/capacity signal before any reopen recommendation",
+            {"target": "maintenance", "action": "create_work_order", "asset": disrupted_ride.get("id") or disrupted_ride.get("name") or "ride_capacity_signal", "expected_outcome": "inspection owner receives a bounded work-order candidate tied to live feed event IDs", "rollback": "close candidate work order if inspection logs show no asset fault"},
+            maintenance_rows,
+            ["Maintenance may create work-order candidates; reopening remains blocked until inspection and safety clearance."],
+            0.82,
+            "constraint",
+        ),
+        _live_feed_native_proposal(
+            "guest_flow_agent",
+            "Draft a non-promissory guest message that splits demand across lower-pressure destinations",
+            {"target": "guest", "action": "message", "routing": "split_lower_pressure_destinations", "expected_outcome": "guests receive clear routing without private data, compensation promises, or reopen guarantees", "rollback": "withdraw draft if compliance rejects wording or route pressure increases"},
+            guest_rows,
+            ["Guest Experience can draft messages; Compliance and Executive must approve high-risk public messaging."],
+            0.84,
+            "tradeoff",
+        ),
+        _live_feed_native_proposal(
+            "food_demand_agent",
+            "Watch food court demand created by ride-flow migration and pause constrained promos if pressure rises",
+            {"target": "food", "action": "pause_promo_if_constrained", "primary_zone": food_zone.get("id") or food_zone.get("name"), "expected_outcome": "avoid stockout or pickup ETA over-promising while preserving available alternatives", "rollback": "resume promo if POS and queue-near-shop feeds normalize"},
+            food_rows,
+            ["Food/Retail can pause or request restock; it cannot change crowd routing or promise unavailable inventory."],
+            0.81,
+            "action",
+        ),
+        _live_feed_native_proposal(
+            "finance_agent",
+            "Quantify revenue, refund, labor, and POS exposure before Executive selects tradeoff",
+            {"target": "finance", "action": "revenue_impact_report", "expected_outcome": "Executive sees revenue and refund exposure without auto-issuing compensation", "rollback": "void estimate if outage impact or POS feed is superseded"},
+            finance_rows,
+            ["Finance can recommend and report impact, but cannot auto-commit refunds or override safety."],
+            0.8,
+            "tradeoff",
+        ),
+        _live_feed_native_proposal(
+            "staffing_agent",
+            "Recommend only role-compatible staffing moves that preserve breaks, fatigue limits, and certifications",
+            {"target": "staff", "action": "shift_adjustment_recommendation", "role": "crowd_support", "expected_outcome": "staffing pressure is reduced without overtime, fatigue, or certification violations", "rollback": "cancel recommendation if attendance or fatigue feed changes"},
+            staffing_rows,
+            [f"open_callouts={open_callouts}", "No uncertified moves; protected breaks remain protected."],
+            0.79 if open_callouts < 20 else 0.69,
+            "constraint",
+        ),
+        _live_feed_native_proposal(
+            "event_creative_agent",
+            "Pause or redirect marketing offers away from constrained zones instead of creating new crowd pressure",
+            {"target": "marketing", "action": "redirect_offer", "from_zone": crowded_zone.get("id") or crowded_zone.get("name"), "to_zone": "lower_pressure_zone", "expected_outcome": "demand generation avoids the constrained ride/food/crowd area", "rollback": "restore campaign when guest_flow and food_ops pressure return to normal"},
+            marketing_rows,
+            ["Marketing can read crowd data and redirect offers, but cannot alter guest routing directly."],
+            0.78,
+            "tradeoff",
+        ),
+        _live_feed_native_proposal(
+            "security_agent",
+            "Recommend zone-control monitoring for density, access, or lost-child escalation risk",
+            {"target": "security", "action": "zone_control", "zone": crowded_zone.get("id") or crowded_zone.get("name"), "expected_outcome": "security lead has a clear zone-control recommendation without public messaging or equipment control", "rollback": "stand down if density and operator_signal feeds normalize"},
+            security_rows,
+            ["Security can recommend zone control or escalation; public messaging and staffing changes remain with other departments."],
+            0.76,
+            "gate",
+        ),
+        _live_feed_native_proposal(
+            "safety_policy_agent",
+            "Gate all department proposals against safety, weather, crowd, privacy, and labor constraints",
+            {"target": "safety", "action": "require_human_approval", "requires_human_review": True, "expected_outcome": "unsafe or sensitive proposals are blocked before Tool Executor can act", "rollback": "release approval hold only when policy findings are cleared"},
+            safety_rows,
+            ["Safety can block or require approval but cannot execute receiver actions."],
+            0.93,
+            "gate",
+        ),
+        _live_feed_native_proposal(
+            "logic_audit_agent",
+            "Generate a compliance note that names blocked scopes, required approvals, and trace evidence",
+            {"target": "compliance", "action": "generate_compliance_note", "expected_outcome": "Compliance records policy refs and approval requirements for the executive decision", "rollback": "supersede note if live feed evidence changes materially"},
+            context_rows,
+            ["Compliance can block, require approval, or write notes; it cannot execute operations changes."],
+            0.88,
+            "gate",
+        ),
+        _live_feed_native_proposal(
+            "gcp_eval_judge_agent",
+            "Score trace quality, evidence grounding, tool boundaries, and failure modes for this live-feed case",
+            {"target": "qa_judge", "action": "score_decision", "expected_outcome": "Eval Judge returns a trace-quality score and regression-test recommendation if grounding is weak", "rollback": "flag failure and create regression test if any proposal lacks live event evidence"},
+            context_rows,
+            ["QA Judge can score and flag failures; it cannot dispatch or alter recommendations."],
+            0.9,
+            "gate",
+        ),
+    ]
+    passed_departments = [
+        proposal.get("department")
+        for proposal in proposals
+        if (proposal.get("policy_judge", {}) if isinstance(proposal.get("policy_judge"), dict) else {}).get("status") in {"passed", "approved_with_exclusions"}
+    ]
+    held_departments = [
+        proposal.get("department")
+        for proposal in proposals
+        if (proposal.get("policy_judge", {}) if isinstance(proposal.get("policy_judge"), dict) else {}).get("status") not in {"passed", "approved_with_exclusions"}
+    ]
+    proposals.append(
+        _live_feed_native_proposal(
+            "decision_bridge_agent",
+            "Approve only low-risk passed proposals and hold safety, security, guest-message, and reopen-sensitive actions",
+            {"target": "executive", "action": "choose_tradeoff", "approved_departments": passed_departments, "held_departments": held_departments, "expected_outcome": "Tool Executor receives only approved low-risk envelopes; held actions require named approval", "rollback": "withdraw executive selection if policy or live feed evidence changes"},
+            context_rows,
+            ["Executive must compare safety, guest impact, finance, labor, operations, and compliance before Tool Executor acts."],
+            0.9,
+            "bridge",
+        )
+    )
+    park_profile = _park_profile_from_context(retrieved_context)
+    profile_summary = _attach_park_profile_context(proposals, park_profile)
+    active_roles = list(dict.fromkeys(item["agent_id"] for item in proposals))
+    active_departments = active_departments_for_agents(active_roles)
+    envelope_summary = _proposal_envelope_summary(proposals)
+    depth_summary = _live_feed_deep_reasoning_summary(proposals)
+    conflicts = [
+        {"conflict": "Operations wants demand relief, but Guest Experience and Marketing could accidentally move too much demand into a constrained zone.", "agents": ["ride_ops_agent", "guest_flow_agent", "event_creative_agent", "decision_bridge_agent"], "resolution": "Use split routing and redirect/pause offers; public messaging remains compliance-gated.", "status": "resolved"},
+        {"conflict": "Finance may prefer revenue preservation, while Safety/Security hold sensitive actions for approval.", "agents": ["finance_agent", "safety_policy_agent", "security_agent", "decision_bridge_agent"], "resolution": "Executive keeps impact reporting active but holds safety/security actions until approval.", "status": "resolved"},
+        {"conflict": "Labor support is useful, but staffing moves can violate role, fatigue, overtime, or break rules.", "agents": ["staffing_agent", "logic_audit_agent", "decision_bridge_agent"], "resolution": "Only recommendation-only, role-compatible staffing moves can advance to Tool Executor preview.", "status": "watch" if open_callouts >= 20 else "resolved"},
+    ]
+    negotiation_rounds = _build_live_feed_negotiation_rounds(proposals, conflicts)
+    tradeoff_matrix = negotiation_rounds[-1]["tradeoff_matrix"] if negotiation_rounds else []
+    negotiation_turns = [
+        {"turn": 1, "agent": "park_understanding_agent", "decision": "accepted", "reason": "Grounding is based on persisted live feed rows."},
+        {"turn": 2, "agent": "ride_ops_agent", "decision": "held_for_executive", "reason": "High-risk route changes affect guest flow and safety."},
+        {"turn": 3, "agent": "guest_flow_agent", "decision": "held_for_compliance", "reason": "Guest-facing messages need privacy and promise review."},
+        {"turn": 4, "agent": "staffing_agent", "decision": "accepted_for_executor_preview", "reason": "Recommendation-only labor action passed role/break/overtime limits."},
+        {"turn": 5, "agent": "food_demand_agent", "decision": "accepted_for_executor_preview", "reason": "Food action is a low-risk inventory/promo hold, not guest routing."},
+        {"turn": 6, "agent": "event_creative_agent", "decision": "accepted_for_executor_preview", "reason": "Marketing action redirects demand away from constrained zones only."},
+        {"turn": 7, "agent": "security_agent", "decision": "held_for_human_approval", "reason": "Zone-control recommendations are security-sensitive."},
+        {"turn": 8, "agent": "logic_audit_agent", "decision": "accepted", "reason": "Compliance note names policy constraints and approval requirements."},
+        {"turn": 9, "agent": "gcp_eval_judge_agent", "decision": "accepted", "reason": "Trace/eval judge owns score and failure flag writes."},
+        {"turn": 10, "agent": "decision_bridge_agent", "decision": "approved_with_exclusions", "reason": "Executive approves only passed low-risk envelopes and keeps blocked/held items out of execution."},
+    ]
+    event_ids = [row.get("event_id") for row in evidence_rows if row.get("event_id")]
+    return {
+        "mode": "live_feed_native_department_proposals",
+        "route": route or {"route": "live_feed_department_cooperation", "scenario_key": scenario_key},
+        "scenario_key": scenario_key,
+        "orchestration_source": "live_feed",
+        "generated_from": "live_feed_case",
+        "execution_model": "department_agents_read_widely_write_narrowly_policy_judge_then_tool_executor",
+        "active_roles": active_roles,
+        "active_departments": active_departments,
+        "active_department_count": len(active_departments),
+        "proposal_count": len(proposals),
+        "department_reasoning_contract": "Each department proposal diagnoses local state, compares candidate actions, forecasts the selected outcome, names failure modes, and traces carry-forward learning material before Tool Executor receives anything.",
+        "park_profile_context_contract": "Department agents may use venue-approved profile facts, path/capacity priors, source integrity, and profile policy as context; live feed overrides profile for current state and policy gates override both.",
+        **profile_summary,
+        **depth_summary,
+        "proposal_envelope_summary": envelope_summary,
+        "live_feed_evidence_count": len(evidence_rows),
+        "live_feed_event_ids": event_ids[:12],
+        "live_feed_grounded_proposal_count": len(proposals),
+        "proposals": proposals,
+        "conflicts": conflicts,
+        "negotiation_rounds": negotiation_rounds,
+        "tradeoff_matrix": tradeoff_matrix,
+        "negotiation_turns": negotiation_turns,
+        "executive_tradeoff": {
+            "decision": "approved_with_exclusions",
+            "approved_departments": passed_departments,
+            "held_departments": held_departments,
+            "tradeoff_matrix": tradeoff_matrix,
+            "reason": "Executive compared safety risk, guest value, revenue value, labor impact, confidence, policy status, and disposition. Low-risk food, labor, and marketing actions proceed; operations, maintenance, guest-message, safety, and security remain held with owners and exit conditions.",
+        },
+        "mediator_summary": (
+            "Live-feed-native department agents generated proposals directly from persisted feed event IDs. "
+            "Compliance, QA Judge, and Executive made explicit pass/hold decisions before Tool Executor receives any envelope."
+        ),
+    }
+
+
 def build_role_agent_proposals(
     park_state: dict[str, Any],
     route: dict[str, Any] | None = None,
@@ -1451,6 +2706,21 @@ def build_role_agent_proposals(
     route = route or {}
     flow = park_state.get("guestFlow", {}) if isinstance(park_state, dict) else {}
     scenario_key = str(route.get("scenario_key") or flow.get("activeScenario", {}).get("key") or "ride_down")
+    live_feed_case = retrieved_context.get("live_feed_case") if isinstance(retrieved_context, dict) else None
+    live_feed_rows = _live_feed_proposal_evidence_rows(live_feed_case)
+    orchestration_source = route.get("orchestration_source")
+    if not orchestration_source and isinstance(retrieved_context, dict):
+        orchestration_source = retrieved_context.get("orchestration_source")
+    if live_feed_rows and str(orchestration_source or "").lower() == "live_feed":
+        return _build_live_feed_native_role_agent_proposals(
+            park_state,
+            route,
+            operator_constraints,
+            retrieved_context,
+            scenario_key,
+            live_feed_case if isinstance(live_feed_case, dict) else {},
+            live_feed_rows,
+        )
     rides = flow.get("rides", []) if isinstance(flow, dict) else []
     zones = flow.get("zones", []) if isinstance(flow, dict) else []
     paths = flow.get("paths", []) if isinstance(flow, dict) else []

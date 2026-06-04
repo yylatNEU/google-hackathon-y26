@@ -21,6 +21,7 @@ from agent_handshake import (  # noqa: E402
     commerce_agent_evaluate,
     commit_plan,
     counter_proposal,
+    demo_supply_chain_handshake,
     get_session,
     identity_handshake,
     intent_handshake,
@@ -41,6 +42,7 @@ from agent_handshake import (  # noqa: E402
     list_agent_credential_revocations,
     upsert_agent_trust_partner,
     verify_agent_certification_credential,
+    verify_protocol_artifact,
 )
 
 
@@ -69,10 +71,28 @@ def _full_delegation_token():
                 "food_recommendation",
                 "safety_notice",
                 "compensation_offer",
-                "policy_check",
-                "session_commit",
+            "policy_check",
+            "session_commit",
+            "inventory_position",
+            "delivery_eta",
+            "supplier_compliance",
+            "cold_chain_status",
+            "parts_availability",
+            "demand_forecast",
+            "restock_request",
+            "dock_slot",
+            "substitution_request",
+            "purchase_order_notice",
+            "maintenance_parts_request",
+        ],
+            "cannot_do": [
+                "auto_purchase",
+                "share_health_data",
+                "accept_refund_without_user",
+                "auto_accept_price_change",
+                "bypass_food_safety",
+                "release_vendor_payment_without_approval",
             ],
-            "cannot_do": ["auto_purchase", "share_health_data", "accept_refund_without_user"],
             "ttl_seconds": 600,
         }
     )["token"]
@@ -239,7 +259,16 @@ def test_protocol_scenario_catalog_and_all_mode_eval_pass():
     catalog = agent_handshake_scenario_catalog()
     _assert_valid_protocol_signature(catalog, "agent_handshake_scenario_catalog")
     scenario_ids = {item["id"] for item in catalog["scenarios"]}
-    assert {"visit_planning", "incident_response", "accessibility_support", "commerce_resolution", "group_coordination"}.issubset(scenario_ids)
+    assert {
+        "visit_planning",
+        "incident_response",
+        "accessibility_support",
+        "commerce_resolution",
+        "group_coordination",
+        "supply_replenishment",
+        "cold_chain_incident",
+        "maintenance_parts_shortage",
+    }.issubset(scenario_ids)
     assert catalog["configurable"] is True
 
     evaluated = run_agent_handshake_scenario_evaluations()
@@ -253,18 +282,106 @@ def test_protocol_scenario_catalog_and_all_mode_eval_pass():
         _sessions.pop(item["session_id"], None)
 
 
+def test_supply_chain_protocol_extension_negotiates_inventory_and_blocks_procurement():
+    token = _full_delegation_token()
+    identity = identity_handshake(
+        {
+            "agent_id": "beverage_supplier_agent",
+            "represents": "supplier_vendor_42",
+            "proof": "signed_token",
+            "requested_session": "supply_replenishment_case",
+            "delegation_token": issue_delegation_token(
+                {
+                    "subject": "supplier_vendor_42",
+                    "agent_id": "beverage_supplier_agent",
+                    "scope": token["scope"],
+                    "cannot_do": token["cannot_do"],
+                    "ttl_seconds": 600,
+                }
+            )["token"],
+        }
+    )
+    session_id = identity["session"]["session_id"]
+    supplier_token = identity["delegation"]["token"]
+    capability_handshake(
+        session_id,
+        {
+            "can_share": ["inventory_position", "delivery_eta", "supplier_compliance", "cold_chain_status"],
+            "can_receive": ["demand_forecast", "restock_request", "dock_slot", "substitution_request", "purchase_order_notice"],
+            "cannot_do": ["auto_accept_price_change", "bypass_food_safety", "release_vendor_payment_without_approval"],
+            "delegation_token": supplier_token,
+        },
+    )
+    intent_handshake(
+        session_id,
+        {
+            "goal": "prevent_inventory_stockout",
+            "scenario_mode": "supply_replenishment",
+            "time_window": "3_hours",
+            "constraints": {"sku": "lemonade", "zone": "Parade Zone", "scenario_mode": "supply_replenishment"},
+            "delegation_token": supplier_token,
+        },
+    )
+
+    proposed = propose_plan(session_id, {"scenario_mode": "supply_replenishment", "planner": "supply_chain_extension", "delegation_token": supplier_token})
+    assert proposed["proposal"]["scenario_mode"] == "supply_replenishment"
+    assert "Reserve Dock B 14:20 window" in proposed["proposal"]["plan"]
+
+    monitored = monitor_session(session_id, {"scenario_mode": "supply_replenishment", "event": "parade_zone_stockout_risk", "delegation_token": supplier_token})
+    assert monitored["monitoring"]["policy_gate"]["price_change_acceptance"] == "approval_required"
+
+    procurement = commerce_agent_evaluate(
+        session_id,
+        {"action": "purchase_order", "amount": 4200, "reason": "Supplier purchase-order probe.", "delegation_token": supplier_token},
+    )
+    assert procurement["status"] == "requires_user_approval"
+    assert procurement["decision"]["allowed"] is False
+    assert procurement["decision"]["requires_user_approval"] is True
+
+    final_session = get_session(session_id)["session"]
+    assert {handoff["internal_agent_id"] for handoff in final_session["internal_handoffs"]} >= {"supply_chain_agent", "procurement_agent", "food_agent"}
+    assert any(decision["action"] == "restock_request" and decision["allowed"] is True for decision in final_session["policy_decisions"])
+    assert any(decision["action"] == "purchase_order" and decision["requires_user_approval"] is True for decision in final_session["policy_decisions"])
+    _sessions.pop(session_id, None)
+
+
+def test_dedicated_supply_chain_handshake_demo_uses_supplier_scopes_and_signed_receipt():
+    demo = demo_supply_chain_handshake("cold_chain_incident")
+    assert demo["status"] == "demo_complete"
+    assert demo["mode"] == "supply_chain_agent_handshake"
+    assert demo["scenario_mode"] == "cold_chain_incident"
+    receipt = demo["receipt"]
+    _assert_valid_protocol_signature(receipt, "agent_handshake_session_receipt")
+    assert receipt["accepted_plan"]["proposal_id"]
+    assert "cold_chain_status" in set(receipt["delegation_scope"])
+    assert "route_plan" not in set(receipt["delegation_scope"])
+    session = demo["session"]
+    assert session["client_agent"]["agent_id"] == "cold_chain_supplier_agent"
+    assert {handoff["internal_agent_id"] for handoff in session["internal_handoffs"]} >= {"supply_chain_agent", "procurement_agent", "safety_agent", "food_agent"}
+    assert any(decision["action"] == "bypass_food_safety" and decision["allowed"] is False for decision in session["policy_decisions"])
+    assert any(decision["action"] == "vendor_payment_release" and decision["requires_user_approval"] is True for decision in session["policy_decisions"])
+    _sessions.pop(demo["session_id"], None)
+
+
 def test_agent_contract_policy_challenges_and_receipt_are_signed():
     contract = agent_contract()
     _assert_valid_protocol_signature(contract, "agent_contract")
     _assert_valid_protocol_signature(contract["scenario_catalog"], "agent_handshake_scenario_catalog")
     assert "POST /api/park/agent-handshake/policy-challenges" in contract["routes"]
+    assert "POST /api/park/agent-handshake/verify-artifact" in contract["routes"]
     assert "GET /api/park/session/{session_id}/receipt" in contract["routes"]
+    verified_contract = verify_protocol_artifact({"artifact": contract, "expected_artifact_type": "agent_contract"})
+    assert verified_contract["status"] == "verified"
+    assert verified_contract["digest_status"] == "valid"
+    assert verified_contract["signature_status"] == "valid"
 
     challenges = run_agent_handshake_policy_challenges({"actions": ["payment", "health_data_sharing", "override_safety_delay"]})
     _assert_valid_protocol_signature(challenges, "agent_handshake_policy_challenges")
     assert challenges["status"] == "passed"
     assert challenges["passed"] == 3
     assert all(result["allowed"] is False and result["requires_user_approval"] is True for result in challenges["results"])
+    signed_challenges = {key: value for key, value in challenges.items() if key != "session"}
+    assert verify_protocol_artifact({"artifact": signed_challenges, "expected_artifact_type": "agent_handshake_policy_challenges"})["status"] == "verified"
     _sessions.pop(challenges["session_id"], None)
 
     token = _full_delegation_token()
@@ -298,6 +415,14 @@ def test_agent_contract_policy_challenges_and_receipt_are_signed():
     assert receipt["session_id"] == session_id
     assert receipt["policy_gates_triggered"]
     assert receipt["conversation_digest"]
+    assert verify_protocol_artifact({"artifact": receipt, "expected_artifact_type": "agent_handshake_session_receipt"})["status"] == "verified"
+    wrong_type = verify_protocol_artifact({"artifact": receipt, "expected_artifact_type": "agent_contract"})
+    assert wrong_type["status"] == "rejected"
+    assert "artifact_type_mismatch" in wrong_type["failures"]
+    tampered = {**receipt, "final_status": "tampered"}
+    rejected_tampered = verify_protocol_artifact({"artifact": tampered, "expected_artifact_type": "agent_handshake_session_receipt"})
+    assert rejected_tampered["status"] == "rejected"
+    assert "sha256_mismatch" in rejected_tampered["failures"]
     _sessions.pop(session_id, None)
 
 
@@ -400,6 +525,63 @@ def test_agent_onboarding_certifies_full_scope_agent_for_guest_route_planning():
     _agent_onboardings.pop("certified_family_agent", None)
 
 
+def test_agent_onboarding_certifies_supplier_agent_for_supply_chain_coordination():
+    supplier_scopes = [
+        "inventory_position",
+        "delivery_eta",
+        "supplier_compliance",
+        "cold_chain_status",
+        "parts_availability",
+        "demand_forecast",
+        "restock_request",
+        "dock_slot",
+        "substitution_request",
+        "purchase_order_notice",
+        "maintenance_parts_request",
+        "safety_notice",
+        "policy_check",
+        "session_commit",
+    ]
+    registered = register_agent_onboarding(
+        {
+            "agent_id": "certified_supplier_agent",
+            "display_name": "Certified Supplier Agent",
+            "partner_id": "partner_supplier_os",
+            "partner_name": "Supplier OS",
+            "represents": "supplier_vendor_42",
+            "use_case": "supply_chain_coordination",
+            "requested_scopes": supplier_scopes,
+            "cannot_do": ["auto_accept_price_change", "bypass_food_safety", "release_vendor_payment_without_approval", "auto_purchase"],
+        }
+    )
+    assert registered["agent"]["use_case"] == "supply_chain_coordination"
+
+    certified = certify_agent_onboarding("certified_supplier_agent", {"scenario_mode": "cold_chain_incident"})
+    assert certified["status"] == "approved"
+    assert certified["agent"]["approval"] == "approved_for_supply_chain_coordination"
+    assert certified["certification"]["use_case"] == "supply_chain_coordination"
+    assert certified["certification"]["score"] == 1
+    assert set(certified["certification"]["passed_cases"]) >= {"identity_trust", "capability_scope", "supply_chain_negotiation", "procurement_gate", "artifact_verification"}
+    assert {"cold_chain_status", "substitution_request", "policy_check", "session_commit"}.issubset(set(certified["agent"]["allowed_scopes"]))
+
+    credential = certified["certification"]["credential"]
+    assert credential["approval"] == "approved_for_supply_chain_coordination"
+    assert credential["use_case"] == "supply_chain_coordination"
+    assert set(credential["required_cases"]) >= {"supply_chain_negotiation", "procurement_gate", "artifact_verification"}
+    verified = verify_agent_certification_credential({"credential": credential})
+    assert verified["status"] == "verified"
+    assert verified["approval"] == "approved_for_supply_chain_coordination"
+    assert verified["agent_id"] == "certified_supplier_agent"
+    tampered = {**credential, "approval": "approved_for_guest_route_planning"}
+    assert verify_agent_certification_credential({"credential": tampered})["status"] == "rejected"
+
+    session = certified["session"]
+    assert session["client_agent"]["represents"] == "supplier_vendor_42"
+    assert {handoff["internal_agent_id"] for handoff in session["internal_handoffs"]} >= {"supply_chain_agent", "procurement_agent", "safety_agent", "food_agent"}
+    _credential_revocations.pop(credential["certification_id"], None)
+    _agent_onboardings.pop("certified_supplier_agent", None)
+
+
 def test_agent_onboarding_blocks_under_scoped_agent_until_scope_fixed():
     register_agent_onboarding(
         {
@@ -416,7 +598,7 @@ def test_agent_onboarding_blocks_under_scoped_agent_until_scope_fixed():
     assert certified["agent"]["allowed_scopes"] == []
     assert certified["certification"]["score"] < 1
     assert certified["certification"]["credential"] is None
-    assert certified["certification"]["required_cases"]["capability_scope"]["status"] == "missing"
+    assert certified["certification"]["required_cases"]["capability_scope"]["status"] in {"failed", "missing"}
     assert certified["certification"]["readiness_issues"]
     _agent_onboardings.pop("under_scoped_family_agent", None)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import contextmanager
 from typing import Any
 
 from fastapi import APIRouter
@@ -27,6 +28,26 @@ class GcpWorkflowRequest(BaseModel):
 class GcpJudgeSmokeRequest(BaseModel):
     scenario_key: str = Field(default="ride_down")
     execute: bool = Field(default=False)
+    strict: bool = Field(default=False)
+    blocking_hosted_eval: bool = Field(default=False)
+
+
+@contextmanager
+def _temporary_env(updates: dict[str, str | None]):
+    previous = {key: os.getenv(key) for key in updates}
+    try:
+        for key, value in updates.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _trace_eval_judge_payload() -> dict[str, Any]:
@@ -120,11 +141,16 @@ def register_gcp_routes(app: Any, deps: dict[str, Any]) -> None:
         async def run_scenario(scenario_key: str, execute: bool) -> dict[str, Any]:
             return await park_agent_run(park_agent_run_request(scenario_key=scenario_key, execute=execute))
 
-        return await run_gcp_judge_trace_eval_smoke(
-            scenario_key=request.scenario_key,
-            execute=request.execute,
-            scenario_runner=run_scenario,
-        )
+        env_updates = {
+            "PARKPULSE_REQUIRE_STRICT_LIVE_GCP": "true" if request.strict else None,
+            "PARKPULSE_HOSTED_EVAL_BLOCKING": "true" if request.blocking_hosted_eval else None,
+        }
+        with _temporary_env(env_updates):
+            return await run_gcp_judge_trace_eval_smoke(
+                scenario_key=request.scenario_key,
+                execute=request.execute,
+                scenario_runner=run_scenario,
+            )
 
     @router.post("/api/gcp/evaluator-loop/verify")
     async def gcp_evaluator_loop_verify(scenario_key: str = "ride_down"):
@@ -349,6 +375,12 @@ def register_gcp_routes(app: Any, deps: dict[str, Any]) -> None:
         from gcp_operations import start_operator_workflow
 
         return await asyncio.to_thread(start_operator_workflow, request.payload)
+
+    @router.get("/api/gcp/operating-loop-resilience")
+    async def gcp_operating_loop_resilience(write_artifact: bool = False):
+        from operating_loop_resilience import build_operating_loop_resilience_report
+
+        return await asyncio.to_thread(build_operating_loop_resilience_report, write_artifact=write_artifact)
 
     @router.get("/api/arize/status")
     async def arize_status():

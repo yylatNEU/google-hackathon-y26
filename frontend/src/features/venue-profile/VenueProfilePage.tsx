@@ -51,6 +51,135 @@ type VenueProfilePayload = {
     safetyInstructions?: string[];
     channelOwners?: Record<string, string>;
     locationDetails?: Record<string, VenueLocationDetail>;
+    zoneDetails?: Record<string, {
+      id?: string;
+      name?: string;
+      role?: string;
+      publicLocationCount?: number;
+      indoorOrSheltered?: boolean;
+      quietOrCooling?: boolean;
+      sensoryBaseline?: string;
+      agentReasoningHints?: string[];
+      locations?: string[];
+    }>;
+    spatialModel?: {
+      paths?: Array<{
+        id?: string;
+        fromZoneId?: string;
+        toZoneId?: string;
+        estimatedWalkMinutes?: number;
+        covered?: boolean;
+        stepFree?: boolean;
+        crowdSensitivity?: string;
+        source?: string;
+      }>;
+      routingAssumptions?: string[];
+    };
+    guestSegments?: Array<{
+      id?: string;
+      label?: string;
+      decisionDrivers?: string[];
+      preferredZones?: string[];
+      handoffTriggers?: string[];
+    }>;
+    operatingPriors?: {
+      zoneDemandPriors?: Array<{
+        zoneId?: string;
+        role?: string;
+        typicalPressureDrivers?: string[];
+        watchSignals?: string[];
+      }>;
+      crossModuleRules?: string[];
+    };
+    learningContext?: {
+      scenarioTaxonomy?: string[];
+      observationKeys?: string[];
+      feedbackLabels?: string[];
+      privacyBoundary?: string[];
+      coverageTargets?: Record<string, number>;
+    };
+    agentContext?: {
+      groundingFields?: string[];
+      capabilitiesBacked?: string[];
+      humanReviewTriggers?: string[];
+      moduleBindings?: Record<string, string[]>;
+      knownGaps?: string[];
+    };
+    profileIntelligence?: {
+      source?: string;
+      coverage?: Record<string, number>;
+      qualityGaps?: string[];
+      certifiedPaths?: Array<{
+        id?: string;
+        fromZoneId?: string;
+        toZoneId?: string;
+        estimatedWalkMinutes?: number;
+        certificationStatus?: string;
+        allowedUses?: string[];
+        blockedClaims?: string[];
+      }>;
+      capacityModel?: {
+        status?: string;
+        zoneComfort?: Array<{
+          zoneId?: string;
+          comfortCapacityEstimate?: number;
+          dwellMinutesTypical?: number;
+          spillbackRisk?: string;
+          confidence?: string;
+        }>;
+        blockedClaims?: string[];
+      };
+      experienceRules?: {
+        eventReadyZones?: string[];
+        halloweenCandidateLocations?: string[];
+        kidFriendlyAnchors?: string[];
+        rainyDayAnchors?: string[];
+        vipRouteAnchors?: string[];
+        noGoPairings?: Array<{ rule?: string; severity?: string }>;
+      };
+      segmentNeeds?: Record<string, {
+        label?: string;
+        preferredPace?: string;
+        needs?: string[];
+        avoid?: string[];
+        requiredHandoff?: string[];
+      }>;
+      timingModel?: {
+        status?: string;
+        showDurationModel?: Array<{ id?: string; name?: string; zoneId?: string; typicalDurationMinutes?: number }>;
+        knownPulses?: Array<{ id?: string; when?: string; affectedZoneRoles?: string[] }>;
+        missingForExactScheduling?: string[];
+      };
+      modulePolicy?: Record<string, Record<string, string[]>>;
+      fieldSourceLedger?: {
+        status?: string;
+        rows?: Array<{
+          field?: string;
+          sourceId?: string;
+          reviewStatus?: string;
+          lastVerifiedAt?: string;
+          maxAgeSeconds?: number;
+          staleBehavior?: string;
+        }>;
+        staleFieldPolicy?: string[];
+      };
+      learningSchema?: {
+        version?: string;
+        successMetrics?: string[];
+        failureMetrics?: string[];
+        updateTargets?: Record<string, string[]>;
+        reviewOwners?: Record<string, string>;
+      };
+      brandBible?: {
+        brandName?: string;
+        tone?: string[];
+        audiences?: string[];
+        copyRules?: string[];
+        bannedClaims?: string[];
+        supportedLocales?: string[];
+      };
+      liveFeedBindings?: Record<string, unknown>;
+    };
   };
   sourceIntegrity?: {
     profileType?: string;
@@ -66,6 +195,12 @@ type VenueProfilePayload = {
     profileType?: string;
     consumers?: string[];
     ownership?: string;
+    reasoningContract?: {
+      profileFacts?: string;
+      liveFacts?: string;
+      learningBoundary?: string;
+      humanAuthority?: string[];
+    };
   };
   validation?: {
     status?: string;
@@ -347,6 +482,19 @@ export function VenueProfilePage() {
   const identity = profile?.venueIdentity;
   const counts = profile?.readiness?.counts ?? {};
   const owners = Object.entries(profile?.realInputs?.channelOwners ?? {});
+  const zoneDetails = Object.values(profile?.realInputs?.zoneDetails ?? {});
+  const paths = profile?.realInputs?.spatialModel?.paths ?? [];
+  const guestSegments = profile?.realInputs?.guestSegments ?? [];
+  const learningContext = profile?.realInputs?.learningContext;
+  const agentContext = profile?.realInputs?.agentContext;
+  const profileIntelligence = profile?.realInputs?.profileIntelligence;
+  const intelligenceCoverage = profileIntelligence?.coverage ?? {};
+  const sourceLedgerRows = profileIntelligence?.fieldSourceLedger?.rows ?? [];
+  const capacityZones = profileIntelligence?.capacityModel?.zoneComfort ?? [];
+  const modulePolicyEntries = Object.entries(profileIntelligence?.modulePolicy ?? {});
+  const segmentNeedEntries = Object.entries(profileIntelligence?.segmentNeeds ?? {});
+  const moduleBindings = Object.entries(agentContext?.moduleBindings ?? {});
+  const operatingPriors = profile?.realInputs?.operatingPriors?.zoneDemandPriors ?? [];
   const validationStatus = validation?.validation?.status ?? validation?.status;
   const validationIssues = collectIssues(validation);
   const diffSummary = preview?.diff?.summary;
@@ -399,10 +547,24 @@ export function VenueProfilePage() {
             <div className="mt-4 grid gap-2 md:grid-cols-3 xl:grid-cols-5">
               {[
                 ["Locations", counts.locations ?? 0],
+                ["Zones", counts.zones ?? 0],
+                ["Paths", counts.paths ?? 0],
+                ["Segments", counts.guestSegments ?? 0],
+                ["Learning", counts.learningSignals ?? 0],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded border border-slate-800 bg-[#0d1115] p-3">
+                  <div className="text-2xl font-black text-white">{value}</div>
+                  <div className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 grid gap-2 md:grid-cols-3 xl:grid-cols-5">
+              {[
                 ["Indoor", counts.indoorLocations ?? 0],
                 ["Access", counts.accessibleRoutes ?? 0],
                 ["Safety", counts.safetyInstructions ?? 0],
                 ["Owners", counts.channelOwners ?? 0],
+                ["Grounding", counts.agentGroundingFields ?? 0],
               ].map(([label, value]) => (
                 <div key={label} className="rounded border border-slate-800 bg-[#0d1115] p-3">
                   <div className="text-2xl font-black text-white">{value}</div>
@@ -460,6 +622,261 @@ export function VenueProfilePage() {
               </div>
             </div>
           </aside>
+        </section>
+
+        <section className="rounded-lg border border-slate-800 bg-[#151914] p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div className="text-[10px] font-black uppercase tracking-widest text-amber-200">Profile intelligence</div>
+              <h2 className="mt-1 text-2xl font-black text-white">Agent utility contract</h2>
+              <p className="mt-2 max-w-4xl text-sm leading-relaxed text-slate-400">
+                Structured constraints and mappings for deeper reasoning: certified paths, capacity assumptions, experience rules, module policy, source freshness, learning, brand, and live-feed bindings.
+              </p>
+            </div>
+            <div className="w-fit rounded border border-slate-700 bg-[#0d1115] px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-300">
+              {formatStatus(profileIntelligence?.source)}
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+            {[
+              ["Path records", intelligenceCoverage.certifiedPaths ?? counts.certifiedPaths ?? 0],
+              ["Capacity zones", intelligenceCoverage.capacityZones ?? counts.capacityZones ?? 0],
+              ["Source rows", intelligenceCoverage.fieldSourceRows ?? counts.fieldSourceRows ?? 0],
+              ["Policies", intelligenceCoverage.policyModules ?? counts.modulePolicies ?? 0],
+              ["Bindings", intelligenceCoverage.liveFeedBindingGroups ?? counts.liveFeedBindingGroups ?? 0],
+              ["Overrides", intelligenceCoverage.venueOwnedOverrides ?? 0],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded border border-slate-800 bg-[#0d1115] p-3">
+                <div className="text-2xl font-black text-white">{value}</div>
+                <div className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-3">
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Quality gaps</div>
+              <div className="mt-3 grid gap-2">
+                {(profileIntelligence?.qualityGaps ?? []).map((gap) => (
+                  <div key={gap} className="rounded border border-amber-400/25 bg-amber-950/15 p-2 text-xs leading-relaxed text-amber-100">{gap}</div>
+                ))}
+                {!profileIntelligence?.qualityGaps?.length ? <div className="rounded border border-slate-800 bg-[#151914] p-2 text-xs text-slate-500">No intelligence quality gaps reported.</div> : null}
+              </div>
+            </div>
+
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Capacity model</div>
+              <div className="mt-2 text-xs font-bold uppercase tracking-widest text-slate-400">{formatStatus(profileIntelligence?.capacityModel?.status)}</div>
+              <div className="mt-3 grid gap-2">
+                {capacityZones.slice(0, 5).map((zone) => (
+                  <div key={zone.zoneId} className="rounded border border-slate-800 bg-[#151914] p-2 text-xs leading-relaxed text-slate-400">
+                    <span className="font-black text-slate-100">{zone.zoneId}</span>: {zone.comfortCapacityEstimate ?? "--"} comfort / {zone.dwellMinutesTypical ?? "--"}m dwell / {formatStatus(zone.spillbackRisk)}
+                  </div>
+                ))}
+                {!capacityZones.length ? <div className="rounded border border-slate-800 bg-[#151914] p-2 text-xs text-slate-500">No capacity assumptions connected.</div> : null}
+              </div>
+            </div>
+
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Experience rules</div>
+              <div className="mt-3 grid gap-2 text-xs leading-relaxed text-slate-400">
+                <div className="rounded border border-slate-800 bg-[#151914] p-2"><span className="font-black text-slate-200">Rain:</span> {compact(profileIntelligence?.experienceRules?.rainyDayAnchors, 4) || "None"}</div>
+                <div className="rounded border border-slate-800 bg-[#151914] p-2"><span className="font-black text-slate-200">Kids:</span> {compact(profileIntelligence?.experienceRules?.kidFriendlyAnchors, 4) || "None"}</div>
+                <div className="rounded border border-slate-800 bg-[#151914] p-2"><span className="font-black text-slate-200">VIP:</span> {compact(profileIntelligence?.experienceRules?.vipRouteAnchors, 4) || "None"}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-2">
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Module policy</div>
+              <div className="mt-3 grid gap-2">
+                {modulePolicyEntries.map(([module, policy]) => (
+                  <div key={module} className="rounded border border-slate-800 bg-[#151914] p-2">
+                    <div className="text-xs font-black uppercase tracking-widest text-slate-200">{formatStatus(module)}</div>
+                    <div className="mt-1 text-xs leading-relaxed text-slate-500">
+                      {Object.entries(policy).map(([key, values]) => `${formatStatus(key)}: ${compact(values, 2)}`).join(" / ")}
+                    </div>
+                  </div>
+                ))}
+                {!modulePolicyEntries.length ? <div className="rounded border border-slate-800 bg-[#151914] p-2 text-xs text-slate-500">No module policy connected.</div> : null}
+              </div>
+            </div>
+
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Segment needs</div>
+              <div className="mt-3 grid gap-2">
+                {segmentNeedEntries.slice(0, 5).map(([segmentId, need]) => (
+                  <div key={segmentId} className="rounded border border-slate-800 bg-[#151914] p-2">
+                    <div className="text-xs font-black text-slate-100">{need.label ?? formatStatus(segmentId)}</div>
+                    <div className="mt-1 text-xs leading-relaxed text-slate-500">Pace {formatStatus(need.preferredPace)} / avoid {compact(need.avoid, 2) || "none"} / handoff {compact(need.requiredHandoff, 2) || "none"}</div>
+                  </div>
+                ))}
+                {!segmentNeedEntries.length ? <div className="rounded border border-slate-800 bg-[#151914] p-2 text-xs text-slate-500">No segment needs connected.</div> : null}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-3">
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Source freshness</div>
+              <div className="mt-3 grid gap-2">
+                {sourceLedgerRows.slice(0, 6).map((row) => (
+                  <div key={`${row.field}-${row.sourceId}`} className="rounded border border-slate-800 bg-[#151914] p-2 text-xs leading-relaxed text-slate-400">
+                    <span className="font-black text-slate-100">{row.field}</span> / {row.sourceId} / {formatStatus(row.reviewStatus)}
+                  </div>
+                ))}
+                {!sourceLedgerRows.length ? <div className="rounded border border-slate-800 bg-[#151914] p-2 text-xs text-slate-500">No source ledger connected.</div> : null}
+              </div>
+            </div>
+
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Brand bible</div>
+              <div className="mt-3 grid gap-2 text-xs leading-relaxed text-slate-400">
+                <div className="rounded border border-slate-800 bg-[#151914] p-2">Tone: {compact(profileIntelligence?.brandBible?.tone, 5) || "None"}</div>
+                <div className="rounded border border-slate-800 bg-[#151914] p-2">Locales: {compact(profileIntelligence?.brandBible?.supportedLocales, 5) || "None"}</div>
+                <div className="rounded border border-slate-800 bg-[#151914] p-2">Banned: {compact(profileIntelligence?.brandBible?.bannedClaims, 4) || "None"}</div>
+              </div>
+            </div>
+
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Learning schema</div>
+              <div className="mt-3 grid gap-2 text-xs leading-relaxed text-slate-400">
+                <div className="rounded border border-slate-800 bg-[#151914] p-2">Success: {compact(profileIntelligence?.learningSchema?.successMetrics, 3) || "None"}</div>
+                <div className="rounded border border-slate-800 bg-[#151914] p-2">Failure: {compact(profileIntelligence?.learningSchema?.failureMetrics, 3) || "None"}</div>
+                <div className="rounded border border-slate-800 bg-[#151914] p-2">Live binding groups: {Object.keys(profileIntelligence?.liveFeedBindings ?? {}).length}</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-lg border border-slate-800 bg-[#151914] p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div className="text-[10px] font-black uppercase tracking-widest text-cyan-200">Agent reasoning substrate</div>
+              <h2 className="mt-1 text-2xl font-black text-white">Park profile depth</h2>
+              <p className="mt-2 max-w-4xl text-sm leading-relaxed text-slate-400">
+                Source-backed park structure for route planning, experience drafting, accessibility support, command review, and learning evaluation.
+              </p>
+            </div>
+            <div className={`w-fit rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${statusClass(profile?.readiness?.status)}`}>
+              {formatStatus(sourceMode)}
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-3 xl:grid-cols-4">
+            {[
+              ["Grounding fields", agentContext?.groundingFields?.length ?? 0, compact(agentContext?.groundingFields, 4) || "No grounding fields connected."],
+              ["Capabilities", agentContext?.capabilitiesBacked?.length ?? 0, compact(agentContext?.capabilitiesBacked, 2) || "No agent capabilities declared."],
+              ["Feedback labels", learningContext?.feedbackLabels?.length ?? 0, compact(learningContext?.feedbackLabels, 4) || "No learning labels connected."],
+              ["Observation keys", learningContext?.observationKeys?.length ?? 0, compact(learningContext?.observationKeys, 4) || "No observation keys connected."],
+            ].map(([label, value, detail]) => (
+              <div key={label} className="rounded border border-slate-800 bg-[#0d1115] p-3">
+                <div className="text-2xl font-black text-white">{value}</div>
+                <div className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</div>
+                <div className="mt-2 text-xs leading-relaxed text-slate-400">{detail}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-3">
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Zone intelligence</div>
+              <div className="mt-3 grid gap-2">
+                {zoneDetails.slice(0, 6).map((zone) => (
+                  <div key={zone.id ?? zone.name} className="rounded border border-slate-800 bg-[#151914] p-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-sm font-black text-white">{zone.name ?? zone.id}</div>
+                      <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{formatStatus(zone.role)}</div>
+                    </div>
+                    <div className="mt-1 text-xs leading-relaxed text-slate-400">
+                      {zone.publicLocationCount ?? 0} locations / sensory {formatStatus(zone.sensoryBaseline)} / {zone.indoorOrSheltered ? "shelter" : "open"} / {zone.quietOrCooling ? "reset" : "active"}
+                    </div>
+                    {zone.agentReasoningHints?.length ? <div className="mt-1 text-[11px] leading-relaxed text-slate-500">{compact(zone.agentReasoningHints, 2)}</div> : null}
+                  </div>
+                ))}
+                {!zoneDetails.length ? <div className="rounded border border-slate-800 bg-[#151914] p-2 text-xs text-slate-500">No zone intelligence connected.</div> : null}
+              </div>
+            </div>
+
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Guest segments</div>
+              <div className="mt-3 grid gap-2">
+                {guestSegments.slice(0, 6).map((segment) => (
+                  <div key={segment.id ?? segment.label} className="rounded border border-slate-800 bg-[#151914] p-2">
+                    <div className="text-sm font-black text-white">{segment.label ?? segment.id}</div>
+                    <div className="mt-1 text-xs leading-relaxed text-slate-400">{compact(segment.decisionDrivers, 3) || "No drivers connected."}</div>
+                    {segment.handoffTriggers?.length ? <div className="mt-1 text-[11px] leading-relaxed text-slate-500">Handoff: {compact(segment.handoffTriggers, 2)}</div> : null}
+                  </div>
+                ))}
+                {!guestSegments.length ? <div className="rounded border border-slate-800 bg-[#151914] p-2 text-xs text-slate-500">No guest segments connected.</div> : null}
+              </div>
+            </div>
+
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Agent boundaries</div>
+              <div className="mt-3 grid gap-2">
+                {(agentContext?.humanReviewTriggers ?? []).slice(0, 6).map((trigger) => (
+                  <div key={trigger} className="rounded border border-slate-800 bg-[#151914] p-2 text-xs leading-relaxed text-slate-300">{trigger}</div>
+                ))}
+                {!agentContext?.humanReviewTriggers?.length ? <div className="rounded border border-slate-800 bg-[#151914] p-2 text-xs text-slate-500">No human review triggers connected.</div> : null}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Spatial paths</div>
+                <div className="rounded border border-slate-800 bg-[#151914] px-2 py-1 text-[10px] font-black text-slate-400">{paths.length}</div>
+              </div>
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                {paths.slice(0, 8).map((path) => (
+                  <div key={path.id} className="rounded border border-slate-800 bg-[#151914] p-2 text-xs">
+                    <div className="font-black text-slate-100">{path.fromZoneId} to {path.toZoneId}</div>
+                    <div className="mt-1 text-slate-500">{path.estimatedWalkMinutes ?? "--"}m / {path.stepFree ? "step-free" : "verify access"} / {formatStatus(path.crowdSensitivity)}</div>
+                  </div>
+                ))}
+                {!paths.length ? <div className="rounded border border-slate-800 bg-[#151914] p-2 text-xs text-slate-500">No path model connected.</div> : null}
+              </div>
+            </div>
+
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Module bindings</div>
+              <div className="mt-3 grid gap-2">
+                {moduleBindings.map(([module, fields]) => (
+                  <div key={module} className="rounded border border-slate-800 bg-[#151914] p-2">
+                    <div className="text-xs font-black uppercase tracking-widest text-slate-300">{formatStatus(module)}</div>
+                    <div className="mt-1 text-xs leading-relaxed text-slate-500">{compact(fields, 6)}</div>
+                  </div>
+                ))}
+                {!moduleBindings.length ? <div className="rounded border border-slate-800 bg-[#151914] p-2 text-xs text-slate-500">No module bindings connected.</div> : null}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Learning privacy boundary</div>
+              <div className="mt-2 grid gap-2">
+                {(learningContext?.privacyBoundary ?? profile?.globalProfile?.reasoningContract?.humanAuthority ?? []).slice(0, 4).map((item) => (
+                  <div key={item} className="rounded border border-slate-800 bg-[#151914] p-2 text-xs leading-relaxed text-slate-400">{item}</div>
+                ))}
+              </div>
+            </div>
+            <div className="rounded border border-slate-800 bg-[#0d1115] p-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Operating priors</div>
+              <div className="mt-2 grid gap-2">
+                {operatingPriors.slice(0, 4).map((prior) => (
+                  <div key={prior.zoneId} className="rounded border border-slate-800 bg-[#151914] p-2 text-xs leading-relaxed text-slate-400">
+                    <span className="font-black text-slate-200">{prior.zoneId}</span>: {compact(prior.watchSignals, 4) || compact(prior.typicalPressureDrivers, 3) || "No watch signals."}
+                  </div>
+                ))}
+                {!operatingPriors.length ? <div className="rounded border border-slate-800 bg-[#151914] p-2 text-xs text-slate-500">No operating priors connected.</div> : null}
+              </div>
+            </div>
+          </div>
         </section>
 
         <section className="rounded-lg border border-slate-800 bg-[#151914] p-4">

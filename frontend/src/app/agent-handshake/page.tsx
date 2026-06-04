@@ -252,7 +252,32 @@ type OnboardedAgent = {
 
 const jsonHeaders = { "content-type": "application/json" };
 const states = ["verified", "scoped", "intent_accepted", "negotiating", "committed", "monitoring", "closed"];
-const fullAgentScopes = ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference", "route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer", "policy_check", "session_commit"];
+const fullAgentScopes = [
+  "location",
+  "party_size",
+  "preferences",
+  "accessibility_needs",
+  "budget",
+  "ride_preference",
+  "route_plan",
+  "wait_time_alert",
+  "food_recommendation",
+  "safety_notice",
+  "compensation_offer",
+  "policy_check",
+  "session_commit",
+  "inventory_position",
+  "delivery_eta",
+  "supplier_compliance",
+  "cold_chain_status",
+  "parts_availability",
+  "demand_forecast",
+  "restock_request",
+  "dock_slot",
+  "substitution_request",
+  "purchase_order_notice",
+  "maintenance_parts_request",
+];
 const stateLabels: Record<string, string> = {
   verified: "Identity",
   scoped: "Capability",
@@ -326,6 +351,39 @@ const protocolScenarios = [
     blocked: ["cross_guest_data_sharing", "identity_sensitive_action"],
     outcome: "Multiple personal agents converge on one bounded group plan.",
   },
+  {
+    id: "supply_replenishment",
+    mode: "Supply replenishment",
+    clientIntent: "Supplier agent prevents a beverage stockout before parade demand spikes.",
+    parkOffer: "Demand forecast, Dock B slot, approved substitute request, and procurement-gated purchase notice.",
+    negotiation: "Supplier proposes a larger shipment; Park agent caps quantity to storage capacity and approved SKUs.",
+    handoffs: ["Supply Chain Agent", "Procurement Agent", "Food Agent"],
+    allowed: ["restock_request", "dock_slot_assignment", "substitution_request"],
+    blocked: ["purchase_order", "vendor_payment_release", "price_change_acceptance"],
+    outcome: "Stockout risk drops while procurement, payment, and price changes stay approval-gated.",
+  },
+  {
+    id: "cold_chain_incident",
+    mode: "Cold-chain incident",
+    clientIntent: "Supplier agent reports a temperature excursion and asks how to preserve service safely.",
+    parkOffer: "Hold affected lot, suppress unsafe SKU, request approved substitute, and notify food ops.",
+    negotiation: "Supplier asks to release inventory with a note; Park agent blocks release until safety review.",
+    handoffs: ["Safety Agent", "Food Agent", "Supply Chain Agent", "Procurement Agent"],
+    allowed: ["inventory_hold", "substitution_request", "safety_notice"],
+    blocked: ["bypass_food_safety", "vendor_payment_release", "purchase_order"],
+    outcome: "Unsafe stock stays held and food service reroutes through approved inventory.",
+  },
+  {
+    id: "maintenance_parts_shortage",
+    mode: "Maintenance parts shortage",
+    clientIntent: "Parts supplier agent coordinates a replacement sensor for a delayed ride repair.",
+    parkOffer: "Maintenance priority, receiving window, certified substitute request, and safety-gated reopening.",
+    negotiation: "Supplier can deliver a compatible part now; Park agent requires certification evidence and safety signoff.",
+    handoffs: ["Maintenance Agent", "Supply Chain Agent", "Safety Agent", "Procurement Agent"],
+    allowed: ["maintenance_parts_request", "dock_slot_assignment", "safety_notice"],
+    blocked: ["override_safety_delay", "purchase_order", "vendor_payment_release"],
+    outcome: "Parts logistics move forward while ride reopening and procurement remain controlled.",
+  },
 ];
 type ProtocolScenario = (typeof protocolScenarios)[number];
 type ScenarioRunConfig = {
@@ -395,6 +453,39 @@ const scenarioRunConfigs: Record<string, ScenarioRunConfig> = {
     queueReason: "Coordinate shared route anchors with optional split-path windows.",
     planner: "group_coordination",
   },
+  supply_replenishment: {
+    goal: "prevent_inventory_stockout",
+    constraints: { sku: "lemonade", zone: "Parade Zone", target_stockout_minutes: 60, approved_skus_only: true, scenario_mode: "supply_replenishment" },
+    counterRequest: "increase shipment while respecting cold-storage capacity",
+    priorityChange: { stockout_risk: "highest", cost: "medium" },
+    monitorEvent: "parade_zone_stockout_risk",
+    commerceAction: "purchase_order",
+    commerceReason: "Supply replenishment purchase-order boundary probe.",
+    queueReason: "Coordinate dock timing and avoid operational congestion.",
+    planner: "supply_replenishment",
+  },
+  cold_chain_incident: {
+    goal: "protect_food_safety_and_service_continuity",
+    constraints: { lot: "LEM-42", temperature_excursion: true, approved_skus_only: true, scenario_mode: "cold_chain_incident" },
+    counterRequest: "find approved substitute without releasing held inventory",
+    priorityChange: { food_safety: "highest", service_continuity: "medium" },
+    monitorEvent: "cold_chain_temperature_excursion",
+    commerceAction: "vendor_payment_release",
+    commerceReason: "Cold-chain payment-release boundary probe.",
+    queueReason: "Coordinate receiving-dock hold and substitute delivery timing.",
+    planner: "cold_chain_incident",
+  },
+  maintenance_parts_shortage: {
+    goal: "restore_maintenance_supply_without_overriding_safety",
+    constraints: { ride: "Wave Pool", part: "wave_sensor", certified_substitute_required: true, scenario_mode: "maintenance_parts_shortage" },
+    counterRequest: "use certified substitute but keep reopening safety-gated",
+    priorityChange: { part_eta: "highest", safety_signoff: "highest" },
+    monitorEvent: "replacement_sensor_eta_slip",
+    commerceAction: "purchase_order",
+    commerceReason: "Maintenance parts purchase-order boundary probe.",
+    queueReason: "Coordinate receiving window and maintenance bay timing.",
+    planner: "maintenance_parts_shortage",
+  },
 };
 const extensionMarkets = [
   { market: "Airlines", example: "Passenger agent negotiates delay handling, lounge access, and rebooking options." },
@@ -402,6 +493,7 @@ const extensionMarkets = [
   { market: "Hospitals", example: "Patient agent coordinates appointment flow while protecting health-data scope." },
   { market: "Conferences", example: "Attendee agent negotiates agenda, networking slots, and session changes." },
   { market: "Retail", example: "Shopper agent negotiates pickup, inventory alternatives, returns, and offers." },
+  { market: "Supply chain", example: "Supplier agent negotiates restock, substitution, receiving windows, and procurement gates." },
 ];
 
 function titleize(value: string) {
@@ -546,7 +638,7 @@ function ProtocolExplorer({ selectedId, onSelect }: { selectedId: string; onSele
             <div className="text-[11px] font-black uppercase tracking-normal text-slate-500">Protocol explorer</div>
             <h2 className="mt-1 text-2xl font-black text-slate-100">Handshake protocol as the product</h2>
             <p className="mt-2 max-w-4xl text-sm font-bold leading-6 text-slate-400">
-              The same identity, permission, goal, negotiation, policy, and outcome handshakes can power many guest-agent scenarios. ParkPulse is the first vertical demo.
+              The same identity, permission, goal, negotiation, policy, and outcome handshakes can power guest, supplier, maintenance, and commerce counterparty scenarios. ParkPulse is the first vertical demo.
             </p>
           </div>
           <div className="rounded border border-cyan-300/70 px-3 py-2 text-xs font-black uppercase tracking-normal text-cyan-100">Reusable agent contract</div>
@@ -1533,8 +1625,8 @@ export default function AgentHandshakePage() {
     const tokenRequest = {
       subject: "guest_user_123",
       agent_id: "john_personal_agent",
-      scope: ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference", "route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer", "policy_check", "session_commit"],
-      cannot_do: ["auto_purchase", "share_health_data", "accept_refund_without_user"],
+      scope: fullAgentScopes,
+      cannot_do: ["auto_purchase", "share_health_data", "accept_refund_without_user", "auto_accept_price_change", "bypass_food_safety", "release_vendor_payment_without_approval"],
       ttl_seconds: 10800,
     };
     const baseSteps: SimulatorStep[] = [
@@ -1561,7 +1653,11 @@ export default function AgentHandshakePage() {
         withToken({ agent_id: "john_personal_agent", represents: "guest_user_123", proof: "signed_token", requested_session: `park_visit_${Date.now()}` }),
       );
       const sessionId = (identity.session as HandshakeSession).session_id;
-      await callStep("capability", `/api/park/session/${sessionId}/capabilities`, withToken({ can_share: ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference"], can_receive: ["route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer"], cannot_do: ["auto_purchase", "share_health_data", "accept_refund_without_user"] }));
+      await callStep("capability", `/api/park/session/${sessionId}/capabilities`, withToken({
+        can_share: ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference", "inventory_position", "delivery_eta", "supplier_compliance", "cold_chain_status", "parts_availability"],
+        can_receive: ["route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer", "demand_forecast", "restock_request", "dock_slot", "substitution_request", "purchase_order_notice", "maintenance_parts_request"],
+        cannot_do: ["auto_purchase", "share_health_data", "accept_refund_without_user", "auto_accept_price_change", "bypass_food_safety", "release_vendor_payment_without_approval"],
+      }));
       await callStep("intent", `/api/park/session/${sessionId}/intent`, withToken({ goal: scenarioConfig.goal, time_window: "3_hours", constraints: scenarioConfig.constraints, scenario_mode: scenario.id }));
       await callStep("propose", `/api/park/session/${sessionId}/propose`, withToken({ planner: scenarioConfig.planner, horizon: "3_hours", scenario_mode: scenario.id, expected_handoffs: scenario.handoffs }));
       await callStep("counter", `/api/park/session/${sessionId}/counter`, withToken({ counter_request: scenarioConfig.counterRequest, priority_change: scenarioConfig.priorityChange, scenario_mode: scenario.id }));

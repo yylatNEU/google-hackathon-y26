@@ -288,6 +288,708 @@ def _venue_safety_instructions(export: dict[str, Any]) -> list[str]:
     return instructions
 
 
+def _approved_map_nodes(export: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    for node in _as_list(_as_dict(export.get("venue_map")).get("nodes")):
+        if isinstance(node, dict) and _known_approved_sources(export, node):
+            nodes.append(node)
+    return nodes
+
+
+def _zone_name_map(export: dict[str, Any]) -> dict[str, str]:
+    identity = _venue_identity(export)
+    zones: dict[str, str] = {}
+    for zone in _as_list(identity.get("publicZones")):
+        if not isinstance(zone, dict):
+            continue
+        zone_id = _text(zone.get("id"))
+        if zone_id:
+            zones[zone_id] = _text(zone.get("name")) or zone_id
+    return zones
+
+
+def _location_names_by_zone(details: dict[str, dict[str, Any]], zone_id: str, kinds: set[str] | None = None) -> list[str]:
+    names: list[str] = []
+    for name, item in details.items():
+        if _text(item.get("zoneId")) != zone_id:
+            continue
+        if kinds is not None and _text(item.get("kind")) not in kinds:
+            continue
+        _append_unique(names, name)
+    return names
+
+
+def _zone_center(nodes: list[dict[str, Any]], zone_id: str) -> dict[str, float] | None:
+    rows = [node for node in nodes if _text(node.get("zone_id")) == zone_id and isinstance(node.get("x"), (int, float)) and isinstance(node.get("y"), (int, float))]
+    if not rows:
+        return None
+    return {
+        "x": round(sum(float(node["x"]) for node in rows) / len(rows), 1),
+        "y": round(sum(float(node["y"]) for node in rows) / len(rows), 1),
+    }
+
+
+def _zone_role(types: set[str], zone_name: str) -> str:
+    lowered = zone_name.lower()
+    if "entry" in types or "entrance" in lowered:
+        return "arrival_and_guest_services"
+    if "first_aid" in types or "guest_services" in types or "care" in lowered:
+        return "guest_care_and_recovery"
+    if "food" in types:
+        return "dining_and_dwell"
+    if "show" in types or "quiet_or_cooling" in types or "sheltered_area" in types:
+        return "shelter_show_or_reset"
+    if "attraction" in types:
+        return "attraction_demand"
+    return "general_public_area"
+
+
+def _sensory_baseline(types: set[str], location_names: list[str], details: dict[str, dict[str, Any]]) -> str:
+    high_terms = ("coaster", "drop", "launch", "thrill")
+    low_terms = ("quiet", "cooling", "shade", "lower-stimulus", "care")
+    joined = " ".join(location_names).lower()
+    if any(term in joined for term in low_terms) or "quiet_or_cooling" in types:
+        return "low"
+    for name in location_names:
+        note = _text(details.get(name, {}).get("sensoryNote")).lower()
+        if "low" in note or "quiet" in note:
+            return "low"
+        if "loud" in note or "high" in note or "strobe" in note:
+            return "high"
+    if any(term in joined for term in high_terms):
+        return "high"
+    return "medium" if types & {"food", "show", "retail"} else "variable"
+
+
+def _zone_intelligence(export: dict[str, Any], details: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    nodes = _approved_map_nodes(export)
+    zone_names = _zone_name_map(export)
+    quiet_names = set(_venue_quiet_or_cooling(export))
+    indoor_names = set(_venue_indoor_or_sheltered(export))
+    zone_index: dict[str, dict[str, Any]] = {}
+    for zone_id, zone_name in zone_names.items():
+        zone_nodes = [node for node in nodes if _text(node.get("zone_id")) == zone_id]
+        node_types = {_text(node.get("type")) for node in zone_nodes if _text(node.get("type"))}
+        location_names = _location_names_by_zone(details, zone_id)
+        indoor_or_sheltered = bool(indoor_names & set(location_names)) or "sheltered_area" in node_types
+        quiet_or_cooling = bool(quiet_names & set(location_names)) or "quiet_or_cooling" in node_types
+        restrooms = _location_names_by_zone(details, zone_id, {"restrooms"})
+        first_aid = _location_names_by_zone(details, zone_id, {"first_aid"})
+        guest_services = _location_names_by_zone(details, zone_id, {"guest_services", "family_service"})
+        dining = _location_names_by_zone(details, zone_id, {"food"})
+        attractions = _location_names_by_zone(details, zone_id, {"attraction", "show"})
+        zone_index[zone_id] = {
+            "id": zone_id,
+            "name": zone_name,
+            "role": _zone_role(node_types, zone_name),
+            "center": _zone_center(nodes, zone_id),
+            "publicLocationCount": len(location_names),
+            "nodeTypes": sorted(node_types),
+            "locations": location_names,
+            "attractions": attractions,
+            "dining": dining,
+            "restrooms": restrooms,
+            "firstAid": first_aid,
+            "guestServices": guest_services,
+            "indoorOrSheltered": indoor_or_sheltered,
+            "quietOrCooling": quiet_or_cooling,
+            "sensoryBaseline": _sensory_baseline(node_types, location_names, details),
+            "agentReasoningHints": [
+                hint
+                for hint in [
+                    "good reset or weather fallback" if indoor_or_sheltered or quiet_or_cooling else "",
+                    "keep as care handoff anchor" if first_aid or guest_services else "",
+                    "watch meal-time dwell and mobile-order pressure" if dining else "",
+                    "watch queue spillback and thrill-seeker demand" if attractions and not quiet_or_cooling else "",
+                    "use as restroom waypoint" if restrooms else "",
+                ]
+                if hint
+            ],
+            "source": "venue_profile.public_zones + venue_map.nodes + approved public location records",
+        }
+    return zone_index
+
+
+def _distance_between(a: dict[str, float] | None, b: dict[str, float] | None) -> float | None:
+    if not a or not b:
+        return None
+    return ((float(a["x"]) - float(b["x"])) ** 2 + (float(a["y"]) - float(b["y"])) ** 2) ** 0.5
+
+
+def _spatial_model(export: dict[str, Any], zones: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    map_payload = _as_dict(export.get("venue_map"))
+    scale = _as_dict(map_payload.get("scale"))
+    explicit_paths = [path for path in _as_list(map_payload.get("paths")) if isinstance(path, dict) and _known_approved_sources(export, path)]
+    paths: list[dict[str, Any]] = []
+    if explicit_paths:
+        for path in explicit_paths:
+            from_zone = _text(path.get("from_zone_id") or path.get("from"))
+            to_zone = _text(path.get("to_zone_id") or path.get("to"))
+            if from_zone and to_zone:
+                paths.append(
+                    {
+                        "id": _text(path.get("id")) or f"{from_zone}_to_{to_zone}",
+                        "fromZoneId": from_zone,
+                        "toZoneId": to_zone,
+                        "estimatedWalkMinutes": path.get("estimated_walk_minutes"),
+                        "covered": path.get("covered"),
+                        "stepFree": path.get("step_free"),
+                        "notes": path.get("notes"),
+                        "source": "venue_map.paths",
+                    }
+                )
+    else:
+        zone_rows = [zone for zone in zones.values() if zone.get("center")]
+        seen: set[tuple[str, str]] = set()
+        for zone in zone_rows:
+            distances = []
+            for other in zone_rows:
+                if zone["id"] == other["id"]:
+                    continue
+                distance = _distance_between(zone.get("center"), other.get("center"))
+                if distance is not None:
+                    distances.append((distance, other))
+            for distance, other in sorted(distances, key=lambda row: row[0])[:2]:
+                key = tuple(sorted([zone["id"], other["id"]]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                paths.append(
+                    {
+                        "id": f"{key[0]}_to_{key[1]}",
+                        "fromZoneId": zone["id"],
+                        "toZoneId": other["id"],
+                        "estimatedWalkMinutes": max(2, round(distance / 70)),
+                        "distanceMapUnits": round(distance, 1),
+                        "covered": bool(zone.get("indoorOrSheltered") and other.get("indoorOrSheltered")),
+                        "stepFree": True,
+                        "crowdSensitivity": "high" if {"attraction_demand", "dining_and_dwell"} & {zone.get("role"), other.get("role")} else "medium",
+                        "source": "derived_from_venue_map_node_geometry",
+                    }
+                )
+    return {
+        "source": "venue_profile.venue_map",
+        "scale": scale,
+        "zones": zones,
+        "paths": paths,
+        "routingAssumptions": [
+            "Use explicit venue_map.paths when supplied; otherwise derive coarse adjacency from approved map node geometry.",
+            "Derived paths are planning hints, not certified walking directions.",
+            "Accessibility, emergency, and crowd-control route changes require staff confirmation before guest-facing publication.",
+        ],
+    }
+
+
+def _guest_segments(export: dict[str, Any], zones: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    supplied = [row for row in _as_list(export.get("guest_segments")) if isinstance(row, dict)]
+    if supplied:
+        return supplied
+    quiet_zones = [zone["id"] for zone in zones.values() if zone.get("quietOrCooling")]
+    sheltered_zones = [zone["id"] for zone in zones.values() if zone.get("indoorOrSheltered")]
+    thrill_zones = [zone["id"] for zone in zones.values() if zone.get("role") == "attraction_demand"]
+    care_zones = [zone["id"] for zone in zones.values() if zone.get("firstAid") or zone.get("guestServices")]
+    dining_zones = [zone["id"] for zone in zones.values() if zone.get("dining")]
+    return [
+        {
+            "id": "families_with_strollers",
+            "label": "Families with strollers",
+            "decisionDrivers": ["shorter walks", "restrooms", "shade or indoor breaks", "simple wayfinding"],
+            "preferredZones": list(dict.fromkeys(care_zones + sheltered_zones))[:5],
+            "handoffTriggers": ["separated party", "lost item", "child-care need", "weather exposure"],
+        },
+        {
+            "id": "thrill_seekers",
+            "label": "Thrill seekers",
+            "decisionDrivers": ["wait time", "ride intensity", "nearby secondary attractions", "weather closures"],
+            "preferredZones": thrill_zones[:5],
+            "handoffTriggers": ["ride safety rule question", "closure dispute", "height or transfer uncertainty"],
+        },
+        {
+            "id": "low_sensory_guests",
+            "label": "Lower-sensory guests",
+            "decisionDrivers": ["quiet spaces", "indoor reset points", "avoid loud shows", "avoid dense queues"],
+            "preferredZones": list(dict.fromkeys(quiet_zones + sheltered_zones))[:5],
+            "handoffTriggers": ["sensory overload", "accessibility accommodation question", "route blockage"],
+        },
+        {
+            "id": "rainy_day_parties",
+            "label": "Rainy-day parties",
+            "decisionDrivers": ["covered paths", "indoor attractions", "food dwell", "reduced walking"],
+            "preferredZones": sheltered_zones[:6],
+            "handoffTriggers": ["storm shelter direction", "slip risk", "temporary outdoor closure"],
+        },
+        {
+            "id": "allergy_or_dietary_guests",
+            "label": "Allergy or dietary guests",
+            "decisionDrivers": ["venue-approved menu tags", "staff confirmation", "mobile order availability", "low-crowd seating"],
+            "preferredZones": dining_zones[:5],
+            "handoffTriggers": ["ingredient confirmation", "cross-contact concern", "medical uncertainty"],
+        },
+    ]
+
+
+def _operating_priors(export: dict[str, Any], zones: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "source": "derived_from_approved_venue_profile",
+        "zoneDemandPriors": [
+            {
+                "zoneId": zone["id"],
+                "role": zone.get("role"),
+                "typicalPressureDrivers": [
+                    driver
+                    for driver in [
+                        "arrival and exit waves" if zone.get("role") == "arrival_and_guest_services" else "",
+                        "meal periods and mobile pickup" if zone.get("role") == "dining_and_dwell" else "",
+                        "show start/end pulses" if "show" in zone.get("nodeTypes", []) else "",
+                        "ride wait-time imbalance" if zone.get("role") == "attraction_demand" else "",
+                        "heat, rain, and accessibility reset demand" if zone.get("quietOrCooling") or zone.get("indoorOrSheltered") else "",
+                    ]
+                    if driver
+                ],
+                "watchSignals": [
+                    signal
+                    for signal in [
+                        "crowd_density" if zone.get("role") in {"arrival_and_guest_services", "dining_and_dwell", "attraction_demand"} else "",
+                        "queue_spillback" if zone.get("attractions") else "",
+                        "food_pickup_eta" if zone.get("dining") else "",
+                        "care_or_accessibility_request" if zone.get("firstAid") or zone.get("guestServices") else "",
+                        "weather_exposure" if not zone.get("indoorOrSheltered") else "",
+                    ]
+                    if signal
+                ],
+            }
+            for zone in zones.values()
+        ],
+        "crossModuleRules": [
+            "Experience copy can recommend public places but cannot claim operational availability beyond the active source.",
+            "Accessibility and allergy plans must include staff confirmation steps when guest safety depends on live human judgment.",
+            "Command Center actions may use profile priors for triage, but physical reroutes and safety actions still require live state and policy gates.",
+            "Learning should attach outcomes to zone, segment, weather, crowd, and source version rather than private guest identity.",
+        ],
+    }
+
+
+def _learning_context(export: dict[str, Any], zones: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "source": "venue_profile_learning_contract",
+        "scenarioTaxonomy": [
+            "experience_design",
+            "accessibility_journey",
+            "rainy_day_reroute",
+            "low_sensory_route",
+            "dining_allergy_handoff",
+            "vip_tour_script",
+            "signage_language",
+            "guest_recovery_copy",
+            "command_center_triage",
+        ],
+        "observationKeys": [
+            "venueProfileVersion",
+            "sourceIntegrity.profileType",
+            "zoneId",
+            "guestSegmentId",
+            "weatherCondition",
+            "crowdDensityBand",
+            "waitTimeBand",
+            "foodPickupEtaBand",
+            "staffHandoffRecommended",
+            "humanReviewOutcome",
+            "guestFeedbackLabel",
+        ],
+        "feedbackLabels": [
+            "accepted_as_drafted",
+            "edited_for_brand_voice",
+            "edited_for_safety",
+            "rerouted_by_staff",
+            "blocked_by_missing_profile_fact",
+            "allergy_staff_confirmed",
+            "accessibility_staff_confirmed",
+            "guest_completed_route",
+            "guest_abandoned_route",
+            "guest_reported_confusion",
+        ],
+        "privacyBoundary": [
+            "Do not learn or store medical diagnosis, disability identity, protected class, or private guest identifiers.",
+            "Learn from aggregate route outcomes, public zone context, source version, and reviewer labels.",
+            "Keep venue facts versioned so agent regressions can be replayed against the profile that produced them.",
+        ],
+        "coverageTargets": {
+            "zones": len(zones),
+            "guestSegments": 5,
+            "minimumReviewerLabelsPerScenario": 20,
+            "minimumRouteOutcomeSamplesPerSegment": 30,
+        },
+    }
+
+
+def _agent_context(export: dict[str, Any], zones: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "source": "derived_from_approved_venue_profile",
+        "groundingFields": [
+            "venueIdentity",
+            "publicZones",
+            "locationDetails",
+            "spatialModel",
+            "guestSegments",
+            "operatingPriors",
+            "safetyInstructions",
+            "channelOwners",
+            "copyVariants",
+        ],
+        "capabilitiesBacked": [
+            "draft themed attraction and event copy from venue-approved locations",
+            "build low-sensory, rainy-day, family-care, and VIP guest journeys",
+            "rank route options using zone role, shelter, accessibility, dining, and care anchors",
+            "generate signage and pre-arrival language with source-integrity warnings",
+            "label agent outcomes for later prompt and policy evaluation",
+        ],
+        "humanReviewTriggers": [
+            "allergy ingredient or cross-contact claims",
+            "medical advice or urgent care decisions",
+            "ride transfer, height, or safety-rule interpretation",
+            "route changes affecting emergency, accessibility, or service lanes",
+            "claims about live staffing, equipment, refunds, or guaranteed availability",
+        ],
+        "moduleBindings": {
+            "experience_studio": ["venueIdentity", "locationDetails", "guestSegments", "copyVariants", "channelOwners"],
+            "accessibility_journey": ["spatialModel", "locationDetails", "guestSegments", "safetyInstructions"],
+            "command_center_review": ["spatialModel", "operatingPriors", "safetyInstructions"],
+            "guest_recommendations": ["locationDetails", "guestSegments", "spatialModel"],
+            "learning_evaluation": ["learningContext", "sourceIntegrity", "operatingPriors"],
+        },
+        "knownGaps": [
+            "live capacity by room or queue is not part of the Venue Profile and must come from live state",
+            "staff rosters and backstage procedures are intentionally excluded",
+            "certified ADA route geometry requires a venue-provided path feed, not derived map adjacency",
+        ],
+    }
+
+
+def _certified_paths(spatial_model: dict[str, Any]) -> list[dict[str, Any]]:
+    paths: list[dict[str, Any]] = []
+    for path in _as_list(spatial_model.get("paths")):
+        if not isinstance(path, dict):
+            continue
+        source = _text(path.get("source"))
+        certified = source == "venue_map.paths"
+        paths.append(
+            {
+                "id": path.get("id"),
+                "fromZoneId": path.get("fromZoneId"),
+                "toZoneId": path.get("toZoneId"),
+                "estimatedWalkMinutes": path.get("estimatedWalkMinutes"),
+                "stepFree": path.get("stepFree"),
+                "covered": path.get("covered"),
+                "crowdSensitivity": path.get("crowdSensitivity"),
+                "certificationStatus": "venue_certified" if certified else "derived_needs_venue_certification",
+                "allowedUses": ["planning_hint", "internal_ranking"] if not certified else ["guest_route_copy", "internal_ranking", "accessibility_planning"],
+                "blockedClaims": [] if certified else ["certified_accessible_route", "exact_walking_direction", "ada_compliant_path"],
+                "source": source or "unknown",
+            }
+        )
+    return paths
+
+
+def _capacity_model(zones: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    zone_rows: list[dict[str, Any]] = []
+    for zone in zones.values():
+        role = _text(zone.get("role"))
+        location_count = int(zone.get("publicLocationCount") or 0)
+        base = 120 + location_count * 45
+        if role == "arrival_and_guest_services":
+            base += 220
+        elif role == "dining_and_dwell":
+            base += 160
+        elif role == "attraction_demand":
+            base += 240
+        elif role == "shelter_show_or_reset":
+            base += 120
+        if zone.get("quietOrCooling"):
+            base = min(base, 280)
+        zone_rows.append(
+            {
+                "zoneId": zone.get("id"),
+                "comfortCapacityEstimate": base,
+                "dwellMinutesTypical": 35 if role == "dining_and_dwell" else 25 if zone.get("quietOrCooling") else 18,
+                "spillbackRisk": "high" if role in {"attraction_demand", "dining_and_dwell"} else "medium" if role == "arrival_and_guest_services" else "low",
+                "confidence": "heuristic",
+                "source": "derived_from_public_zone_role_and_location_count",
+                "venueOwnedReplacementField": "profile_intelligence.capacity_model.zoneComfort",
+            }
+        )
+    return {
+        "status": "derived_needs_venue_capacity_feed",
+        "zoneComfort": zone_rows,
+        "blockedClaims": ["certified_capacity", "fire_code_limit", "staffing_level"],
+        "recommendedLiveFeeds": ["guestFlow.zones.densityPct", "queue_spillback", "foodInventory.locations.pickupEtaMinutes"],
+    }
+
+
+def _experience_rules(export: dict[str, Any], zones: dict[str, dict[str, Any]], details: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    event_ready_zones = [
+        zone["id"]
+        for zone in zones.values()
+        if zone.get("role") in {"shelter_show_or_reset", "dining_and_dwell", "arrival_and_guest_services"} or zone.get("quietOrCooling")
+    ]
+    halloween_locations = [
+        name
+        for name, item in details.items()
+        if _text(item.get("kind")) in {"attraction", "show", "photo_spots", "quiet_or_cooling"} and not item.get("heightRequirementInches")
+    ]
+    kid_friendly = [
+        name
+        for name, item in details.items()
+        if _text(item.get("kind")) in {"show", "family_service", "quiet_or_cooling", "restrooms", "guest_services"} or "family" in _text(item.get("familyFit")).lower()
+    ]
+    return {
+        "eventReadyZones": event_ready_zones,
+        "halloweenCandidateLocations": halloween_locations[:12],
+        "kidFriendlyAnchors": kid_friendly[:12],
+        "rainyDayAnchors": [zone["id"] for zone in zones.values() if zone.get("indoorOrSheltered")][:8],
+        "vipRouteAnchors": [name for name, item in details.items() if _text(item.get("kind")) in {"attraction", "show", "photo_spots", "guest_services"}][:10],
+        "noGoPairings": [
+            {"rule": "Do not pair allergy dining copy with a guarantee of allergen-free food.", "severity": "critical"},
+            {"rule": "Do not route low-sensory guests through high-sensory thrill zones without an alternate reset point.", "severity": "high"},
+            {"rule": "Do not publish safety, transfer, or access-lane claims without staff review.", "severity": "critical"},
+        ],
+        "source": "derived_from_location_details_and_zone_intelligence",
+    }
+
+
+def _segment_needs(segments: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        str(segment.get("id")): {
+            "label": segment.get("label"),
+            "preferredPace": "slow" if "families" in _text(segment.get("id")) or "sensory" in _text(segment.get("id")) else "moderate",
+            "needs": segment.get("decisionDrivers") or [],
+            "avoid": [
+                item
+                for item in [
+                    "dense queues" if "sensory" in _text(segment.get("id")) else "",
+                    "long exposed walks" if "rainy" in _text(segment.get("id")) or "families" in _text(segment.get("id")) else "",
+                    "ingredient assumptions" if "allergy" in _text(segment.get("id")) else "",
+                    "closed or restricted rides" if "thrill" in _text(segment.get("id")) else "",
+                ]
+                if item
+            ],
+            "requiredHandoff": segment.get("handoffTriggers") or [],
+        }
+        for segment in segments
+        if segment.get("id")
+    }
+
+
+def _timing_model(export: dict[str, Any]) -> dict[str, Any]:
+    shows = [
+        {
+            "id": item.get("id"),
+            "name": item.get("name"),
+            "zoneId": item.get("zone_id"),
+            "typicalDurationMinutes": item.get("typical_duration_minutes"),
+            "crowdPulse": "show_start_end",
+            "sourceIds": _source_ids(item),
+        }
+        for item in _as_list(export.get("shows"))
+        if isinstance(item, dict) and _known_approved_sources(export, item)
+    ]
+    return {
+        "status": "schedule_feed_required_for_exact_times",
+        "showDurationModel": shows,
+        "knownPulses": [
+            {"id": "arrival_wave", "when": "opening_hour", "affectedZoneRoles": ["arrival_and_guest_services"]},
+            {"id": "meal_wave", "when": "lunch_and_dinner_periods", "affectedZoneRoles": ["dining_and_dwell"]},
+            {"id": "show_pulse", "when": "before_and_after_showtimes", "affectedZoneRoles": ["shelter_show_or_reset"]},
+        ],
+        "missingForExactScheduling": ["showtimes", "parade_routes", "event_windows", "setup_teardown_windows", "blackout_periods"],
+    }
+
+
+def _module_policy(agent_context: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "experience_studio": {
+            "mayDraft": ["themed copy", "guest journey concepts", "scavenger hunts", "VIP scripts", "pre-arrival email drafts"],
+            "mustReview": ["safety messaging", "accessibility language", "claims about availability or staff actions"],
+            "neverClaim": ["guaranteed access", "certified safety status", "medical or allergy assurance"],
+        },
+        "accessibility_journey": {
+            "mayRecommend": ["public route options", "rest points", "staff handoff points", "conservative alternates"],
+            "mustReview": ["ride transfer help", "allergy dining", "medical uncertainty", "route blockage"],
+            "neverClaim": ["ADA compliance", "equipment availability", "diagnosis-specific advice"],
+        },
+        "command_center_review": {
+            "mayUse": ["zone priors", "public map anchors", "handoff owners", "safety instruction references"],
+            "mustReview": ["physical reroutes", "access lane changes", "staff dispatch", "guest compensation"],
+            "neverClaim": ["live staffing from profile data", "incident resolution without live confirmation"],
+        },
+        "learning_evaluation": {
+            "mayLearnFrom": ["reviewer labels", "aggregate route outcomes", "source version", "zone and segment context"],
+            "mustExclude": ["private guest identity", "medical diagnosis", "disability identity", "protected class"],
+            "knownGaps": agent_context.get("knownGaps") or [],
+        },
+    }
+
+
+def _field_source_ledger(export: dict[str, Any]) -> dict[str, Any]:
+    source_catalog = _source_catalog(export)
+    field_sources = _as_dict(source_catalog.get("field_sources"))
+    sources = _sources(export)
+    rows = []
+    for field, source_ids in field_sources.items():
+        for source_id in _as_list(source_ids):
+            source = _as_dict(sources.get(str(source_id)))
+            rows.append(
+                {
+                    "field": field,
+                    "sourceId": source_id,
+                    "label": source.get("label"),
+                    "sourceType": source.get("source_type"),
+                    "reviewStatus": source.get("review_status"),
+                    "lastVerifiedAt": source.get("last_verified_at"),
+                    "maxAgeSeconds": source.get("max_age_seconds"),
+                    "confidence": source.get("confidence"),
+                    "staleBehavior": "block_guest_facing_claims" if field in {"venue_map", "landmarks", "food"} else "require_review",
+                }
+            )
+    return {
+        "status": "ready" if rows else "missing_source_catalog",
+        "rows": rows,
+        "staleFieldPolicy": [
+            "Block guest-facing safety, accessibility, menu, and path claims when their source is stale.",
+            "Allow creative drafts from stale copy sources only with reviewer warning.",
+            "Do not use seed_catalog source types for production grounding.",
+        ],
+    }
+
+
+def _brand_bible(export: dict[str, Any]) -> dict[str, Any]:
+    identity = _venue_identity(export)
+    copy_variants = _as_dict(export.get("copy_variants"))
+    return {
+        "brandName": identity.get("name"),
+        "tone": ["clear", "warm", "family-friendly", "operationally cautious"],
+        "audiences": identity.get("primaryAudiences") or [],
+        "copyRules": [
+            "Use public place names exactly as venue-approved.",
+            "Prefer plain language for safety, accessibility, and wayfinding.",
+            "Use staff-confirmation language for allergy, medical, accessibility, and ride-rule uncertainty.",
+            "Avoid fear-based phrasing during weather, crowd, or safety guidance.",
+        ],
+        "bannedClaims": ["guaranteed", "allergen-free", "ADA compliant", "always available", "no wait"],
+        "supportedLocales": sorted(copy_variants.keys()),
+        "approvedSnippets": copy_variants,
+    }
+
+
+def _live_feed_bindings(details: dict[str, dict[str, Any]], zones: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    attraction_bindings = []
+    food_bindings = []
+    care_bindings = []
+    for name, item in details.items():
+        kind = _text(item.get("kind"))
+        row = {"name": name, "zoneId": item.get("zoneId"), "profileKey": name}
+        if kind in {"attraction", "show"}:
+            attraction_bindings.append({**row, "liveFeed": "guestFlow.rides", "matchStrategy": "name_or_profile_id"})
+        elif kind == "food":
+            food_bindings.append({**row, "liveFeed": "foodInventory.locations", "matchStrategy": "name_or_profile_id"})
+        elif kind in {"first_aid", "guest_services", "family_service", "restrooms"}:
+            care_bindings.append({**row, "liveFeed": "incidentReadiness_or_staff_handoff", "matchStrategy": "zone_and_service_kind"})
+    return {
+        "zones": [
+            {"zoneId": zone_id, "liveFeed": "guestFlow.zones", "matchStrategy": "zone_id", "profileRole": zone.get("role")}
+            for zone_id, zone in zones.items()
+        ],
+        "attractions": attraction_bindings,
+        "food": food_bindings,
+        "careAndServices": care_bindings,
+        "weather": [
+            {"profileField": "zoneDetails.indoorOrSheltered", "liveFeed": "weather", "use": "rank shelter and exposed-route risk"},
+            {"profileField": "zoneDetails.quietOrCooling", "liveFeed": "weather.heatIndexF", "use": "rank cooling breaks"},
+        ],
+        "missingBindingsPolicy": "If a live feed cannot be matched, agents may draft but must mark the recommendation as needing operator confirmation.",
+    }
+
+
+def _outcome_learning_schema(learning_context: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "version": "venue_profile_learning_schema_v1",
+        "observationKeys": learning_context.get("observationKeys") or [],
+        "feedbackLabels": learning_context.get("feedbackLabels") or [],
+        "successMetrics": [
+            "guest_completed_route",
+            "reviewer_accepted_without_safety_edit",
+            "lower_confusion_report_rate",
+            "staff_handoff_completed_when_required",
+        ],
+        "failureMetrics": [
+            "edited_for_safety",
+            "rerouted_by_staff",
+            "blocked_by_missing_profile_fact",
+            "guest_reported_confusion",
+        ],
+        "updateTargets": {
+            "profile_update": ["blocked_by_missing_profile_fact", "rerouted_by_staff"],
+            "prompt_or_policy_update": ["edited_for_safety", "guest_reported_confusion"],
+            "source_feed_update": ["stale_source_detected", "live_feed_binding_missing"],
+        },
+        "reviewOwners": {
+            "experience_design": "Park Experience Content Owner",
+            "accessibility_journey": "Guest Experience Training Owner",
+            "dining_allergy_handoff": "Digital Experience Owner",
+            "command_center_triage": "Operations Review Lead",
+        },
+    }
+
+
+def _profile_intelligence(
+    export: dict[str, Any],
+    details: dict[str, dict[str, Any]],
+    zones: dict[str, dict[str, Any]],
+    spatial_model: dict[str, Any],
+    guest_segments: list[dict[str, Any]],
+    operating_priors: dict[str, Any],
+    learning_context: dict[str, Any],
+    agent_context: dict[str, Any],
+) -> dict[str, Any]:
+    supplied = _as_dict(export.get("profile_intelligence"))
+    generated = {
+        "version": "profile_intelligence_v1",
+        "certifiedPaths": _certified_paths(spatial_model),
+        "capacityModel": _capacity_model(zones),
+        "experienceRules": _experience_rules(export, zones, details),
+        "segmentNeeds": _segment_needs(guest_segments),
+        "timingModel": _timing_model(export),
+        "modulePolicy": _module_policy(agent_context),
+        "fieldSourceLedger": _field_source_ledger(export),
+        "learningSchema": _outcome_learning_schema(learning_context),
+        "brandBible": _brand_bible(export),
+        "liveFeedBindings": _live_feed_bindings(details, zones),
+    }
+    merged = {**generated, **{key: value for key, value in supplied.items() if value not in (None, "", [], {})}}
+    merged["source"] = "venue_profile.profile_intelligence" if supplied else "derived_from_approved_venue_profile"
+    merged["coverage"] = {
+        "certifiedPaths": len(_as_list(merged.get("certifiedPaths"))),
+        "capacityZones": len(_as_list(_as_dict(merged.get("capacityModel")).get("zoneComfort"))),
+        "experienceRuleGroups": len(_as_dict(merged.get("experienceRules"))),
+        "segmentNeeds": len(_as_dict(merged.get("segmentNeeds"))),
+        "timingEvents": len(_as_list(_as_dict(merged.get("timingModel")).get("showDurationModel"))),
+        "policyModules": len(_as_dict(merged.get("modulePolicy"))),
+        "fieldSourceRows": len(_as_list(_as_dict(merged.get("fieldSourceLedger")).get("rows"))),
+        "learningLabels": len(_as_list(_as_dict(merged.get("learningSchema")).get("feedbackLabels"))),
+        "liveFeedBindingGroups": len(_as_dict(merged.get("liveFeedBindings"))),
+        "venueOwnedOverrides": len(supplied),
+    }
+    merged["qualityGaps"] = [
+        gap
+        for gap in [
+            "certified path feed missing; paths are derived hints" if not any(path.get("certificationStatus") == "venue_certified" for path in _as_list(merged.get("certifiedPaths"))) else "",
+            "capacity model is heuristic until venue supplies room, queue, and seating capacities" if _as_dict(merged.get("capacityModel")).get("status") != "venue_certified" else "",
+            "exact showtimes, parade routes, setup, teardown, and blackout windows require a schedule feed" if _as_dict(merged.get("timingModel")).get("status") != "venue_scheduled" else "",
+        ]
+        if gap
+    ]
+    return merged
+
+
 def _channel_owners(export: dict[str, Any]) -> dict[str, str]:
     owners = _as_dict(export.get("channel_owners"))
     return {key: _text(owners.get(key)) for key in REQUIRED_CHANNEL_OWNERS if _text(owners.get(key))}
@@ -358,6 +1060,18 @@ def build_venue_experience_data_from_export(export: dict[str, Any] | None, loade
     validation = validate_venue_experience_export(export if export else {})
     profile_type = (_venue_identity(export).get("profileType") if export else "not_connected")
     is_approved_synthetic = profile_type == "synthetic_approved"
+    location_details = _location_details(export) if export and validation.get("autofillAllowed") else {}
+    zone_details = _zone_intelligence(export, location_details) if export and validation.get("autofillAllowed") else {}
+    spatial_model = _spatial_model(export, zone_details) if export and validation.get("autofillAllowed") else {"zones": {}, "paths": []}
+    guest_segments = _guest_segments(export, zone_details) if export and validation.get("autofillAllowed") else []
+    operating_priors = _operating_priors(export, zone_details) if export and validation.get("autofillAllowed") else {}
+    learning_context = _learning_context(export, zone_details) if export and validation.get("autofillAllowed") else {}
+    agent_context = _agent_context(export, zone_details) if export and validation.get("autofillAllowed") else {}
+    profile_intelligence = (
+        _profile_intelligence(export, location_details, zone_details, spatial_model, guest_segments, operating_priors, learning_context, agent_context)
+        if export and validation.get("autofillAllowed")
+        else {}
+    )
     real_inputs = {
         "source": f"venue_experience_data:{loaded_from or validation.get('loadedFrom') or 'not_connected'}",
         "venueIdentity": _venue_identity(export) if export else None,
@@ -368,7 +1082,14 @@ def build_venue_experience_data_from_export(export: dict[str, Any] | None, loade
         "accessibleRoutes": _venue_accessibility_notes(export) if validation.get("autofillAllowed") else [],
         "safetyInstructions": _venue_safety_instructions(export) if validation.get("autofillAllowed") else [],
         "channelOwners": _channel_owners(export) if validation.get("autofillAllowed") else {},
-        "locationDetails": _location_details(export) if validation.get("autofillAllowed") else {},
+        "locationDetails": location_details,
+        "zoneDetails": zone_details,
+        "spatialModel": spatial_model,
+        "guestSegments": guest_segments,
+        "operatingPriors": operating_priors,
+        "learningContext": learning_context,
+        "agentContext": agent_context,
+        "profileIntelligence": profile_intelligence,
     }
     counts = {
         "locations": len(real_inputs["locations"]),
@@ -376,6 +1097,16 @@ def build_venue_experience_data_from_export(export: dict[str, Any] | None, loade
         "accessibleRoutes": len(real_inputs["accessibleRoutes"]),
         "safetyInstructions": len(real_inputs["safetyInstructions"]),
         "channelOwners": len(real_inputs["channelOwners"]),
+        "zones": len(zone_details),
+        "paths": len(spatial_model.get("paths") or []) if isinstance(spatial_model, dict) else 0,
+        "guestSegments": len(guest_segments),
+        "agentGroundingFields": len(agent_context.get("groundingFields") or []) if isinstance(agent_context, dict) else 0,
+        "learningSignals": len(learning_context.get("feedbackLabels") or []) if isinstance(learning_context, dict) else 0,
+        "certifiedPaths": len(profile_intelligence.get("certifiedPaths") or []) if isinstance(profile_intelligence, dict) else 0,
+        "capacityZones": len((profile_intelligence.get("capacityModel") or {}).get("zoneComfort") or []) if isinstance(profile_intelligence, dict) else 0,
+        "fieldSourceRows": len((profile_intelligence.get("fieldSourceLedger") or {}).get("rows") or []) if isinstance(profile_intelligence, dict) else 0,
+        "modulePolicies": len(profile_intelligence.get("modulePolicy") or {}) if isinstance(profile_intelligence, dict) else 0,
+        "liveFeedBindingGroups": len(profile_intelligence.get("liveFeedBindings") or {}) if isinstance(profile_intelligence, dict) else 0,
     }
     return {
         "status": "ready",
@@ -400,8 +1131,18 @@ def build_venue_experience_data_from_export(export: dict[str, Any] | None, loade
         },
         "validation": validation,
         "contract": {
-            "requiredFields": ["verified public locations", "indoor or sheltered locations", "accessibility map facts", "safety instructions", "channel owners"],
+            "requiredFields": [
+                "verified public locations",
+                "indoor or sheltered locations",
+                "accessibility map facts",
+                "safety instructions",
+                "channel owners",
+                "agent grounding fields",
+                "learning outcome labels",
+                "profile intelligence contract",
+            ],
             "blockedSources": ["seed_catalog", "sample venue exports", "simulated park state"],
+            "agentUse": "Agents may reason from Venue Profile facts and derived public-map intelligence, but must separate profile priors from live state and human-authorized actions.",
         },
     }
 
@@ -490,7 +1231,21 @@ def resolve_experience_studio_real_inputs(payload: dict[str, Any]) -> tuple[dict
     existing = _as_dict(resolved.get("realInputs"))
     venue_inputs = _as_dict(venue_data.get("realInputs"))
     merged = deepcopy(existing)
-    for key in ("locations", "indoorLocations", "quietLocations", "attractionLocations", "accessibleRoutes", "safetyInstructions"):
+    for key in (
+        "locations",
+        "indoorLocations",
+        "quietLocations",
+        "attractionLocations",
+        "accessibleRoutes",
+        "safetyInstructions",
+        "zoneDetails",
+        "spatialModel",
+        "guestSegments",
+        "operatingPriors",
+        "learningContext",
+        "agentContext",
+        "profileIntelligence",
+    ):
         if not _as_list(existing.get(key)) and not _text(existing.get(key)):
             merged[key] = venue_inputs.get(key, [])
     existing_owners = _as_dict(existing.get("channelOwners"))

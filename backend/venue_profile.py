@@ -28,8 +28,20 @@ def _with_global_profile(profile: dict[str, Any]) -> dict[str, Any]:
             "signage_copy",
             "vip_tours",
             "command_center_review",
+            "scan_agent",
+            "react_agent",
+            "proact_agent",
+            "learning_evaluation",
         ],
         "ownership": "Venue Profile layer owns source integrity; consumers use allowed public fields only.",
+        "reasoningContract": {
+            "profileFacts": "venue-approved public facts and derived public-map intelligence",
+            "liveFacts": "waits, crowd, weather, inventory, staffing, incidents, and closures remain live-state inputs",
+            "learningBoundary": "learn from aggregate outcomes, reviewer labels, source version, and public zone context; do not learn private guest identity or medical/disability status",
+            "humanAuthority": [
+                "medical, allergy, accessibility accommodation, ride safety, emergency routing, staffing, compensation, and backstage decisions",
+            ],
+        },
     }
     return profile
 

@@ -21,6 +21,7 @@ runtime-external
 
 # Generated reports/artifacts
 output/
+artifacts/*-latest.json
 tmp/
 .arize-tmp-traces/
 

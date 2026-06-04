@@ -28,6 +28,23 @@ FULL_SCOPE = [
     "session_commit",
 ]
 
+SUPPLY_CHAIN_SCOPE = [
+    "inventory_position",
+    "delivery_eta",
+    "supplier_compliance",
+    "cold_chain_status",
+    "parts_availability",
+    "demand_forecast",
+    "restock_request",
+    "dock_slot",
+    "substitution_request",
+    "purchase_order_notice",
+    "maintenance_parts_request",
+    "safety_notice",
+    "policy_check",
+    "session_commit",
+]
+
 
 @dataclass
 class ApiResult:
@@ -191,11 +208,15 @@ def run_happy_path(api: str) -> dict[str, Any]:
     signature = signed_receipt.get("signature") if isinstance(signed_receipt.get("signature"), dict) else {}
     if receipt.get("status") != "ready" or signature.get("artifact_type") != "agent_handshake_session_receipt" or not signature.get("sig"):
         raise ConformanceFailure(f"Session receipt was not signed correctly: {receipt}")
+    verified_receipt = post_json(api, "/api/park/agent-handshake/verify-artifact", {"artifact": signed_receipt, "expected_artifact_type": "agent_handshake_session_receipt"}).payload
+    if verified_receipt.get("status") != "verified":
+        raise ConformanceFailure(f"Signed session receipt did not verify: {verified_receipt}")
 
     return {
         "session_id": session_id,
         "receipt_id": signed_receipt.get("receipt_id"),
         "receipt_signature_kid": signature.get("kid"),
+        "receipt_verification_status": verified_receipt.get("status"),
         "cases": {
             "identity_trust": identity_eval,
             "capability_scope": capability_eval,
@@ -293,6 +314,50 @@ def run_onboarding_case(api: str, external_admin_email: str | None = None) -> di
     }
 
 
+def run_supplier_onboarding_case(api: str) -> dict[str, Any]:
+    agent_id = f"conformance_supplier_agent_{int(time.time())}"
+    post_json(
+        api,
+        "/api/park/agent-onboarding/register",
+        {
+            "agent_id": agent_id,
+            "display_name": "Conformance Supplier Agent",
+            "partner_id": "conformance_supplier_partner",
+            "partner_name": "Conformance Supplier Partner",
+            "represents": "supplier_vendor_conformance",
+            "use_case": "supply_chain_coordination",
+            "requested_scopes": SUPPLY_CHAIN_SCOPE,
+            "cannot_do": ["auto_accept_price_change", "bypass_food_safety", "release_vendor_payment_without_approval", "auto_purchase"],
+        },
+    )
+    certified = post_json(api, f"/api/park/agent-onboarding/{agent_id}/certify", {"scenario_mode": "cold_chain_incident"}).payload
+    if certified.get("status") != "approved":
+        raise ConformanceFailure(f"Supplier onboarding certification should approve full-scope supplier agent: {certified}")
+    certification = certified.get("certification") if isinstance(certified.get("certification"), dict) else {}
+    credential = certification.get("credential") if isinstance(certification.get("credential"), dict) else {}
+    if certification.get("approval") != "approved_for_supply_chain_coordination" or not credential:
+        raise ConformanceFailure(f"Supplier certification did not return supply-chain approval credential: {certification}")
+    required = set(certification.get("passed_cases") or [])
+    if not {"identity_trust", "capability_scope", "supply_chain_negotiation", "procurement_gate", "artifact_verification"}.issubset(required):
+        raise ConformanceFailure(f"Supplier certification did not pass required supply-chain cases: {certification}")
+    verified = post_json(api, "/api/park/agent-onboarding/verify-credential", {"credential": credential}).payload
+    if verified.get("status") != "verified" or verified.get("approval") != "approved_for_supply_chain_coordination":
+        raise ConformanceFailure(f"Supplier certification credential did not verify: {verified}")
+    tampered = {**credential, "approval": "approved_for_guest_route_planning"}
+    tampered_result = post_json(api, "/api/park/agent-onboarding/verify-credential", {"credential": tampered}).payload
+    if tampered_result.get("status") != "rejected":
+        raise ConformanceFailure(f"Tampered supplier credential should be rejected: {tampered_result}")
+    return {
+        "agent_id": agent_id,
+        "status": certified["status"],
+        "approval": certification.get("approval"),
+        "score": certification.get("score"),
+        "credential_status": verified.get("status"),
+        "tampered_status": tampered_result.get("status"),
+        "passed_cases": certification.get("passed_cases"),
+    }
+
+
 def run_trust_admin_gate_case(api: str, external_admin_email: str | None = None) -> dict[str, Any]:
     public_status = get_json(api, "/api/park/agent-trust/status").status_code
     unauth_keys = get_json(api, "/api/park/agent-trust/keys", expected_status=401).status_code
@@ -339,6 +404,9 @@ def run_scenario_eval_case(api: str) -> dict[str, Any]:
     catalog_signature = catalog.get("signature") if isinstance(catalog.get("signature"), dict) else {}
     if catalog_signature.get("artifact_type") != "agent_handshake_scenario_catalog" or not catalog_signature.get("sig"):
         raise ConformanceFailure(f"Scenario catalog is not signed: {catalog_signature}")
+    verified_catalog = post_json(api, "/api/park/agent-handshake/verify-artifact", {"artifact": catalog, "expected_artifact_type": "agent_handshake_scenario_catalog"}).payload
+    if verified_catalog.get("status") != "verified":
+        raise ConformanceFailure(f"Scenario catalog signature did not verify: {verified_catalog}")
     scenario_ids = [str(item.get("id")) for item in catalog.get("scenarios", []) if isinstance(item, dict) and item.get("id")]
     if not scenario_ids:
         raise ConformanceFailure(f"Scenario catalog did not expose any scenarios: {catalog}")
@@ -359,6 +427,7 @@ def run_scenario_eval_case(api: str) -> dict[str, Any]:
         "average_score": evaluated["average_score"],
         "scenario_ids": result_ids,
         "catalog_signature_kid": catalog_signature.get("kid"),
+        "catalog_verification_status": verified_catalog.get("status"),
     }
 
 
@@ -369,6 +438,10 @@ def run_policy_challenge_case(api: str) -> dict[str, Any]:
         raise ConformanceFailure(f"Policy challenges failed: {challenged}")
     if signature.get("artifact_type") != "agent_handshake_policy_challenges" or not signature.get("sig"):
         raise ConformanceFailure(f"Policy challenge report is not signed: {signature}")
+    signed_report = {key: value for key, value in challenged.items() if key != "session"}
+    verified_report = post_json(api, "/api/park/agent-handshake/verify-artifact", {"artifact": signed_report, "expected_artifact_type": "agent_handshake_policy_challenges"}).payload
+    if verified_report.get("status") != "verified":
+        raise ConformanceFailure(f"Policy challenge report signature did not verify: {verified_report}")
     if challenged.get("passed") != challenged.get("challenge_count"):
         raise ConformanceFailure(f"Not all policy challenges passed: {challenged}")
     return {
@@ -376,6 +449,7 @@ def run_policy_challenge_case(api: str) -> dict[str, Any]:
         "challenge_count": challenged["challenge_count"],
         "passed": challenged["passed"],
         "signature_kid": signature.get("kid"),
+        "verification_status": verified_report.get("status"),
         "actions": [item.get("action") for item in challenged.get("results", []) if isinstance(item, dict)],
     }
 
@@ -391,6 +465,7 @@ def main() -> int:
         happy = run_happy_path(args.api)
         rejected = run_rejection_case(args.api)
         onboarding = run_onboarding_case(args.api, args.external_admin_email or None)
+        supplier_onboarding = run_supplier_onboarding_case(args.api)
         trust_admin = run_trust_admin_gate_case(args.api, args.external_admin_email or None)
         auth_readiness = run_auth_readiness_case(args.api, args.external_admin_email or None)
         scenario_eval = run_scenario_eval_case(args.api)
@@ -401,6 +476,7 @@ def main() -> int:
             "happy_path": happy,
             "rejection_case": rejected,
             "onboarding_case": onboarding,
+            "supplier_onboarding_case": supplier_onboarding,
             "trust_admin_gate": trust_admin,
             "auth_readiness": auth_readiness,
             "scenario_eval": scenario_eval,
@@ -412,6 +488,7 @@ def main() -> int:
                 "signed_receipt_issued": bool(happy.get("receipt_signature_kid")),
                 "under_scoped_capability_rejected": rejected["http_status"] == 403,
                 "certification_credential_verified": onboarding["credential_status"] == "verified",
+                "supplier_certification_verified": supplier_onboarding["credential_status"] == "verified",
                 "certification_revocation_enforced": onboarding["revoked_status"] == "rejected",
                 "trust_admin_gate_enforced": trust_admin["unauthenticated_keys"] == 401
                 and (

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 
@@ -57,6 +59,23 @@ def _check(
         "details": details or {},
         "readiness_issues": readiness_issues or [],
     }
+
+
+def _artifact_path() -> Path:
+    configured = os.getenv("PARKPULSE_GCP_SMOKE_ARTIFACT_PATH", "").strip()
+    if configured:
+        return Path(configured)
+    return Path("artifacts") / "gcp-judge-smoke-latest.json"
+
+
+def _persist_smoke_artifact(result: dict[str, Any]) -> dict[str, Any]:
+    path = _artifact_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(result, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        return {"status": "written", "path": str(path)}
+    except Exception as error:
+        return {"status": "failed", "path": str(path), "reason": str(error)[:300]}
 
 
 def build_gcp_live_readiness() -> dict[str, Any]:
@@ -252,7 +271,9 @@ def _proof_from_eval(eval_result: dict[str, Any]) -> dict[str, Any]:
         "live"
         if vertex_status == "completed"
         else "skipped"
-        if not hosted_eval or trigger_status == "not_triggered" or vertex_status in {"failed", "auth_unavailable", "blocked", "sdk_unavailable"}
+        if not hosted_eval
+        or trigger_status == "not_triggered"
+        or vertex_status in {"failed", "auth_unavailable", "blocked", "sdk_unavailable", "ssl_failed", "quota_failed", "timeout", "http_failed"}
         else "mocked"
     )
     return {
@@ -273,11 +294,38 @@ def _proof_from_eval(eval_result: dict[str, Any]) -> dict[str, Any]:
         "hosted_vertex_eval": {
             "proof_mode": hosted_vertex_mode,
             "status": hosted_eval.get("status"),
+            "failure_class": vertex_result.get("failure_class"),
             "provider": hosted_eval.get("provider"),
             "evaluator_id": hosted_eval.get("evaluator_id"),
             "trigger": trigger,
             "vertex_result": vertex_result,
         },
+    }
+
+
+def _strict_gate(readiness: dict[str, Any], smoke: dict[str, Any]) -> dict[str, Any]:
+    required_readiness = readiness.get("summary", {}).get("required_live_checks", [])
+    checks = _as_dict(readiness.get("checks"))
+    proof = _as_dict(smoke.get("proof"))
+    failures: list[str] = []
+    for name in required_readiness:
+        check = _as_dict(checks.get(name))
+        if check.get("proof_mode") != "live":
+            failures.append(f"{name} is {check.get('proof_mode', 'missing')}, not live.")
+    if readiness.get("status") != "live_ready":
+        failures.append(f"readiness status is {readiness.get('status')}, not live_ready.")
+    if not smoke.get("eval_present"):
+        failures.append("judge smoke eval result is missing.")
+    if _nested(proof, "local_scorecard", "proof_mode") != "live":
+        failures.append("local scorecard proof is not live.")
+    if _nested(proof, "hosted_vertex_eval", "proof_mode") != "live":
+        status = _nested(proof, "hosted_vertex_eval", "status")
+        reason = _nested(proof, "hosted_vertex_eval", "trigger", "reason")
+        failures.append(f"hosted Vertex eval is not live: status={status}, reason={reason}.")
+    return {
+        "required": _env_bool("PARKPULSE_REQUIRE_STRICT_LIVE_GCP"),
+        "passed": not failures,
+        "failures": failures,
     }
 
 
@@ -289,7 +337,7 @@ async def run_gcp_judge_trace_eval_smoke(
 ) -> dict[str, Any]:
     readiness = build_gcp_live_readiness()
     if scenario_runner is None:
-        return {
+        result = {
             "status": "readiness_only",
             "scenario_key": scenario_key,
             "execute": execute,
@@ -300,6 +348,9 @@ async def run_gcp_judge_trace_eval_smoke(
                 "reason": "No scenario runner was supplied; only readiness was checked.",
             },
         }
+        result["strict_gate"] = _strict_gate(readiness, result["smoke"])
+        result["artifact"] = _persist_smoke_artifact(result)
+        return result
 
     run_result = await scenario_runner(scenario_key, execute)
     eval_result = _extract_eval(run_result)
@@ -307,7 +358,7 @@ async def run_gcp_judge_trace_eval_smoke(
     proof = _proof_from_eval(eval_result)
     analytics_inserted = bool(analytics.get("inserted"))
     analytics_mocked = bool(analytics) and not analytics_inserted
-    return {
+    result = {
         "status": "complete" if eval_result else "missing_eval",
         "scenario_key": scenario_key,
         "execute": execute,
@@ -330,3 +381,8 @@ async def run_gcp_judge_trace_eval_smoke(
             },
         },
     }
+    result["strict_gate"] = _strict_gate(readiness, result["smoke"])
+    if result["strict_gate"]["required"] and not result["strict_gate"]["passed"]:
+        result["status"] = "strict_live_failed"
+    result["artifact"] = _persist_smoke_artifact(result)
+    return result

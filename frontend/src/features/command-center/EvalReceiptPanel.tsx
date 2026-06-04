@@ -1,24 +1,34 @@
 "use client";
 
-import type { EvalScore, IntegrationStatus, RunTelemetry } from "@/types/platform";
+import type { EvalScore, GcpLiveReadinessStatus, IntegrationStatus, RunTelemetry } from "@/types/platform";
 import { humanize } from "./style";
 
 export function EvalReceiptPanel({
   evals,
   telemetry,
   integrationStatus,
+  gcpLiveReadiness,
   evalScore,
   memoryMode,
 }: {
   evals: EvalScore[];
   telemetry: RunTelemetry | null;
   integrationStatus: IntegrationStatus | null;
+  gcpLiveReadiness: GcpLiveReadinessStatus | null;
   evalScore?: number;
   memoryMode: string;
 }) {
   const decisionId = telemetry?.decision_id ?? telemetry?.trace_contract?.memory_write?.decision_id ?? telemetry?.trace_contract?.run_id ?? telemetry?.run_receipt?.id;
   const traceState = telemetry?.eval?.gcp_trace_eval?.trace_state ?? integrationStatus?.gcp_trace_eval?.trace?.runtime ?? "local";
   const mongoState = integrationStatus?.mongo?.connected ? "connected" : memoryMode;
+  const readinessStatus = gcpLiveReadiness?.status ?? "unknown";
+  const readinessSummary = gcpLiveReadiness?.summary;
+  const readinessTone =
+    readinessStatus === "live_ready"
+      ? "border-emerald-400 bg-emerald-400 text-slate-950"
+      : readinessStatus === "wired_not_live"
+        ? "border-amber-300 bg-amber-300 text-slate-950"
+        : "border-slate-700 bg-slate-900 text-slate-200";
 
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
@@ -33,10 +43,17 @@ export function EvalReceiptPanel({
         </div>
       </div>
 
-      <div className="mt-4 grid gap-2 sm:grid-cols-3">
+      <div className="mt-4 grid gap-2 sm:grid-cols-4">
         <ReceiptMetric label="Decision" value={decisionId ?? "--"} />
         <ReceiptMetric label="Trace" value={humanize(traceState)} />
         <ReceiptMetric label="Memory" value={humanize(mongoState)} />
+        <div className={`rounded border p-3 ${readinessTone}`}>
+          <div className="text-[10px] font-black uppercase tracking-widest opacity-70">GCP proof</div>
+          <div className="mt-1 text-xs font-black">{humanize(readinessStatus)}</div>
+          <div className="mt-1 text-[11px] font-bold opacity-80">
+            {readinessSummary ? `${readinessSummary.live ?? 0} live / ${readinessSummary.mocked ?? 0} mocked / ${readinessSummary.skipped ?? 0} skipped` : "--"}
+          </div>
+        </div>
       </div>
 
       <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">

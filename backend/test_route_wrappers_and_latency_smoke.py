@@ -138,7 +138,7 @@ def test_memory_route_wrappers(monkeypatch):
     assert client.get("/api/park/analytics?query=q").json()["dashboard"]["query"] == "q"
 
 
-def test_gcp_route_wrappers(monkeypatch):
+def test_gcp_route_wrappers(monkeypatch, tmp_path):
     import arize_config
     import bigquery_analytics
     import evaluator_loop
@@ -149,6 +149,7 @@ def test_gcp_route_wrappers(monkeypatch):
     import scenario_eval_sweep
     from parkpulse_routes.gcp_routes import register_gcp_routes
 
+    monkeypatch.setenv("PARKPULSE_GCP_SMOKE_ARTIFACT_PATH", str(tmp_path / "gcp-smoke.json"))
     monkeypatch.setattr(gemini_provider, "get_gemini_agent_properties", lambda: types.SimpleNamespace(public_dict=lambda: {"ready": True}))
     monkeypatch.setattr(gcp_trace_eval, "get_gcp_trace_eval_status", lambda: types.SimpleNamespace(public_dict=lambda: {"ready": True}))
     monkeypatch.setattr(gcp_trace_eval, "verify_gcp_trace_export", lambda: {"status": "flush_succeeded"})
@@ -246,6 +247,7 @@ def test_gcp_route_wrappers(monkeypatch):
     assert smoke["status"] == "complete"
     assert smoke["smoke"]["proof"]["local_scorecard"]["proof_mode"] == "live"
     assert smoke["smoke"]["proof"]["analytics_export"]["proof_mode"] == "mocked"
+    assert smoke["artifact"]["status"] == "written"
     evaluator_verify = client.post("/api/gcp/evaluator-loop/verify?scenario_key=s").json()
     assert evaluator_verify["hosted_eval"]["provider"] == "vertex"
     assert evaluator_verify["judge_agent"]["agent_id"] == "gcp_eval_judge_agent"
@@ -267,4 +269,7 @@ def test_gcp_route_wrappers(monkeypatch):
     accepted = client.post("/api/gcp/eventarc/park-signal", json={"event": {"eventType": "parkpulse.manual.signal"}, "text": "guest fainted", "source": "s"}).json()
     assert accepted["status"] == "executed"
     assert client.post("/api/gcp/workflows/operator-approval", json={"payload": {"id": "w"}}).json()["workflow"]["id"] == "w"
+    resilience = client.get("/api/gcp/operating-loop-resilience").json()
+    assert resilience["status"] in {"passed", "passed_with_conditions"}
+    assert resilience["decision"] in {"allow_loop_claim", "allow_with_conditions"}
     assert client.get("/api/arize/status").json()["ready"] is False

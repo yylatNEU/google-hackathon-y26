@@ -98,6 +98,53 @@ function liveAgentsStatusClass(status?: string) {
   return "border-rose-500/40 bg-rose-950/25 text-rose-100";
 }
 
+function compactValue(value: unknown) {
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(2);
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "string" && value.trim()) return value;
+  return "--";
+}
+
+function constraintText(constraint: unknown) {
+  if (typeof constraint === "string") return constraint;
+  if (!constraint || typeof constraint !== "object") return "Profile constraint";
+  const record = constraint as { policy?: string; rule?: string; summary?: string; constraint?: string };
+  return record.summary ?? record.rule ?? record.policy ?? record.constraint ?? "Profile constraint";
+}
+
+function bestProfileCandidate(proposal: RoleAgentProposal) {
+  const summary = proposal.department_reasoning?.profile_counterfactual_summary;
+  const selected =
+    proposal.department_reasoning?.candidate_actions?.find((candidate) => candidate.selected) ??
+    proposal.department_reasoning?.candidate_actions?.[0];
+  return {
+    action: summary?.best_profile_adjusted_action ?? selected?.action ?? proposal.requested_tool ?? "Candidate pending",
+    score: summary?.best_profile_adjusted_score ?? selected?.profile_adjusted_score ?? selected?.profile_counterfactual?.score,
+    effect: selected?.profile_counterfactual?.profile_effect ?? "profile checked",
+    reasons: selected?.profile_counterfactual?.reasons ?? [],
+  };
+}
+
+function profileZoneNames(proposal: RoleAgentProposal) {
+  return (proposal.park_profile_context?.relevant_zones ?? [])
+    .slice(0, 3)
+    .map((zone) => zone.name ?? zone.id)
+    .filter(Boolean)
+    .join(", ");
+}
+
+function profileLocationNames(proposal: RoleAgentProposal) {
+  return (proposal.park_profile_context?.relevant_locations ?? [])
+    .slice(0, 3)
+    .map((location) => location.name ?? location.id)
+    .filter(Boolean)
+    .join(", ");
+}
+
+function profileConstraintSummary(proposal: RoleAgentProposal) {
+  return (proposal.park_profile_context?.profile_constraints ?? []).slice(0, 2).map(constraintText).join(" | ");
+}
+
 function stageEvidence(stageId: string, props: ProductLoopPanelProps) {
   if (stageId === "signals") return signalSummary(props.parkState);
   if (stageId === "feature_pipeline") return featureSummary(props.runTelemetry);
@@ -193,6 +240,23 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
   const proactRun = props.liveAgentsSmoke?.role_runs?.find((row) => row.mode === "proact");
   const liveFeedCase = props.runTelemetry?.live_feed_case;
   const toolUseClarity = props.runTelemetry?.tool_use_clarity;
+  const profileSummary = props.runTelemetry?.park_profile_summary ?? proposalArtifact?.park_profile_summary;
+  const profileProposals = proposalArtifact?.proposals?.filter((proposal) => proposal.park_profile_context?.status === "attached").slice(0, 6) ?? [];
+  const tradeoffRows = proposalArtifact?.tradeoff_matrix?.slice(0, 6) ?? [];
+  const negotiationRounds = proposalArtifact?.negotiation_rounds?.slice(0, 4) ?? [];
+  const memoryDeltas =
+    proposalArtifact?.memory_decision_deltas?.slice(0, 5) ??
+    proposalArtifact?.proposals
+      ?.map((proposal) => proposal.memory_decision_delta)
+      .filter((delta): delta is NonNullable<RoleAgentProposal["memory_decision_delta"]> => Boolean(delta))
+      .slice(0, 5) ??
+    [];
+  const executorProof = props.runTelemetry?.tool_executor_live_test;
+  const receiverProof = props.runTelemetry?.live_feed_receiver_delivery;
+  const followThrough = props.runTelemetry?.hard_decision_follow_through;
+  const outcomeMeasurement = props.runTelemetry?.live_feed_outcome_measurement;
+  const outcomeMemory = props.runTelemetry?.live_feed_outcome_memory;
+  const memoryPriors = props.runTelemetry?.live_feed_memory_priors;
 
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
@@ -406,6 +470,251 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
               Department proposal envelopes will appear after the operating loop emits role-agent proposals.
             </div>
           )}
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-lg border border-cyan-400/25 bg-cyan-950/10 p-4">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          <div>
+            <div className="text-[10px] font-black uppercase tracking-widest text-cyan-200">Park profile decision board</div>
+            <h3 className="mt-1 text-lg font-black text-slate-100">{profileSummary?.venue_name ?? "Park profile not attached"}</h3>
+            <p className="mt-2 max-w-4xl text-xs leading-relaxed text-slate-400">
+              {profileSummary?.contract ??
+                "Profile facts should constrain reasoning while live-feed evidence defines the current operating state."}
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              ["Status", profileSummary?.status ?? proposalArtifact?.park_profile_context_status],
+              ["Profiled agents", proposalArtifact?.profile_context_proposal_count],
+              ["Candidates scored", proposalArtifact?.profile_counterfactual_candidate_count],
+              ["Precedence", proposalArtifact?.precedence ?? profileSummary?.precedence],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded border border-cyan-300/20 bg-slate-950 px-3 py-2 text-center">
+                <div className="text-[10px] font-black uppercase text-slate-500">{label}</div>
+                <div className="mt-1 truncate text-sm font-black text-cyan-100">{compactValue(value)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="mt-3 grid gap-2 xl:grid-cols-3">
+          {profileProposals.length ? (
+            profileProposals.map((proposal) => {
+              const candidate = bestProfileCandidate(proposal);
+              return (
+                <div key={`${proposal.agent_id ?? proposal.department}-profile`} className="rounded border border-slate-800 bg-slate-950 p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="text-[10px] font-black uppercase text-cyan-200">{proposal.department_label ?? humanize(proposal.department)}</div>
+                      <div className="mt-1 text-sm font-black text-slate-100">{proposalLabel(proposal)}</div>
+                    </div>
+                    <div className="rounded bg-cyan-950 px-2 py-1 text-[10px] font-black uppercase text-cyan-100">
+                      {compactValue(candidate.score)}
+                    </div>
+                  </div>
+                  <div className="mt-3 text-xs font-black text-slate-100">{humanize(candidate.action)}</div>
+                  <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-slate-400">
+                    {candidate.reasons[0] ?? proposal.department_reasoning?.selected_rationale ?? "Profile counterfactual recorded."}
+                  </p>
+                  <div className="mt-3 space-y-1 text-[11px] font-bold text-slate-300">
+                    <div className="truncate">Zones: {profileZoneNames(proposal) || "profile zones pending"}</div>
+                    <div className="truncate">Locations: {profileLocationNames(proposal) || "profile locations pending"}</div>
+                    <div className="truncate">Constraint: {profileConstraintSummary(proposal) || "policy constraint pending"}</div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    <span className="rounded bg-slate-900 px-2 py-1 text-[10px] font-black uppercase text-cyan-100">{humanize(candidate.effect)}</span>
+                    <span className="rounded bg-slate-900 px-2 py-1 text-[10px] font-black uppercase text-slate-300">
+                      {humanize(proposal.profile_precedence ?? proposal.park_profile_context?.precedence)}
+                    </span>
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <div className="rounded border border-slate-800 bg-slate-950 p-3 text-xs leading-relaxed text-slate-400 xl:col-span-3">
+              Profile-aware proposal slices will appear after the live-feed agent run attaches the full park profile.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-3 xl:grid-cols-[.9fr_1.1fr]">
+        <div className="rounded-lg border border-violet-400/25 bg-violet-950/10 p-4">
+          <div className="text-[10px] font-black uppercase tracking-widest text-violet-200">Department negotiation</div>
+          <h3 className="mt-1 text-lg font-black text-slate-100">Claims, challenges, and tradeoff selection</h3>
+          <div className="mt-3 space-y-2">
+            {negotiationRounds.length ? (
+              negotiationRounds.map((round) => {
+                const firstClaim = round.claims?.[0];
+                const firstChallenge = round.challenges?.[0];
+                return (
+                  <div key={`${round.round ?? "round"}-${round.name ?? "negotiation"}`} className="rounded border border-slate-800 bg-slate-950 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs font-black text-slate-100">
+                        Round {round.round ?? "--"}: {humanize(round.name ?? "negotiation")}
+                      </div>
+                      <div className="rounded bg-violet-950 px-2 py-1 text-[10px] font-black uppercase text-violet-100">
+                        {(round.claims?.length ?? 0) + (round.challenges?.length ?? 0)} turns
+                      </div>
+                    </div>
+                    <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-slate-400">
+                      {firstChallenge?.issue ?? firstClaim?.wants ?? round.rationale ?? "Negotiation evidence recorded."}
+                    </p>
+                    <div className="mt-2 text-[10px] font-black uppercase text-violet-200">{humanize(round.decision ?? firstClaim?.disposition ?? "review")}</div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="rounded border border-slate-800 bg-slate-950 p-3 text-xs leading-relaxed text-slate-400">
+                Negotiation rounds will appear after department agents disagree or Executive weighs tradeoffs.
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Executive tradeoff matrix</div>
+              <h3 className="mt-1 text-lg font-black text-slate-100">Utility is ranked after safety, policy, and profile fit</h3>
+            </div>
+            <div className="rounded border border-slate-800 bg-slate-950 px-3 py-2 text-[10px] font-black uppercase text-slate-400">
+              {tradeoffRows.length || "--"} rows
+            </div>
+          </div>
+          <div className="mt-3 space-y-2">
+            {tradeoffRows.length ? (
+              tradeoffRows.map((row) => (
+                <div key={`${row.department ?? "dept"}-${row.requested_tool ?? "tool"}`} className="rounded border border-slate-800 bg-slate-950 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-black text-slate-100">
+                      {humanize(row.department)} / {humanize(row.requested_tool)}
+                    </div>
+                    <div className="rounded bg-slate-900 px-2 py-1 text-[10px] font-black uppercase text-slate-300">{humanize(row.verdict ?? row.decision)}</div>
+                  </div>
+                  <div className="mt-2 grid grid-cols-4 gap-1.5 text-center">
+                    {[
+                      ["Safety", row.safety_risk_weight],
+                      ["Guest", row.guest_value],
+                      ["Revenue", row.revenue_value],
+                      ["Labor", row.labor_value],
+                    ].map(([label, value]) => (
+                      <div key={label} className="rounded bg-slate-900 px-2 py-1">
+                        <div className="text-[9px] font-black uppercase text-slate-500">{label}</div>
+                        <div className="text-xs font-black text-slate-100">{compactValue(value)}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <span className="rounded bg-cyan-950 px-2 py-1 text-[10px] font-black uppercase text-cyan-100">
+                      Profile {humanize(row.profile_counterfactual_action)} {compactValue(row.profile_counterfactual_score)}
+                    </span>
+                    <span className="rounded bg-slate-900 px-2 py-1 text-[10px] font-black uppercase text-slate-300">{humanize(row.policy_status)}</span>
+                  </div>
+                  <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-slate-400">{row.rationale}</p>
+                </div>
+              ))
+            ) : (
+              <div className="rounded border border-slate-800 bg-slate-950 p-3 text-xs leading-relaxed text-slate-400">
+                Executive tradeoff rows will appear after proposals are judged.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-lg border border-emerald-400/25 bg-emerald-950/10 p-4">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          <div>
+            <div className="text-[10px] font-black uppercase tracking-widest text-emerald-200">Learning and execution closure</div>
+            <h3 className="mt-1 text-lg font-black text-slate-100">No hard decision is left without owner, exit condition, and memory effect</h3>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              ["Executor", executorProof?.status],
+              ["Executed", executorProof?.executed_count],
+              ["Held", executorProof?.held_count],
+              ["Follow-up", followThrough?.task_count],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded border border-emerald-300/20 bg-slate-950 px-3 py-2 text-center">
+                <div className="text-[10px] font-black uppercase text-slate-500">{label}</div>
+                <div className="mt-1 text-sm font-black text-emerald-100">{compactValue(value)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="mt-3 grid gap-3 xl:grid-cols-3">
+          <div className="rounded border border-slate-800 bg-slate-950 p-3">
+            <div className="text-[10px] font-black uppercase tracking-widest text-emerald-200">Memory influence</div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <span className="rounded bg-slate-900 px-2 py-1 text-[10px] font-black uppercase text-slate-300">Priors {compactValue(memoryPriors?.prior_count)}</span>
+              <span className="rounded bg-slate-900 px-2 py-1 text-[10px] font-black uppercase text-slate-300">Applied {compactValue(memoryPriors?.applied_count)}</span>
+              <span className="rounded bg-slate-900 px-2 py-1 text-[10px] font-black uppercase text-slate-300">Blocked {compactValue(memoryPriors?.blocked_count)}</span>
+            </div>
+            <div className="mt-3 space-y-2">
+              {memoryDeltas.length ? (
+                memoryDeltas.map((delta, index) => (
+                  <div key={`${delta.requested_tool ?? "memory"}-${index}`} className="rounded border border-slate-800 bg-slate-900 px-3 py-2">
+                    <div className="text-xs font-black text-slate-100">{humanize(delta.requested_tool ?? "decision")}</div>
+                    <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-slate-400">
+                      {delta.decision_delta?.after ?? delta.decision_delta?.effect ?? delta.usage_scope ?? "Prior outcome evaluated."}
+                    </p>
+                  </div>
+                ))
+              ) : (
+                <p className="mt-3 text-xs leading-relaxed text-slate-400">No reusable prior has been applied to this run yet.</p>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded border border-slate-800 bg-slate-950 p-3">
+            <div className="text-[10px] font-black uppercase tracking-widest text-emerald-200">Action disposition</div>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              {[
+                ["Delivered", receiverProof?.delivered_count],
+                ["Acked", receiverProof?.acknowledged_count],
+                ["Receiver exec", receiverProof?.executed_count],
+                ["Public msgs", receiverProof?.public_guest_messages_sent],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded bg-slate-900 px-2 py-2 text-center">
+                  <div className="text-[9px] font-black uppercase text-slate-500">{label}</div>
+                  <div className="text-sm font-black text-slate-100">{compactValue(value)}</div>
+                </div>
+              ))}
+            </div>
+            <p className="mt-3 text-xs leading-relaxed text-slate-400">
+              {receiverProof?.status
+                ? `${humanize(receiverProof.status)}. Material mutation: ${compactValue(receiverProof.material_state_mutation)}.`
+                : "Receiver delivery proof appears after Tool Executor produces receipts."}
+            </p>
+          </div>
+
+          <div className="rounded border border-slate-800 bg-slate-950 p-3">
+            <div className="text-[10px] font-black uppercase tracking-widest text-emerald-200">Hard-decision follow-through</div>
+            <div className="mt-3 space-y-2">
+              {(followThrough?.tasks ?? []).slice(0, 4).map((task) => (
+                <div key={task.task_id ?? `${task.department}-${task.source_tool}`} className="rounded border border-slate-800 bg-slate-900 px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs font-black text-slate-100">{humanize(task.department)} / {humanize(task.source_tool)}</div>
+                    <div className="rounded bg-slate-950 px-2 py-1 text-[10px] font-black uppercase text-slate-300">{humanize(task.status)}</div>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-slate-400">{task.why_not_undecided ?? task.exit_condition}</p>
+                  <div className="mt-2 text-[10px] font-black uppercase text-emerald-200">{humanize(task.next_owner ?? "owner pending")}</div>
+                </div>
+              ))}
+              {!(followThrough?.tasks ?? []).length && (
+                <p className="text-xs leading-relaxed text-slate-400">Held actions will appear here with owner, exit condition, and fallback.</p>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="mt-3 grid gap-2 md:grid-cols-2">
+          <div className="rounded border border-slate-800 bg-slate-950 p-3 text-xs leading-relaxed text-slate-400">
+            Measurement: {humanize(outcomeMeasurement?.status)} / reward {compactValue(outcomeMeasurement?.reward_value)} / confidence {compactValue(outcomeMeasurement?.attribution_confidence)}
+          </div>
+          <div className="rounded border border-slate-800 bg-slate-950 p-3 text-xs leading-relaxed text-slate-400">
+            Memory write: {humanize(outcomeMemory?.status)} / {outcomeMemory?.mongo_collection ?? "collection pending"} / {outcomeMemory?.outcome_id ?? "outcome pending"}
+          </div>
         </div>
       </div>
 

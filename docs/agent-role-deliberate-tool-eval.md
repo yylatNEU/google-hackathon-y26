@@ -30,6 +30,8 @@ The boundary contract exposes this as `judge_trace_eval_contract`, including the
 
 Pass threshold: `score >= 88` with no critical failures.
 
+Product-ready threshold: each role must pass its real trace eval, real output eval, explicit role setup, role-work depth checks, role-specific boundary checks, negative fixture coverage, and adversarial fixture coverage. The gate reports this as `product_readiness`; a single not-ready role blocks release.
+
 ## Roles Covered
 
 | Role | Must understand | Deliberate tool requirement |
@@ -52,6 +54,14 @@ Run the release gate directly:
 ```bash
 make agent-role-eval-gate
 ```
+
+Run the deployed private Cloud Run role-readiness gate:
+
+```bash
+make gcp-verify-agent-roles
+```
+
+The Cloud Run gate calls `GET /api/park/agent-role-eval?real=1` and then directly runs `scan`, `react`, `proact`, `customer`, and `qa` through `POST /api/park/agent-role-run`. It fails if the deployed payloads lack role setup, reasoning depth, tool rationale, output evidence, policy proof, dispatch receipts, read-only boundaries, or role-specific work.
 
 `POST /api/park/agent-role-run` persists bounded replay samples to:
 
@@ -117,6 +127,25 @@ Each role trace includes:
 }
 ```
 
+Each live role-run payload must also include `role_work_contract`:
+
+```json
+{
+  "role_work_contract": {
+    "role_description": "",
+    "mission": "",
+    "input_evidence": [],
+    "reasoning_steps": [],
+    "tool_rationale": [],
+    "output_evidence": [],
+    "boundary": "",
+    "escalation_or_stop_conditions": [],
+    "success_criteria": [],
+    "role_specific_work": {}
+  }
+}
+```
+
 ## Current Verification
 
 - All five roles pass the deliberate eval report.
@@ -127,6 +156,7 @@ Each role trace includes:
 - QA role-run includes `digital_twin_tools.deliberate_eval`.
 - FastAPI `POST /api/park/agent-role-run` preserves `scan`, `react`, `proact`, `customer`, and `qa` role boundaries and emits strict-passing traces.
 - FastAPI role-run traces are persisted and replayed by `make agent-role-eval-gate`.
+- Private Cloud Run deploy verification runs `scripts/verify_private_cloud_run_agent_roles.sh` after base readiness/auth checks.
 - Adversarial sampled traces are generated for shallow outputs, fake policy evidence, customer internal dispatch, scan dispatch, QA missing observability, and proact memory without policy/outcome.
 
 Test command:
@@ -135,7 +165,9 @@ Test command:
 python3 -m pytest backend/test_production_reliability_qa_agent.py backend/test_parkpulse_completion.py::test_agent_role_run_is_custom_and_persists_receipt backend/test_parkpulse_completion.py::test_agent_role_scan_never_dispatches_and_medical_stays_bounded backend/test_parkpulse_completion.py::test_agent_role_routes_vague_signals_to_proact backend/test_parkpulse_completion.py::test_park_gemini_agent_success_error_enterprise_and_helpers backend/test_park_understanding_benchmark.py backend/test_live_feedback_loop.py -q
 ```
 
-Latest focused result: `19 passed`.
+Latest focused result: `22 passed`, including product-readiness and role-work-depth blocking tests.
+
+Latest focused result after Cloud Run auth-gate hardening: `23 passed`, including spoofed unsigned mutation blocking for lazy `/api/park/operator-command`.
 
 ## Real-Trace Release Gate
 
@@ -151,6 +183,12 @@ Latest real-trace result:
   "passed_role_count": 5,
   "failed_role_count": 0,
   "release_gate": {"status": "passed"},
+  "product_readiness": {
+    "status": "passed",
+    "product_ready_role_count": 5,
+    "not_ready_role_count": 0,
+    "readiness_issues": []
+  },
   "negative_fixtures": {
     "status": "passed",
     "missed_count": 0,
@@ -158,7 +196,7 @@ Latest real-trace result:
   },
   "sampled": {
     "status": "passed",
-    "sample_count": 8,
+    "sample_count": 50,
     "failed_count": 0,
     "average_score": 100.0
   },
@@ -180,6 +218,15 @@ Negative fixtures currently checked:
 - customer internal dispatch.
 - QA missing observability/idempotency inspection.
 
+Product-readiness checks currently enforced:
+
+- All roles: role description, mission, boundary, input evidence, at least four reasoning steps, tool rationale, output evidence, success criteria, and escalation/stop conditions.
+- `scan`: uncertainty disclosure, next-role condition, read-only, signal evidence present, no dispatch tools, negative/adversarial scan boundary coverage.
+- `react`: alternatives considered, rejected actions named, receiver channels named, policy gate evidence, dispatch receipt/idempotency evidence, negative/adversarial react coverage.
+- `proact`: baseline-vs-action comparison, observed response, learning rule, policy gate evidence, dispatch receipt evidence, negative/adversarial proact coverage.
+- `customer`: public data sources, privacy boundary, bounded customer-only actions, no operator dispatch, negative/adversarial customer coverage.
+- `qa`: failure modes checked, observability checks, idempotency check, go/no-go, failure-mode matrix, delivery and observability inspection evidence, negative/adversarial QA coverage.
+
 Adversarial sampled fixtures currently checked:
 
 - ordered react trace with only shallow `{"status": "ok"}` outputs.
@@ -191,4 +238,8 @@ Adversarial sampled fixtures currently checked:
 
 Latest backend result: `315 passed`.
 
-Latest full QA result: `make qa` completed with `Routine QA score: 100/100`, including agent role eval gate, frontend build, and Playwright E2E.
+Latest deployed private Cloud Run result: revision `parkpulse-private-api-00085-b49` passed `scripts/verify_private_cloud_run_deploy.sh` and `scripts/verify_private_cloud_run_agent_roles.sh`. The deployed aggregate real-role eval passed with 5 product-ready roles, 100.0 average score, negative fixtures passed, and adversarial fixtures passed. Direct deployed role-run checks passed for scan, react, proact, customer, and QA.
+
+Latest full QA result: `make qa` completed at `2026-06-03T18:15:53-04:00` with `Routine QA score: 100/100`, including agent role eval gate, Spring backend tests, frontend build, and Playwright E2E.
+
+Latest full QA report: `/Users/yenyu/Desktop/google hackathon y26/output/qa/20260603-181553.md`.

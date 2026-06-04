@@ -60,6 +60,8 @@ The conformance runner proves:
 - production-style external admin identity headers when `--external-admin-email` is supplied
 - protocol scenario catalog discovery
 - automatic judge/eval across every configured protocol extension mode
+- signed session receipt issuance
+- policy challenge cases for sensitive-action boundaries
 
 ## External-Agent Flow
 
@@ -99,9 +101,122 @@ Discovery and automatic eval endpoints:
 ```bash
 curl http://127.0.0.1:8001/api/park/agent-handshake/scenarios
 curl -X POST http://127.0.0.1:8001/api/park/agent-handshake/scenario-eval -H 'content-type: application/json' -d '{}'
+curl -X POST http://127.0.0.1:8001/api/park/agent-handshake/policy-challenges -H 'content-type: application/json' -d '{}'
+curl -X POST http://127.0.0.1:8001/api/park/agent-handshake/verify-artifact -H 'content-type: application/json' -d '{"artifact": {...}, "expected_artifact_type":"agent_handshake_session_receipt"}'
+curl -X POST http://127.0.0.1:8001/api/park/agent-handshake/supply-chain/demo -H 'content-type: application/json' -d '{"scenario_mode":"cold_chain_incident"}'
 ```
 
 `/api/park/agent-handshake/scenario-eval` creates a real handshake session for every scenario and judges identity, capability, intent, proposal, counterproposal, commit, monitor, commerce-boundary, queue-reroute, policy, and internal-handoff evidence. Scenario behavior can be overridden with a JSON catalog file via `PARKPULSE_AHP_SCENARIO_CATALOG=/path/to/catalog.json`.
+
+The built-in catalog now covers both guest-facing and supply-chain counterparties:
+
+- `visit_planning`
+- `incident_response`
+- `accessibility_support`
+- `commerce_resolution`
+- `group_coordination`
+- `supply_replenishment`
+- `cold_chain_incident`
+- `maintenance_parts_shortage`
+
+After a session is negotiated, an external agent can request a signed receipt:
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/park/session/{session_id}/receipt \
+  -H 'content-type: application/json' \
+  -d '{"delegation_token": {...}}'
+```
+
+The receipt signs the final status, delegation scope, accepted plan, monitoring outcome, policy gates, internal handoffs, case evaluations, and conversation digest. The policy challenge endpoint runs negative probes for payment, purchase, refund acceptance, compensation settlement, health-data sharing, medical escalation, identity-sensitive action, safety override, purchase-order execution, vendor payment release, price-change acceptance, and food-safety bypass.
+
+External agents can verify signed artifacts before trusting them:
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/park/agent-handshake/verify-artifact \
+  -H 'content-type: application/json' \
+  -d '{
+    "artifact": {
+      "receipt_id": "ahp_receipt_...",
+      "signature": {
+        "artifact_type": "agent_handshake_session_receipt",
+        "sha256": "...",
+        "sig": "..."
+      }
+    },
+    "expected_artifact_type": "agent_handshake_session_receipt"
+  }'
+```
+
+Verification checks:
+
+- canonical JSON digest
+- signature validity against the ParkPulse artifact signing key
+- trusted issuer
+- protocol version
+- expected artifact type
+
+## Supply Chain Extension
+
+The same handshake pattern works when the outside counterparty is a supplier agent instead of a personal guest agent:
+
+```text
+Supplier Agent
+        ⇅
+Agent Handshake Protocol
+        ⇅
+ParkPulse Park Agent
+        ⇅
+Supply Chain / Procurement / Food Safety / Maintenance Agents
+```
+
+Example supplier capability envelope:
+
+```json
+{
+  "can_share": [
+    "inventory_position",
+    "delivery_eta",
+    "supplier_compliance",
+    "cold_chain_status",
+    "parts_availability"
+  ],
+  "can_receive": [
+    "demand_forecast",
+    "restock_request",
+    "dock_slot",
+    "substitution_request",
+    "purchase_order_notice",
+    "maintenance_parts_request"
+  ],
+  "cannot_do": [
+    "auto_accept_price_change",
+    "bypass_food_safety",
+    "release_vendor_payment_without_approval"
+  ]
+}
+```
+
+Supply-chain policy gates:
+
+- allowed: `restock_request`, `dock_slot_assignment`, `substitution_request`, `inventory_hold`, `maintenance_parts_request`
+- approval required: `purchase_order`, `vendor_payment_release`, `price_change_acceptance`
+- blocked: `bypass_food_safety`, `override_safety_delay`
+
+This makes the protocol bigger than a customer-agent feature. It becomes a permissioned counterparty layer for any external agent that needs to negotiate with park operations without silently crossing safety, procurement, privacy, or payment boundaries.
+
+Dedicated supply-chain demo endpoint:
+
+```http
+POST /api/park/agent-handshake/supply-chain/demo
+```
+
+Supported `scenario_mode` values:
+
+- `supply_replenishment`
+- `cold_chain_incident`
+- `maintenance_parts_shortage`
+
+This endpoint creates a supplier-agent session, verifies supplier delegation scope, negotiates the supply-chain plan, probes procurement/safety gates, and returns a signed `agent_handshake_session_receipt`.
 
 Reusable negotiation primitives:
 
@@ -114,7 +229,7 @@ Reusable negotiation primitives:
 - live revision
 - escalation request
 
-The same contract can generalize beyond parks: airlines, hotels, hospitals, conferences, and retail all need external personal agents to negotiate with an internal operating layer under identity, permission, policy, and outcome constraints.
+The same contract can generalize beyond parks: airlines, hotels, hospitals, conferences, retail, and supply-chain networks all need external agents to negotiate with an internal operating layer under identity, permission, policy, and outcome constraints.
 
 ## Credential Contract
 
@@ -141,6 +256,56 @@ Approved agents receive a signed credential with stable JSON claims:
 ```
 
 `score_basis_points` is an integer so browser and server JSON serialization produce the same signature input.
+
+Supplier agents use the same credential format with a different approval class:
+
+```json
+{
+  "agent_id": "external_supplier_agent",
+  "certification_id": "cert_...",
+  "approval": "approved_for_supply_chain_coordination",
+  "use_case": "supply_chain_coordination",
+  "scope": [
+    "inventory_position",
+    "delivery_eta",
+    "supplier_compliance",
+    "cold_chain_status",
+    "restock_request",
+    "substitution_request",
+    "purchase_order_notice",
+    "policy_check",
+    "session_commit"
+  ],
+  "required_cases": [
+    "artifact_verification",
+    "capability_scope",
+    "identity_trust",
+    "procurement_gate",
+    "supply_chain_negotiation"
+  ],
+  "token_type": "parkpulse_agent_certification",
+  "sig": "..."
+}
+```
+
+Register a supplier agent:
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/park/agent-onboarding/register \
+  -H 'content-type: application/json' \
+  -d '{
+    "agent_id": "external_supplier_agent",
+    "partner_id": "supplier_os",
+    "represents": "supplier_vendor_42",
+    "use_case": "supply_chain_coordination",
+    "requested_scopes": ["inventory_position", "delivery_eta", "supplier_compliance", "cold_chain_status", "restock_request", "substitution_request", "purchase_order_notice", "policy_check", "session_commit"],
+    "cannot_do": ["auto_accept_price_change", "bypass_food_safety", "release_vendor_payment_without_approval"]
+  }'
+
+curl -X POST http://127.0.0.1:8001/api/park/agent-onboarding/external_supplier_agent/certify \
+  -H 'content-type: application/json' \
+  -d '{"scenario_mode":"cold_chain_incident"}'
+```
 
 Issuer metadata is available at:
 

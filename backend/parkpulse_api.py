@@ -56,6 +56,7 @@ from agent_handshake import (
     commit_plan,
     counter_proposal,
     demo_handshake,
+    demo_supply_chain_handshake,
     escalate_session as escalate_agent_session,
     evaluate_policy_action,
     get_session as get_agent_session,
@@ -78,6 +79,7 @@ from agent_handshake import (
     session_protocol_receipt,
     upsert_agent_trust_partner,
     verify_agent_certification_credential,
+    verify_protocol_artifact,
 )
 from arize_config import get_arize_status, setup_arize_tracing
 from analytics_action_layer import build_analytics_to_action_layer
@@ -231,6 +233,7 @@ from park_ontology_store import read_ontology_events, read_persistent_ontology, 
 from park_optimizer import optimize_park_response, revise_plan_after_response
 from park_outcome_loop import build_closed_loop_outcome, build_reactive_outcome
 from park_proactive_agent import build_proactive_eval, build_proactive_insights, build_proactive_operator_brief
+from venue_profile import build_venue_profile
 from park_review import build_review_snapshot
 from park_replay_store import backup_replay_store, replay_collaboration_context, replay_store_status
 from park_scenarios import get_park_scenarios
@@ -554,6 +557,8 @@ class ParkAgentRunRequest(BaseModel):
 class LiveFeedAgentRunRequest(BaseModel):
     refresh_stale: bool = Field(default=True)
     execute: bool = Field(default=False)
+    controlled_executor_execute: bool = Field(default=False)
+    measure_post_action: bool = Field(default=True)
     min_ready_feeds: int = Field(default=4, ge=1, le=6)
     require_persisted_events: bool = Field(default=True)
 
@@ -654,6 +659,11 @@ async def park_agent_handshake_scenario_eval(body: dict[str, Any] | None = None)
 @app.post("/api/park/agent-handshake/policy-challenges")
 async def park_agent_handshake_policy_challenges(body: dict[str, Any] | None = None):
     return run_agent_handshake_policy_challenges(body or {})
+
+
+@app.post("/api/park/agent-handshake/verify-artifact")
+async def park_agent_handshake_verify_artifact(body: dict[str, Any] | None = None):
+    return verify_protocol_artifact(body or {})
 
 
 @app.post("/api/park/delegation-token")
@@ -772,6 +782,13 @@ async def park_agent_handshake_demo():
         return demo_handshake(await park_simulation.get_state_lite())
     except Exception:
         return demo_handshake()
+
+
+@app.get("/api/park/agent-handshake/supply-chain/demo")
+@app.post("/api/park/agent-handshake/supply-chain/demo")
+async def park_supply_chain_handshake_demo(body: dict[str, Any] | None = None):
+    request_body = body or {}
+    return demo_supply_chain_handshake(str(request_body.get("scenario_mode") or request_body.get("scenarioMode") or "supply_replenishment"))
 
 
 @app.post("/api/park/handshake")
@@ -6813,6 +6830,14 @@ async def park_agent_run(request: ParkAgentRunRequest):
             context["live_feed_case"] = request.live_feed_case
             context["live_feed_health"] = request.live_feed_health or {}
             context["orchestration_source"] = request.orchestration_source or "live_feed"
+            try:
+                context["park_profile"] = build_venue_profile()
+            except Exception as error:
+                context["park_profile"] = {
+                    "status": "unavailable",
+                    "mode": "venue_profile",
+                    "readiness": {"status": "unavailable", "issues": [{"id": "venue_profile_load_failed", "detail": str(error)[:240]}]},
+                }
         proposal_route = _role_proposal_route_for_agent_run(scenario_key, operator_route)
         if request.live_feed_case:
             proposal_route = {
@@ -6830,6 +6855,8 @@ async def park_agent_run(request: ParkAgentRunRequest):
         )
         if request.live_feed_case:
             role_agent_proposals = _enrich_role_proposals_with_live_feed(role_agent_proposals, request.live_feed_case)
+        if context.get("park_profile"):
+            role_agent_proposals["park_profile_summary"] = _park_profile_summary_for_agent_run(context.get("park_profile"))
         context["role_agent_proposals"] = role_agent_proposals
         workflow_timer.mark(
             "collaborate.role_proposals",
@@ -8925,6 +8952,32 @@ def _live_feed_case_from_health(health: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _park_profile_summary_for_agent_run(profile: Any) -> dict[str, Any]:
+    if not isinstance(profile, dict):
+        return {"status": "missing", "profile_version": None, "counts": {}, "precedence": "live_feed_over_profile_policy_over_both"}
+    identity = profile.get("venueIdentity", {}) if isinstance(profile.get("venueIdentity"), dict) else {}
+    readiness = profile.get("readiness", {}) if isinstance(profile.get("readiness"), dict) else {}
+    counts = readiness.get("counts", {}) if isinstance(readiness.get("counts"), dict) else {}
+    source = profile.get("sourceIntegrity", {}) if isinstance(profile.get("sourceIntegrity"), dict) else {}
+    loaded_from = readiness.get("loadedFrom")
+    profile_version = ":".join(
+        str(item or "unknown")
+        for item in [identity.get("venueId"), identity.get("profileType") or source.get("profileType"), loaded_from]
+    )
+    return {
+        "status": "attached" if profile.get("status") in {"ready", "studio_ready"} or readiness.get("status") else str(profile.get("status") or "unknown"),
+        "profile_version": profile_version,
+        "venue_id": identity.get("venueId"),
+        "venue_name": identity.get("name"),
+        "profile_type": identity.get("profileType") or source.get("profileType"),
+        "readiness_status": readiness.get("status"),
+        "counts": counts,
+        "source_integrity": source,
+        "precedence": "live_feed_over_profile_policy_over_both",
+        "contract": "Profile facts constrain reasoning and learning context; live feeds define current state; policy gates define authority.",
+    }
+
+
 def _live_feed_evidence_rows(live_feed_case: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(live_feed_case, dict):
         return []
@@ -9122,7 +9175,7 @@ def _tool_use_clarity_from_run(payload: dict[str, Any]) -> dict[str, Any]:
     trace_contract = payload.get("trace_contract", {}) if isinstance(payload.get("trace_contract"), dict) else {}
     governance = payload.get("governance", {}) if isinstance(payload.get("governance"), dict) else {}
     tool_rows = []
-    for proposal in proposal_rows[:8]:
+    for proposal in proposal_rows:
         envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
         grounding = proposal.get("live_feed_grounding", {}) if isinstance(proposal.get("live_feed_grounding"), dict) else {}
         tool_rows.append(
@@ -9152,7 +9205,7 @@ def _tool_use_clarity_from_run(payload: dict[str, Any]) -> dict[str, Any]:
         "live_feed_grounded_proposal_count": proposals.get("live_feed_grounded_proposal_count", 0),
         "live_feed_grounded_tool_count": live_feed_grounded_tool_count,
         "missing_policy_check_count": missing_policy_check_count,
-        "cooperation_graph_present": bool(proposals.get("cooperation_graph")),
+        "cooperation_graph_present": bool(proposals.get("cooperation_graph") or payload.get("live_feed_cooperation")),
         "tools": tool_rows,
         "trace_steps": [
             {
@@ -9169,6 +9222,928 @@ def _tool_use_clarity_from_run(payload: dict[str, Any]) -> dict[str, Any]:
             "policy_gate": governance.get("gate_status"),
             "trace_contract_present": bool(trace_contract),
         },
+    }
+
+
+def _controlled_live_feed_tool_executor_run(payload: dict[str, Any], *, execute: bool) -> dict[str, Any]:
+    proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
+    proposal_rows = proposals.get("proposals", []) if isinstance(proposals.get("proposals"), list) else []
+    receipts = []
+    for proposal in proposal_rows:
+        if not isinstance(proposal, dict):
+            continue
+        envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+        policy_judge = envelope.get("policy_judge") or proposal.get("policy_judge")
+        if not isinstance(policy_judge, dict):
+            policy_judge = {"status": "requires_compliance", "reason": "No concrete policy judge result was attached."}
+        policy_status = str(policy_judge.get("status") or "")
+        executor_status = str(envelope.get("executor_status") or proposal.get("executor_status") or "")
+        action_disposition = proposal.get("action_disposition") or envelope.get("action_disposition")
+        if not isinstance(action_disposition, dict):
+            action_disposition = {
+                "decision": "hold_for_policy_review",
+                "next_owner": "decision_bridge_agent",
+                "why_not_undecided": "Tool Executor received no executable policy-passed envelope.",
+                "exit_condition": "Attach concrete policy approval before retry.",
+                "fallback": "Keep action in trace only.",
+            }
+        controlled_executor_departments = {"food_retail", "hr_labor", "marketing"}
+        approved_for_controlled_executor = (
+            policy_status in {"passed", "approved_with_exclusions"}
+            and executor_status in {"ready_for_executor", "executor_only"}
+            and proposal.get("department") in controlled_executor_departments
+        )
+        context = {
+            "department": proposal.get("department") or envelope.get("department"),
+            "tool": "execute_approved_action",
+            "intent": envelope.get("intent") or proposal.get("recommendation"),
+            "evidence": envelope.get("evidence") or proposal.get("evidence", []),
+            "risk_level": envelope.get("risk_level") or proposal.get("risk_level") or "medium",
+            "policy_check": envelope.get("policy_check") or proposal.get("policy_check"),
+            "expected_outcome": envelope.get("expected_outcome") or proposal.get("expected_outcome"),
+            "rollback": envelope.get("rollback") or proposal.get("rollback"),
+            "policy_gate_checked": True,
+            "policyGateStatus": policy_status,
+            "decision_id": payload.get("decision_id"),
+            "approved_action_envelope": envelope,
+            "live_feed_event_ids": envelope.get("live_feed_event_ids") or (proposal.get("live_feed_grounding", {}) if isinstance(proposal.get("live_feed_grounding"), dict) else {}).get("event_ids", []),
+        }
+        if approved_for_controlled_executor:
+            result = run_agent_tool(
+                "tool_executor_agent",
+                "execute_approved_action",
+                context,
+                lambda proposal=proposal, envelope=envelope: {
+                    "status": "executed_controlled" if execute else "preview_controlled",
+                    "mode": "controlled_live_feed_tool_executor",
+                    "executed": bool(execute),
+                    "source_agent": proposal.get("agent_id"),
+                    "source_department": proposal.get("department"),
+                    "source_tool": envelope.get("requested_tool") or proposal.get("requested_tool"),
+                    "idempotency_key": hashlib.sha1(
+                        json.dumps(
+                            {
+                                "decision_id": payload.get("decision_id"),
+                                "agent": proposal.get("agent_id"),
+                                "tool": envelope.get("requested_tool") or proposal.get("requested_tool"),
+                                "events": context["live_feed_event_ids"],
+                            },
+                            sort_keys=True,
+                            default=str,
+                        ).encode("utf-8")
+                    ).hexdigest()[:16],
+                    "rollback": context.get("rollback"),
+                },
+            )
+        else:
+            result = {
+                "status": "held",
+                "mode": "controlled_live_feed_tool_executor",
+                "executed": False,
+                "reason": policy_judge.get("reason") or f"Policy status {policy_status or 'unknown'} is not executable.",
+                "disposition": action_disposition.get("decision"),
+                "next_owner": action_disposition.get("next_owner"),
+                "exit_condition": action_disposition.get("exit_condition"),
+                "fallback": action_disposition.get("fallback"),
+                "why_not_undecided": action_disposition.get("why_not_undecided"),
+                "evidence_argument": action_disposition.get("evidence_argument"),
+                "live_feed_event_ids": action_disposition.get("live_feed_event_ids") or context["live_feed_event_ids"],
+            }
+        receipts.append(
+            {
+                "agent": proposal.get("agent_id"),
+                "department": proposal.get("department"),
+                "source_tool": envelope.get("requested_tool") or proposal.get("requested_tool"),
+                "policy_check": envelope.get("policy_check") or proposal.get("policy_check"),
+                "policy_status": policy_status,
+                "executor_status": executor_status,
+                "approved_for_controlled_executor": approved_for_controlled_executor,
+                "live_feed_event_ids": action_disposition.get("live_feed_event_ids") or context["live_feed_event_ids"],
+                "action_disposition": action_disposition,
+                "result": result,
+            }
+        )
+    executed_count = sum(1 for row in receipts if (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "executed_controlled")
+    preview_count = sum(1 for row in receipts if (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "preview_controlled")
+    held_count = sum(1 for row in receipts if (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "held")
+    return {
+        "mode": "controlled_live_feed_tool_executor",
+        "execute_requested": bool(execute),
+        "status": "executed" if executed_count else "preview" if preview_count else "held",
+        "receipt_count": len(receipts),
+        "executed_count": executed_count,
+        "preview_count": preview_count,
+        "held_count": held_count,
+        "held_disposition_count": sum(1 for row in receipts if isinstance(row.get("action_disposition"), dict) and (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "held"),
+        "executor_agent": "tool_executor_agent",
+        "contract": "Tool Executor receives only approved low-risk envelopes; held safety, security, guest-message, and reopen-sensitive actions are not executed.",
+        "receipts": receipts,
+    }
+
+
+def _build_live_feed_hard_decision_follow_through(payload: dict[str, Any]) -> dict[str, Any]:
+    executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
+    receipts = executor.get("receipts", []) if isinstance(executor.get("receipts"), list) else []
+    tasks: list[dict[str, Any]] = []
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            continue
+        result = receipt.get("result", {}) if isinstance(receipt.get("result"), dict) else {}
+        if result.get("status") != "held":
+            continue
+        disposition = receipt.get("action_disposition", {}) if isinstance(receipt.get("action_disposition"), dict) else {}
+        department = str(receipt.get("department") or "")
+        decision = str(disposition.get("decision") or result.get("disposition") or "hold_for_review")
+        next_owner = str(disposition.get("next_owner") or result.get("next_owner") or "decision_bridge_agent")
+        exit_condition = str(disposition.get("exit_condition") or result.get("exit_condition") or "Named owner records approve, reject, or continue hold.")
+        fallback = str(disposition.get("fallback") or result.get("fallback") or "Keep action in trace only.")
+        terminal_decisions = {"tradeoff_review_only", "report_only_no_comp_commitment", "policy_note_committed", "score_trace_and_flag_regression"}
+        if decision in terminal_decisions:
+            status = "closed_non_executable"
+            follow_up_decision = "closed_as_trace_or_review_artifact"
+            active_follow_up_required = False
+        else:
+            status = "routed_to_owner"
+            follow_up_decision = "owner_review_required"
+            active_follow_up_required = True
+        task_basis = {
+            "decision_id": payload.get("decision_id"),
+            "agent": receipt.get("agent"),
+            "department": department,
+            "tool": receipt.get("source_tool"),
+            "decision": decision,
+            "next_owner": next_owner,
+        }
+        tasks.append(
+            {
+                "task_id": f"hard_follow_{hashlib.sha1(json.dumps(task_basis, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:12]}",
+                "agent": receipt.get("agent"),
+                "department": department,
+                "source_tool": receipt.get("source_tool"),
+                "policy_check": receipt.get("policy_check"),
+                "policy_status": receipt.get("policy_status"),
+                "status": status,
+                "follow_up_decision": follow_up_decision,
+                "active_follow_up_required": active_follow_up_required,
+                "next_owner": next_owner,
+                "exit_condition": exit_condition,
+                "fallback": fallback,
+                "why_not_undecided": disposition.get("why_not_undecided") or result.get("why_not_undecided"),
+                "review_inputs": {
+                    "policy_reason": result.get("reason"),
+                    "live_feed_event_ids": result.get("live_feed_event_ids") or [],
+                    "executor_status": receipt.get("executor_status"),
+                    "approved_for_controlled_executor": receipt.get("approved_for_controlled_executor"),
+                },
+            }
+        )
+    unresolved_without_owner = [
+        task
+        for task in tasks
+        if not task.get("next_owner") or not task.get("exit_condition") or not task.get("fallback")
+    ]
+    active_tasks = [task for task in tasks if task.get("active_follow_up_required")]
+    closed_tasks = [task for task in tasks if not task.get("active_follow_up_required")]
+    status = "routed" if tasks and not unresolved_without_owner else "none" if not tasks else "incomplete"
+    return {
+        "mode": "hard_decision_follow_through",
+        "status": status,
+        "task_count": len(tasks),
+        "active_follow_up_count": len(active_tasks),
+        "closed_non_executable_count": len(closed_tasks),
+        "unresolved_without_owner_count": len(unresolved_without_owner),
+        "owner_count": len({str(task.get("next_owner")) for task in tasks if task.get("next_owner")}),
+        "contract": "Every held action is either closed as a non-executable trace/review artifact or routed to a named owner with an exit condition and fallback.",
+        "tasks": tasks,
+    }
+
+
+def _controlled_live_feed_receiver_delivery_proof(payload: dict[str, Any]) -> dict[str, Any]:
+    executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
+    live_case = payload.get("live_feed_case", {}) if isinstance(payload.get("live_feed_case"), dict) else {}
+    receipts = executor.get("receipts", []) if isinstance(executor.get("receipts"), list) else []
+    receiver_by_department = {
+        "food_retail": "food_ops_console",
+        "hr_labor": "labor_scheduler_console",
+        "marketing": "marketing_ops_console",
+    }
+    proof_rows: list[dict[str, Any]] = []
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            continue
+        result = receipt.get("result", {}) if isinstance(receipt.get("result"), dict) else {}
+        executed = result.get("status") == "executed_controlled"
+        department = str(receipt.get("department") or "")
+        receiver = receiver_by_department.get(department)
+        if not executed:
+            proof_rows.append(
+                {
+                    "agent": receipt.get("agent"),
+                    "department": receipt.get("department"),
+                    "source_tool": receipt.get("source_tool"),
+                    "status": "not_dispatched_policy_hold",
+                    "delivered": False,
+                    "acknowledged": False,
+                    "reason": (result.get("reason") if isinstance(result, dict) else None) or "Action was held by policy or executive gate.",
+                }
+            )
+            continue
+        if not receiver:
+            proof_rows.append(
+                {
+                    "agent": receipt.get("agent"),
+                    "department": receipt.get("department"),
+                    "source_tool": receipt.get("source_tool"),
+                    "status": "receiver_not_configured",
+                    "delivered": False,
+                    "acknowledged": False,
+                    "reason": "No bounded internal receiver is configured for this department.",
+                }
+            )
+            continue
+        dispatch_payload = {
+            "scenarioKey": "live_feed_controlled_executor",
+            "decisionId": payload.get("decision_id"),
+            "agentId": receipt.get("agent"),
+            "executorAgentId": "tool_executor_agent",
+            "department": department,
+            "targetReceiver": receiver,
+            "sourceTool": receipt.get("source_tool"),
+            "intent": f"Deliver controlled internal action handoff for {receipt.get('source_tool')}",
+            "evidence": live_case.get("live_feed_event_ids") or [],
+            "riskLevel": "low",
+            "policyCheck": receipt.get("policy_check"),
+            "policyGateStatus": receipt.get("policy_status"),
+            "policyGateChecked": True,
+            "expectedOutcome": "Internal receiver records the controlled action handoff.",
+            "rollback": (result.get("rollback") if isinstance(result, dict) else None) or "Supersede this internal receiver task if the live feed normalizes.",
+            "liveFeedEventIds": live_case.get("live_feed_event_ids") or [],
+            "controlledExecutorReceiptId": result.get("idempotency_key"),
+            "publicGuestMessage": False,
+            "materialStateMutation": False,
+        }
+        try:
+            dispatch = send_worker_notification(dispatch_payload)
+            acknowledged = {}
+            if dispatch.get("status") in {"delivered", "acknowledged"}:
+                acknowledged = acknowledge_dispatch(
+                    str(dispatch.get("id")),
+                    actor=f"{receiver}:system",
+                    choice="received_controlled_internal_action",
+                    channel=str(dispatch.get("channel") or "worker_device"),
+                )
+            delivered = dispatch.get("status") in {"delivered", "acknowledged"} or acknowledged.get("status") == "acknowledged"
+            acked = acknowledged.get("status") == "acknowledged" or dispatch.get("status") == "acknowledged"
+            proof_rows.append(
+                {
+                    "agent": receipt.get("agent"),
+                    "department": receipt.get("department"),
+                    "source_tool": receipt.get("source_tool"),
+                    "status": "delivered_and_acknowledged" if delivered and acked else "dispatch_recorded_without_ack",
+                    "receiver": receiver,
+                    "channel": dispatch.get("channel"),
+                    "dispatch_id": dispatch.get("id"),
+                    "dispatch_status": dispatch.get("status"),
+                    "dispatch_durable": dispatch.get("durable"),
+                    "ack_status": acknowledged.get("status"),
+                    "acknowledged_by": (acknowledged.get("lastAcknowledgement", {}) if isinstance(acknowledged.get("lastAcknowledgement"), dict) else {}).get("actor"),
+                    "idempotency_key": dispatch.get("idempotencyKey") or result.get("idempotency_key"),
+                    "delivered": bool(delivered),
+                    "acknowledged": bool(acked),
+                    "material_state_mutation": False,
+                }
+            )
+        except Exception as error:
+            proof_rows.append(
+                {
+                    "agent": receipt.get("agent"),
+                    "department": receipt.get("department"),
+                    "source_tool": receipt.get("source_tool"),
+                    "status": "delivery_error",
+                    "receiver": receiver,
+                    "delivered": False,
+                    "acknowledged": False,
+                    "error": str(error)[:300],
+                    "material_state_mutation": False,
+                }
+            )
+    executed_count = sum(1 for row in receipts if isinstance(row, dict) and (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "executed_controlled")
+    delivered_count = sum(1 for row in proof_rows if row.get("delivered"))
+    acknowledged_count = sum(1 for row in proof_rows if row.get("acknowledged"))
+    proof_id = f"receiver_proof_{hashlib.sha1(json.dumps({'decision_id': payload.get('decision_id'), 'rows': proof_rows}, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:12]}"
+    return {
+        "mode": "controlled_live_feed_receiver_delivery_proof",
+        "proof_id": proof_id,
+        "status": "proven_controlled" if executed_count and delivered_count == executed_count and acknowledged_count == executed_count else "incomplete",
+        "executor_agent": "tool_executor_agent",
+        "delivery_agent": "delivery_proof_agent",
+        "executed_count": executed_count,
+        "delivered_count": delivered_count,
+        "acknowledged_count": acknowledged_count,
+        "held_count": sum(1 for row in proof_rows if row.get("status") == "not_dispatched_policy_hold"),
+        "public_guest_messages_sent": 0,
+        "material_state_mutation": False,
+        "contract": "Only controlled low-risk executor receipts are delivered to bounded internal receivers; held or approval-gated actions are not dispatched.",
+        "outbox_status": delivery_outbox_status(),
+        "receipts": proof_rows,
+    }
+
+
+def _live_feed_numeric_metrics(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    metrics: dict[str, float] = {}
+    for key, raw in value.items():
+        if isinstance(raw, bool):
+            continue
+        if isinstance(raw, (int, float)):
+            metrics[str(key)] = float(raw)
+        elif isinstance(raw, list):
+            metrics[f"{key}_count"] = float(len(raw))
+    return metrics
+
+
+def _live_feed_metric_direction(source: str, metric: str) -> str:
+    lower_is_better = {
+        "ride_ops": {"capacity_pressure_pct", "down_ride_count"},
+        "food_ops": {"kitchen_load_pct", "low_inventory_items_count", "mobile_order_backlog"},
+        "operator_signal": {"open_cases", "complaint_rate_pct"},
+    }
+    higher_is_better = {
+        "guest_flow": {"routing_take_rate_pct", "avg_satisfaction"},
+        "staffing": {"guard_team_count", "health_team_count"},
+    }
+    if metric in lower_is_better.get(source, set()):
+        return "lower_is_better"
+    if metric in higher_is_better.get(source, set()):
+        return "higher_is_better"
+    return "stability_watch"
+
+
+def _live_feed_metric_score(source: str, metric: str, delta: float) -> int:
+    direction = _live_feed_metric_direction(source, metric)
+    if direction == "lower_is_better":
+        return 1 if delta < 0 else -1 if delta > 0 else 0
+    if direction == "higher_is_better":
+        return 1 if delta > 0 else -1 if delta < 0 else 0
+    return 0 if abs(delta) < 0.0001 else -1
+
+
+def _live_feed_rows_by_source(health_or_refresh: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows = health_or_refresh.get("feeds")
+    if not isinstance(rows, list):
+        rows = health_or_refresh.get("after_feeds")
+    if not isinstance(rows, list):
+        return {}
+    return {str(row.get("source")): row for row in rows if isinstance(row, dict) and row.get("source")}
+
+
+def _build_live_feed_outcome_measurement(payload: dict[str, Any], post_action_refresh: dict[str, Any] | None) -> dict[str, Any]:
+    executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
+    receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
+    before_health = payload.get("live_feed_health", {}) if isinstance(payload.get("live_feed_health"), dict) else {}
+    after_refresh = post_action_refresh if isinstance(post_action_refresh, dict) else {}
+    before_by_source = _live_feed_rows_by_source(before_health)
+    after_by_source = _live_feed_rows_by_source({"feeds": after_refresh.get("after_feeds", [])})
+    executed_departments = {
+        str(row.get("department"))
+        for row in executor.get("receipts", [])
+        if isinstance(row, dict) and (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "executed_controlled"
+    }
+    department_sources = {
+        "food_retail": {"food_ops", "guest_flow"},
+        "hr_labor": {"staffing"},
+        "marketing": {"guest_flow", "food_ops"},
+    }
+    measured_sources: set[str] = set()
+    for department in executed_departments:
+        measured_sources.update(department_sources.get(department, set()))
+    measured_sources.update({"ride_ops", "operator_signal"})
+    rows: list[dict[str, Any]] = []
+    improvement_points = 0
+    regression_points = 0
+    stable_points = 0
+    for source in sorted(source for source in measured_sources if source in before_by_source or source in after_by_source):
+        before_row = before_by_source.get(source, {})
+        after_row = after_by_source.get(source, {})
+        before_value = before_row.get("value") if isinstance(before_row.get("value"), dict) else {}
+        after_value = after_row.get("value") if isinstance(after_row.get("value"), dict) else {}
+        before_metrics = _live_feed_numeric_metrics(before_value)
+        after_metrics = _live_feed_numeric_metrics(after_value)
+        metric_rows = []
+        for metric in sorted(set(before_metrics) | set(after_metrics)):
+            if metric not in before_metrics or metric not in after_metrics:
+                continue
+            delta = round(after_metrics[metric] - before_metrics[metric], 3)
+            metric_score = _live_feed_metric_score(source, metric, delta)
+            if metric_score > 0:
+                improvement_points += 1
+            elif metric_score < 0:
+                regression_points += 1
+            else:
+                stable_points += 1
+            metric_rows.append(
+                {
+                    "metric": metric,
+                    "before": before_metrics[metric],
+                    "after": after_metrics[metric],
+                    "delta": delta,
+                    "direction": _live_feed_metric_direction(source, metric),
+                    "impact": "improved" if metric_score > 0 else "regressed" if metric_score < 0 else "stable",
+                }
+            )
+        rows.append(
+            {
+                "source": source,
+                "before_event_id": before_row.get("latest_event_id"),
+                "after_event_id": after_row.get("latest_event_id"),
+                "before_signal_type": before_row.get("latest_signal_type"),
+                "after_signal_type": after_row.get("latest_signal_type"),
+                "before_age_seconds": before_row.get("age_seconds"),
+                "after_age_seconds": after_row.get("age_seconds"),
+                "post_action_snapshot_captured": bool(after_row.get("latest_event_id")),
+                "metrics": metric_rows,
+            }
+        )
+    covered_departments = [
+        department
+        for department in sorted(executed_departments)
+        if department_sources.get(department, set()).intersection(after_by_source)
+    ]
+    post_snapshot_count = sum(1 for row in rows if row.get("post_action_snapshot_captured"))
+    receiver_delivery_proven = receiver_delivery.get("status") == "proven_controlled"
+    measurement_available = bool(rows) and post_snapshot_count == len(rows) and receiver_delivery_proven
+    source_coverage = round((post_snapshot_count / len(rows)), 3) if rows else 0
+    department_coverage = round((len(covered_departments) / len(executed_departments)), 3) if executed_departments else 0
+    attribution_confidence = round(
+        min(
+            0.95,
+            0.3
+            + (0.25 if receiver_delivery_proven else 0)
+            + (0.2 * source_coverage)
+            + (0.15 * department_coverage)
+            + (0.05 if after_refresh.get("status") in {"refreshed", "no_due_feeds"} else 0),
+        ),
+        3,
+    )
+    reward_ready = measurement_available and attribution_confidence >= 0.7
+    reward_value = round(
+        min(
+            1.0,
+            max(
+                0.0,
+                0.58
+                + (0.12 if receiver_delivery_proven else -0.2)
+                + (0.12 if measurement_available else -0.15)
+                + (0.04 * improvement_points)
+                + (0.01 * stable_points)
+                - (0.08 * regression_points),
+            ),
+        ),
+        3,
+    )
+    return {
+        "mode": "live_feed_post_action_outcome_measurement",
+        "status": "measured" if measurement_available else "incomplete",
+        "measurement_id": f"measurement_{hashlib.sha1(json.dumps({'decision_id': payload.get('decision_id'), 'rows': rows}, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:12]}",
+        "post_action_refresh_status": after_refresh.get("status"),
+        "post_action_refresh_sources": after_refresh.get("refreshed_sources", []),
+        "executed_departments": sorted(executed_departments),
+        "covered_departments": covered_departments,
+        "source_coverage": source_coverage,
+        "department_coverage": department_coverage,
+        "attribution_confidence": attribution_confidence,
+        "improvement_points": improvement_points,
+        "regression_points": regression_points,
+        "stable_points": stable_points,
+        "measured_outcome_available": measurement_available,
+        "eligible_for_reward": reward_ready,
+        "reward_value": reward_value if reward_ready else None,
+        "reward_label": "safe_controlled_handoff_with_measured_live_state" if reward_ready else "measurement_not_reward_ready",
+        "material_state_mutation": False,
+        "measurement_rows": rows,
+        "boundary": "Measures post-action live-feed state and receiver acknowledgements only; it does not infer safety clearance, send public messages, mutate park state, start training, or promote a model.",
+    }
+
+
+def _live_feed_memory_priors_from_dashboard(live_case: dict[str, Any], limit: int = 5) -> dict[str, Any]:
+    query_parts = [
+        "live feed controlled executor measured outcome reward",
+        str(live_case.get("lead_source") or ""),
+        str(live_case.get("lead_signal_type") or ""),
+    ]
+    try:
+        dashboard = get_operational_memory_dashboard(" ".join(part for part in query_parts if part).strip())
+    except Exception as error:
+        return {
+            "mode": "live_feed_memory_priors",
+            "status": "unavailable",
+            "reason": str(error)[:300],
+            "prior_count": 0,
+            "priors": [],
+            "policy": "Memory retrieval failed closed; live feed and policy gates remain authoritative.",
+        }
+    latest = dashboard.get("latest_outcomes", []) if isinstance(dashboard.get("latest_outcomes"), list) else []
+    priors = []
+    for row in latest:
+        if not isinstance(row, dict):
+            continue
+        learning = row.get("learning", {}) if isinstance(row.get("learning"), dict) else {}
+        metrics = row.get("responseMetrics", {}) if isinstance(row.get("responseMetrics"), dict) else {}
+        impact = row.get("stateImpact", {}) if isinstance(row.get("stateImpact"), dict) else {}
+        if not metrics.get("measuredOutcomeAvailable") and not learning.get("eligible_for_reward"):
+            continue
+        priors.append(
+            {
+                "outcome_id": row.get("_id"),
+                "decision_id": row.get("decisionId"),
+                "loop_id": row.get("loopId"),
+                "mode": row.get("mode"),
+                "executed_tools": impact.get("executed_tools", []),
+                "held_tools": impact.get("held_tools", []),
+                "executed_departments": impact.get("executed_departments", []),
+                "held_departments": impact.get("held_departments", []),
+                "reward_value": learning.get("reward_value") if learning.get("reward_value") is not None else metrics.get("rewardValue"),
+                "attribution_confidence": metrics.get("attributionConfidence"),
+                "receiver_delivery_proven": metrics.get("receiverDeliveryProven"),
+                "measured_outcome_available": metrics.get("measuredOutcomeAvailable"),
+                "measurement_id": impact.get("post_action_measurement_id"),
+                "status": "usable_prior" if metrics.get("measuredOutcomeAvailable") else "trace_only",
+            }
+        )
+        if len(priors) >= limit:
+            break
+    return {
+        "mode": "live_feed_memory_priors",
+        "status": "retrieved" if priors else "empty",
+        "prior_count": len(priors),
+        "priors": priors,
+        "latest_outcome_ids": [row.get("outcome_id") for row in priors if row.get("outcome_id")],
+        "dashboard_status": dashboard.get("status"),
+        "policy": "Memory can bias only low-risk execute-vs-hold recommendations; live feed evidence, policy judge, and Executive gate remain authoritative.",
+    }
+
+
+def _live_feed_memory_prior_for_department(memory_priors: dict[str, Any], department: str, requested_tool: str) -> dict[str, Any] | None:
+    priors = memory_priors.get("priors", []) if isinstance(memory_priors, dict) else []
+    department = str(department or "")
+    requested_tool = str(requested_tool or "")
+    for prior in priors if isinstance(priors, list) else []:
+        if not isinstance(prior, dict):
+            continue
+        executed_departments = {str(item) for item in prior.get("executed_departments", []) if item}
+        executed_tools = {str(item) for item in prior.get("executed_tools", []) if item}
+        if department in executed_departments or requested_tool in executed_tools:
+            return prior
+    return priors[0] if priors and isinstance(priors[0], dict) else None
+
+
+def _judge_live_feed_memory_relevance(prior: dict[str, Any] | None, department: str, requested_tool: str) -> dict[str, Any]:
+    if not prior:
+        return {
+            "status": "no_prior",
+            "relevance_score": 0,
+            "accepted_by_judge": False,
+            "usage_scope": "none",
+            "reason": "No measured prior was available for this proposal.",
+            "policy": "Proposal remains live-feed-only.",
+        }
+    department = str(department or "")
+    requested_tool = str(requested_tool or "")
+    executed_departments = {str(item) for item in prior.get("executed_departments", []) if item}
+    executed_tools = {str(item) for item in prior.get("executed_tools", []) if item}
+    held_departments = {str(item) for item in prior.get("held_departments", []) if item}
+    held_tools = {str(item) for item in prior.get("held_tools", []) if item}
+    high_risk_departments = {"operations", "maintenance", "guest_experience", "safety", "security"}
+    governance_departments = {"executive", "compliance", "qa_judge", "finance"}
+    exact_executed_match = department in executed_departments or requested_tool in executed_tools
+    held_match = department in held_departments or requested_tool in held_tools
+    if exact_executed_match and department not in high_risk_departments:
+        return {
+            "status": "accepted",
+            "relevance_score": 1.0,
+            "accepted_by_judge": True,
+            "usage_scope": "low_risk_execution_bias",
+            "reason": "Prior measured outcome matches the same low-risk department/tool family.",
+            "policy": "Memory may bias low-risk execute-vs-hold only; policy and Executive gates remain authoritative.",
+        }
+    if department in high_risk_departments:
+        return {
+            "status": "blocked_policy_boundary",
+            "relevance_score": 0.2 if held_match or exact_executed_match else 0.1,
+            "accepted_by_judge": False,
+            "usage_scope": "context_only_no_execution_bias",
+            "reason": "Sensitive or operations-changing proposal cannot use memory as execution justification.",
+            "policy": "Safety, security, guest-message, maintenance, and operations actions still require their normal gates.",
+        }
+    if held_match or department in governance_departments:
+        return {
+            "status": "weak_context_only",
+            "relevance_score": 0.45,
+            "accepted_by_judge": False,
+            "usage_scope": "context_only_no_execution_bias",
+            "reason": "Prior is useful context for tradeoff or review, not direct action selection.",
+            "policy": "Memory context cannot grant execution rights.",
+        }
+    return {
+        "status": "rejected_irrelevant",
+        "relevance_score": 0.05,
+        "accepted_by_judge": False,
+        "usage_scope": "none",
+        "reason": "Prior outcome does not match department, tool, or review scope.",
+        "policy": "Irrelevant memory is excluded from proposal evidence.",
+    }
+
+
+def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memory_priors: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(proposals, dict):
+        return proposals
+    rows = proposals.get("proposals", []) if isinstance(proposals.get("proposals"), list) else []
+    applied = []
+    weak_context = []
+    blocked = []
+    rejected = []
+    for proposal in rows:
+        if not isinstance(proposal, dict):
+            continue
+        envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+        requested_tool = envelope.get("requested_tool") or proposal.get("requested_tool")
+        prior = _live_feed_memory_prior_for_department(memory_priors, str(proposal.get("department") or ""), str(requested_tool or ""))
+        relevance = _judge_live_feed_memory_relevance(prior, str(proposal.get("department") or ""), str(requested_tool or ""))
+        memory_use = {
+            "status": relevance["status"],
+            "prior_outcome_id": prior.get("outcome_id") if prior else None,
+            "prior_measurement_id": prior.get("measurement_id") if prior else None,
+            "prior_reward_value": prior.get("reward_value") if prior else None,
+            "prior_attribution_confidence": prior.get("attribution_confidence") if prior else None,
+            "used_for": relevance["usage_scope"],
+            "policy": relevance["policy"],
+            "accepted_by_judge": relevance["accepted_by_judge"],
+            "memory_relevance_judge": relevance,
+        }
+        if relevance["accepted_by_judge"] and prior:
+            memory_delta = {
+                "effect": "reinforced_selected_candidate",
+                "before": "Recommendation was based on current live feed only.",
+                "after": "Prior measured success increases confidence in the same low-risk department/tool family, but grants no new execution rights.",
+                "score_adjustment": 0.05,
+                "decision_boundary": "Policy, Executive, and Tool Executor gates remain unchanged.",
+            }
+        elif relevance["status"] == "blocked_policy_boundary":
+            memory_delta = {
+                "effect": "blocked_from_execution_bias",
+                "before": "Prior outcome was retrieved for context.",
+                "after": "Memory is excluded from execute-vs-hold selection because this department is safety, security, operations, maintenance, or guest-message sensitive.",
+                "score_adjustment": 0,
+                "decision_boundary": "Memory cannot override human approval or safety/privacy/maintenance gates.",
+            }
+        elif relevance["status"] == "weak_context_only":
+            memory_delta = {
+                "effect": "context_only",
+                "before": "Prior outcome was retrieved.",
+                "after": "Memory may inform tradeoff explanation but does not alter the selected action.",
+                "score_adjustment": 0,
+                "decision_boundary": "Governance and finance context cannot execute receiver actions.",
+            }
+        else:
+            memory_delta = {
+                "effect": "no_decision_effect",
+                "before": "No relevant measured prior was available.",
+                "after": "Proposal remains based on current live feed and policy only.",
+                "score_adjustment": 0,
+                "decision_boundary": "No memory bias applied.",
+            }
+        memory_use["decision_delta"] = memory_delta
+        proposal["memory_use"] = memory_use
+        proposal["memory_relevance_judge"] = relevance
+        proposal["memory_decision_delta"] = memory_delta
+        reasoning = proposal.get("department_reasoning", {}) if isinstance(proposal.get("department_reasoning"), dict) else {}
+        if reasoning:
+            reasoning["memory_decision_delta"] = memory_delta
+            candidate_actions = reasoning.get("candidate_actions", []) if isinstance(reasoning.get("candidate_actions"), list) else []
+            if relevance["accepted_by_judge"] and candidate_actions:
+                first = candidate_actions[0]
+                if isinstance(first, dict):
+                    first["memory_adjusted_score"] = round(min(0.99, float(first.get("score") or 0) + 0.05), 2)
+                    first["memory_adjustment_reason"] = memory_delta["after"]
+            forecast = reasoning.get("forecast", {}) if isinstance(reasoning.get("forecast"), dict) else {}
+            if forecast:
+                forecast["memory_prior_adjustment"] = memory_delta
+            proposal["department_reasoning"] = reasoning
+        if relevance["accepted_by_judge"] and prior:
+            proposal.setdefault("evidence", [])
+            if isinstance(proposal["evidence"], list):
+                proposal["evidence"] = list(
+                    dict.fromkeys(
+                        [
+                            f"memory_prior:{prior.get('outcome_id')}:reward={prior.get('reward_value')}:confidence={prior.get('attribution_confidence')}",
+                            *[str(item) for item in proposal["evidence"]],
+                        ]
+                    )
+                )[:10]
+        if envelope:
+            envelope["memory_use"] = memory_use
+            envelope["memory_relevance_judge"] = relevance
+            envelope["memory_decision_delta"] = memory_delta
+            if relevance["accepted_by_judge"] and prior:
+                envelope["memory_prior_outcome_id"] = prior.get("outcome_id")
+            proposal["proposal_envelope"] = envelope
+        row = {
+            "agent": proposal.get("agent_id"),
+            "department": proposal.get("department"),
+            "requested_tool": requested_tool,
+            "prior_outcome_id": prior.get("outcome_id") if prior else None,
+            "status": relevance["status"],
+            "accepted_by_judge": relevance["accepted_by_judge"],
+            "usage_scope": relevance["usage_scope"],
+            "decision_delta": memory_delta,
+        }
+        if relevance["accepted_by_judge"]:
+            applied.append(row)
+        elif relevance["status"] == "weak_context_only":
+            weak_context.append(row)
+        elif relevance["status"] == "blocked_policy_boundary":
+            blocked.append(row)
+        elif relevance["status"] != "no_prior":
+            rejected.append(row)
+    proposals["memory_priors"] = memory_priors
+    proposals["memory_prior_use"] = {
+        "status": "applied" if applied else "none",
+        "applied_count": len(applied),
+        "prior_outcome_ids": sorted({str(row.get("prior_outcome_id")) for row in applied if row.get("prior_outcome_id")}),
+        "weak_context_count": len(weak_context),
+        "blocked_count": len(blocked),
+        "rejected_count": len(rejected),
+        "accepted_departments": sorted({str(row.get("department")) for row in applied if row.get("department")}),
+        "blocked_departments": sorted({str(row.get("department")) for row in blocked if row.get("department")}),
+        "policy": "Prior outcomes are evidence only; they do not grant execution rights.",
+        "rows": applied,
+        "weak_context_rows": weak_context,
+        "blocked_rows": blocked,
+        "rejected_rows": rejected,
+    }
+    proposals["memory_decision_deltas"] = [*applied, *weak_context, *blocked, *rejected]
+    tradeoff = proposals.get("executive_tradeoff", {}) if isinstance(proposals.get("executive_tradeoff"), dict) else {}
+    if tradeoff:
+        tradeoff["memory_influence"] = {
+            "accepted_low_risk_count": len(applied),
+            "context_only_count": len(weak_context),
+            "blocked_sensitive_count": len(blocked),
+            "rejected_irrelevant_count": len(rejected),
+            "decision_rule": "Memory can reinforce low-risk candidates but cannot turn held, sensitive, or human-approval actions into executable actions.",
+            "deltas": [*applied, *weak_context, *blocked, *rejected],
+        }
+        proposals["executive_tradeoff"] = tradeoff
+    rounds = proposals.get("negotiation_rounds", []) if isinstance(proposals.get("negotiation_rounds"), list) else []
+    if rounds and (applied or weak_context or blocked or rejected):
+        rounds.insert(
+            3,
+            {
+                "round": "memory",
+                "name": "memory_prior_challenge",
+                "decision": "selective_memory_influence",
+                "accepted": applied,
+                "weak_context": weak_context,
+                "blocked": blocked,
+                "rejected": rejected,
+                "resolution": "Use measured prior outcomes only where department/tool relevance and policy boundaries allow it.",
+            },
+        )
+        proposals["negotiation_rounds"] = rounds
+    proposals.setdefault("negotiation_turns", [])
+    if isinstance(proposals["negotiation_turns"], list) and (applied or weak_context or blocked or rejected):
+        proposals["negotiation_turns"].insert(
+            1,
+            {
+                "turn": "memory",
+                "agent": "memory_ops_agent",
+                "decision": "judged_measured_priors",
+                "reason": f"{len(applied)} accepted, {len(weak_context)} weak-context, {len(blocked)} policy-blocked, {len(rejected)} rejected memory prior uses.",
+                "prior_outcome_ids": sorted({str(row.get("prior_outcome_id")) for row in applied if row.get("prior_outcome_id")}),
+            },
+        )
+    return proposals
+
+
+def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict[str, Any]:
+    executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
+    proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
+    live_case = payload.get("live_feed_case", {}) if isinstance(payload.get("live_feed_case"), dict) else {}
+    receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
+    outcome_measurement = payload.get("live_feed_outcome_measurement", {}) if isinstance(payload.get("live_feed_outcome_measurement"), dict) else {}
+    memory_priors = payload.get("live_feed_memory_priors", {}) if isinstance(payload.get("live_feed_memory_priors"), dict) else {}
+    follow_through = payload.get("hard_decision_follow_through", {}) if isinstance(payload.get("hard_decision_follow_through"), dict) else {}
+    park_profile_summary = payload.get("park_profile_summary") or proposals.get("park_profile_summary") or {}
+    if not isinstance(park_profile_summary, dict):
+        park_profile_summary = {}
+    receipts = executor.get("receipts", []) if isinstance(executor.get("receipts"), list) else []
+    executed = [row for row in receipts if isinstance(row, dict) and (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "executed_controlled"]
+    held = [row for row in receipts if isinstance(row, dict) and (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "held"]
+    receiver_delivery_proven = (
+        receiver_delivery.get("status") == "proven_controlled"
+        and int(receiver_delivery.get("delivered_count") or 0) == len(executed)
+        and int(receiver_delivery.get("acknowledged_count") or 0) == len(executed)
+        and bool(executed)
+    )
+    measured_outcome_available = bool(outcome_measurement.get("measured_outcome_available"))
+    eligible_for_reward = bool(outcome_measurement.get("eligible_for_reward"))
+    decision_basis = {
+        "mode": "live_feed_controlled_executor_decision",
+        "lead_source": live_case.get("lead_source"),
+        "lead_signal_type": live_case.get("lead_signal_type"),
+        "proposal_count": proposals.get("proposal_count"),
+        "executed_tools": [row.get("source_tool") for row in executed],
+        "held_tools": [row.get("source_tool") for row in held],
+    }
+    decision_id = payload.get("decision_id")
+    if not decision_id:
+        decision_id = f"decision_live_feed_{hashlib.sha1(json.dumps(decision_basis, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:12]}"
+    outcome = {
+        "loop_id": f"live_feed_controlled_executor:{decision_id}",
+        "mode": "live_feed_controlled_executor_outcome",
+        "phases": [
+            {"phase": "observe", "status": "complete", "evidence_count": len(live_case.get("evidence", []) if isinstance(live_case.get("evidence"), list) else [])},
+            {"phase": "memory_retrieval", "status": memory_priors.get("status") or "missing", "prior_count": memory_priors.get("prior_count"), "prior_outcome_ids": memory_priors.get("latest_outcome_ids", [])},
+            {"phase": "park_profile_context", "status": proposals.get("park_profile_context_status") or park_profile_summary.get("status") or "missing", "profile_context_proposal_count": proposals.get("profile_context_proposal_count"), "profile_version": proposals.get("profile_version") or park_profile_summary.get("profile_version")},
+            {"phase": "propose", "status": "complete", "proposal_count": proposals.get("proposal_count")},
+            {"phase": "policy_judge", "status": "complete", "concrete_policy_count": sum(1 for item in proposals.get("proposals", []) if isinstance(item, dict) and item.get("policy_judge")) if isinstance(proposals.get("proposals"), list) else 0},
+            {"phase": "controlled_executor", "status": executor.get("status"), "executed_count": executor.get("executed_count"), "held_count": executor.get("held_count")},
+            {"phase": "hard_decision_follow_through", "status": follow_through.get("status") or "missing", "task_count": follow_through.get("task_count"), "active_follow_up_count": follow_through.get("active_follow_up_count")},
+            {"phase": "receiver_delivery", "status": receiver_delivery.get("status") or "missing", "delivered_count": receiver_delivery.get("delivered_count"), "acknowledged_count": receiver_delivery.get("acknowledged_count")},
+            {"phase": "post_action_measurement", "status": outcome_measurement.get("status") or "missing", "attribution_confidence": outcome_measurement.get("attribution_confidence"), "eligible_for_reward": eligible_for_reward},
+        ],
+        "response_metrics": {
+            "controlledExecutionRate": round((len(executed) / len(receipts)), 3) if receipts else 0,
+            "heldActionRate": round((len(held) / len(receipts)), 3) if receipts else 0,
+            "receiverDeliveryProven": receiver_delivery_proven,
+            "measuredOutcomeAvailable": measured_outcome_available,
+            "attributionConfidence": outcome_measurement.get("attribution_confidence"),
+            "rewardValue": outcome_measurement.get("reward_value"),
+        },
+        "state_impact": {
+            "domain": "live_feed_controlled_executor",
+            "headline": "Controlled low-risk envelopes executed, internal receivers acknowledged, and post-action live-feed measurements were captured.",
+            "executed_departments": sorted({str(row.get("department")) for row in executed if row.get("department")}),
+            "held_departments": sorted({str(row.get("department")) for row in held if row.get("department")}),
+            "executed_tools": [row.get("source_tool") for row in executed],
+            "held_tools": [row.get("source_tool") for row in held],
+            "live_feed_event_ids": live_case.get("live_feed_event_ids") or proposals.get("live_feed_event_ids") or [],
+            "material_state_mutation": False,
+            "controlled_executor_only": True,
+            "memory_prior_outcome_ids": memory_priors.get("latest_outcome_ids", []),
+            "memory_prior_count": memory_priors.get("prior_count", 0),
+            "memory_prior_policy": memory_priors.get("policy"),
+            "park_profile_summary": park_profile_summary,
+            "profile_context_proposal_count": proposals.get("profile_context_proposal_count"),
+            "profile_precedence": proposals.get("precedence") or park_profile_summary.get("precedence"),
+            "hard_decision_follow_through_status": follow_through.get("status"),
+            "hard_decision_follow_through_tasks": follow_through.get("tasks", []),
+            "active_follow_up_count": follow_through.get("active_follow_up_count"),
+            "receiver_delivery_proof_id": receiver_delivery.get("proof_id"),
+            "receiver_delivery_status": receiver_delivery.get("status"),
+            "receiver_delivery_receipts": receiver_delivery.get("receipts", []),
+            "post_action_measurement_id": outcome_measurement.get("measurement_id"),
+            "post_action_measurement_status": outcome_measurement.get("status"),
+            "post_action_measurement_rows": outcome_measurement.get("measurement_rows", []),
+        },
+        "scorecard": {
+            "overall": 86 if executed and held else 72,
+            "status": "reward_candidate_ready" if eligible_for_reward else "training_ready_controlled_outcome" if executed and held else "review",
+            "groundedness": 100 if proposals.get("live_feed_grounded_proposal_count") == proposals.get("proposal_count") else 70,
+            "policy_boundary": 100 if held else 80,
+            "executor_boundary": 100 if executed and held else 75,
+            "park_profile_context": 100 if proposals.get("profile_context_proposal_count") == proposals.get("proposal_count") else 40,
+            "hard_decision_follow_through": 100 if follow_through.get("status") == "routed" and int(follow_through.get("unresolved_without_owner_count") or 0) == 0 else 50 if held else 100,
+            "receiver_delivery": 100 if receiver_delivery_proven else 0,
+            "post_action_measurement": 100 if measured_outcome_available else 0,
+        },
+        "learning": {
+            "label": "controlled_execute_vs_hold_supervision",
+            "training_use": "supervised_eval_and_reward_candidate_material" if eligible_for_reward else "supervised_eval_only_until_measured_outcome_exists",
+            "eligible_for_reward": eligible_for_reward,
+            "reward_label": outcome_measurement.get("reward_label"),
+            "reward_value": outcome_measurement.get("reward_value"),
+            "profile_learning_context": {
+                "profile_version": proposals.get("profile_version") or park_profile_summary.get("profile_version"),
+                "profile_context_proposal_count": proposals.get("profile_context_proposal_count"),
+                "precedence": proposals.get("precedence") or park_profile_summary.get("precedence"),
+                "observation_keys": ((park_profile_summary.get("counts") or {}) if isinstance(park_profile_summary.get("counts"), dict) else {}),
+            },
+            "next_gap": "Resolve active hard-decision follow-up tasks and attribute longer-horizon operational lift." if follow_through.get("active_follow_up_count") else "Attribute longer-horizon operational lift after receiver action." if eligible_for_reward else "Record post-action state measurements before reward training.",
+        },
+    }
+    try:
+        outcome_id = record_mongo_outcome_event(outcome, str(decision_id), None)
+    except Exception as error:
+        outcome_id = f"skipped_live_feed_outcome_error_{hashlib.sha1(str(error).encode('utf-8')).hexdigest()[:12]}"
+    return {
+        "status": "recorded" if not str(outcome_id).startswith("skipped_") else "skipped",
+        "mode": "live_feed_controlled_outcome_memory",
+        "decision_id": decision_id,
+        "outcome_id": outcome_id,
+        "mongo_collection": "outcome_events",
+        "outcome": outcome,
+        "training_boundary": "Outcome memory is materialized for next-term training only; this run does not start training or promote a model.",
     }
 
 
@@ -9190,6 +10165,8 @@ async def park_live_feed_agent_run(request: LiveFeedAgentRunRequest):
             refresh = await _refresh_due_live_feeds_payload({"stale_only": True, "refresh_margin_seconds": 20})
     health = await _live_feed_health_payload(limit=500)
     live_case = _live_feed_case_from_health(health)
+    memory_priors = _live_feed_memory_priors_from_dashboard(live_case)
+    live_case["memory_priors"] = memory_priors
     readiness_issues: list[str] = []
     if request.require_persisted_events and int(live_case.get("persisted_event_count") or 0) <= 0:
         readiness_issues.append("No persisted live feed events are available; load live feeds before running a live-feed case.")
@@ -9227,8 +10204,34 @@ async def park_live_feed_agent_run(request: LiveFeedAgentRunRequest):
         payload["live_feed_case"] = live_case
         payload["live_feed_health"] = health
         payload["live_feed_refresh"] = refresh
+        payload["live_feed_memory_priors"] = memory_priors
         proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
+        proposals = _apply_live_feed_memory_priors_to_proposals(proposals, memory_priors)
+        payload["role_agent_proposals"] = proposals
+        payload["park_profile_summary"] = proposals.get("park_profile_summary", {})
         payload["live_feed_cooperation"] = proposals.get("cooperation_graph") or _build_live_feed_cooperation_graph(proposals, live_case)
+        payload["tool_executor_live_test"] = _controlled_live_feed_tool_executor_run(
+            payload,
+            execute=request.controlled_executor_execute,
+        )
+        payload["hard_decision_follow_through"] = _build_live_feed_hard_decision_follow_through(payload)
+        payload["live_feed_receiver_delivery"] = _controlled_live_feed_receiver_delivery_proof(payload)
+        if request.measure_post_action:
+            payload["live_feed_post_action_refresh"] = await _refresh_due_live_feeds_payload(
+                {
+                    "stale_only": False,
+                    "refresh_margin_seconds": 0,
+                    "sources": ["ride_ops", "guest_flow", "staffing", "food_ops", "operator_signal"],
+                }
+            )
+            payload["live_feed_outcome_measurement"] = _build_live_feed_outcome_measurement(
+                payload,
+                payload.get("live_feed_post_action_refresh") if isinstance(payload.get("live_feed_post_action_refresh"), dict) else {},
+            )
+        else:
+            payload["live_feed_post_action_refresh"] = {"status": "skipped", "reason": "measure_post_action=false"}
+            payload["live_feed_outcome_measurement"] = _build_live_feed_outcome_measurement(payload, {})
+        payload["live_feed_outcome_memory"] = _record_live_feed_controlled_outcome_memory(payload)
         payload["tool_use_clarity"] = _tool_use_clarity_from_run(payload)
     return payload
 

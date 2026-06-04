@@ -95,4 +95,38 @@ class PythonFallbackProxyServiceTests {
         assertThat(response.getStatusCode().value()).isEqualTo(413);
         assertThat(new String(response.getBody(), StandardCharsets.UTF_8)).contains("request body exceeds fallback gateway limit");
     }
+
+    @Test
+    void blocksSpringOwnedRoutesBeforeFallbackForwarding() {
+        MockEnvironment environment = new MockEnvironment()
+            .withProperty("parkpulse.python-backend-url", "http://127.0.0.1:8000");
+        PythonFallbackProxyService service = new PythonFallbackProxyService(environment);
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/park/agent-onboarding/spring_certified_agent/certify");
+
+        ResponseEntity<byte[]> response = service.forward(request, "{}".getBytes(StandardCharsets.UTF_8));
+
+        String payload = new String(response.getBody(), StandardCharsets.UTF_8);
+        assertThat(response.getStatusCode().value()).isEqualTo(409);
+        assertThat(response.getHeaders().getFirst("x-parkpulse-spring-gateway")).isEqualTo("spring-owned-route-blocked");
+        assertThat(payload)
+            .contains("spring_owned_route_fallback_gate")
+            .contains("POST /api/park/agent-onboarding/{agent_id}/certify")
+            .contains("cannot fall back to Python");
+
+        MockHttpServletRequest deliveryRequest = new MockHttpServletRequest("POST", "/api/park/delivery/guest-promotion");
+        ResponseEntity<byte[]> deliveryResponse = service.forward(deliveryRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        String deliveryPayload = new String(deliveryResponse.getBody(), StandardCharsets.UTF_8);
+        assertThat(deliveryResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(deliveryPayload)
+            .contains("spring_owned_route_fallback_gate")
+            .contains("POST /api/park/delivery/guest-promotion");
+
+        MockHttpServletRequest adapterStatusRequest = new MockHttpServletRequest("GET", "/api/park/delivery/gcp-adapters/status");
+        ResponseEntity<byte[]> adapterStatusResponse = service.forward(adapterStatusRequest, new byte[0]);
+
+        assertThat(adapterStatusResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(adapterStatusResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/delivery/gcp-adapters/status");
+    }
 }

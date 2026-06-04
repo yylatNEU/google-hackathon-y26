@@ -41,6 +41,7 @@ type JourneyPayload = {
     request?: string;
     allergies?: string[];
     currentLocation?: string;
+    guestSegmentId?: string;
   };
   planSteps?: Array<{
     id?: string;
@@ -80,6 +81,41 @@ type JourneyPayload = {
   staffHandoff?: { recommended?: boolean; owner?: string; message?: string };
   guardrails?: string[];
   evidence?: Array<{ id?: string; source?: string; label?: string; detail?: string }>;
+  profileIntelligence?: {
+    source?: string;
+    guestSegmentId?: string;
+    segmentNeeds?: {
+      preferredPace?: string;
+      avoid?: string[];
+      requiredHandoff?: string[];
+    };
+    usedPathRecords?: Array<{
+      fromZoneId?: string;
+      toZoneId?: string;
+      estimatedWalkMinutes?: number;
+      certificationStatus?: string;
+      allowedUses?: string[];
+    }>;
+    qualityGaps?: string[];
+    modulePolicy?: {
+      mayRecommend?: string[];
+      mustReview?: string[];
+      neverClaim?: string[];
+    };
+  };
+  learningReceipt?: {
+    schemaVersion?: string;
+    scenarioTaxonomy?: string;
+    observation?: {
+      guestSegmentId?: string;
+      needs?: string[];
+      routeZoneIds?: string[];
+      staffHandoffRecommended?: boolean;
+      qualityGapCount?: number;
+    };
+    eligibleFeedbackLabels?: string[];
+    privacyBoundary?: string;
+  };
   readinessIssues?: string[];
   venueProfile?: ScopePayload["venueProfile"];
 };
@@ -104,6 +140,12 @@ function fmt(value?: string | number | boolean | null) {
 function pct(value?: number) {
   if (value === undefined || value === null) return "--";
   return `${Math.round(value)}%`;
+}
+
+function compact(items?: string[], limit = 3) {
+  const list = items?.filter(Boolean) ?? [];
+  if (!list.length) return "--";
+  return `${list.slice(0, limit).join(", ")}${list.length > limit ? ` +${list.length - limit}` : ""}`;
 }
 
 export default function AccessibilityJourneyPage() {
@@ -390,6 +432,45 @@ export default function AccessibilityJourneyPage() {
                   <p className="mt-3 text-sm leading-relaxed text-slate-400">
                     {journey?.staffHandoff?.message ?? "Build a journey to see staff confirmation notes."}
                   </p>
+                </div>
+              </div>
+            </section>
+
+            <section className="grid gap-4 lg:grid-cols-2">
+              <div className="rounded border border-slate-800 bg-slate-900 p-4">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Profile intelligence</div>
+                <div className="mt-3 grid gap-2">
+                  {[
+                    ["Segment", fmt(journey?.profileIntelligence?.guestSegmentId ?? journey?.profile?.guestSegmentId)],
+                    ["Pace", fmt(journey?.profileIntelligence?.segmentNeeds?.preferredPace)],
+                    ["Avoid", compact(journey?.profileIntelligence?.segmentNeeds?.avoid, 2)],
+                    ["Path records", String(journey?.profileIntelligence?.usedPathRecords?.length ?? 0)],
+                    ["Quality gaps", String(journey?.profileIntelligence?.qualityGaps?.length ?? 0)],
+                    ["Never claim", compact(journey?.profileIntelligence?.modulePolicy?.neverClaim, 2)],
+                  ].map(([label, value]) => (
+                    <div key={label} className="grid grid-cols-[7rem_1fr] gap-2 rounded border border-slate-800 bg-slate-950 p-2 text-xs">
+                      <div className="font-black uppercase tracking-widest text-slate-500">{label}</div>
+                      <div className="font-bold text-slate-300">{value}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 space-y-2">
+                  {(journey?.profileIntelligence?.qualityGaps ?? []).slice(0, 3).map((gap) => (
+                    <div key={gap} className="rounded border border-amber-300/30 bg-amber-300/10 p-2 text-xs leading-relaxed text-amber-100">{gap}</div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded border border-slate-800 bg-slate-900 p-4">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Learning receipt</div>
+                <div className="mt-3 rounded border border-slate-800 bg-slate-950 p-3">
+                  <div className="text-sm font-black text-slate-100">{fmt(journey?.learningReceipt?.schemaVersion)}</div>
+                  <div className="mt-1 text-xs font-bold text-cyan-200">{fmt(journey?.learningReceipt?.scenarioTaxonomy)}</div>
+                  <div className="mt-3 grid gap-2 text-xs">
+                    <div className="rounded border border-slate-800 p-2 text-slate-400">Route zones: {compact(journey?.learningReceipt?.observation?.routeZoneIds, 5)}</div>
+                    <div className="rounded border border-slate-800 p-2 text-slate-400">Feedback labels: {compact(journey?.learningReceipt?.eligibleFeedbackLabels, 4)}</div>
+                    <div className="rounded border border-slate-800 p-2 text-slate-400">{journey?.learningReceipt?.privacyBoundary ?? "No learning receipt yet."}</div>
+                  </div>
                 </div>
               </div>
             </section>

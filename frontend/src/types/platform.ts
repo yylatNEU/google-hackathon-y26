@@ -218,6 +218,36 @@ export type IntegrationStatus = {
   latest_outcome_id?: string;
 };
 
+export type GcpLiveReadinessStatus = {
+  status?: "live_ready" | "wired_not_live" | string;
+  checked_at?: string;
+  summary?: {
+    live?: number;
+    mocked?: number;
+    skipped?: number;
+    required_live_ready?: boolean;
+    required_live_checks?: string[];
+  };
+  judge_agent?: {
+    agent_id?: string;
+    department?: string;
+    exclusive_tools?: string[];
+    routing_rule?: string;
+  };
+  checks?: Record<
+    string,
+    {
+      name?: string;
+      ready?: boolean;
+      proof_mode?: "live" | "mocked" | "skipped" | string;
+      details?: Record<string, unknown>;
+      readiness_issues?: string[];
+    }
+  >;
+  readiness_issues?: string[];
+  env_gates?: Record<string, boolean>;
+};
+
 export type GcpOperationsStatus = {
   platform?: string;
   project?: string | null;
@@ -1578,6 +1608,80 @@ export type RoleAgentProposal = {
   confidence?: number;
   policy_refs?: string[];
   handoff_to?: string;
+  action_disposition?: {
+    decision?: string;
+    executor_status?: string;
+    policy_status?: string;
+    reason?: string;
+    next_owner?: string;
+    exit_condition?: string;
+  };
+  live_feed_grounding?: {
+    event_ids?: string[];
+    evidence_count?: number;
+    source_count?: number;
+    grounding_status?: string;
+  };
+  memory_decision_delta?: {
+    status?: string;
+    usage_scope?: string;
+    requested_tool?: string;
+    prior_outcome_id?: string;
+    decision_delta?: {
+      before?: string;
+      after?: string;
+      effect?: string;
+      score_adjustment?: number;
+      decision_boundary?: string;
+    };
+  };
+  department_reasoning?: {
+    diagnosis?: string;
+    forecast?: string;
+    selected_rationale?: string;
+    candidate_actions?: Array<{
+      action?: string;
+      rank?: number;
+      score?: number;
+      risk?: string;
+      selected?: boolean;
+      expected_effect?: string;
+      profile_adjusted_score?: number;
+      profile_score_delta?: number;
+      profile_counterfactual?: {
+        score?: number;
+        profile_effect?: string;
+        precedence?: string;
+        reasons?: string[];
+        constraint_count?: number;
+        relevant_zone_count?: number;
+        sheltered_zone_count?: number;
+        quiet_zone_count?: number;
+        high_spillback_zone_count?: number;
+      };
+    }>;
+    profile_counterfactual_summary?: {
+      candidate_count?: number;
+      best_profile_adjusted_action?: string;
+      best_profile_adjusted_score?: number;
+      precedence?: string;
+      rule?: string;
+    };
+    failure_modes?: Array<{ mode?: string; mitigation?: string; owner?: string } | string>;
+    memory_carry_forward?: string[];
+    park_profile_context?: Record<string, unknown>;
+  };
+  park_profile_context?: {
+    status?: string;
+    department?: string;
+    relevant_zones?: Array<{ id?: string; name?: string; role?: string; crowdPattern?: string; comfortCapacity?: number; spillbackRisk?: string }>;
+    relevant_locations?: Array<{ id?: string; name?: string; type?: string; zoneId?: string; indoor?: boolean }>;
+    profile_constraints?: Array<string | { policy?: string; rule?: string; summary?: string; constraint?: string }>;
+    reasoning_effect?: string[];
+    profile_version?: string;
+    precedence?: string;
+  };
+  profile_precedence?: string;
   boundary?: {
     allowed_tools?: string[];
     decision_rights?: string[];
@@ -1611,6 +1715,59 @@ export type RoleAgentProposalArtifact = {
     ready_for_executor?: number;
     awaiting_compliance?: number;
     awaiting_executive?: number;
+  };
+  park_profile_summary?: {
+    status?: string;
+    venue_id?: string;
+    venue_name?: string;
+    profile_type?: string;
+    profile_version?: string;
+    readiness_status?: string;
+    precedence?: string;
+    contract?: string;
+    counts?: Record<string, number>;
+    source_integrity?: Record<string, unknown>;
+  };
+  park_profile_context_status?: string;
+  profile_context_proposal_count?: number;
+  profile_counterfactual_candidate_count?: number;
+  profile_precedence_count?: number;
+  profile_version?: string;
+  precedence?: string;
+  tradeoff_matrix?: Array<{
+    agent?: string;
+    department?: string;
+    requested_tool?: string;
+    decision?: string;
+    verdict?: string;
+    rationale?: string;
+    confidence?: number;
+    safety_risk_weight?: number;
+    guest_value?: number;
+    revenue_value?: number;
+    labor_value?: number;
+    policy_status?: string;
+    profile_constraint_count?: number;
+    profile_counterfactual_action?: string;
+    profile_counterfactual_score?: number;
+    profile_precedence?: string;
+  }>;
+  negotiation_rounds?: Array<{
+    round?: number;
+    name?: string;
+    claims?: Array<{ agent?: string; department?: string; tool?: string; disposition?: string; wants?: string }>;
+    challenges?: Array<{ from?: string; to?: string; issue?: string; resolution?: string; status?: string }>;
+    tradeoff_matrix?: RoleAgentProposalArtifact["tradeoff_matrix"];
+    decision?: string;
+    rationale?: string;
+  }>;
+  memory_decision_deltas?: NonNullable<RoleAgentProposal["memory_decision_delta"]>[];
+  executive_tradeoff?: {
+    decision?: string;
+    rationale?: string;
+    tradeoff_matrix?: RoleAgentProposalArtifact["tradeoff_matrix"];
+    approved_departments?: string[];
+    held_departments?: string[];
   };
   proposals?: RoleAgentProposal[];
   conflicts?: RoleAgentProposalConflict[];
@@ -1770,6 +1927,84 @@ export type RunTelemetry = {
     }>;
     feed_issues?: Array<{ source?: string; status?: string; readiness_issues?: string[] }>;
     reasoning?: string[];
+  };
+  park_profile_summary?: NonNullable<RoleAgentProposalArtifact["park_profile_summary"]>;
+  tool_executor_live_test?: {
+    status?: string;
+    receipt_count?: number;
+    executed_count?: number;
+    held_count?: number;
+    held_disposition_count?: number;
+    receipts?: Array<{
+      department?: string;
+      agent?: string;
+      tool?: string;
+      status?: string;
+      executor_status?: string;
+      policy_check?: string;
+      disposition?: string;
+      reason?: string;
+    }>;
+  };
+  live_feed_receiver_delivery?: {
+    status?: string;
+    proof_id?: string;
+    delivered_count?: number;
+    acknowledged_count?: number;
+    executed_count?: number;
+    material_state_mutation?: boolean;
+    public_guest_messages_sent?: number;
+  };
+  hard_decision_follow_through?: {
+    status?: string;
+    mode?: string;
+    contract?: string;
+    task_count?: number;
+    active_follow_up_count?: number;
+    closed_non_executable_count?: number;
+    owner_count?: number;
+    unresolved_without_owner_count?: number;
+    tasks?: Array<{
+      task_id?: string;
+      department?: string;
+      agent?: string;
+      source_tool?: string;
+      status?: string;
+      next_owner?: string;
+      exit_condition?: string;
+      fallback?: string;
+      why_not_undecided?: string;
+      policy_status?: string;
+      follow_up_decision?: string;
+      active_follow_up_required?: boolean;
+    }>;
+  };
+  live_feed_outcome_measurement?: {
+    status?: string;
+    measurement_id?: string;
+    measured_outcome_available?: boolean;
+    measured_source_count?: number;
+    attribution_confidence?: number;
+    reward_value?: number;
+    eligible_for_reward?: boolean;
+  };
+  live_feed_outcome_memory?: {
+    status?: string;
+    mongo_collection?: string;
+    decision_id?: string;
+    outcome_id?: string;
+  };
+  live_feed_memory_priors?: {
+    status?: string;
+    prior_count?: number;
+    applied_count?: number;
+    blocked_count?: number;
+    rejected_count?: number;
+    weak_context_count?: number;
+    accepted_departments?: string[];
+    blocked_departments?: string[];
+    latest_outcome_ids?: string[];
+    applied_prior_outcome_ids?: string[];
   };
   tool_use_clarity?: {
     mode?: string;

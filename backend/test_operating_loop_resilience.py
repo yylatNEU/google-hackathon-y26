@@ -1,0 +1,65 @@
+from operating_loop_resilience import build_operating_loop_resilience_report
+
+
+def _healthy_inputs():
+    return {
+        "reliability_report": {
+            "agent": {"permissions": {"dispatch": False, "memory_write": False}},
+            "critical_findings": [],
+            "failure_mode_matrix": [{"mode": f"mode_{index}"} for index in range(12)],
+            "scenario_coverage_evaluation": {"dynamic_state_chain": ["ride_outage", "crowd_redistribution", "staffing_pressure", "food_demand_spike", "guest_sentiment_shift", "safety_risk"]},
+        },
+        "gcp_live_readiness": {
+            "summary": {"required_live_checks": ["cloud_trace_export", "vertex_eval_trigger", "bigquery"]},
+            "checks": {
+                "cloud_trace_export": {"proof_mode": "live"},
+                "vertex_eval_trigger": {"proof_mode": "live"},
+                "bigquery": {"proof_mode": "live"},
+                "firestore": {"proof_mode": "mocked"},
+            },
+        },
+        "live_feed_health": {"summary": {"required_feed_count": 6, "ready_feed_count": 6, "missing_or_weak_feed_count": 0}},
+        "review_ledger": {
+            "training_rule": "Review decisions become supervised evidence; reward remains measured from post-action outcomes.",
+            "rows": [{"llm_used_for_reward_or_label": False, "labels_or_reward_changed": False}],
+        },
+        "controlled_eval": {
+            "status": "passed",
+            "labels_or_reward_changed": False,
+            "llm_used_for_reward_or_label": False,
+            "gcp_training_started": False,
+            "model_promotion_started": False,
+        },
+        "training_readiness": {
+            "status": "ready",
+            "boundaries": ["RL reward rows require measured outcomes.", "Promotion requires rollback gates."],
+        },
+    }
+
+
+def test_operating_loop_resilience_passes_healthy_contract():
+    report = build_operating_loop_resilience_report(inputs=_healthy_inputs(), write_artifact=False)
+
+    assert report["status"] == "passed"
+    assert report["decision"] == "allow_loop_claim"
+    assert report["summary"]["critical_failed_count"] == 0
+
+
+def test_operating_loop_resilience_blocks_unsafe_training_mutation():
+    inputs = _healthy_inputs()
+    inputs["controlled_eval"]["labels_or_reward_changed"] = True
+
+    report = build_operating_loop_resilience_report(inputs=inputs, write_artifact=False)
+
+    assert report["status"] == "failed"
+    assert "controlled_eval_gate_is_safe" in report["summary"]["critical_failures"]
+
+
+def test_operating_loop_resilience_blocks_missing_strict_gcp_contract():
+    inputs = _healthy_inputs()
+    inputs["gcp_live_readiness"]["summary"]["required_live_checks"] = ["bigquery"]
+
+    report = build_operating_loop_resilience_report(inputs=inputs, write_artifact=False)
+
+    assert report["status"] == "failed"
+    assert "strict_gcp_gate_available" in report["summary"]["critical_failures"]

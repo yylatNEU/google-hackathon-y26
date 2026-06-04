@@ -81,6 +81,37 @@ for name, ready in checks.items():
 print("GCP readiness:", checks)
 PY
 
+echo "Checking strict GCP judge trace/eval smoke..."
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -X POST \
+  -d '{"scenario_key":"ride_down","execute":false,"strict":true,"blocking_hosted_eval":true}' \
+  "${SERVICE_URL}/api/gcp/judge-smoke" > "$TMP_DIR/gcp-judge-smoke.json"
+python3 - "$TMP_DIR/gcp-judge-smoke.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1]))
+strict_gate = payload.get("strict_gate", {})
+if not strict_gate.get("passed"):
+    raise SystemExit(f"Strict GCP judge smoke failed: {strict_gate.get('failures') or payload}")
+proof = payload.get("smoke", {}).get("proof", {})
+required = ["local_scorecard", "trace_artifact", "hosted_vertex_eval", "analytics_export"]
+not_live = {key: proof.get(key, {}).get("proof_mode") for key in required if proof.get(key, {}).get("proof_mode") != "live"}
+if not_live:
+    raise SystemExit(f"Strict GCP judge proof was not fully live: {not_live}")
+print("Strict GCP judge smoke:", {
+    "status": payload.get("status"),
+    "readiness": payload.get("readiness", {}).get("status"),
+    "decision_id": payload.get("smoke", {}).get("decision_id"),
+    "artifact": payload.get("artifact", {}).get("path"),
+})
+PY
+
+echo "Checking deployed agent-role product readiness..."
+scripts/verify_private_cloud_run_agent_roles.sh "$PROJECT_ID" "$REGION" "$SERVICE"
+
 echo "Checking app-level ML role authorization..."
 curl -fsS \
   -H "Authorization: Bearer ${TOKEN}" \
@@ -279,6 +310,28 @@ print("BQML dry run:", {
     "table_validation": tables.get("status"),
     "status": payload.get("status"),
     "readiness_issues": payload.get("readiness_issues", [])[:6],
+})
+PY
+
+echo "Checking operating-loop resilience gate..."
+curl -fsS \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "${SERVICE_URL}/api/gcp/operating-loop-resilience?write_artifact=true" > "$TMP_DIR/operating-loop-resilience.json"
+python3 - "$TMP_DIR/operating-loop-resilience.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1]))
+summary = payload.get("summary", {})
+if payload.get("status") != "passed":
+    raise SystemExit(f"Operating-loop resilience gate did not pass: {summary or payload}")
+if summary.get("critical_failed_count"):
+    raise SystemExit(f"Operating-loop resilience has critical failures: {summary}")
+print("Operating-loop resilience:", {
+    "decision": payload.get("decision"),
+    "score": summary.get("score"),
+    "check_count": summary.get("check_count"),
+    "artifact": payload.get("artifact", {}).get("path"),
 })
 PY
 

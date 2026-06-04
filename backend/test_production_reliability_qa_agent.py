@@ -1,10 +1,11 @@
 import asyncio
+from copy import deepcopy
 import json
 import os
 
 os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
 
-from agent_role_skills import build_deliberate_role_eval_report, build_deliberate_role_negative_fixtures, evaluate_agent_role_trace, list_agent_role_skills, route_agent_role
+from agent_role_skills import build_agent_role_product_readiness_report, build_deliberate_role_eval_report, build_deliberate_role_negative_fixtures, evaluate_agent_role_trace, list_agent_role_skills, route_agent_role
 from agent_role_trace_samples import build_adversarial_sampled_role_trace_eval_report, build_sampled_agent_role_trace_eval_report, latest_agent_role_trace_samples
 from prod_reliability_qa_agent import run_production_reliability_qa
 
@@ -74,12 +75,77 @@ def test_real_role_eval_report_uses_actual_role_payloads():
     assert report["decision"] == "allow_real_trace_role_agent_tool_use_claim"
     assert report["release_gate"]["status"] == "passed"
     assert report["negative_fixtures"]["status"] == "passed"
+    assert report["product_readiness"]["status"] == "passed"
+    assert report["product_readiness"]["product_ready_role_count"] == 5
     assert report["average_score"] >= 88
     assert {row["role"] for row in report["roles"]} == {"scan", "react", "proact", "customer", "qa"}
     assert all(row["trace_eval"]["status"] == "passed" for row in report["roles"])
     assert all(row["output_eval"]["status"] == "passed" for row in report["roles"])
     assert all(row["trace_eval"]["required_without_output"] == [] for row in report["roles"])
     assert all(row["trace_eval"]["critical_failures"] == [] for row in report["roles"])
+
+
+def test_product_readiness_report_marks_each_role_ready():
+    synthetic = build_deliberate_role_eval_report()
+    real = asyncio.run(main._real_agent_role_eval_report())
+    product = build_agent_role_product_readiness_report(
+        real,
+        synthetic_report=synthetic,
+        adversarial_report=real["adversarial_sampled"],
+        negative_report=real["negative_fixtures"],
+    )
+
+    assert product["status"] == "passed"
+    assert product["decision"] == "all_agent_roles_product_ready"
+    assert product["product_ready_role_count"] == 5
+    assert {row["role"] for row in product["roles"] if row["status"] == "product_ready"} == {"scan", "react", "proact", "customer", "qa"}
+    assert all(not row["failed_checks"] for row in product["roles"])
+    for row in real["roles"]:
+        depth = row["output_eval"]["role_work_depth_checks"]
+        assert all(depth.values()), row["role"]
+
+
+def test_product_readiness_report_blocks_specific_role_gap():
+    synthetic = build_deliberate_role_eval_report()
+    real = deepcopy(asyncio.run(main._real_agent_role_eval_report()))
+    for row in real["roles"]:
+        if row["role"] == "customer":
+            row["output_eval"]["checks"]["public_actions_only"] = False
+
+    product = build_agent_role_product_readiness_report(
+        real,
+        synthetic_report=synthetic,
+        adversarial_report=real["adversarial_sampled"],
+        negative_report=real["negative_fixtures"],
+    )
+    customer = next(row for row in product["roles"] if row["role"] == "customer")
+
+    assert product["status"] == "failed"
+    assert product["decision"] == "block_until_each_agent_role_is_product_ready"
+    assert customer["status"] == "not_ready"
+    assert "public_actions_only" in customer["failed_checks"]
+
+
+def test_product_readiness_report_blocks_missing_role_work_contract():
+    synthetic = build_deliberate_role_eval_report()
+    real = deepcopy(asyncio.run(main._real_agent_role_eval_report()))
+    for row in real["roles"]:
+        if row["role"] == "react":
+            row["output_eval"]["checks"]["role_setup_complete"] = False
+            row["output_eval"]["checks"]["role_work_depth_passed"] = False
+
+    product = build_agent_role_product_readiness_report(
+        real,
+        synthetic_report=synthetic,
+        adversarial_report=real["adversarial_sampled"],
+        negative_report=real["negative_fixtures"],
+    )
+    react = next(row for row in product["roles"] if row["role"] == "react")
+
+    assert product["status"] == "failed"
+    assert react["status"] == "not_ready"
+    assert "role_setup_complete" in react["failed_checks"]
+    assert "role_work_depth_passed" in react["failed_checks"]
 
 
 def test_customer_role_run_uses_customer_contract_not_scan():
@@ -89,6 +155,8 @@ def test_customer_role_run_uses_customer_contract_not_scan():
     assert payload["role_run"]["dispatch_allowed"] is False
     assert payload["digital_twin_tools"]["deliberate_eval"]["status"] == "passed"
     assert payload["role_receipt"]["read_only"] is True
+    assert payload["role_work_contract"]["role"] == "customer"
+    assert payload["role_work_contract"]["role_specific_work"]["privacy_boundary"]
 
 
 def test_agent_role_eval_api_surface_returns_report():
@@ -198,6 +266,51 @@ def test_lazy_main_role_run_persists_replayable_trace_sample(monkeypatch, tmp_pa
     assert report["status"] == "passed"
     assert report["sample_count"] == 1
     assert report["samples"][0]["role"] == "customer"
+
+
+def test_lazy_operator_command_blocks_spoofed_unsigned_mutation(monkeypatch):
+    monkeypatch.setenv("PARKPULSE_REQUIRE_SIGNED_ROLE_TOKEN", "true")
+
+    async def call_operator_command():
+        sent = []
+        body = b'{"message":"dispatch crowd staff","execute":true}'
+        received = False
+
+        async def receive():
+            nonlocal received
+            if received:
+                return {"type": "http.disconnect"}
+            received = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        await main.app(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/park/operator-command",
+                "query_string": b"",
+                "headers": [
+                    (b"authorization", b"Bear" + b"er unsigned-cloud-run-identity"),
+                    (b"x-parkpulse-role", b"ops_team"),
+                    (b"content-type", b"application/json"),
+                ],
+            },
+            receive,
+            send,
+        )
+        status = next(item["status"] for item in sent if item["type"] == "http.response.start")
+        response_body = b"".join(item.get("body", b"") for item in sent if item["type"] == "http.response.body")
+        return status, json.loads(response_body or b"{}")
+
+    status, payload = asyncio.run(call_operator_command())
+
+    assert status == 401
+    assert payload["mode"] == "role_authorization_gate"
+    assert payload["authorization"]["allowed"] is False
+    assert payload["authorization"]["identity"]["auth_method"] == "signed_role_session_required"
 
 
 def test_adversarial_sampled_role_traces_are_caught_for_exact_reasons():

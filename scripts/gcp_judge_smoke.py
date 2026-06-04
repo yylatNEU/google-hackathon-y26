@@ -38,10 +38,24 @@ def main() -> int:
     parser.add_argument("--scenario-key", default="ride_down")
     parser.add_argument("--execute", action="store_true", help="Execute the selected scenario action instead of previewing it.")
     parser.add_argument("--readiness-only", action="store_true", help="Skip the agent run and only report GCP readiness.")
+    parser.add_argument("--strict", action="store_true", help="Fail unless required GCP trace/eval/BigQuery proof is live.")
+    parser.add_argument("--blocking-hosted-eval", action="store_true", help="Call Vertex hosted eval inline instead of deferring it.")
     args = parser.parse_args()
+
+    if args.strict:
+        import os
+
+        os.environ["PARKPULSE_REQUIRE_STRICT_LIVE_GCP"] = "true"
+    if args.blocking_hosted_eval:
+        import os
+
+        os.environ["PARKPULSE_HOSTED_EVAL_BLOCKING"] = "true"
 
     result = asyncio.run(_run(args.scenario_key, args.execute, args.readiness_only))
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    strict_gate = result.get("strict_gate", {}) if isinstance(result.get("strict_gate"), dict) else {}
+    if strict_gate.get("required") and not strict_gate.get("passed"):
+        return 1
     return 0 if result.get("status") in {"complete", "readiness_only"} else 1
 
 

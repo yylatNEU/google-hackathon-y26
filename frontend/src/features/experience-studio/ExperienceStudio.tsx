@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchParkPulseApi } from "@/lib/api";
 
 type VenueIssue = {
@@ -45,6 +45,32 @@ type VenueLocationDetail = {
   sourceIds?: string[];
 };
 
+type ProfileIntelligence = {
+  source?: string;
+  coverage?: Record<string, number>;
+  qualityGaps?: string[];
+  experienceStudioPolicy?: {
+    mayDraft?: string[];
+    mustReview?: string[];
+    neverClaim?: string[];
+  };
+  modulePolicy?: Record<string, {
+    mayDraft?: string[];
+    mustReview?: string[];
+    neverClaim?: string[];
+  }>;
+  brandBible?: {
+    tone?: string[];
+    bannedClaims?: string[];
+    supportedLocales?: string[];
+  };
+  learningLabels?: string[];
+  learningSchema?: {
+    feedbackLabels?: string[];
+  };
+  experienceRules?: Record<string, string[]>;
+};
+
 type VenueDataPayload = {
   status?: string;
   message?: string;
@@ -86,6 +112,7 @@ type VenueDataPayload = {
     safetyInstructions?: string[];
     channelOwners?: Record<string, string>;
     locationDetails?: Record<string, VenueLocationDetail>;
+    profileIntelligence?: ProfileIntelligence;
   };
 };
 
@@ -107,6 +134,7 @@ type DraftStop = {
   guestCopy: string;
   staffNote: string;
   accessibilityNote: string;
+  profileIntelligenceNote?: string;
   source?: string;
 };
 
@@ -114,9 +142,27 @@ type ExperienceDraft = {
   title: string;
   audience: string;
   intent: string;
+  creativeBrief?: {
+    creativeDirection?: string;
+    storyArc?: string;
+    sensoryLevel?: string;
+    walkingPace?: string;
+    outputPackage?: string;
+    seasonalTheme?: string;
+    tone?: string;
+    constraints?: string;
+  };
   route: DraftStop[];
   messages: Array<{ channel: string; copy: string; owner?: string }>;
   productionNotes: string[];
+  studioReview?: Array<{
+    agentId?: string;
+    agentName?: string;
+    status?: string;
+    finding?: string;
+    nextStep?: string;
+  }>;
+  profileIntelligence?: ProfileIntelligence;
   sourceIntegrity?: {
     realInputCount?: number;
     missingRealInputs?: string[];
@@ -124,6 +170,8 @@ type ExperienceDraft = {
     usesSeedData?: boolean;
     usesSimulatedParkState?: boolean;
     usesInventedLocations?: boolean;
+    profileIntelligenceAttached?: boolean;
+    profileIntelligenceQualityGaps?: string[];
   };
 };
 
@@ -192,6 +240,98 @@ const workflowStates: Array<{ id: DraftStatus; label: string; detail: string }> 
   { id: "ready_for_publish", label: "Ready for publish", detail: "Handoff package has been staged, not published by Studio." },
 ];
 
+const creativeDirections = [
+  { value: "story-rich", label: "Story-rich", detail: "More narrative beats and guest-facing atmosphere." },
+  { value: "comfort-first", label: "Comfort-first", detail: "Practical journey design with calm copy." },
+  { value: "playful mission", label: "Playful", detail: "Quest language, clues, small wins, and caregiver clarity." },
+  { value: "premium host-led", label: "Premium", detail: "Hosted pacing, polish, and graceful alternates." },
+];
+
+const storyArcs = [
+  "Invitation -> clue -> reveal -> choice -> finale",
+  "Arrival reset -> dry discovery -> warm pause -> flexible choice -> covered close",
+  "Mission start -> clue -> discovery -> reward -> celebration",
+  "Welcome -> insider reveal -> signature moment -> relaxed pause -> closing keepsake",
+];
+
+const sensoryLevels = ["low", "balanced", "high energy"];
+const walkingPaces = ["compact", "moderate", "exploratory"];
+const outputPackages = ["route storyboard", "channel copy", "full package", "host script"];
+
+const creativeDefaultsByTemplate: Record<ExperienceTemplateId, {
+  creativeDirection: string;
+  storyArc: string;
+  sensoryLevel: string;
+  walkingPace: string;
+  outputPackage: string;
+  seasonalTheme: string;
+}> = {
+  "halloween-route": {
+    creativeDirection: "story-rich",
+    storyArc: "Invitation -> clue -> reveal -> choice -> finale",
+    sensoryLevel: "balanced",
+    walkingPace: "moderate",
+    outputPackage: "full package",
+    seasonalTheme: "family-safe Halloween mystery",
+  },
+  "rainy-day": {
+    creativeDirection: "comfort-first",
+    storyArc: "Arrival reset -> dry discovery -> warm pause -> flexible choice -> covered close",
+    sensoryLevel: "low",
+    walkingPace: "compact",
+    outputPackage: "full package",
+    seasonalTheme: "rainy-day comfort route",
+  },
+  "low-sensory": {
+    creativeDirection: "comfort-first",
+    storyArc: "Arrival reset -> dry discovery -> warm pause -> flexible choice -> covered close",
+    sensoryLevel: "low",
+    walkingPace: "compact",
+    outputPackage: "route storyboard",
+    seasonalTheme: "predictable low-sensory path",
+  },
+  "kid-quest": {
+    creativeDirection: "playful mission",
+    storyArc: "Mission start -> clue -> discovery -> reward -> celebration",
+    sensoryLevel: "balanced",
+    walkingPace: "moderate",
+    outputPackage: "full package",
+    seasonalTheme: "kid-friendly quest",
+  },
+  "scavenger-hunt": {
+    creativeDirection: "playful mission",
+    storyArc: "Invitation -> clue -> reveal -> choice -> finale",
+    sensoryLevel: "balanced",
+    walkingPace: "moderate",
+    outputPackage: "full package",
+    seasonalTheme: "visual scavenger hunt",
+  },
+  "attraction-copy": {
+    creativeDirection: "story-rich",
+    storyArc: "Hook -> expectation -> accessibility -> nearby pairing -> decision",
+    sensoryLevel: "balanced",
+    walkingPace: "moderate",
+    outputPackage: "channel copy",
+    seasonalTheme: "attraction planning copy",
+  },
+  "safety-signage": {
+    creativeDirection: "comfort-first",
+    storyArc: "Notice -> action -> reason -> support -> reminder",
+    sensoryLevel: "low",
+    walkingPace: "compact",
+    outputPackage: "channel copy",
+    seasonalTheme: "clear safety language",
+  },
+  "vip-tour": {
+    creativeDirection: "premium host-led",
+    storyArc: "Welcome -> insider reveal -> signature moment -> relaxed pause -> closing keepsake",
+    sensoryLevel: "balanced",
+    walkingPace: "exploratory",
+    outputPackage: "host script",
+    seasonalTheme: "VIP hosted route",
+  },
+};
+
 function formatStatus(value?: string) {
   return (value || "unknown").replaceAll("_", " ");
 }
@@ -233,11 +373,21 @@ export function ExperienceStudio() {
   const [isLoading, setIsLoading] = useState(false);
   const [isDrafting, setIsDrafting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [lastGeneratedAt, setLastGeneratedAt] = useState<string | null>(null);
+  const [generationCount, setGenerationCount] = useState(0);
+  const draftResultRef = useRef<HTMLDivElement | null>(null);
   const [templateId, setTemplateId] = useState<ExperienceTemplateId>("rainy-day");
   const selectedTemplate = draftTemplates.find((item) => item.id === templateId) ?? draftTemplates[1];
   const [audience, setAudience] = useState(selectedTemplate.audience);
   const [tone, setTone] = useState(selectedTemplate.tone);
   const [constraints, setConstraints] = useState("Use verified venue facts only. Keep movement guidance optional and send operational impacts to Command Center review.");
+  const rainyDayDefaults = creativeDefaultsByTemplate["rainy-day"];
+  const [creativeDirection, setCreativeDirection] = useState(rainyDayDefaults.creativeDirection);
+  const [storyArc, setStoryArc] = useState(rainyDayDefaults.storyArc);
+  const [sensoryLevel, setSensoryLevel] = useState(rainyDayDefaults.sensoryLevel);
+  const [walkingPace, setWalkingPace] = useState(rainyDayDefaults.walkingPace);
+  const [outputPackage, setOutputPackage] = useState(rainyDayDefaults.outputPackage);
+  const [seasonalTheme, setSeasonalTheme] = useState(rainyDayDefaults.seasonalTheme);
   const [draftPayload, setDraftPayload] = useState<DraftPayload | null>(null);
   const [savedDrafts, setSavedDrafts] = useState<SavedDraft[]>([]);
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
@@ -288,15 +438,31 @@ export function ExperienceStudio() {
 
   const selectDraftTemplate = (id: ExperienceTemplateId) => {
     const next = draftTemplates.find((item) => item.id === id) ?? selectedTemplate;
+    const creativeDefaults = creativeDefaultsByTemplate[next.id];
     setTemplateId(next.id);
     setAudience(next.audience);
     setTone(next.tone);
+    setCreativeDirection(creativeDefaults.creativeDirection);
+    setStoryArc(creativeDefaults.storyArc);
+    setSensoryLevel(creativeDefaults.sensoryLevel);
+    setWalkingPace(creativeDefaults.walkingPace);
+    setOutputPackage(creativeDefaults.outputPackage);
+    setSeasonalTheme(creativeDefaults.seasonalTheme);
     setDraftPayload(null);
   };
 
   const generateDraft = async () => {
     setIsDrafting(true);
     setMessage(null);
+    const composedConstraints = [
+      constraints,
+      `Creative direction: ${creativeDirection}.`,
+      `Story arc: ${storyArc}.`,
+      `Sensory level: ${sensoryLevel}.`,
+      `Walking pace: ${walkingPace}.`,
+      `Output package: ${outputPackage}.`,
+      `Theme: ${seasonalTheme}.`,
+    ].join("\n");
     try {
       const response = await fetchParkPulseApi("/api/park/experience-studio/draft", {
         method: "POST",
@@ -305,7 +471,13 @@ export function ExperienceStudio() {
           templateId,
           audience,
           tone,
-          constraints,
+          constraints: composedConstraints,
+          creativeDirection,
+          storyArc,
+          sensoryLevel,
+          walkingPace,
+          outputPackage,
+          seasonalTheme,
           useLlm: false,
           useRealParkContext: false,
           useVenueExperienceData: true,
@@ -318,7 +490,11 @@ export function ExperienceStudio() {
       setWorkflowStatus("draft");
       setLatestHandoff(null);
       if (payload.venueExperienceData) setReadiness(payload.venueExperienceData);
-      setMessage(payload.draft?.sourceIntegrity?.readyForHandoff ? "Draft generated from verified venue data" : "Draft generated with blockers because verified venue data is incomplete");
+      const generatedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      setLastGeneratedAt(generatedAt);
+      setGenerationCount((current) => current + 1);
+      setMessage(payload.draft?.sourceIntegrity?.readyForHandoff ? `Creative package generated at ${generatedAt}` : `Draft generated at ${generatedAt} with blockers because verified venue data is incomplete`);
+      window.setTimeout(() => draftResultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
     } catch {
       setMessage("Draft generation failed");
     } finally {
@@ -342,7 +518,7 @@ export function ExperienceStudio() {
           draft,
           sourceMode: draftPayload?.mode ?? "experience_studio_gated_draft",
           actor: "experience_designer",
-          brief: { audience, tone, constraints, venueReadiness: readiness?.readiness },
+          brief: { audience, tone, constraints, creativeDirection, storyArc, sensoryLevel, walkingPace, outputPackage, seasonalTheme, venueReadiness: readiness?.readiness },
         }),
         timeoutMs: 6000,
       });
@@ -450,6 +626,16 @@ export function ExperienceStudio() {
       setWorkflowStatus(selected.status ?? "draft");
       if (selected.templateId) setTemplateId(selected.templateId);
       if (selected.draft?.audience) setAudience(selected.draft.audience);
+      if (selected.draft?.creativeBrief) {
+        setCreativeDirection(selected.draft.creativeBrief.creativeDirection ?? creativeDirection);
+        setStoryArc(selected.draft.creativeBrief.storyArc ?? storyArc);
+        setSensoryLevel(selected.draft.creativeBrief.sensoryLevel ?? sensoryLevel);
+        setWalkingPace(selected.draft.creativeBrief.walkingPace ?? walkingPace);
+        setOutputPackage(selected.draft.creativeBrief.outputPackage ?? outputPackage);
+        setSeasonalTheme(selected.draft.creativeBrief.seasonalTheme ?? seasonalTheme);
+        if (selected.draft.creativeBrief.tone) setTone(selected.draft.creativeBrief.tone);
+        if (selected.draft.creativeBrief.constraints) setConstraints(selected.draft.creativeBrief.constraints);
+      }
       setLatestHandoff(null);
       setMessage("Saved draft opened");
     } catch {
@@ -559,6 +745,14 @@ export function ExperienceStudio() {
   const issues = collectIssues(readiness);
   const draft = draftPayload?.draft;
   const draftMissing = draft?.sourceIntegrity?.missingRealInputs ?? [];
+  const profileIntelligence = draft?.profileIntelligence ?? readiness?.realInputs?.profileIntelligence ?? null;
+  const coverageEntries = Object.entries(profileIntelligence?.coverage ?? {}).filter(([, value]) => typeof value === "number");
+  const profileQualityGaps = profileIntelligence?.qualityGaps ?? draft?.sourceIntegrity?.profileIntelligenceQualityGaps ?? [];
+  const studioPolicy = (profileIntelligence?.experienceStudioPolicy ?? profileIntelligence?.modulePolicy?.experience_studio ?? {}) as NonNullable<ProfileIntelligence["experienceStudioPolicy"]>;
+  const brandTone = profileIntelligence?.brandBible?.tone ?? [];
+  const bannedClaims = profileIntelligence?.brandBible?.bannedClaims ?? [];
+  const learningLabels = profileIntelligence?.learningLabels ?? profileIntelligence?.learningSchema?.feedbackLabels ?? [];
+  const studioReview = draft?.studioReview ?? [];
 
   return (
     <main className="min-h-screen bg-[#10130f] px-4 py-5 font-sans text-slate-200 lg:px-8">
@@ -567,9 +761,9 @@ export function ExperienceStudio() {
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div>
               <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Experience Studio</div>
-              <h1 className="mt-2 max-w-5xl text-3xl font-black tracking-normal text-white lg:text-5xl">Venue experience data import</h1>
+              <h1 className="mt-2 max-w-5xl text-3xl font-black tracking-normal text-white lg:text-5xl">Creative guest journey workbench</h1>
               <p className="mt-3 max-w-4xl text-sm leading-relaxed text-slate-300">
-                Connect real guest-facing venue facts before Experience Studio can draft routes, journeys, signage, quests, or tour scripts. This page validates source-backed data; it does not create fake venue content.
+                Design routes, quests, scripts, signage, and channel copy from the active Venue Profile. Studio can be imaginative about story, pacing, and language, but it stays grounded in approved park facts and sends operational impact to review.
               </p>
             </div>
             <nav className="flex flex-wrap gap-2">
@@ -585,9 +779,9 @@ export function ExperienceStudio() {
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <div className="text-[10px] font-black uppercase tracking-widest text-cyan-200">Draft workspace</div>
-              <h2 className="mt-1 text-2xl font-black text-white">Generate only from verified venue data</h2>
+              <h2 className="mt-1 text-2xl font-black text-white">Shape the creative brief, then generate</h2>
               <p className="mt-2 max-w-4xl text-sm leading-relaxed text-slate-400">
-                Draft generation calls the Studio backend with venue-data autofill enabled. If the venue export is not Studio-ready, the output remains a blocked placeholder draft with missing-input flags.
+                Pick an experience type, steer the story arc and sensory profile, then let the Studio backend synthesize a reviewable package from the active park profile.
               </p>
             </div>
             <div className={`w-fit rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${readiness?.readiness?.autofillAllowed ? "border-emerald-400/40 bg-emerald-950/25 text-emerald-100" : "border-amber-400/40 bg-amber-950/25 text-amber-100"}`}>
@@ -629,6 +823,93 @@ export function ExperienceStudio() {
                   />
                 </label>
               </div>
+              <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1fr)_18rem]">
+                <div className="rounded border border-slate-800 bg-[#151914] p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <div className="text-[10px] font-black uppercase tracking-widest text-cyan-200">Creative direction</div>
+                      <div className="mt-1 text-xs leading-relaxed text-slate-500">Controls how the assistant frames each stop, transition, and channel artifact.</div>
+                    </div>
+                    <div className="rounded border border-slate-700 bg-[#0d1115] px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">{outputPackage}</div>
+                  </div>
+                  <div className="mt-3 grid gap-2 md:grid-cols-2">
+                    {creativeDirections.map((item) => (
+                      <button
+                        key={item.value}
+                        type="button"
+                        onClick={() => setCreativeDirection(item.value)}
+                        className={`rounded border p-3 text-left transition ${creativeDirection === item.value ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-slate-800 bg-[#0d1115] text-slate-300 hover:border-cyan-300/70"}`}
+                      >
+                        <div className="text-xs font-black">{item.label}</div>
+                        <div className={`mt-1 text-[11px] leading-relaxed ${creativeDirection === item.value ? "text-slate-800" : "text-slate-500"}`}>{item.detail}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded border border-slate-800 bg-[#151914] p-3">
+                  <label className="block">
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Theme</span>
+                    <input
+                      value={seasonalTheme}
+                      onChange={(event) => setSeasonalTheme(event.target.value)}
+                      className="mt-2 w-full rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-bold text-slate-100 outline-none transition focus:border-cyan-300"
+                    />
+                  </label>
+                  <label className="mt-3 block">
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Story arc</span>
+                    <select
+                      value={storyArc}
+                      onChange={(event) => setStoryArc(event.target.value)}
+                      className="mt-2 w-full rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-bold text-slate-100 outline-none transition focus:border-cyan-300"
+                    >
+                      {storyArcs.map((item) => <option key={item} value={item}>{item}</option>)}
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div className="mt-3 grid gap-3 md:grid-cols-3">
+                <div className="rounded border border-slate-800 bg-[#151914] p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Sensory level</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {sensoryLevels.map((item) => (
+                      <button
+                        key={item}
+                        type="button"
+                        onClick={() => setSensoryLevel(item)}
+                        className={`rounded border px-3 py-2 text-xs font-black transition ${sensoryLevel === item ? "border-lime-300 bg-lime-300 text-slate-950" : "border-slate-700 bg-[#0d1115] text-slate-300 hover:border-lime-300/70"}`}
+                      >
+                        {item}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded border border-slate-800 bg-[#151914] p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Walking pace</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {walkingPaces.map((item) => (
+                      <button
+                        key={item}
+                        type="button"
+                        onClick={() => setWalkingPace(item)}
+                        className={`rounded border px-3 py-2 text-xs font-black transition ${walkingPace === item ? "border-lime-300 bg-lime-300 text-slate-950" : "border-slate-700 bg-[#0d1115] text-slate-300 hover:border-lime-300/70"}`}
+                      >
+                        {item}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="rounded border border-slate-800 bg-[#151914] p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Package</div>
+                  <select
+                    value={outputPackage}
+                    onChange={(event) => setOutputPackage(event.target.value)}
+                    className="mt-2 w-full rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-bold text-slate-100 outline-none transition focus:border-cyan-300"
+                  >
+                    {outputPackages.map((item) => <option key={item} value={item}>{item}</option>)}
+                  </select>
+                </div>
+              </div>
               <label className="mt-3 block">
                 <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Constraints</span>
                 <textarea
@@ -644,8 +925,11 @@ export function ExperienceStudio() {
                   disabled={isDrafting}
                   className="rounded border border-cyan-300 bg-cyan-300 px-4 py-2 text-sm font-black text-slate-950 transition hover:bg-cyan-200 disabled:opacity-50"
                 >
-                  {isDrafting ? "Generating" : "Generate gated draft"}
+                  {isDrafting ? "Generating" : "Generate creative package"}
                 </button>
+                <div className={`rounded border px-3 py-2 text-xs font-bold ${isDrafting ? "border-cyan-300/50 bg-cyan-950/25 text-cyan-100" : lastGeneratedAt ? "border-emerald-400/40 bg-emerald-950/25 text-emerald-100" : "border-slate-800 bg-[#151914] text-slate-400"}`}>
+                  {isDrafting ? "Building route, copy, and review packet" : lastGeneratedAt ? `Generated ${generationCount} time${generationCount === 1 ? "" : "s"} / ${lastGeneratedAt}` : "No package generated in this session"}
+                </div>
                 <div className="rounded border border-slate-800 bg-[#151914] px-3 py-2 text-xs font-bold text-slate-400">
                   Venue autofill: {readiness?.readiness?.autofillAllowed ? "available" : "blocked"}
                 </div>
@@ -658,19 +942,54 @@ export function ExperienceStudio() {
                   {isSavingDraft ? "Saving" : "Save draft"}
                 </button>
               </div>
+              <div className="mt-4 grid gap-3 xl:grid-cols-3">
+                <div className="rounded border border-slate-800 bg-[#151914] p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Brand voice</div>
+                  <div className="mt-2 text-xs leading-relaxed text-slate-300">{brandTone.length ? compactList(brandTone, 5) : "No brand bible tone connected."}</div>
+                  {bannedClaims.length ? <div className="mt-2 text-[11px] leading-relaxed text-amber-100">Avoid: {compactList(bannedClaims, 4)}</div> : null}
+                </div>
+                <div className="rounded border border-slate-800 bg-[#151914] p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Policy boundary</div>
+                  <div className="mt-2 text-xs leading-relaxed text-slate-300">May draft: {compactList(studioPolicy.mayDraft, 4) || "not connected"}</div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-slate-500">Review: {compactList(studioPolicy.mustReview, 4) || "movement, safety, access, and availability claims"}</div>
+                </div>
+                <div className="rounded border border-slate-800 bg-[#151914] p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Learning loop</div>
+                  <div className="mt-2 text-xs leading-relaxed text-slate-300">{learningLabels.length ? compactList(learningLabels, 5) : "No feedback labels connected."}</div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-slate-500">{profileQualityGaps.length ? `${profileQualityGaps.length} profile gap(s) need review.` : "Profile gaps clear for this view."}</div>
+                </div>
+              </div>
 
               {draft ? (
-                <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
+                <div ref={draftResultRef} className="mt-4 scroll-mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
                   <div className="rounded border border-slate-800 bg-[#151914] p-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <div className="text-[10px] font-black uppercase tracking-widest text-cyan-200">{draft.title}</div>
                         <div className="mt-1 text-sm text-slate-400">{draft.intent}</div>
+                        {lastGeneratedAt ? <div className="mt-2 w-fit rounded border border-emerald-400/40 bg-emerald-950/25 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-100">Generated at {lastGeneratedAt}</div> : null}
                       </div>
                       <div className={`rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${draft.sourceIntegrity?.readyForHandoff ? "border-emerald-400/40 bg-emerald-950/25 text-emerald-100" : "border-amber-400/40 bg-amber-950/25 text-amber-100"}`}>
                         {draft.sourceIntegrity?.readyForHandoff ? "handoff ready" : "handoff blocked"}
                       </div>
                     </div>
+                    {draft.creativeBrief ? (
+                      <div className="mt-4 grid gap-2 border-t border-slate-800 pt-3 md:grid-cols-3">
+                        {[
+                          ["Direction", draft.creativeBrief.creativeDirection],
+                          ["Story arc", draft.creativeBrief.storyArc],
+                          ["Sensory", draft.creativeBrief.sensoryLevel],
+                          ["Pace", draft.creativeBrief.walkingPace],
+                          ["Package", draft.creativeBrief.outputPackage],
+                          ["Theme", draft.creativeBrief.seasonalTheme],
+                        ].map(([label, value]) => (
+                          <div key={label} className="rounded border border-slate-800 bg-[#0d1115] px-3 py-2">
+                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</div>
+                            <div className="mt-1 text-xs font-bold text-slate-200">{value ?? "not set"}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                     <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-3">
                       <div>
                         <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Draft editor</div>
@@ -694,6 +1013,14 @@ export function ExperienceStudio() {
                               value={stop.stop}
                               onChange={(event) => updateRouteStop(index, "stop", event.target.value)}
                               className="mt-2 w-full rounded border border-slate-700 bg-[#151914] px-3 py-2 text-sm font-black text-white outline-none transition focus:border-cyan-300"
+                            />
+                          </label>
+                          <label className="mt-2 block">
+                            <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Story beat purpose</span>
+                            <textarea
+                              value={stop.purpose}
+                              onChange={(event) => updateRouteStop(index, "purpose", event.target.value)}
+                              className="mt-2 h-16 w-full resize-none rounded border border-slate-700 bg-[#151914] p-2 text-xs leading-relaxed text-slate-100 outline-none transition focus:border-cyan-300"
                             />
                           </label>
                           <div className="mt-2 grid gap-2 lg:grid-cols-2">
@@ -720,6 +1047,14 @@ export function ExperienceStudio() {
                               value={stop.accessibilityNote}
                               onChange={(event) => updateRouteStop(index, "accessibilityNote", event.target.value)}
                               className="mt-2 h-20 w-full resize-none rounded border border-slate-700 bg-[#151914] p-2 text-xs leading-relaxed text-slate-100 outline-none transition focus:border-cyan-300"
+                            />
+                          </label>
+                          <label className="mt-2 block">
+                            <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Profile intelligence note</span>
+                            <textarea
+                              value={stop.profileIntelligenceNote ?? ""}
+                              onChange={(event) => updateRouteStop(index, "profileIntelligenceNote", event.target.value)}
+                              className="mt-2 h-16 w-full resize-none rounded border border-slate-700 bg-[#151914] p-2 text-xs leading-relaxed text-slate-100 outline-none transition focus:border-cyan-300"
                             />
                           </label>
                         </div>
@@ -846,6 +1181,36 @@ export function ExperienceStudio() {
                     <div className="mt-3 text-[10px] font-black uppercase tracking-widest text-slate-500">Missing inputs</div>
                     <div className="mt-2 grid gap-1 text-xs leading-relaxed text-slate-400">
                       {draftMissing.length ? draftMissing.map((item) => <div key={item}>{item.replaceAll("_", " ")}</div>) : <div>No missing input flags.</div>}
+                    </div>
+                    <div className="mt-3 text-[10px] font-black uppercase tracking-widest text-slate-500">Profile intelligence</div>
+                    <div className="mt-2 rounded border border-slate-800 bg-[#0d1115] p-2">
+                      <div className="text-xs font-black text-slate-200">{profileIntelligence?.source ?? "not connected"}</div>
+                      <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-slate-400">
+                        {coverageEntries.slice(0, 6).map(([label, value]) => (
+                          <div key={label} className="rounded border border-slate-800 bg-[#151914] px-2 py-1">
+                            <span className="font-black uppercase tracking-widest text-slate-500">{formatStatus(label)}</span>
+                            <span className="ml-2 font-bold text-slate-200">{value}</span>
+                          </div>
+                        ))}
+                        {!coverageEntries.length ? <div className="col-span-2 text-slate-500">No coverage counters attached.</div> : null}
+                      </div>
+                      <div className="mt-2 grid gap-1 text-[11px] leading-relaxed text-amber-100">
+                        {profileQualityGaps.length ? profileQualityGaps.slice(0, 4).map((item) => <div key={item}>Review: {item}</div>) : <div className="text-slate-500">No profile quality gaps reported.</div>}
+                      </div>
+                    </div>
+                    <div className="mt-3 text-[10px] font-black uppercase tracking-widest text-slate-500">Studio reviewers</div>
+                    <div className="mt-2 grid gap-2">
+                      {studioReview.length ? studioReview.map((item) => (
+                        <div key={item.agentId ?? item.agentName} className="rounded border border-slate-800 bg-[#0d1115] p-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-xs font-black text-slate-200">{item.agentName ?? item.agentId}</div>
+                            <div className={`rounded border px-2 py-1 text-[9px] font-black uppercase tracking-widest ${item.status === "clear" ? "border-emerald-400/40 bg-emerald-950/25 text-emerald-100" : item.status === "blocked" ? "border-red-400/40 bg-red-950/25 text-red-100" : "border-amber-400/40 bg-amber-950/25 text-amber-100"}`}>
+                              {item.status ?? "review"}
+                            </div>
+                          </div>
+                          <div className="mt-1 text-[11px] leading-relaxed text-slate-500">{item.finding}</div>
+                        </div>
+                      )) : <div className="rounded border border-slate-800 bg-[#0d1115] p-2 text-xs text-slate-500">Generate a draft to see reviewer flags.</div>}
                     </div>
                     <div className="mt-3 text-[10px] font-black uppercase tracking-widest text-slate-500">Messages</div>
                     <div className="mt-2 grid gap-2">

@@ -162,9 +162,10 @@ def build_accessibility_journey(payload: dict[str, Any], park_state: dict[str, A
     zone_scores = _score_zones(profile, zones, weather, readiness, venue_catalog)
     dining_options = _dining_options(profile, food_inventory, zone_scores, venue_catalog)
     attraction_options = _attraction_options(profile, rides, zone_scores, venue_catalog)
-    plan_steps = _build_steps(profile, zone_scores, dining_options, attraction_options)
+    plan_steps = _build_steps(profile, zone_scores, dining_options, attraction_options, venue_catalog)
     guardrails = _guardrails_for_profile(profile, readiness)
     requires_review = _requires_human_review(profile, readiness)
+    intelligence_receipt = _intelligence_receipt(profile, venue_catalog, plan_steps)
 
     headline = _headline(profile, plan_steps, dining_options)
     return {
@@ -187,6 +188,8 @@ def build_accessibility_journey(payload: dict[str, Any], park_state: dict[str, A
         "staffHandoff": _staff_handoff(profile, requires_review),
         "guardrails": guardrails,
         "evidence": evidence,
+        "profileIntelligence": intelligence_receipt,
+        "learningReceipt": _learning_receipt(profile, plan_steps, requires_review, venue_catalog),
         "venueProfile": _venue_profile_summary(venue_profile),
         "runtime": {
             "provider": "deterministic_accessibility_planner",
@@ -220,11 +223,13 @@ def _profile_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     allergies = _allergens_from_payload(payload, lowered)
     if allergies:
         detected.add("allergy")
+    segment_id = _guest_segment_id(detected, allergies, lowered)
     duration = _safe_int(payload.get("durationMinutes") or payload.get("duration_minutes"), 180)
     current_location = str(payload.get("currentLocation") or payload.get("current_location") or "Entrance Plaza").strip() or "Entrance Plaza"
     return {
         "request": request or "Create an accessible park route.",
         "needs": sorted(detected),
+        "guestSegmentId": segment_id,
         "allergies": allergies,
         "durationMinutes": max(45, min(360, duration)),
         "currentLocation": current_location,
@@ -234,6 +239,20 @@ def _profile_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "avoidLoudShows": bool(payload.get("avoidLoudShows")) or "no loud" in lowered or "loud shows" in lowered or "low sensory" in lowered,
         "minimalWalking": bool(payload.get("minimalWalking")) or "minimal walking" in lowered or "short walk" in lowered or "elderly" in lowered,
     }
+
+
+def _guest_segment_id(needs: set[str], allergies: list[str], lowered: str) -> str:
+    if allergies or "allergy" in needs:
+        return "allergy_or_dietary_guests"
+    if "low_sensory" in needs:
+        return "low_sensory_guests"
+    if "child" in lowered or "kid" in lowered or "stroller" in lowered or "family_care" in needs:
+        return "families_with_strollers"
+    if "rain" in lowered or "storm" in lowered:
+        return "rainy_day_parties"
+    if "thrill" in lowered or "coaster" in lowered:
+        return "thrill_seekers"
+    return "families_with_strollers"
 
 
 def _allergens_from_payload(payload: dict[str, Any], lowered: str) -> list[str]:
@@ -347,6 +366,9 @@ def _normalize_profile_location(item: dict[str, Any], restrooms_by_zone: dict[st
 def _venue_accessibility_catalog(venue_profile: dict[str, Any]) -> dict[str, Any]:
     real_inputs = venue_profile.get("realInputs") or {}
     details = real_inputs.get("locationDetails") if isinstance(real_inputs.get("locationDetails"), dict) else {}
+    profile_intelligence = real_inputs.get("profileIntelligence") if isinstance(real_inputs.get("profileIntelligence"), dict) else {}
+    zone_details = real_inputs.get("zoneDetails") if isinstance(real_inputs.get("zoneDetails"), dict) else {}
+    spatial_model = real_inputs.get("spatialModel") if isinstance(real_inputs.get("spatialModel"), dict) else {}
     restrooms_by_zone: dict[str, list[str]] = {}
     for item in details.values():
         if isinstance(item, dict) and str(item.get("kind") or "") == "restrooms":
@@ -357,18 +379,53 @@ def _venue_accessibility_catalog(venue_profile: dict[str, Any]) -> dict[str, Any
         "dining": [item for item in locations if item["kind"] == "food"],
         "attractions": [item for item in locations if item["kind"] in {"attraction", "show"}],
         "safetyInstructions": [str(item) for item in real_inputs.get("safetyInstructions", []) if str(item).strip()],
+        "profileIntelligence": profile_intelligence,
+        "zoneDetails": zone_details,
+        "spatialModel": spatial_model,
+        "capacityByZone": _capacity_by_zone(profile_intelligence),
+        "pathByZonePair": _path_by_zone_pair(profile_intelligence),
+        "segmentNeeds": profile_intelligence.get("segmentNeeds") if isinstance(profile_intelligence.get("segmentNeeds"), dict) else {},
+        "qualityGaps": [str(item) for item in profile_intelligence.get("qualityGaps", []) if str(item).strip()] if isinstance(profile_intelligence.get("qualityGaps"), list) else [],
         "source": real_inputs.get("source"),
     }
+
+
+def _capacity_by_zone(profile_intelligence: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    capacity = profile_intelligence.get("capacityModel") if isinstance(profile_intelligence.get("capacityModel"), dict) else {}
+    rows = capacity.get("zoneComfort") if isinstance(capacity.get("zoneComfort"), list) else []
+    return {str(row.get("zoneId")): row for row in rows if isinstance(row, dict) and row.get("zoneId")}
+
+
+def _path_by_zone_pair(profile_intelligence: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    rows = profile_intelligence.get("certifiedPaths") if isinstance(profile_intelligence.get("certifiedPaths"), list) else []
+    indexed: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        from_zone = str(row.get("fromZoneId") or "")
+        to_zone = str(row.get("toZoneId") or "")
+        if from_zone and to_zone:
+            indexed[(from_zone, to_zone)] = row
+            indexed[(to_zone, from_zone)] = row
+    return indexed
 
 
 def _score_zones(profile: dict[str, Any], zones: list[dict[str, Any]], weather: dict[str, Any], readiness: dict[str, Any], venue_catalog: dict[str, Any]) -> list[dict[str, Any]]:
     live_zones = _zone_by_id(zones)
     heat_index = _safe_int(weather.get("heatIndexF"), 80)
     routes_open = readiness.get("accessibilityRoutesOpen", True) is not False
+    capacity_by_zone = venue_catalog.get("capacityByZone", {}) if isinstance(venue_catalog.get("capacityByZone"), dict) else {}
+    zone_details = venue_catalog.get("zoneDetails", {}) if isinstance(venue_catalog.get("zoneDetails"), dict) else {}
+    segment_needs = venue_catalog.get("segmentNeeds", {}) if isinstance(venue_catalog.get("segmentNeeds"), dict) else {}
+    segment = segment_needs.get(profile.get("guestSegmentId"), {}) if isinstance(segment_needs.get(profile.get("guestSegmentId")), dict) else {}
+    preferred_zones = {str(zone_id) for zone_id in segment.get("preferredZones", []) if str(zone_id).strip()} if isinstance(segment.get("preferredZones"), list) else set()
+    avoid_terms = " ".join(str(item).lower() for item in segment.get("avoid", []) if str(item).strip()) if isinstance(segment.get("avoid"), list) else ""
     scored: list[dict[str, Any]] = []
     for meta in venue_catalog["locations"]:
         zone_id = str(meta.get("zoneId") or meta.get("id"))
         live = live_zones.get(zone_id, {})
+        zone_intel = zone_details.get(zone_id, {}) if isinstance(zone_details.get(zone_id), dict) else {}
+        capacity = capacity_by_zone.get(zone_id, {}) if isinstance(capacity_by_zone.get(zone_id), dict) else {}
         density = _safe_int(live.get("density"), 50)
         wait = _safe_int(live.get("waitMins"), 0)
         comfort = _safe_int(live.get("comfortScore"), 75)
@@ -378,6 +435,29 @@ def _score_zones(profile: dict[str, Any], zones: list[dict[str, Any]], weather: 
             f"comfort score {comfort}",
             f"{'indoor' if meta['indoor'] else 'outdoor/covered'} location",
         ]
+        if zone_id in preferred_zones:
+            score += 22
+            reasons.append(f"preferred for {profile.get('guestSegmentId')}")
+        if capacity:
+            spillback = str(capacity.get("spillbackRisk") or "").lower()
+            if spillback == "high":
+                score -= 10
+                reasons.append("capacity model flags spillback risk")
+            elif spillback == "low":
+                score += 6
+                reasons.append("capacity model indicates lower spillback risk")
+        if zone_intel.get("quietOrCooling"):
+            score += 12 if "low_sensory" in profile["needs"] or profile["needsIndoorBreaks"] else 4
+            reasons.append("profile intelligence marks reset value")
+        if zone_intel.get("indoorOrSheltered") and ("rain" in profile["request"].lower() or profile["needsIndoorBreaks"]):
+            score += 15
+            reasons.append("profile intelligence marks shelter value")
+        if "dense queues" in avoid_terms and str(zone_intel.get("role") or "") == "attraction_demand":
+            score -= 18
+            reasons.append("segment avoids dense queues")
+        if "long exposed walks" in avoid_terms and not zone_intel.get("indoorOrSheltered"):
+            score -= 12
+            reasons.append("segment avoids exposed walking")
         if "low_sensory" in profile["needs"]:
             score += int(meta["quietScore"]) // 3
             if int(meta["quietScore"]) < 60:
@@ -409,6 +489,10 @@ def _score_zones(profile: dict[str, Any], zones: list[dict[str, Any]], weather: 
                 "restrooms": list(meta["restrooms"]),
                 "breakFeatures": list(meta["breakFeatures"]),
                 "sensoryNotes": list(meta["sensoryNotes"]),
+                "profileRole": zone_intel.get("role"),
+                "spillbackRisk": capacity.get("spillbackRisk"),
+                "capacityEstimate": capacity.get("comfortCapacityEstimate"),
+                "certificationWarnings": list(venue_catalog.get("qualityGaps", [])),
                 "reasons": reasons,
             }
         )
@@ -436,6 +520,7 @@ def _dining_options(profile: dict[str, Any], food_inventory: dict[str, Any], zon
             {
                 "id": dining_id,
                 "name": meta["name"],
+                "zoneId": str(meta.get("zoneId") or ""),
                 "score": score,
                 "pickupEtaMinutes": eta,
                 "mobileOrderBacklog": backlog,
@@ -484,6 +569,7 @@ def _attraction_options(profile: dict[str, Any], rides: list[dict[str, Any]], zo
             {
                 "id": ride_id,
                 "name": str(meta.get("name") or ride.get("name") or ride_id),
+                "zoneId": str(meta.get("zoneId") or ride.get("zone") or ""),
                 "zoneName": str(ride.get("zoneName") or (zone or {}).get("name") or ""),
                 "score": score,
                 "waitMins": wait,
@@ -501,6 +587,7 @@ def _attraction_options(profile: dict[str, Any], rides: list[dict[str, Any]], zo
             {
                 "id": "profile_quiet_activity",
                 "name": f"{quiet.get('name', 'Quiet area')} reset activity",
+                "zoneId": str(quiet.get("zoneId") or ""),
                 "zoneName": str(quiet.get("name") or ""),
                 "score": int(quiet.get("score", 70)) + 10,
                 "waitMins": _safe_int(quiet.get("waitMins"), 10),
@@ -520,6 +607,7 @@ def _build_steps(
     zone_scores: list[dict[str, Any]],
     dining_options: list[dict[str, Any]],
     attraction_options: list[dict[str, Any]],
+    venue_catalog: dict[str, Any],
 ) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     duration = profile["durationMinutes"]
@@ -527,18 +615,21 @@ def _build_steps(
     if not calm_zones:
         return []
     first_break = next((zone for zone in calm_zones if zone["indoor"]), calm_zones[0])
-    steps.append(_zone_step("start", "Start with a calm check-in", first_break, 20, "Begin at the lowest-pressure area that still keeps restrooms and staff help nearby."))
+    steps.append(_zone_step("start", "Start with a calm check-in", first_break, 20, "Begin at the lowest-pressure area that still keeps restrooms and staff help nearby.", None, venue_catalog))
 
     if attraction_options:
         attraction = attraction_options[0]
+        previous_zone_id = str(steps[-1].get("zoneId") or "")
+        attraction_zone_id = str(attraction.get("zoneId") or "")
         steps.append(
             {
                 "id": "step_attraction_1",
                 "type": "attraction_or_activity",
                 "title": attraction["name"],
                 "location": attraction["zoneName"] or attraction["name"],
+                "zoneId": attraction_zone_id,
                 "durationMinutes": max(20, min(45, int(attraction["waitMins"]) + 15)),
-                "walkMinutes": 6 if profile["minimalWalking"] else 9,
+                "walkMinutes": _walk_minutes(previous_zone_id, attraction_zone_id, venue_catalog, 6 if profile["minimalWalking"] else 9),
                 "why": "Selected after filtering closed rides, loud/high-stimulation options, stairs, and live wait time.",
                 "accessibility": [
                     "step-free queue" if attraction["stepFreeQueue"] else "staff confirmation needed for queue access",
@@ -546,25 +637,28 @@ def _build_steps(
                     f"sensory load: {attraction['sensoryLoad']}",
                 ],
                 "nearby": [],
-                "risks": attraction["cautions"],
-                "evidenceIds": ["rides_live", "venue_profile_accessibility_metadata"],
+                "risks": attraction["cautions"] + _route_claim_warnings(previous_zone_id, attraction_zone_id, venue_catalog),
+                "evidenceIds": ["rides_live", "venue_profile_accessibility_metadata", "profile_intelligence_route_policy"],
             }
         )
 
     if profile["needsIndoorBreaks"] or "low_sensory" in profile["needs"] or duration >= 120:
         second_break = next((zone for zone in calm_zones if zone["zoneId"] != first_break["zoneId"] and zone["indoor"]), first_break)
-        steps.append(_zone_step("break_1", "Indoor decompression break", second_break, 25, "Adds a planned reset before fatigue, heat, or sensory load accumulates."))
+        steps.append(_zone_step("break_1", "Indoor decompression break", second_break, 25, "Adds a planned reset before fatigue, heat, or sensory load accumulates.", str(steps[-1].get("zoneId") or ""), venue_catalog))
 
     if dining_options and ("allergy" in profile["needs"] or duration >= 150):
         dining = dining_options[0]
+        dining_zone_id = str(dining.get("zoneId") or "")
+        previous_zone_id = str(steps[-1].get("zoneId") or "")
         steps.append(
             {
                 "id": "step_food_1",
                 "type": "dining",
                 "title": dining["name"],
                 "location": dining["name"],
+                "zoneId": dining_zone_id,
                 "durationMinutes": max(25, min(50, int(dining["pickupEtaMinutes"]) + 18)),
-                "walkMinutes": 5 if profile["minimalWalking"] else 8,
+                "walkMinutes": _walk_minutes(previous_zone_id, dining_zone_id, venue_catalog, 5 if profile["minimalWalking"] else 8),
                 "why": "Best available dining match for allergy metadata, lower crowd seating, pickup pressure, and restroom proximity.",
                 "accessibility": [
                     "staff allergy confirmation required" if dining["staffConfirmationRequired"] else "standard dining confirmation",
@@ -572,17 +666,18 @@ def _build_steps(
                     f"pickup estimate: {dining['pickupEtaMinutes']} minutes",
                 ],
                 "nearby": dining["nearbyRestrooms"],
-                "risks": dining["cautions"],
-                "evidenceIds": ["food_live", "venue_profile_accessibility_metadata"],
+                "risks": dining["cautions"] + _route_claim_warnings(previous_zone_id, dining_zone_id, venue_catalog),
+                "evidenceIds": ["food_live", "venue_profile_accessibility_metadata", "profile_intelligence_module_policy"],
             }
         )
 
     finish_zone = next((zone for zone in calm_zones if "shade" in zone["breakFeatures"] or zone["zoneId"] == "coveredPlaza"), calm_zones[0])
-    steps.append(_zone_step("finish", "Finish near a flexible exit point", finish_zone, 20, "Ends near shade, restrooms, and easier staff handoff if the group needs to change plans."))
+    steps.append(_zone_step("finish", "Finish near a flexible exit point", finish_zone, 20, "Ends near shade, restrooms, and easier staff handoff if the group needs to change plans.", str(steps[-1].get("zoneId") or ""), venue_catalog))
     return steps[:5]
 
 
-def _zone_step(step_id: str, title: str, zone: dict[str, Any], duration: int, why: str) -> dict[str, Any]:
+def _zone_step(step_id: str, title: str, zone: dict[str, Any], duration: int, why: str, previous_zone_id: str | None, venue_catalog: dict[str, Any]) -> dict[str, Any]:
+    zone_id = str(zone["zoneId"])
     return {
         "id": f"step_{step_id}",
         "type": "break_or_route",
@@ -590,7 +685,7 @@ def _zone_step(step_id: str, title: str, zone: dict[str, Any], duration: int, wh
         "location": zone["name"],
         "zoneId": zone["zoneId"],
         "durationMinutes": duration,
-        "walkMinutes": 4 if zone["score"] >= 120 else 7,
+        "walkMinutes": _walk_minutes(previous_zone_id or "", zone_id, venue_catalog, 4 if zone["score"] >= 120 else 7),
         "why": why,
         "accessibility": [
             "step-free route" if zone["stepFree"] else "staff confirmation needed for route",
@@ -598,9 +693,30 @@ def _zone_step(step_id: str, title: str, zone: dict[str, Any], duration: int, wh
             "stroller-friendly" if zone["strollerFriendly"] else "stroller caution",
         ],
         "nearby": zone["restrooms"] + zone["breakFeatures"],
-        "risks": zone["sensoryNotes"],
-        "evidenceIds": ["zones_live", "weather_live", "venue_profile_accessibility_metadata"],
+        "risks": zone["sensoryNotes"] + _route_claim_warnings(previous_zone_id or "", zone_id, venue_catalog),
+        "evidenceIds": ["zones_live", "weather_live", "venue_profile_accessibility_metadata", "profile_intelligence_route_policy"],
     }
+
+
+def _walk_minutes(from_zone_id: str, to_zone_id: str, venue_catalog: dict[str, Any], fallback: int) -> int:
+    if not from_zone_id or not to_zone_id or from_zone_id == to_zone_id:
+        return max(2, min(12, fallback))
+    path = (venue_catalog.get("pathByZonePair") or {}).get((from_zone_id, to_zone_id)) if isinstance(venue_catalog.get("pathByZonePair"), dict) else None
+    if isinstance(path, dict):
+        return max(2, min(20, _safe_int(path.get("estimatedWalkMinutes"), fallback)))
+    return max(2, min(20, fallback))
+
+
+def _route_claim_warnings(from_zone_id: str, to_zone_id: str, venue_catalog: dict[str, Any]) -> list[str]:
+    if not from_zone_id or not to_zone_id or from_zone_id == to_zone_id:
+        return []
+    path = (venue_catalog.get("pathByZonePair") or {}).get((from_zone_id, to_zone_id)) if isinstance(venue_catalog.get("pathByZonePair"), dict) else None
+    if not isinstance(path, dict):
+        return ["Path timing is a planning estimate; staff should confirm the current route before guest-facing publication."]
+    warnings = [str(item) for item in path.get("blockedClaims", []) if str(item).strip()] if isinstance(path.get("blockedClaims"), list) else []
+    if str(path.get("certificationStatus") or "") != "venue_certified":
+        warnings.append("Path record is derived, not venue-certified.")
+    return list(dict.fromkeys(warnings))
 
 
 def _break_plan(profile: dict[str, Any], steps: list[dict[str, Any]]) -> dict[str, Any]:
@@ -622,6 +738,71 @@ def _guardrails_for_profile(profile: dict[str, Any], readiness: dict[str, Any]) 
     if readiness.get("accessibilityRoutesOpen") is False:
         guardrails.append("Live accessibility route status is degraded; confirm route with staff before moving.")
     return guardrails
+
+
+def _module_policy(profile_intelligence: dict[str, Any], module_id: str) -> dict[str, Any]:
+    module_policy = profile_intelligence.get("modulePolicy") if isinstance(profile_intelligence.get("modulePolicy"), dict) else {}
+    return module_policy.get(module_id, {}) if isinstance(module_policy.get(module_id), dict) else {}
+
+
+def _intelligence_receipt(profile: dict[str, Any], venue_catalog: dict[str, Any], plan_steps: list[dict[str, Any]]) -> dict[str, Any]:
+    profile_intelligence = venue_catalog.get("profileIntelligence") if isinstance(venue_catalog.get("profileIntelligence"), dict) else {}
+    policy = _module_policy(profile_intelligence, "accessibility_journey")
+    step_zone_ids = [str(step.get("zoneId")) for step in plan_steps if str(step.get("zoneId") or "").strip()]
+    used_paths = []
+    path_index = venue_catalog.get("pathByZonePair") if isinstance(venue_catalog.get("pathByZonePair"), dict) else {}
+    for index in range(1, len(step_zone_ids)):
+        path = path_index.get((step_zone_ids[index - 1], step_zone_ids[index]))
+        if isinstance(path, dict):
+            used_paths.append(
+                {
+                    "fromZoneId": step_zone_ids[index - 1],
+                    "toZoneId": step_zone_ids[index],
+                    "estimatedWalkMinutes": path.get("estimatedWalkMinutes"),
+                    "certificationStatus": path.get("certificationStatus"),
+                    "allowedUses": path.get("allowedUses", []),
+                }
+            )
+    segment_needs = venue_catalog.get("segmentNeeds") if isinstance(venue_catalog.get("segmentNeeds"), dict) else {}
+    segment = segment_needs.get(profile.get("guestSegmentId"), {}) if isinstance(segment_needs.get(profile.get("guestSegmentId")), dict) else {}
+    return {
+        "source": profile_intelligence.get("source") or "not_connected",
+        "guestSegmentId": profile.get("guestSegmentId"),
+        "segmentNeeds": {
+            "preferredPace": segment.get("preferredPace"),
+            "avoid": segment.get("avoid", []),
+            "requiredHandoff": segment.get("requiredHandoff", []),
+        },
+        "usedPathRecords": used_paths,
+        "qualityGaps": list(venue_catalog.get("qualityGaps", [])),
+        "modulePolicy": {
+            "mayRecommend": policy.get("mayRecommend", []),
+            "mustReview": policy.get("mustReview", []),
+            "neverClaim": policy.get("neverClaim", []),
+        },
+    }
+
+
+def _learning_receipt(profile: dict[str, Any], plan_steps: list[dict[str, Any]], requires_review: bool, venue_catalog: dict[str, Any]) -> dict[str, Any]:
+    profile_intelligence = venue_catalog.get("profileIntelligence") if isinstance(venue_catalog.get("profileIntelligence"), dict) else {}
+    learning_schema = profile_intelligence.get("learningSchema") if isinstance(profile_intelligence.get("learningSchema"), dict) else {}
+    return {
+        "schemaVersion": learning_schema.get("version") or "venue_profile_learning_schema_v1",
+        "scenarioTaxonomy": "accessibility_journey",
+        "observation": {
+            "guestSegmentId": profile.get("guestSegmentId"),
+            "needs": profile.get("needs", []),
+            "routeZoneIds": [step.get("zoneId") for step in plan_steps if step.get("zoneId")],
+            "staffHandoffRecommended": requires_review,
+            "qualityGapCount": len(venue_catalog.get("qualityGaps", [])),
+        },
+        "eligibleFeedbackLabels": [
+            label
+            for label in learning_schema.get("feedbackLabels", [])
+            if str(label).startswith(("guest_", "edited_", "rerouted_", "blocked_", "allergy_", "accessibility_"))
+        ],
+        "privacyBoundary": "No medical diagnosis, disability identity, protected class, or private guest identifier is captured.",
+    }
 
 
 def _requires_human_review(profile: dict[str, Any], readiness: dict[str, Any]) -> bool:
@@ -677,6 +858,9 @@ def _build_evidence(
     open_rides = sum(1 for ride in rides if isinstance(ride, dict) and ride.get("status") != "down")
     venue_identity = venue_profile.get("venueIdentity") or {}
     venue_counts = (venue_profile.get("readiness") or {}).get("counts") or {}
+    intelligence = (venue_profile.get("realInputs") or {}).get("profileIntelligence") if isinstance((venue_profile.get("realInputs") or {}).get("profileIntelligence"), dict) else {}
+    coverage = intelligence.get("coverage") if isinstance(intelligence.get("coverage"), dict) else {}
+    gaps = intelligence.get("qualityGaps") if isinstance(intelligence.get("qualityGaps"), list) else []
     return [
         {"id": "zones_live", "source": "guestFlow.zones", "label": "Live crowd and comfort state", "detail": f"{len(zones)} zones read; highest density {max_density}%."},
         {"id": "rides_live", "source": "guestFlow.rides", "label": "Live ride status and waits", "detail": f"{open_rides} ride/activity options are currently usable after closure filtering."},
@@ -688,6 +872,18 @@ def _build_evidence(
             "source": "venue_profile.realInputs.locationDetails",
             "label": "Venue Profile accessibility metadata",
             "detail": f"{venue_identity.get('name', 'Active venue')} supplied {len(venue_catalog.get('locations', []))} profile locations, {len(venue_catalog.get('dining', []))} dining records, and {venue_counts.get('safetyInstructions', 0)} safety instructions.",
+        },
+        {
+            "id": "profile_intelligence_route_policy",
+            "source": "venue_profile.realInputs.profileIntelligence",
+            "label": "Profile intelligence route policy",
+            "detail": f"{coverage.get('certifiedPaths', 0)} path records, {coverage.get('capacityZones', 0)} capacity zone assumptions, and {len(gaps)} quality gaps are attached.",
+        },
+        {
+            "id": "profile_intelligence_module_policy",
+            "source": "venue_profile.realInputs.profileIntelligence.modulePolicy.accessibility_journey",
+            "label": "Accessibility Journey module policy",
+            "detail": "Route, allergy, medical, transfer, and accommodation claims are bounded by module-specific review rules.",
         },
     ]
 
