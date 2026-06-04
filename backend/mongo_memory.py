@@ -80,6 +80,7 @@ COLLECTION_PURPOSES = {
     "customer_emergency_incidents": "Customer-submitted emergency incidents with redacted report text, lifecycle state, and operator ownership.",
     "customer_emergency_audit": "Append-style audit events for customer emergency report intake, classification, dispatch, and resolution.",
     "role_access_audit": "Append-style audit events for role session issuance and protected mutation authorization decisions.",
+    "controlled_training_evals": "Latest controlled training eval reports used by resilience gates across Cloud Run instances.",
     "agent_handshake_sessions": "Persisted agent-to-agent handshake sessions, permissions, intent, proposals, commitments, and session lifecycle.",
     "agent_handshake_policy_events": "Append-style policy enforcement decisions for delegated client-agent actions.",
     "executive_guest_feedback_monthly": "Curated aggregate monthly guest feedback for executive experience intelligence.",
@@ -980,6 +981,7 @@ class OperationalMemory:
             "customer_emergency_incidents": [],
             "customer_emergency_audit": [],
             "role_access_audit": [],
+            "controlled_training_evals": [],
             "evidence_refresh_jobs": [],
             "agent_handshake_sessions": [],
             "agent_handshake_policy_events": [],
@@ -1103,6 +1105,8 @@ class OperationalMemory:
         self._create_index(self.db.customer_emergency_audit, [("createdAt", DESCENDING), ("incidentId", ASCENDING), ("eventType", ASCENDING)])
         self._create_index(self.db.role_access_audit, [("createdAt", DESCENDING), ("event_type", ASCENDING), ("resource", ASCENDING)])
         self._create_index(self.db.role_access_audit, [("capability", ASCENDING), ("status", ASCENDING), ("createdAt", DESCENDING)])
+        self._create_index(self.db.controlled_training_evals, [("createdAt", DESCENDING), ("status", ASCENDING)])
+        self._create_index(self.db.controlled_training_evals, [("pack_id", ASCENDING), ("createdAt", DESCENDING)])
         self._create_index(self.db.evidence_refresh_jobs, [("kind", ASCENDING), ("status", ASCENDING), ("updatedAt", DESCENDING)])
         self._create_index(self.db.evidence_refresh_jobs, [("cacheKey", ASCENDING), ("updatedAt", DESCENDING)])
         self._create_index(self.db.experience_studio_generation_runs, [("createdAt", DESCENDING), ("templateId", ASCENDING)])
@@ -2776,6 +2780,39 @@ class OperationalMemory:
     def get_latest_role_access_audit_events(self, limit: int = 20) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit or 20), 100))
         return self.latest_documents("role_access_audit", safe_limit)
+
+    def record_controlled_training_eval(self, report: dict[str, Any]) -> dict[str, Any]:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        report_id = str(report.get("id") or report.get("_id") or f"controlled_training_eval_{hashlib.sha1(_stable_json({**report, 'createdAt': now}).encode('utf-8')).hexdigest()[:16]}")
+        document = _clean_for_bson(
+            {
+                **report,
+                "_id": report_id,
+                "id": report_id,
+                "documentType": "controlled_training_eval",
+                "createdAt": report.get("createdAt") or report.get("created_at") or now,
+            }
+        )
+        collection = self._collection("controlled_training_evals")
+        if collection is not None:
+            collection.replace_one({"_id": report_id}, document, upsert=True)
+        else:
+            self._fallback["controlled_training_evals"] = [
+                row for row in self._fallback["controlled_training_evals"] if row.get("_id") != report_id
+            ]
+            self._fallback["controlled_training_evals"].insert(0, document)
+            self._fallback["controlled_training_evals"] = self._fallback["controlled_training_evals"][:100]
+        return {
+            "status": "stored",
+            "mode": self.mode,
+            "collection": "controlled_training_evals",
+            "id": report_id,
+        }
+
+    def get_latest_controlled_training_eval(self) -> dict[str, Any] | None:
+        rows = self.latest_documents("controlled_training_evals", 1)
+        return rows[0] if rows else None
 
     def record_evidence_refresh_job(self, job: dict[str, Any]) -> str:
         self._invalidate_dashboard_cache()
@@ -4929,6 +4966,27 @@ def get_latest_role_access_audit_events(limit: int = 20) -> list[dict[str, Any]]
         "mongo.role_access_audit.latest",
         lambda: _memory.get_latest_role_access_audit_events(limit),
         lambda error: [],
+    )
+
+
+def record_controlled_training_eval(report: dict[str, Any]) -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.controlled_training_eval.record",
+        lambda: _memory.record_controlled_training_eval(report),
+        lambda error: {
+            "status": "skipped",
+            "mode": "mongo_error",
+            "collection": "controlled_training_evals",
+            "reason": str(error)[:160],
+        },
+    )
+
+
+def get_latest_controlled_training_eval() -> dict[str, Any] | None:
+    return _safe_memory_call(
+        "mongo.controlled_training_eval.latest",
+        lambda: _memory.get_latest_controlled_training_eval(),
+        lambda error: None,
     )
 
 

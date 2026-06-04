@@ -54,6 +54,10 @@ def run_controlled_training_eval(pack: dict[str, Any] | None = None, *, write_ar
 
 
 def latest_controlled_training_eval() -> dict[str, Any]:
+    durable = _latest_durable_eval()
+    if durable:
+        durable["artifacts"] = {**durable.get("artifacts", {}), "durable_storage": "mongodb"}
+        return durable
     directory = _artifact_dir()
     if not os.path.isdir(directory):
         return {"status": "empty", "mode": "controlled_eval_training_gate_latest", "readiness_issues": ["No controlled training eval artifacts have been written."]}
@@ -323,10 +327,30 @@ def _write_eval_artifact(report: dict[str, Any]) -> dict[str, Any]:
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, f"{report.get('id')}.eval.json")
     report_with_path = dict(report)
-    report_with_path["artifacts"] = {"status": "written", "paths": {"eval_report": path}}
+    durable = _write_durable_eval(report)
+    report_with_path["artifacts"] = {"status": "written", "paths": {"eval_report": path}, "durable": durable}
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(report_with_path, handle, indent=2, sort_keys=True)
-    return {"status": "written", "paths": {"eval_report": path}}
+    return {"status": "written", "paths": {"eval_report": path}, "durable": durable}
+
+
+def _write_durable_eval(report: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from mongo_memory import record_controlled_training_eval
+
+        return record_controlled_training_eval(report)
+    except Exception as error:
+        return {"status": "skipped", "mode": "durable_eval_error", "reason": str(error)[:160]}
+
+
+def _latest_durable_eval() -> dict[str, Any] | None:
+    try:
+        from mongo_memory import get_latest_controlled_training_eval
+
+        latest = get_latest_controlled_training_eval()
+    except Exception:
+        latest = None
+    return latest if isinstance(latest, dict) and latest.get("id") else None
 
 
 def _artifact_dir() -> str:

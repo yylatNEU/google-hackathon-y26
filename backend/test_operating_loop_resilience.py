@@ -87,3 +87,29 @@ def test_operating_loop_monitor_writes_timestamped_and_latest_artifacts(tmp_path
     latest = json.loads(latest_path.read_text(encoding="utf-8"))
     assert latest["report"]["decision"] == "allow_loop_claim"
     assert latest["monitor_id"].startswith("operating-loop-resilience-")
+
+
+def test_controlled_training_eval_latest_reads_durable_copy(tmp_path, monkeypatch):
+    import controlled_training_eval
+
+    monkeypatch.setenv("PARKPULSE_CONTROLLED_TRAINING_ARTIFACT_DIR", str(tmp_path))
+    report = {
+        "id": "controlled_training_eval_unit_durable",
+        "created_at": "2026-06-04T19:00:00+00:00",
+        "status": "failed",
+        "mode": "controlled_eval_training_gate",
+        "pack_id": "pack-unit",
+        "readiness_issues": ["react_agent failed eval gate: score 79/80."],
+        "labels_or_reward_changed": False,
+        "llm_used_for_reward_or_label": False,
+        "gcp_training_started": False,
+        "model_promotion_started": False,
+    }
+
+    artifact = controlled_training_eval._write_eval_artifact(report)
+    latest = controlled_training_eval.latest_controlled_training_eval()
+
+    assert artifact["status"] == "written"
+    assert artifact["durable"]["status"] in {"stored", "skipped"}
+    assert latest["id"] == "controlled_training_eval_unit_durable"
+    assert latest["artifacts"]["durable_storage"] == "mongodb"
