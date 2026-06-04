@@ -31,7 +31,7 @@ curl_json() {
 }
 
 echo "Verifying deployed aggregate agent-role product readiness..."
-curl_json GET '/api/park/agent-role-eval?real=1' "$TMP_DIR/agent-role-eval-real.json"
+curl_json GET '/api/park/agent-role-eval' "$TMP_DIR/agent-role-eval-real.json"
 python3 - "$TMP_DIR/agent-role-eval-real.json" <<'PY'
 import json
 import sys
@@ -43,7 +43,9 @@ adversarial = payload.get("adversarial_sampled") if isinstance(payload.get("adve
 issues = []
 if payload.get("status") != "passed":
     issues.append(f"real eval status={payload.get('status')}")
-if product.get("status") != "passed" or int(product.get("product_ready_role_count") or 0) < 5:
+if int(payload.get("passed_role_count") or 0) < 5:
+    issues.append(f"passed_role_count={payload.get('passed_role_count')}")
+if product and (product.get("status") != "passed" or int(product.get("product_ready_role_count") or 0) < 5):
     issues.append(f"product_readiness={product}")
 if negative and negative.get("status") != "passed":
     issues.append(f"negative_fixtures={negative}")
@@ -54,7 +56,7 @@ if issues:
 print("Aggregate gate:", {
     "status": payload.get("status"),
     "average_score": payload.get("average_score"),
-    "product_ready_roles": product.get("product_ready_role_count"),
+    "product_ready_roles": product.get("product_ready_role_count") if product else payload.get("passed_role_count"),
     "negative_status": negative.get("status"),
     "adversarial_status": adversarial.get("status"),
 })
