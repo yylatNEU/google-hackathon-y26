@@ -1520,8 +1520,9 @@ async def park_delivery_agent_proof(request: CallableAgentRunRequest):
 
 
 @app.get("/api/park/agents/memory/status")
-async def park_memory_agent_status(query: str = "ride down crowd staff food"):
+async def park_memory_agent_status(query: str = "ride down crowd staff food", refresh: bool = False):
     boundary = enforce_agent_tool_boundary("memory_ops_agent", "inspect_runtime_status", {"query": query})
+    refresh_status = init_operational_memory(force=True) if refresh else None
     dashboard = get_operational_memory_dashboard(query)
     report = build_memory_ops_report(query)
     return {
@@ -1529,6 +1530,7 @@ async def park_memory_agent_status(query: str = "ride down crowd staff food"):
         "agent": "memory_ops_agent",
         "service": "memory_readiness_status",
         "agentBoundary": boundary,
+        "refreshStatus": refresh_status,
         "dashboard": dashboard,
         "memoryOps": report,
         "executionBoundary": "diagnostic callable only; no live dispatch or unsafe automatic repair",
@@ -1538,7 +1540,8 @@ async def park_memory_agent_status(query: str = "ride down crowd staff food"):
 @app.post("/api/park/agents/memory/status")
 async def park_memory_agent_status_post(request: CallableAgentRunRequest):
     query = str(request.context.get("query") or request.context.get("text") or "ride down crowd staff food")
-    return await park_memory_agent_status(query)
+    refresh = str(request.context.get("refresh") or request.context.get("forceRefresh") or "").strip().lower() in {"1", "true", "yes", "on"}
+    return await park_memory_agent_status(query, refresh=refresh)
 
 
 @app.get("/")
