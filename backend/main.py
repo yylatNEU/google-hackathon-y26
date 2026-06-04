@@ -834,6 +834,40 @@ def _role_authorization_payload(payload: dict[str, Any], scope: dict[str, Any] |
     }
 
 
+def _durable_role_authorization_rows(limit: int) -> list[dict[str, Any]]:
+    try:
+        from park_role_access_audit import role_access_audit_status
+
+        payload = role_access_audit_status(limit=limit)
+    except Exception:
+        return []
+    events = payload.get("events", []) if isinstance(payload.get("events"), list) else []
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("event_type") or "")
+        allowed = False if event_type in {"mutation_denied", "role_session_denied"} else True if event_type in {"mutation_allowed", "role_session_issued"} else None
+        rows.append(
+            {
+                "id": event.get("_id") or event.get("id"),
+                "created_at": event.get("createdAt") or event.get("created_at"),
+                "method": None,
+                "path": "/api/park/operator-command" if event_type == "mutation_denied" and event.get("resource") == "operator_command" else None,
+                "role": event.get("role"),
+                "capability": event.get("capability"),
+                "resource": event.get("resource"),
+                "status": event.get("status"),
+                "reason": event.get("reason"),
+                "allowed": allowed,
+                "identity": {"subject": event.get("subject")} if event.get("subject") else {},
+                "audit_storage": payload.get("storage"),
+                "audit_event_type": event_type,
+            }
+        )
+    return rows
+
+
 def _identity_readiness_payload() -> dict[str, Any]:
     secret = _role_auth_secret()
     default_secret = secret == "parkpulse-local-dev-secret-change-before-production"
@@ -13214,7 +13248,14 @@ async def app(scope, receive, send):
         limit_raw = (query.get("limit") or [None])[0]
         if not await _authorize_or_send(send, scope, "read_ops_evidence", "role_authorization_log", None, default_role="ops_team"):
             return
-        rows = _recent_jsonl_records(_role_authorization_log_path(), limit=int(limit_raw) if limit_raw else 40)
+        limit = int(limit_raw) if limit_raw else 40
+        local_rows = _recent_jsonl_records(_role_authorization_log_path(), limit=limit)
+        durable_rows = _durable_role_authorization_rows(max(limit, 40))
+        rows_by_id: dict[str, dict[str, Any]] = {}
+        for row in durable_rows + local_rows:
+            row_id = str(row.get("id") or f"{row.get('created_at')}:{row.get('path')}:{row.get('capability')}:{row.get('status')}")
+            rows_by_id[row_id] = row
+        rows = sorted(rows_by_id.values(), key=lambda row: str(row.get("created_at") or row.get("createdAt") or ""), reverse=True)[:limit]
         await _send_json(
             send,
             200,
@@ -13223,6 +13264,7 @@ async def app(scope, receive, send):
                 "mode": "role_authorization_log",
                 "row_count": len(rows),
                 "rows": rows,
+                "storage": "jsonl_plus_durable_audit",
                 "uses_seed_data": False,
                 "loads_bigquery_per_tick": False,
                 "llm_control_authority": False,

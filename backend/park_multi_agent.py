@@ -1771,6 +1771,97 @@ def _live_feed_reasoning_failure_modes(department: str, policy_status: str, cons
     return deduped[:4]
 
 
+def _ride_down_recovery_decision_board(
+    *,
+    proposed_action: dict[str, Any],
+    evidence_rows: list[dict[str, Any]],
+    event_ids: list[Any],
+    policy_status: str,
+    evidence_argument: str,
+) -> dict[str, Any]:
+    affected_ride = proposed_action.get("ride") or proposed_action.get("asset") or "affected_ride"
+    summaries = [str(row.get("summary") or row.get("signal_type") or row.get("source") or "live signal") for row in evidence_rows[:5]]
+    sources = list(dict.fromkeys(str(row.get("source")) for row in evidence_rows if row.get("source")))
+    branches = [
+        {
+            "branch_id": "split_route_hold_reopen",
+            "decision": "preferred_pending_executive",
+            "owner": "operations_lead_with_executive",
+            "why": "Reduces queue spillback while preserving the safety and maintenance hold on reopening.",
+            "required_checks": ["destination density below threshold", "safety does not object", "guest message remains compliance-held"],
+            "expected_effect": "Lower queue pressure without promising reopen or moving guests into a constrained destination.",
+            "measurement": ["queue spillback", "destination density", "routing take rate", "guest care complaints"],
+        },
+        {
+            "branch_id": "maintenance_reopen_request",
+            "decision": "rejected_until_clearance",
+            "owner": "maintenance_lead_and_safety",
+            "why": "A ride-flow problem cannot become a reopening action until inspection and safety clearance exist.",
+            "required_checks": ["inspection log clears asset", "safety removes reopen hold"],
+            "expected_effect": "Protects safety boundary even if queue pressure creates revenue or guest-pressure incentives.",
+            "measurement": ["inspection status", "safety hold status", "downtime duration"],
+        },
+        {
+            "branch_id": "public_guest_message",
+            "decision": "held_for_compliance_and_executive",
+            "owner": "compliance_agent_then_executive",
+            "why": "Public wording can create demand movement, compensation expectations, or reopening certainty.",
+            "required_checks": ["privacy review", "no compensation promise", "destination capacity review"],
+            "expected_effect": "Avoids guest confusion without making unsafe or unsupported claims.",
+            "measurement": ["complaint rate", "message take rate", "destination density"],
+        },
+        {
+            "branch_id": "monitor_only",
+            "decision": "fallback_if_destination_capacity_unclear",
+            "owner": "operations_lead",
+            "why": "Safer than bad routing when destination capacity or feed confidence is insufficient, but leaves queue pressure unresolved.",
+            "required_checks": ["feed freshness", "destination capacity unknown or unsafe"],
+            "expected_effect": "Avoids secondary crowding at the cost of slower recovery.",
+            "measurement": ["wait time", "queue guests", "operator open cases"],
+        },
+        {
+            "branch_id": "labor_metering_support",
+            "decision": "supporting_branch_only",
+            "owner": "hr_labor_agent",
+            "why": "Staff can meter flow and answer questions, but labor support does not authorize routing, reopening, or public messaging.",
+            "required_checks": ["skill match", "break protection", "fatigue and overtime limits"],
+            "expected_effect": "Improves follow-through quality without crossing department write authority.",
+            "measurement": ["staff coverage", "break exceptions", "queue edge incidents"],
+        },
+    ]
+    return {
+        "mode": "ride_down_recovery_decision_board",
+        "affected_ride": affected_ride,
+        "selected_branch_id": "split_route_hold_reopen",
+        "policy_status": policy_status,
+        "live_feed_sources": sources,
+        "live_feed_event_ids": event_ids[:8],
+        "live_evidence_summary": summaries,
+        "evidence_argument": evidence_argument,
+        "tradeoff_vector": {
+            "safety": "reopen and security-sensitive actions stay held until authorized checks clear",
+            "guest": "split routing can reduce queue frustration but must not overload destination zones",
+            "labor": "staffing support is bounded by skill, fatigue, break, and overtime limits",
+            "finance": "revenue and refund exposure inform priority but cannot override safety gates",
+            "communications": "guest message is useful but remains compliance/executive gated",
+        },
+        "branch_count": len(branches),
+        "branches": branches,
+        "explicit_rejections": [
+            "No ride reopening from an operations recommendation.",
+            "No public guest message from the Operations Agent.",
+            "No route execution until Executive selects a destination and Safety accepts the destination crowd risk.",
+        ],
+        "learning_carry_forward": {
+            "scenario_slice": "ride_down",
+            "label": "ride_down_branch_tradeoff",
+            "selected_branch": "split_route_hold_reopen",
+            "rejected_branches": [branch["branch_id"] for branch in branches if branch["decision"].startswith("rejected")],
+            "next_eval_question": "Did split routing reduce queue pressure without increasing destination density or guest complaints?",
+        },
+    }
+
+
 def _live_feed_department_reasoning(proposal: dict[str, Any], evidence_rows: list[dict[str, Any]], constraints: list[str], confidence: float) -> dict[str, Any]:
     envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
     proposed_action = proposal.get("proposed_action", {}) if isinstance(proposal.get("proposed_action"), dict) else {}
@@ -1810,7 +1901,7 @@ def _live_feed_department_reasoning(proposal: dict[str, Any], evidence_rows: lis
     recommend = f"Select {requested_tool or action_name} and keep execution behind policy and Tool Executor gates."
     justify = f"Uses event ids {', '.join(str(item) for item in event_ids[:4]) if event_ids else 'none'} with policy status {policy_status}; top live evidence says {evidence_summaries[0] if evidence_summaries else 'no summary'}."
     trace = "Record diagnosis, candidate comparison, forecast, failure modes, policy result, and executor outcome for memory."
-    return {
+    reasoning = {
         "contract": "observe_interpret_predict_recommend_justify_trace",
         "diagnosis": {
             "department": department,
@@ -1850,6 +1941,19 @@ def _live_feed_department_reasoning(proposal: dict[str, Any], evidence_rows: lis
         },
         "depth_score": round(min(0.98, 0.58 + min(len(candidate_actions), 3) * 0.08 + min(len(evidence_rows), 4) * 0.04 + min(len(constraints), 3) * 0.03), 2),
     }
+    if department == "operations" and ("ride" in str(proposed_action.get("target") or "").lower() or "route" in requested_tool.lower()):
+        recovery_board = _ride_down_recovery_decision_board(
+            proposed_action=proposed_action,
+            evidence_rows=evidence_rows,
+            event_ids=event_ids,
+            policy_status=policy_status,
+            evidence_argument=evidence_argument,
+        )
+        reasoning["ride_down_recovery_board"] = recovery_board
+        reasoning["forecast"]["ride_down_selected_branch"] = recovery_board["selected_branch_id"]
+        reasoning["memory_carry_forward"]["carry"].extend(["ride_down_selected_branch", "ride_down_rejected_branches", "destination_density_outcome"])
+        reasoning["memory_carry_forward"]["do_better_next_time"].insert(0, recovery_board["learning_carry_forward"]["next_eval_question"])
+    return reasoning
 
 
 def _proposal_has_deep_department_reasoning(proposal: dict[str, Any]) -> bool:
@@ -2375,6 +2479,7 @@ def _live_feed_tradeoff_score(proposal: dict[str, Any]) -> dict[str, Any]:
     profile_constraints = profile_context.get("profile_constraints", []) if isinstance(profile_context.get("profile_constraints"), list) else []
     reasoning = proposal.get("department_reasoning", {}) if isinstance(proposal.get("department_reasoning"), dict) else {}
     profile_counterfactual = reasoning.get("profile_counterfactual_summary", {}) if isinstance(reasoning.get("profile_counterfactual_summary"), dict) else {}
+    ride_down_board = reasoning.get("ride_down_recovery_board", {}) if isinstance(reasoning.get("ride_down_recovery_board"), dict) else {}
     evidence_argument = reasoning.get("evidence_argument") or _evidence_argument_from_proposal(proposal)
     disposition = proposal.get("action_disposition", {}) if isinstance(proposal.get("action_disposition"), dict) else {}
     return {
@@ -2391,6 +2496,9 @@ def _live_feed_tradeoff_score(proposal: dict[str, Any]) -> dict[str, Any]:
         "profile_counterfactual_action": profile_counterfactual.get("best_profile_adjusted_action"),
         "profile_counterfactual_score": profile_counterfactual.get("best_profile_adjusted_score"),
         "profile_precedence": profile_context.get("precedence"),
+        "ride_down_selected_branch": ride_down_board.get("selected_branch_id"),
+        "ride_down_branch_count": ride_down_board.get("branch_count") or len(ride_down_board.get("branches", []) if isinstance(ride_down_board.get("branches"), list) else []),
+        "ride_down_explicit_rejections": ride_down_board.get("explicit_rejections", []),
         "evidence_argument": evidence_argument,
         "live_feed_event_ids": disposition.get("live_feed_event_ids") or (proposal.get("live_feed_grounding", {}) if isinstance(proposal.get("live_feed_grounding"), dict) else {}).get("event_ids", []),
         "decision": decision,
