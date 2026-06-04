@@ -689,12 +689,168 @@
       line-height: 1.25;
     }
 
+    .live-demo {
+      display: grid;
+      grid-template-columns: minmax(0, 1.28fr) 340px;
+      gap: 14px;
+      align-items: stretch;
+    }
+
+    .live-conversation,
+    .live-side {
+      border: 1px solid var(--line);
+      background: #090f13;
+      border-radius: 8px;
+      padding: 14px;
+      min-width: 0;
+    }
+
+    .live-conversation {
+      display: grid;
+      gap: 10px;
+      min-height: 430px;
+      align-content: start;
+    }
+
+    .live-turn {
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 8px;
+      padding: 12px;
+      background: rgba(255,255,255,.025);
+      opacity: .42;
+      transform: translateY(3px);
+      transition: opacity .24s ease, transform .24s ease, border-color .24s ease, background .24s ease;
+    }
+
+    .live-turn.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .live-turn.active {
+      border-color: rgba(73, 214, 232, .72);
+      background: rgba(73, 214, 232, .08);
+    }
+
+    .live-turn-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .live-bubbles {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .live-bubble {
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 8px;
+      padding: 11px;
+      min-height: 94px;
+      background: rgba(255,255,255,.03);
+    }
+
+    .live-bubble.client {
+      border-color: rgba(255, 209, 102, .36);
+      background: rgba(255, 209, 102, .07);
+    }
+
+    .live-bubble.park {
+      border-color: rgba(73, 214, 232, .36);
+      background: rgba(73, 214, 232, .07);
+    }
+
+    .live-bubble strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--ink);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .live-bubble p,
+    .live-outcome p,
+    .timeline-step p {
+      margin: 0;
+      color: #c9d8de;
+      font-size: 13px;
+      line-height: 1.45;
+      font-weight: 750;
+    }
+
+    .live-outcome {
+      margin-top: 10px;
+      border-left: 3px solid var(--green);
+      padding: 8px 0 8px 10px;
+    }
+
+    .live-side {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+
+    .timeline-step {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 9px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      background: rgba(255,255,255,.025);
+    }
+
+    .timeline-step.done {
+      border-color: rgba(131, 227, 119, .35);
+      background: rgba(131, 227, 119, .08);
+    }
+
+    .timeline-step.active {
+      border-color: rgba(73, 214, 232, .62);
+      background: rgba(73, 214, 232, .1);
+    }
+
+    .timeline-dot {
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: rgba(255,255,255,.08);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 1000;
+    }
+
+    .timeline-step.done .timeline-dot {
+      background: var(--green);
+      color: var(--ink-dark);
+    }
+
+    .timeline-step.active .timeline-dot {
+      background: var(--cyan);
+      color: var(--ink-dark);
+    }
+
+    .timeline-step strong {
+      display: block;
+      margin-bottom: 3px;
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
     .footer-space {
       height: 24px;
     }
 
     @media (max-width: 1100px) {
       .main-grid, .split-3 { grid-template-columns: 1fr; }
+      .live-demo { grid-template-columns: 1fr; }
       .metrics { grid-template-columns: repeat(2, 1fr); }
       .stage { min-height: 620px; }
       .node { width: min(260px, 42vw); }
@@ -709,6 +865,7 @@
       .api-box { width: 100%; }
       .actions { justify-content: flex-start; }
       .metrics, .form-grid, .policy-grid, .story-grid, .outcome-grid { grid-template-columns: 1fr; }
+      .live-bubbles { grid-template-columns: 1fr; }
       .node { position: relative; left: auto !important; right: auto !important; top: auto !important; bottom: auto !important; width: auto; margin: 10px; }
       .core { position: relative; left: auto; top: auto; transform: none; width: auto; margin: 10px; }
       .pulse, .stage svg { display: none; }
@@ -809,6 +966,27 @@
             </div>
             <div id="receiptBox" class="receipt json-box">Run a handshake to issue a receipt.</div>
           </section>
+        </div>
+      </section>
+
+      <section class="card pad">
+        <div class="section-title">
+          <div>
+            <div class="kicker">Live agent exchange</div>
+            <h2>One run, shown as a negotiation</h2>
+          </div>
+          <span id="liveBadge" class="badge info">ready</span>
+        </div>
+        <div class="live-demo">
+          <div id="liveConversation" class="live-conversation"></div>
+          <aside class="live-side">
+            <div>
+              <div class="kicker">Progression</div>
+              <h3 id="liveHeadline">Run the agent demo</h3>
+              <p class="section-note" id="liveSubhead">The protocol evidence stays below; this panel shows what the agents actually decided.</p>
+            </div>
+            <div id="liveTimeline"></div>
+          </aside>
         </div>
       </section>
 
@@ -1035,8 +1213,10 @@
       externalClient: null,
       protocolDocs: null,
       lastPayload: null,
+      liveStep: 0,
       error: null
     };
+    let liveTimer = null;
 
     const $ = (id) => document.getElementById(id);
     const pretty = (value) => JSON.stringify(value, null, 2);
@@ -1099,11 +1279,14 @@
     }
 
     function setRunning(label) {
+      window.clearInterval(liveTimer);
       state.running = true;
+      state.liveStep = 0;
       $("runStatus").textContent = label;
       $("runStatus").className = "badge warn";
       $("coreStatus").textContent = "running";
       for (const button of document.querySelectorAll("button")) button.disabled = true;
+      if ($("liveConversation")) renderLiveExchange();
     }
 
     function clearRunning(status) {
@@ -1117,8 +1300,10 @@
     function showError(error) {
       state.error = error.message || String(error);
       state.lastPayload = { status: "error", reason: state.error };
+      state.liveStep = 0;
       $("rawPayload").textContent = pretty(state.lastPayload);
       clearRunning("error");
+      renderLiveExchange();
     }
 
     async function runCustomHandshake() {
@@ -1168,6 +1353,7 @@
         state.lastPayload = { input, session: refreshed.session, receipt: receiptPayload.receipt, verification, draft_verification: draftVerification, local_steps: steps };
         renderAll();
         clearRunning("passed");
+        startLivePlayback();
       } catch (error) {
         showError(error);
       }
@@ -1185,6 +1371,7 @@
         state.lastPayload = payload;
         renderAll();
         clearRunning("passed");
+        startLivePlayback();
       } catch (error) {
         showError(error);
       }
@@ -1212,6 +1399,7 @@
         state.lastPayload = payload;
         renderAll();
         clearRunning("passed");
+        startLivePlayback();
       } catch (error) {
         showError(error);
       }
@@ -1326,6 +1514,153 @@
       $("receiptBadge").textContent = state.verification?.status || "issued";
       $("receiptBadge").className = state.verification?.status === "verified" ? "badge good" : "badge warn";
       $("metricReceipt").textContent = state.verification?.status === "verified" ? "verified" : "issued";
+    }
+
+    function shortList(values, fallback) {
+      const list = Array.isArray(values) ? values.filter(Boolean) : [];
+      if (!list.length) return fallback;
+      return list.slice(0, 4).map((item) => titleize(item)).join(", ");
+    }
+
+    function planText() {
+      const plan = state.session?.proposal?.plan || state.receipt?.accepted_plan?.plan;
+      if (Array.isArray(plan) && plan.length) return plan.join(" -> ");
+      return scenarios[state.selectedScenario].summary;
+    }
+
+    function blockedPolicyText() {
+      const decisions = state.session?.policy_decisions || state.receipt?.policy_gates_triggered || [];
+      const blocked = decisions.filter((item) => item.status === "blocked" || item.status === "requires_user_approval");
+      if (!blocked.length) return "No delegated unsafe action was allowed.";
+      return blocked.slice(-2).map((item) => `${titleize(item.action)} stayed ${titleize(item.status)}: ${item.reason || "approval required"}`).join(" ");
+    }
+
+    function buildLiveSteps() {
+      const input = currentInput();
+      const session = state.session || {};
+      const permissions = session.permissions || {};
+      const intent = session.intent || {};
+      const proposal = session.proposal || {};
+      const monitoring = session.monitoring || {};
+      const verification = state.verification?.status || "not issued";
+      const consent = state.externalClient?.consent_grant;
+      const transcript = state.externalClient?.external_agent_transcript || [];
+      const proposalReview = transcript.find((turn) => turn.label === "proposal_review")?.decision || {};
+      const counter = transcript.find((turn) => turn.label === "counterproposal")?.decision || {};
+      const selectedAlternative = proposalReview.chosen_alternative ? titleize(proposalReview.chosen_alternative) : "best bounded plan";
+      return [
+        {
+          phase: "Identity",
+          title: "External agent asks to speak for the represented party",
+          client: `I am ${input.agentId}. I represent ${input.represents}. I need a bounded session for ${titleize(input.goal)}.`,
+          park: session.identity ? `Verified ${titleize(session.identity.status)} as ${titleize(session.identity.guest_role || "counterparty")} with ${titleize(session.identity.trust_level || "standard")} trust.` : "Waiting to verify agent identity and represented subject.",
+          outcome: consent ? `Consent grant ${consent.grant_id} is signed and revocable.` : "No plan starts until representation is verified."
+        },
+        {
+          phase: "Scope",
+          title: "The agents agree on what can and cannot be shared",
+          client: `Can share ${shortList(permissions.client_agent?.can_share, shortList(input.scopes, "declared scopes"))}. Cannot do ${shortList(permissions.client_agent?.cannot_do, shortList(input.cannotDo, "unsafe actions"))}.`,
+          park: `Can offer ${shortList(permissions.park_agent?.can_offer, "route planning, alerts, food recommendations, and gated offers")}.`,
+          outcome: "Payment, refund, medical, identity, and safety-bypass actions remain outside delegated authority."
+        },
+        {
+          phase: "Intent",
+          title: "The client agent turns preference into an objective",
+          client: `Goal: ${titleize(intent.client_agent?.goal || input.goal)}. Constraints: ${compact(intent.client_agent?.constraints || input.constraints, 180)}.`,
+          park: intent.park_agent?.accepted_goal ? `Accepted targets: ${shortList(intent.park_agent.optimization_targets, "low wait, safe, useful")}.` : "Waiting for a goal before proposing.",
+          outcome: "The park optimizes for declared preferences, not a generic itinerary."
+        },
+        {
+          phase: "Proposal",
+          title: "ParkPulse proposes a bounded plan",
+          client: `Evaluating proposal against time, authority, safety, and user value. Selected alternative: ${selectedAlternative}.`,
+          park: proposal.proposal_id ? `${proposal.proposal_id}: ${planText()}. Confidence ${Math.round(Number(proposal.confidence || 0) * 100)}%.` : `Draft plan: ${planText()}.`,
+          outcome: "The proposal is inspectable before the client agent accepts it."
+        },
+        {
+          phase: "Counter",
+          title: "The external agent negotiates, not just posts a request",
+          client: counter.counter_request || proposal.countered_from?.counter_request || "Counter for a plan that better fits the represented party.",
+          park: proposal.rationale || "ParkPulse revises the plan while preserving authority boundaries.",
+          outcome: "This is the agent-to-agent value: preferences become tradeoffs, not one-shot API parameters."
+        },
+        {
+          phase: "Commit",
+          title: "The final plan is committed without expanding authority",
+          client: session.commitment?.accepted ? "Accepted. Notify the represented party with the bounded result." : "Waiting for final acceptance.",
+          park: session.commitment?.commitment_id ? `Commitment ${session.commitment.commitment_id} recorded for ${planText()}.` : "No commitment yet.",
+          outcome: monitoring.accepted_resolution || "The run becomes a trackable session once committed."
+        },
+        {
+          phase: "Boundary",
+          title: "Unsafe or sensitive actions are blocked",
+          client: `Probe requested: ${titleize(input.commerceAction)}.`,
+          park: blockedPolicyText(),
+          outcome: "The agent can negotiate experience, but cannot silently spend money, release unsafe stock, or share protected data."
+        },
+        {
+          phase: "Receipt",
+          title: "The outcome is verifiable and replayable",
+          client: verification === "verified" ? "Receipt verified. Notify represented party." : "Waiting for receipt verification.",
+          park: state.receipt ? `Receipt ${state.receipt.receipt_id} signed with digest ${String(state.receipt.signature?.sha256 || "").slice(0, 18)}...` : "No receipt issued yet.",
+          outcome: verification === "verified" ? "Judge can inspect the signed outcome instead of trusting the UI." : "Run the demo to issue a receipt."
+        }
+      ];
+    }
+
+    function renderLiveExchange() {
+      const steps = buildLiveSteps();
+      const maxIndex = Math.max(0, Math.min(state.liveStep, steps.length - 1));
+      const hasSession = Boolean(state.session);
+      $("liveBadge").textContent = state.running ? "running" : hasSession ? "played" : "ready";
+      $("liveBadge").className = state.running ? "badge warn" : hasSession ? "badge good" : "badge info";
+      $("liveHeadline").textContent = steps[maxIndex]?.title || "Run the agent demo";
+      $("liveSubhead").textContent = hasSession
+        ? `${steps.length} protocol moments from the actual run.`
+        : "The protocol evidence stays below; this panel shows what the agents actually decided.";
+      $("liveConversation").innerHTML = steps.map((step, index) => {
+        const visible = index <= maxIndex;
+        const cls = `live-turn${visible ? " visible" : ""}${index === maxIndex ? " active" : ""}`;
+        return `<article class="${cls}">
+          <div class="live-turn-head">
+            <strong>${safe(step.title)}</strong>
+            <span class="badge ${visible ? "info" : ""}">${safe(step.phase)}</span>
+          </div>
+          <div class="live-bubbles">
+            <div class="live-bubble client">
+              <strong>External agent</strong>
+              <p>${safe(step.client)}</p>
+            </div>
+            <div class="live-bubble park">
+              <strong>ParkPulse agent</strong>
+              <p>${safe(step.park)}</p>
+            </div>
+          </div>
+          <div class="live-outcome"><p>${safe(step.outcome)}</p></div>
+        </article>`;
+      }).join("");
+      $("liveTimeline").innerHTML = steps.map((step, index) => {
+        const cls = index < maxIndex ? "timeline-step done" : index === maxIndex ? "timeline-step active" : "timeline-step";
+        return `<div class="${cls}">
+          <div class="timeline-dot">${index + 1}</div>
+          <div><strong>${safe(step.phase)}</strong><p>${safe(step.title)}</p></div>
+        </div>`;
+      }).join("");
+    }
+
+    function startLivePlayback() {
+      window.clearInterval(liveTimer);
+      const steps = buildLiveSteps();
+      state.liveStep = 0;
+      renderLiveExchange();
+      liveTimer = window.setInterval(() => {
+        state.liveStep += 1;
+        if (state.liveStep >= steps.length - 1) {
+          state.liveStep = steps.length - 1;
+          window.clearInterval(liveTimer);
+        }
+        renderLiveExchange();
+      }, 850);
     }
 
     function renderStorySteps() {
@@ -1632,6 +1967,7 @@ await client.externalClientDemo({ scenario_mode: "${safe(state.selectedScenario)
       $("apiUrl").value = state.api;
       renderHeader();
       renderPhases();
+      renderLiveExchange();
       renderStorySteps();
       renderOutcomeSummary();
       renderScenarioBoard();
