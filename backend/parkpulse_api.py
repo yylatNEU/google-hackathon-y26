@@ -47,6 +47,8 @@ from pydantic import BaseModel, Field
 from agent_handshake import (
     agent_contract,
     agent_handshake_scenario_catalog,
+    agent_handshake_live_state_feed,
+    agent_handshake_protocol_docs,
     agent_trust_registry_status,
     capability_handshake,
     certify_agent_onboarding,
@@ -64,6 +66,7 @@ from agent_handshake import (
     identity_handshake,
     intent_handshake,
     issue_delegation_token,
+    issue_agent_consent_grant,
     list_agent_credential_revocations,
     list_agent_trust_audit_events,
     list_agent_trust_keys,
@@ -74,6 +77,7 @@ from agent_handshake import (
     register_agent_onboarding,
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
+    run_external_client_agent_demo,
     run_agent_handshake_policy_challenges,
     run_agent_handshake_scenario_evaluations,
     session_protocol_receipt,
@@ -649,6 +653,22 @@ async def park_agent_handshake_scenarios():
     return agent_handshake_scenario_catalog()
 
 
+@app.get("/api/park/agent-handshake/docs")
+async def park_agent_handshake_docs():
+    return agent_handshake_protocol_docs()
+
+
+@app.get("/api/park/agent-handshake/live-state")
+@app.post("/api/park/agent-handshake/live-state")
+async def park_agent_handshake_live_state(body: dict[str, Any] | None = None):
+    return agent_handshake_live_state_feed(body or {})
+
+
+@app.post("/api/park/agent-handshake/consent-grant")
+async def park_agent_handshake_consent_grant(body: dict[str, Any] | None = None):
+    return issue_agent_consent_grant(body or {})
+
+
 @app.get("/api/park/agent-handshake/scenario-eval")
 @app.post("/api/park/agent-handshake/scenario-eval")
 async def park_agent_handshake_scenario_eval(body: dict[str, Any] | None = None):
@@ -659,6 +679,12 @@ async def park_agent_handshake_scenario_eval(body: dict[str, Any] | None = None)
 @app.post("/api/park/agent-handshake/policy-challenges")
 async def park_agent_handshake_policy_challenges(body: dict[str, Any] | None = None):
     return run_agent_handshake_policy_challenges(body or {})
+
+
+@app.get("/api/park/agent-handshake/external-client-demo")
+@app.post("/api/park/agent-handshake/external-client-demo")
+async def park_agent_handshake_external_client_demo(body: dict[str, Any] | None = None):
+    return run_external_client_agent_demo(body or {})
 
 
 @app.post("/api/park/agent-handshake/verify-artifact")

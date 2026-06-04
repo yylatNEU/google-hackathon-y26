@@ -327,6 +327,8 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
         from agent_handshake import (
             agent_contract,
             agent_handshake_scenario_catalog,
+            agent_handshake_live_state_feed,
+            agent_handshake_protocol_docs,
             agent_trust_registry_status,
             capability_handshake,
             certification_issuer_metadata,
@@ -343,6 +345,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             identity_handshake,
             intent_handshake,
             issue_delegation_token,
+            issue_agent_consent_grant,
             list_agent_credential_revocations,
             list_agent_trust_audit_events,
             list_agent_trust_keys,
@@ -353,6 +356,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             register_agent_onboarding,
             revoke_agent_certification_credential,
             rotate_agent_certification_key,
+            run_external_client_agent_demo,
             run_agent_handshake_policy_challenges,
             run_agent_handshake_scenario_evaluations,
             session_protocol_receipt,
@@ -368,11 +372,23 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             if self.command == "GET" and path == "/api/park/agent-handshake/scenarios":
                 self._send_direct_json(200, agent_handshake_scenario_catalog())
                 return True
+            if self.command == "GET" and path == "/api/park/agent-handshake/docs":
+                self._send_direct_json(200, agent_handshake_protocol_docs())
+                return True
+            if self.command in {"GET", "POST"} and path == "/api/park/agent-handshake/live-state":
+                self._send_direct_json(200, agent_handshake_live_state_feed(payload))
+                return True
+            if self.command == "POST" and path == "/api/park/agent-handshake/consent-grant":
+                self._send_direct_json(200, issue_agent_consent_grant(payload))
+                return True
             if self.command in {"GET", "POST"} and path == "/api/park/agent-handshake/scenario-eval":
                 self._send_direct_json(200, run_agent_handshake_scenario_evaluations(payload))
                 return True
             if self.command in {"GET", "POST"} and path == "/api/park/agent-handshake/policy-challenges":
                 self._send_direct_json(200, run_agent_handshake_policy_challenges(payload))
+                return True
+            if self.command in {"GET", "POST"} and path == "/api/park/agent-handshake/external-client-demo":
+                self._send_direct_json(200, run_external_client_agent_demo(payload))
                 return True
             if self.command == "POST" and path == "/api/park/agent-handshake/verify-artifact":
                 self._send_direct_json(200, verify_protocol_artifact(payload))

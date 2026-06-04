@@ -15,6 +15,8 @@ from agent_handshake import (  # noqa: E402
     _sessions,
     _verify_certification_claims,
     agent_handshake_scenario_catalog,
+    agent_handshake_live_state_feed,
+    agent_handshake_protocol_docs,
     agent_contract,
     capability_handshake,
     certify_agent_onboarding,
@@ -26,6 +28,7 @@ from agent_handshake import (  # noqa: E402
     get_session,
     identity_handshake,
     intent_handshake,
+    issue_agent_consent_grant,
     issue_delegation_token,
     monitor_session,
     propose_plan,
@@ -33,6 +36,7 @@ from agent_handshake import (  # noqa: E402
     register_agent_onboarding,
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
+    run_external_client_agent_demo,
     run_agent_handshake_scenario_evaluations,
     run_agent_handshake_policy_challenges,
     session_protocol_receipt,
@@ -290,9 +294,20 @@ def test_protocol_scenario_catalog_and_all_mode_eval_pass():
     assert evaluated["scenario_count"] == len(scenario_ids)
     assert evaluated["passed"] == evaluated["scenario_count"]
     assert evaluated["average_score"] == 1
+    assert evaluated["judge_report"]["overall_score"] >= 0.9
+    assert {item["dimension"] for item in evaluated["judge_report"]["dimensions"]} >= {
+        "interaction_depth",
+        "policy_reasoning",
+        "handoff_coverage",
+        "receipt_integrity",
+        "counterparty_autonomy",
+    }
     assert {item["scenario_id"] for item in evaluated["results"]} == scenario_ids
     assert all(item["evaluation"]["case"].startswith("protocol_scenario_") for item in evaluated["results"])
     for item in evaluated["results"]:
+        assert item["judge"]["overall_score"] >= 0.85
+        assert len(item["interaction_trace"]) >= 6
+        assert item["receipt_verification"]["status"] == "verified"
         _sessions.pop(item["session_id"], None)
 
 
@@ -377,6 +392,52 @@ def test_dedicated_supply_chain_handshake_demo_uses_supplier_scopes_and_signed_r
     _sessions.pop(demo["session_id"], None)
 
 
+def test_external_client_agent_demo_runs_counterparty_loop_and_adversarial_probes():
+    demo = run_external_client_agent_demo({"scenario_mode": "cold_chain_incident"})
+    assert demo["status"] == "demo_complete"
+    assert demo["mode"] == "external_client_agent_simulator"
+    assert demo["external_agent"]["decision_loop"][-1] == "probe_adversarial_cases"
+    assert len(demo["external_agent_transcript"]) >= 6
+    assert demo["consent_grant"]["signature"]["artifact_type"] == "agent_consent_grant"
+    assert demo["live_state"]["mode"] == "agent_handshake_live_state_feed"
+    assert len(demo["protocol_replay"]) >= 9
+    assert demo["protocol_replay"][0]["path"] == "/api/park/agent-handshake/consent-grant"
+    proposal_review = next(item for item in demo["external_agent_transcript"] if item["label"] == "proposal_review")
+    alternatives = proposal_review["decision"]["alternatives"]
+    assert len(alternatives) >= 3
+    assert alternatives[0]["utility"] >= alternatives[-1]["utility"]
+    assert any(item.get("rejection_reason") for item in alternatives)
+    assert demo["verification"]["status"] == "verified"
+    assert all(probe["status"] == "passed" for probe in demo["adversarial_probes"])
+    assert demo["judge_report"]["overall_score"] >= 0.9
+    assert {item["dimension"] for item in demo["judge_report"]["dimensions"]} >= {
+        "external_agent_autonomy",
+        "adversarial_resilience",
+        "memory_grounding",
+        "trust_boundary",
+        "receipt_integrity",
+    }
+    assert demo["memory_context"]["memory_role"]
+    assert demo["trust_context"]["certification_required"] is True
+    _sessions.pop(demo["session_id"], None)
+
+
+def test_protocol_docs_consent_and_live_state_artifacts_are_available():
+    docs = agent_handshake_protocol_docs()
+    assert docs["mode"] == "agent_handshake_protocol_docs"
+    assert any(route["path"] == "/api/park/agent-handshake/external-client-demo" for route in docs["routes"])
+    assert "agent_consent_grant" in docs["artifact_types"]
+
+    live = agent_handshake_live_state_feed({"scenario_mode": "cold_chain_incident"})
+    assert live["status"] == "ready"
+    assert live["signals"]["cold_chain"]["status"] == "excursion"
+
+    consent = issue_agent_consent_grant({"subject": "guest_user_123", "agent_id": "john_personal_agent", "scope": ["route_plan"], "scenario_mode": "visit_planning"})
+    _assert_valid_protocol_signature(consent, "agent_consent_grant")
+    verified = verify_protocol_artifact({"artifact": consent, "expected_artifact_type": "agent_consent_grant"})
+    assert verified["status"] == "verified"
+
+
 def test_agent_contract_policy_challenges_and_receipt_are_signed():
     contract = agent_contract()
     _assert_valid_protocol_signature(contract, "agent_contract")
@@ -393,6 +454,8 @@ def test_agent_contract_policy_challenges_and_receipt_are_signed():
     _assert_valid_protocol_signature(challenges, "agent_handshake_policy_challenges")
     assert challenges["status"] == "passed"
     assert challenges["passed"] == 3
+    assert challenges["judge_report"]["overall_score"] >= 0.9
+    assert {item["dimension"] for item in challenges["judge_report"]["dimensions"]} >= {"unsafe_action_blocking", "reason_quality", "commerce_gate_coverage"}
     assert all(result["allowed"] is False and result["requires_user_approval"] is True for result in challenges["results"])
     signed_challenges = {key: value for key, value in challenges.items() if key != "session"}
     assert verify_protocol_artifact({"artifact": signed_challenges, "expected_artifact_type": "agent_handshake_policy_challenges"})["status"] == "verified"

@@ -21,6 +21,8 @@ from agent_role_trace_samples import build_adversarial_sampled_role_trace_eval_r
 from agent_handshake import (
     agent_contract,
     agent_handshake_scenario_catalog,
+    agent_handshake_live_state_feed,
+    agent_handshake_protocol_docs,
     agent_trust_registry_status,
     capability_handshake,
     certify_agent_onboarding,
@@ -38,6 +40,7 @@ from agent_handshake import (
     identity_handshake,
     intent_handshake,
     issue_delegation_token,
+    issue_agent_consent_grant,
     list_agent_credential_revocations,
     list_agent_trust_audit_events,
     list_agent_trust_keys,
@@ -48,6 +51,7 @@ from agent_handshake import (
     register_agent_onboarding,
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
+    run_external_client_agent_demo,
     run_agent_handshake_policy_challenges,
     run_agent_handshake_scenario_evaluations,
     session_protocol_receipt,
@@ -12116,6 +12120,20 @@ async def app(scope, receive, send):
         await _send_json(send, 200, agent_handshake_scenario_catalog())
         return
 
+    if method == "GET" and path == "/api/park/agent-handshake/docs":
+        await _send_json(send, 200, agent_handshake_protocol_docs())
+        return
+
+    if method in {"GET", "POST"} and path == "/api/park/agent-handshake/live-state":
+        request_payload = await _read_json_body(receive) if method == "POST" else {}
+        await _send_json(send, 200, agent_handshake_live_state_feed(request_payload))
+        return
+
+    if method == "POST" and path == "/api/park/agent-handshake/consent-grant":
+        request_payload = await _read_json_body(receive)
+        await _send_json(send, 200, issue_agent_consent_grant(request_payload))
+        return
+
     if method in {"GET", "POST"} and path == "/api/park/agent-handshake/scenario-eval":
         request_payload = await _read_json_body(receive) if method == "POST" else {}
         await _send_json(send, 200, run_agent_handshake_scenario_evaluations(request_payload))
@@ -12124,6 +12142,11 @@ async def app(scope, receive, send):
     if method in {"GET", "POST"} and path == "/api/park/agent-handshake/policy-challenges":
         request_payload = await _read_json_body(receive) if method == "POST" else {}
         await _send_json(send, 200, run_agent_handshake_policy_challenges(request_payload))
+        return
+
+    if method in {"GET", "POST"} and path == "/api/park/agent-handshake/external-client-demo":
+        request_payload = await _read_json_body(receive) if method == "POST" else {}
+        await _send_json(send, 200, run_external_client_agent_demo(request_payload))
         return
 
     if method == "POST" and path == "/api/park/agent-handshake/verify-artifact":

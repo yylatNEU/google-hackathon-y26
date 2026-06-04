@@ -514,11 +514,179 @@
       margin-bottom: 8px;
     }
 
+    .deep-grid {
+      display: grid;
+      gap: 10px;
+      max-height: 690px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+
+    .exchange {
+      border: 1px solid var(--line);
+      background: #090f13;
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .exchange-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .exchange-body {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .agent-say {
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: 8px;
+      padding: 10px;
+      background: rgba(255,255,255,.025);
+      min-height: 92px;
+    }
+
+    .agent-say strong {
+      display: block;
+      color: var(--cyan);
+      font-size: 11px;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .agent-say.client strong { color: var(--amber); }
+
+    .agent-say pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #c9d8de;
+      font-size: 11px;
+      line-height: 1.45;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .judge-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .judge-card {
+      border: 1px solid var(--line);
+      background: #090f13;
+      border-radius: 8px;
+      padding: 11px;
+    }
+
+    .judge-top {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: start;
+      margin-bottom: 8px;
+    }
+
+    .bar {
+      height: 8px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255,255,255,.08);
+      margin: 8px 0;
+    }
+
+    .bar span {
+      display: block;
+      height: 100%;
+      width: var(--score, 0%);
+      background: linear-gradient(90deg, var(--rose), var(--amber), var(--green));
+    }
+
+    .findings {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 750;
+    }
+
     .receipt {
       border: 1px solid rgba(141, 182, 255, .45);
       background: rgba(141, 182, 255, .09);
       border-radius: 8px;
       padding: 12px;
+    }
+
+    .story-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+    }
+
+    .story-step {
+      border: 1px solid var(--line);
+      background: #090f13;
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 138px;
+    }
+
+    .story-step.done {
+      border-color: rgba(131, 227, 119, .7);
+      background: rgba(131, 227, 119, .1);
+    }
+
+    .story-step.active {
+      border-color: rgba(73, 214, 232, .78);
+      background: rgba(73, 214, 232, .12);
+    }
+
+    .story-step .step-num {
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: rgba(255,255,255,.08);
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 1000;
+      margin-bottom: 10px;
+    }
+
+    .story-step p,
+    .outcome p,
+    .section-note {
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 750;
+    }
+
+    .outcome-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+
+    .outcome {
+      border: 1px solid var(--line);
+      background: #090f13;
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 112px;
+    }
+
+    .outcome strong {
+      display: block;
+      font-size: 14px;
+      line-height: 1.25;
     }
 
     .footer-space {
@@ -532,13 +700,15 @@
       .node { width: min(260px, 42vw); }
       .phase-rail { grid-template-columns: repeat(2, 1fr); }
       .policy-grid { grid-template-columns: 1fr 1fr; }
+      .exchange-body { grid-template-columns: 1fr; }
+      .story-grid { grid-template-columns: repeat(2, 1fr); }
     }
 
     @media (max-width: 720px) {
       .topbar-inner { grid-template-columns: 1fr; }
       .api-box { width: 100%; }
       .actions { justify-content: flex-start; }
-      .metrics, .form-grid, .policy-grid { grid-template-columns: 1fr; }
+      .metrics, .form-grid, .policy-grid, .story-grid, .outcome-grid { grid-template-columns: 1fr; }
       .node { position: relative; left: auto !important; right: auto !important; top: auto !important; bottom: auto !important; width: auto; margin: 10px; }
       .core { position: relative; left: auto; top: auto; transform: none; width: auto; margin: 10px; }
       .pulse, .stage svg { display: none; }
@@ -554,14 +724,15 @@
           <div class="mark">AHP</div>
           <div>
             <h1>ParkPulse Agent Handshake</h1>
-            <div class="subhead">A live, visual demo of external agents negotiating with the park operating layer through identity, permissions, intent, policy gates, internal handoffs, receipts, and persistence.</div>
+            <div class="subhead">Watch an outside guest or supplier agent negotiate with ParkPulse, hit safety and commerce boundaries, and leave with a verified receipt.</div>
           </div>
         </div>
         <div class="actions">
           <input id="apiUrl" class="api-box" aria-label="API URL" />
-          <button id="runCustom" class="primary">Run custom handshake</button>
-          <button id="runSupply" class="green">Run supply-chain demo</button>
-          <button id="runJudge" class="amber">Judge all modes</button>
+          <button id="runExternal" class="primary">Run agent demo</button>
+          <button id="runCustom">Edit and run</button>
+          <button id="runSupply" class="green">Supply-chain case</button>
+          <button id="runJudge" class="amber">Quality sweep</button>
         </div>
       </div>
     </header>
@@ -641,6 +812,30 @@
         </div>
       </section>
 
+      <section class="grid main-grid">
+        <section class="card pad">
+          <div class="section-title">
+            <div>
+              <div class="kicker">Demo story</div>
+              <h2>What you are watching</h2>
+            </div>
+            <span id="storyBadge" class="badge info">guided</span>
+          </div>
+          <div id="storySteps" class="story-grid"></div>
+        </section>
+
+        <section class="card pad">
+          <div class="section-title">
+            <div>
+              <div class="kicker">Human outcome</div>
+              <h2>What the represented party gets</h2>
+            </div>
+            <span id="outcomeBadge" class="badge">waiting</span>
+          </div>
+          <div id="outcomeSummary" class="outcome-grid"></div>
+        </section>
+      </section>
+
       <section class="grid split-3">
         <section class="card pad">
           <div class="section-title">
@@ -680,12 +875,60 @@
         <section class="card pad">
           <div class="section-title">
             <div>
-              <div class="kicker">Policy suite</div>
-              <h2>Boundary proof</h2>
+              <div class="kicker">Safety boundaries</div>
+              <h2>What the agent cannot do</h2>
             </div>
             <span id="policyBadge" class="badge">not run</span>
           </div>
           <div id="policyGrid" class="policy-grid"></div>
+        </section>
+      </section>
+
+      <section class="grid main-grid">
+        <section class="card pad">
+          <div class="section-title">
+            <div>
+              <div class="kicker">Deep interaction</div>
+              <h2>Protocol exchange</h2>
+            </div>
+            <span id="interactionBadge" class="badge">idle</span>
+          </div>
+          <div id="deepInteraction" class="deep-grid"></div>
+        </section>
+
+        <section class="card pad">
+          <div class="section-title">
+            <div>
+              <div class="kicker">Quality check</div>
+              <h2>Rubric and findings</h2>
+            </div>
+            <span id="judgeBadge" class="badge">not run</span>
+          </div>
+          <div id="judgeMatrix" class="judge-grid"></div>
+        </section>
+      </section>
+
+      <section class="grid main-grid">
+        <section class="card pad">
+          <div class="section-title">
+            <div>
+              <div class="kicker">Developer replay</div>
+              <h2>Request / response trace</h2>
+            </div>
+            <span id="replayBadge" class="badge">idle</span>
+          </div>
+          <div id="protocolReplay" class="deep-grid"></div>
+        </section>
+
+        <section class="card pad">
+          <div class="section-title">
+            <div>
+              <div class="kicker">Developer integration</div>
+              <h2>External integration surface</h2>
+            </div>
+            <span id="docsBadge" class="badge">not loaded</span>
+          </div>
+          <div id="protocolDocs" class="judge-grid"></div>
         </section>
       </section>
 
@@ -704,7 +947,7 @@
         <section class="card pad">
           <div class="section-title">
             <div>
-              <div class="kicker">Raw evidence</div>
+              <div class="kicker">API evidence</div>
               <h2>Last API payload</h2>
             </div>
             <span id="apiBadge" class="badge info">local</span>
@@ -782,13 +1025,15 @@
 
     const state = {
       api: new URLSearchParams(location.search).get("api") || localStorage.getItem("parkpulse_demo_api") || "http://127.0.0.1:8001",
-      selectedScenario: "cold_chain_incident",
+      selectedScenario: "visit_planning",
       running: false,
       session: null,
       receipt: null,
       verification: null,
       scenarioEval: null,
       policyChallenge: null,
+      externalClient: null,
+      protocolDocs: null,
       lastPayload: null,
       error: null
     };
@@ -797,6 +1042,11 @@
     const pretty = (value) => JSON.stringify(value, null, 2);
     const titleize = (value) => String(value || "").replaceAll("_", " ");
     const csv = (value) => String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+    const safe = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+    const compact = (value, limit = 520) => {
+      const text = typeof value === "string" ? value : pretty(value ?? {});
+      return text.length > limit ? `${text.slice(0, limit)}...` : text;
+    };
 
     async function api(path, body) {
       const url = `${state.api.replace(/\/$/, "")}${path}`;
@@ -874,6 +1124,7 @@
     async function runCustomHandshake() {
       try {
         setRunning("custom");
+        state.externalClient = null;
         const input = currentInput();
         const steps = [];
         const tokenPayload = await api("/api/park/delegation-token", {
@@ -925,6 +1176,7 @@
     async function runSupplyDemo() {
       try {
         setRunning("supply");
+        state.externalClient = null;
         const payload = await api("/api/park/agent-handshake/supply-chain/demo", { scenario_mode: state.selectedScenario });
         const verification = await api("/api/park/agent-handshake/verify-artifact", { artifact: payload.receipt, expected_artifact_type: "agent_handshake_session_receipt" });
         state.session = payload.session;
@@ -938,9 +1190,37 @@
       }
     }
 
+    async function runExternalAgentDemo() {
+      try {
+        setRunning("external");
+        state.scenarioEval = null;
+        state.policyChallenge = null;
+        const input = currentInput();
+        const [payload, docs] = await Promise.all([
+          api("/api/park/agent-handshake/external-client-demo", {
+            scenario_mode: input.scenario,
+            agent_id: input.agentId,
+            represents: input.represents
+          }),
+          api("/api/park/agent-handshake/docs")
+        ]);
+        state.externalClient = payload;
+        state.protocolDocs = docs;
+        state.session = payload.session;
+        state.receipt = payload.receipt;
+        state.verification = payload.verification;
+        state.lastPayload = payload;
+        renderAll();
+        clearRunning("passed");
+      } catch (error) {
+        showError(error);
+      }
+    }
+
     async function runJudge() {
       try {
         setRunning("judge");
+        state.externalClient = null;
         const [scenarioEval, policyChallenge] = await Promise.all([
           api("/api/park/agent-handshake/scenario-eval", { scenarios: Object.keys(scenarios) }),
           api("/api/park/agent-handshake/policy-challenges", {})
@@ -998,16 +1278,21 @@
     }
 
     function renderPolicyGrid() {
-      const decisions = state.policyChallenge?.results || state.session?.policy_decisions || [];
+      const decisions = state.externalClient?.adversarial_probes || state.policyChallenge?.results || state.session?.policy_decisions || [];
       $("policyGrid").innerHTML = decisions.slice(-12).map((decision) => {
-        const status = decision.passed || decision.status === "blocked" || decision.status === "requires_user_approval" ? "good" : decision.allowed ? "info" : "warn";
+        const action = decision.action || decision.probe;
+        const status = decision.status === "passed" || decision.passed || decision.status === "blocked" || decision.status === "requires_user_approval" ? "good" : decision.allowed ? "info" : "warn";
         return `<article class="policy">
-          <div class="action">${titleize(decision.action)}</div>
+          <div class="action">${titleize(action)}</div>
           <span class="badge ${status}">${titleize(decision.status || (decision.passed ? "blocked" : "checked"))}</span>
           <p style="margin:8px 0 0;color:var(--muted);font-size:12px;font-weight:700;line-height:1.4">${decision.reason || ""}</p>
         </article>`;
       }).join("") || `<article class="policy"><div class="action">No policy run</div><span class="badge">idle</span></article>`;
-      if (state.policyChallenge) {
+      if (state.externalClient) {
+        const passed = (state.externalClient.adversarial_probes || []).filter((probe) => probe.status === "passed").length;
+        $("policyBadge").textContent = `${passed}/${(state.externalClient.adversarial_probes || []).length} probes`;
+        $("policyBadge").className = "badge good";
+      } else if (state.policyChallenge) {
         $("policyBadge").textContent = `${state.policyChallenge.passed}/${state.policyChallenge.challenge_count}`;
         $("policyBadge").className = state.policyChallenge.status === "passed" ? "badge good" : "badge bad";
       }
@@ -1043,6 +1328,295 @@
       $("metricReceipt").textContent = state.verification?.status === "verified" ? "verified" : "issued";
     }
 
+    function renderStorySteps() {
+      const input = currentInput();
+      const hasSession = Boolean(state.session);
+      const activeIndex = state.running ? 1 : hasSession ? 4 : 0;
+      const steps = [
+        {
+          title: "Counterparty declares itself",
+          copy: `${input.agentId || "External agent"} says who it represents and what authority it has.`
+        },
+        {
+          title: "ParkPulse checks scope",
+          copy: "The park agent accepts usable permissions and keeps blocked actions outside the delegated session."
+        },
+        {
+          title: "Agents negotiate the plan",
+          copy: "The outside agent and ParkPulse trade off wait, safety, walking, inventory, or service continuity."
+        },
+        {
+          title: "Receipt proves the outcome",
+          copy: "The final decision, policy gates, live-state evidence, and signature become a replayable artifact."
+        }
+      ];
+      $("storyBadge").textContent = hasSession ? "complete" : state.running ? "running" : "guided";
+      $("storyBadge").className = hasSession ? "badge good" : state.running ? "badge warn" : "badge info";
+      $("storySteps").innerHTML = steps.map((step, index) => {
+        const cls = hasSession || index < activeIndex ? "story-step done" : index === activeIndex ? "story-step active" : "story-step";
+        return `<article class="${cls}">
+          <div class="step-num">${index + 1}</div>
+          <strong>${safe(step.title)}</strong>
+          <p>${safe(step.copy)}</p>
+        </article>`;
+      }).join("");
+    }
+
+    function renderOutcomeSummary() {
+      const input = currentInput();
+      const scenario = scenarios[state.selectedScenario];
+      const session = state.session || {};
+      const proposal = session.proposal || {};
+      const monitoring = session.monitoring || {};
+      const policyDecisions = session.policy_decisions || [];
+      const blocked = policyDecisions.filter((item) => item.status === "blocked" || item.status === "requires_user_approval");
+      const plan = Array.isArray(proposal.plan) && proposal.plan.length ? proposal.plan.join(" -> ") : scenario.summary;
+      const resolution = monitoring.accepted_resolution || monitoring.park_agent_revision || (state.receipt ? "Committed plan with signed receipt" : "Run the agent demo to produce a committed outcome.");
+      const blockedText = blocked.length
+        ? blocked.slice(-3).map((item) => `${titleize(item.action)}: ${titleize(item.status)}`).join("; ")
+        : state.session ? "No unsafe delegated action was allowed." : "Payment, refund, medical, food-safety, and vendor-payment actions stay gated.";
+      const verification = state.verification?.status === "verified" ? "Verified receipt issued." : state.receipt ? "Receipt issued; verification pending." : "No receipt yet.";
+      $("outcomeBadge").textContent = state.session ? "ready" : "waiting";
+      $("outcomeBadge").className = state.session ? "badge good" : "badge";
+      $("outcomeSummary").innerHTML = `
+        <article class="outcome">
+          <div class="kicker">${safe(input.counterparty)} agent</div>
+          <strong>${safe(input.represents || "Represented party")}</strong>
+          <p>${safe(input.goal || scenario.goal)}</p>
+        </article>
+        <article class="outcome">
+          <div class="kicker">Plan</div>
+          <strong>${safe(titleize(state.selectedScenario))}</strong>
+          <p>${safe(plan)}</p>
+        </article>
+        <article class="outcome">
+          <div class="kicker">Decision</div>
+          <strong>${safe(resolution)}</strong>
+          <p>${safe(state.externalClient ? "This came from the external-client simulator using protocol calls." : "This is based on the current session state.")}</p>
+        </article>
+        <article class="outcome">
+          <div class="kicker">Trust boundary</div>
+          <strong>${safe(verification)}</strong>
+          <p>${safe(blockedText)}</p>
+        </article>`;
+    }
+
+    function activeScenarioResult() {
+      const sessionId = state.session?.session_id;
+      return (state.scenarioEval?.results || []).find((item) => item.session_id === sessionId) || null;
+    }
+
+    function localInteractionTrace() {
+      const session = state.session;
+      if (!session) return [];
+      const permissions = session.permissions || {};
+      const intent = session.intent || {};
+      const proposal = session.proposal || {};
+      const monitoring = session.monitoring || {};
+      const policyDecisions = session.policy_decisions || [];
+      const blocked = policyDecisions.filter((item) => item.allowed === false).slice(-6);
+      return [
+        {
+          stage: "identity",
+          client_agent: session.client_agent,
+          park_agent: session.identity,
+          judgement: "Identity and represented subject are verified before planning."
+        },
+        {
+          stage: "capability",
+          client_agent: permissions.client_agent,
+          park_agent: permissions.park_agent,
+          judgement: "Share, receive, and cannot-do boundaries are explicit."
+        },
+        {
+          stage: "intent",
+          client_agent: intent.client_agent,
+          park_agent: intent.park_agent,
+          judgement: "The goal and constraints are negotiated before any plan is accepted."
+        },
+        {
+          stage: "proposal and counter",
+          client_agent: { priority_change: proposal.rationale, countered_from: proposal.countered_from },
+          park_agent: { proposal_id: proposal.proposal_id, plan: proposal.plan, tradeoffs: proposal.tradeoffs },
+          judgement: "The park agent revises the route or operating plan instead of returning static data."
+        },
+        {
+          stage: "monitoring",
+          client_agent: { counter: monitoring.client_agent_counter },
+          park_agent: { event: monitoring.event, revision: monitoring.park_agent_revision, accepted_resolution: monitoring.accepted_resolution },
+          judgement: "The session reacts to live state after commitment."
+        },
+        {
+          stage: "policy gate",
+          client_agent: { requested_or_blocked_actions: blocked.map((item) => item.action) },
+          park_agent: { decisions: policyDecisions.slice(-6).map((item) => ({ action: item.action, status: item.status, reason: item.reason })) },
+          judgement: "Approval-gated or unsafe actions are separated from delegated actions."
+        }
+      ];
+    }
+
+    function externalInteractionTrace() {
+      const transcript = state.externalClient?.external_agent_transcript || [];
+      return transcript.map((turn) => ({
+        stage: turn.label,
+        client_agent: { reasoning: turn.reasoning, decision: turn.decision },
+        park_agent: turn.label === "receipt_verification"
+          ? { verification: state.externalClient.verification, receipt_id: state.externalClient.receipt?.receipt_id }
+          : { session_id: state.externalClient.session_id, counterparty: state.externalClient.counterparty, protocol: state.externalClient.protocol_version },
+        judgement: "This is an external counterparty decision before or after a ParkPulse protocol call."
+      }));
+    }
+
+    function renderDeepInteraction() {
+      const traced = externalInteractionTrace().length ? externalInteractionTrace() : activeScenarioResult()?.interaction_trace || localInteractionTrace();
+      $("interactionBadge").textContent = traced.length ? `${traced.length} stages` : "idle";
+      $("interactionBadge").className = traced.length ? "badge info" : "badge";
+      $("deepInteraction").innerHTML = traced.length ? traced.map((row, index) => `
+        <article class="exchange">
+          <div class="exchange-head">
+            <strong>${safe(index + 1)}. ${safe(titleize(row.stage))}</strong>
+            <span class="badge info">agent turn</span>
+          </div>
+          <div class="exchange-body">
+            <div class="agent-say client">
+              <strong>External agent</strong>
+              <pre>${safe(compact(row.client_agent || "No client-side payload recorded."))}</pre>
+            </div>
+            <div class="agent-say">
+              <strong>ParkPulse agent</strong>
+              <pre>${safe(compact(row.park_agent || "No park-side payload recorded."))}</pre>
+            </div>
+          </div>
+          <p style="margin:10px 0 0;color:var(--muted);font-size:12px;font-weight:800;line-height:1.45">${safe(row.judgement || "")}</p>
+        </article>
+      `).join("") : `<article class="exchange"><div class="exchange-head"><strong>No protocol exchange yet</strong><span class="badge">idle</span></div><p style="margin:0;color:var(--muted);font-weight:800">Run a handshake to see the identity, capability, intent, counterproposal, monitor, and policy phases.</p></article>`;
+    }
+
+    function judgeSections() {
+      const sections = [];
+      if (state.externalClient?.judge_report) sections.push({ title: "External agent judge", report: state.externalClient.judge_report });
+      const scenarioJudge = activeScenarioResult()?.judge;
+      if (scenarioJudge) sections.push({ title: "Active scenario judge", report: scenarioJudge });
+      if (state.scenarioEval?.judge_report) sections.push({ title: "All-mode judge", report: state.scenarioEval.judge_report });
+      if (state.policyChallenge?.judge_report) sections.push({ title: "Policy boundary judge", report: state.policyChallenge.judge_report });
+      if (!sections.length && state.session?.case_evaluations?.length) {
+        const cases = state.session.case_evaluations;
+        const passed = cases.filter((item) => item.status === "passed").length;
+        sections.push({
+          title: "Session case judge",
+          report: {
+            status: passed === cases.length ? "passed" : "partial",
+            overall_score: passed / Math.max(1, cases.length),
+            dimensions: cases.map((item) => ({
+              dimension: item.case,
+              score: item.score,
+              verdict: item.status,
+              evidence: Object.entries(item.criteria || {}).map(([key, value]) => `${key}: ${value}`)
+            })),
+            findings: [`${passed}/${cases.length} case evaluations passed for this session.`]
+          }
+        });
+      }
+      return sections;
+    }
+
+    function renderJudgeMatrix() {
+      const sections = judgeSections();
+      const first = sections[0]?.report;
+      $("judgeBadge").textContent = first ? `${Math.round((first.overall_score || 0) * 100)}% ${first.status || "judged"}` : "not run";
+      $("judgeBadge").className = first ? ((first.overall_score || 0) >= .85 ? "badge good" : "badge warn") : "badge";
+      $("judgeMatrix").innerHTML = sections.length ? sections.map(({ title, report }) => `
+        <article class="judge-card">
+          <div class="judge-top">
+            <div>
+              <div class="kicker">${safe(title)}</div>
+              <strong>${safe(titleize(report.status || "judged"))}</strong>
+            </div>
+            <span class="badge ${Number(report.overall_score || 0) >= .85 ? "good" : "warn"}">${Math.round(Number(report.overall_score || 0) * 100)}%</span>
+          </div>
+          ${(report.dimensions || []).map((dimension) => `
+            <div style="margin-top:10px">
+              <div class="judge-top" style="margin-bottom:0">
+                <strong>${safe(titleize(dimension.dimension))}</strong>
+                <span class="badge ${Number(dimension.score || 0) >= .85 ? "good" : Number(dimension.score || 0) >= .7 ? "info" : "warn"}">${Math.round(Number(dimension.score || 0) * 100)}%</span>
+              </div>
+              <div class="bar" style="--score:${Math.round(Number(dimension.score || 0) * 100)}%"><span></span></div>
+              <p style="margin:0;color:var(--muted);font-size:12px;font-weight:750;line-height:1.45">${safe((dimension.evidence || []).slice(0, 2).join(" | "))}</p>
+            </div>
+          `).join("")}
+          <ul class="findings">${(report.findings || []).slice(0, 4).map((finding) => `<li>${safe(finding)}</li>`).join("")}</ul>
+        </article>
+      `).join("") : `<article class="judge-card"><div class="judge-top"><strong>Quality sweep not run</strong><span class="badge">idle</span></div><p style="margin:0;color:var(--muted);font-weight:800">Run Quality sweep to score negotiation depth, policy reasoning, handoffs, receipts, and autonomy.</p></article>`;
+    }
+
+    function renderProtocolReplay() {
+      const replay = state.externalClient?.protocol_replay || [];
+      $("replayBadge").textContent = replay.length ? `${replay.length} calls` : "idle";
+      $("replayBadge").className = replay.length ? "badge info" : "badge";
+      $("protocolReplay").innerHTML = replay.length ? replay.map((step, index) => `
+        <article class="exchange">
+          <div class="exchange-head">
+            <strong>${safe(index + 1)}. ${safe(step.method)} ${safe(step.path)}</strong>
+            <span class="badge ${String(step.status || "").includes("error") ? "bad" : "good"}">${safe(step.status || "ok")}</span>
+          </div>
+          <div class="exchange-body">
+            <div class="agent-say client">
+              <strong>Request</strong>
+              <pre>${safe(compact(step.request, 720))}</pre>
+            </div>
+            <div class="agent-say">
+              <strong>Response</strong>
+              <pre>${safe(compact(step.response, 720))}</pre>
+            </div>
+          </div>
+        </article>
+      `).join("") : `<article class="exchange"><div class="exchange-head"><strong>No replay trace yet</strong><span class="badge">idle</span></div><p style="margin:0;color:var(--muted);font-weight:800">Run external agent to see ordered request/response pairs another agent could replay.</p></article>`;
+    }
+
+    function renderProtocolDocs() {
+      const docs = state.protocolDocs;
+      const external = state.externalClient;
+      $("docsBadge").textContent = docs ? `${(docs.routes || []).length} routes` : "not loaded";
+      $("docsBadge").className = docs ? "badge info" : "badge";
+      if (!docs && !external) {
+        $("protocolDocs").innerHTML = `<article class="judge-card"><div class="judge-top"><strong>Contract not loaded</strong><span class="badge">idle</span></div><p style="margin:0;color:var(--muted);font-weight:800">Run external agent to load protocol docs, consent grant, live-state evidence, and SDK path.</p></article>`;
+        return;
+      }
+      const consent = external?.consent_grant;
+      const live = external?.live_state;
+      $("protocolDocs").innerHTML = `
+        <article class="judge-card">
+          <div class="judge-top">
+            <div><div class="kicker">SDK</div><strong>Importable client</strong></div>
+            <span class="badge good">served</span>
+          </div>
+          <pre class="json-box">import { ParkPulseAHPClient } from "/parkpulse-ahp-client.js";
+const client = new ParkPulseAHPClient({ apiBase: "${safe(state.api)}" });
+await client.externalClientDemo({ scenario_mode: "${safe(state.selectedScenario)}" });</pre>
+        </article>
+        <article class="judge-card">
+          <div class="judge-top">
+            <div><div class="kicker">Consent</div><strong>${safe(consent?.grant_id || "No grant yet")}</strong></div>
+            <span class="badge ${consent ? "good" : ""}">${safe(consent?.signature?.artifact_type || "missing")}</span>
+          </div>
+          <p style="margin:0;color:var(--muted);font-size:12px;font-weight:750;line-height:1.45">${safe(consent?.consent_text || "Run external agent to issue a signed consent grant.")}</p>
+        </article>
+        <article class="judge-card">
+          <div class="judge-top">
+            <div><div class="kicker">Live evidence</div><strong>${safe(live?.source || "not loaded")}</strong></div>
+            <span class="badge info">${safe(live?.freshness_seconds ? `${live.freshness_seconds}s` : "idle")}</span>
+          </div>
+          <pre class="json-box">${safe(compact(live?.signals || {}, 920))}</pre>
+        </article>
+        <article class="judge-card">
+          <div class="judge-top">
+            <div><div class="kicker">Docs</div><strong>${safe(docs?.protocol_version || "parkpulse-ahp-0.1")}</strong></div>
+            <span class="badge info">${safe((docs?.routes || []).length)} routes</span>
+          </div>
+          <ul class="findings">${(docs?.routes || []).slice(0, 8).map((route) => `<li>${safe(route.method)} ${safe(route.path)} - ${safe(route.purpose)}</li>`).join("")}</ul>
+        </article>`;
+    }
+
     function renderMetrics() {
       const cases = state.session?.case_evaluations || [];
       const passedCases = cases.filter((item) => item.status === "passed").length;
@@ -1058,8 +1632,14 @@
       $("apiUrl").value = state.api;
       renderHeader();
       renderPhases();
+      renderStorySteps();
+      renderOutcomeSummary();
       renderScenarioBoard();
       renderPolicyGrid();
+      renderDeepInteraction();
+      renderJudgeMatrix();
+      renderProtocolReplay();
+      renderProtocolDocs();
       renderLedger();
       renderReceipt();
       renderMetrics();
@@ -1082,12 +1662,13 @@
         $(id).addEventListener("input", renderHeader);
       }
       $("runCustom").addEventListener("click", runCustomHandshake);
+      $("runExternal").addEventListener("click", runExternalAgentDemo);
       $("runSupply").addEventListener("click", runSupplyDemo);
       $("runJudge").addEventListener("click", runJudge);
     }
 
     bind();
-    configureScenario("cold_chain_incident");
+    configureScenario("visit_planning");
     renderAll();
   </script>
 </body>

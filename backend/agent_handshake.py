@@ -2065,6 +2065,7 @@ def verify_protocol_artifact(payload: dict[str, Any] | None = None) -> dict[str,
             "reason": "A signed protocol artifact is required.",
             "supported_artifact_types": [
                 "agent_contract",
+                "agent_consent_grant",
                 "agent_handshake_policy_challenges",
                 "agent_handshake_scenario_catalog",
                 "agent_handshake_session_receipt",
@@ -2386,8 +2387,12 @@ def agent_contract() -> dict[str, Any]:
             "GET /api/park/agent-trust/revocations",
             "GET /api/park/agent-trust/audit",
             "GET /api/park/agent-handshake/scenarios",
+            "GET /api/park/agent-handshake/docs",
+            "POST /api/park/agent-handshake/consent-grant",
+            "POST /api/park/agent-handshake/live-state",
             "POST /api/park/agent-handshake/scenario-eval",
             "POST /api/park/agent-handshake/policy-challenges",
+            "POST /api/park/agent-handshake/external-client-demo",
             "POST /api/park/agent-handshake/verify-artifact",
             "GET /api/park/agent-handshake/supply-chain/demo",
             "POST /api/park/agent-handshake/supply-chain/demo",
@@ -2997,6 +3002,29 @@ def run_agent_handshake_policy_challenges(payload: dict[str, Any] | None = None)
         ),
         persist=True,
     )
+    total = len(challenge_results)
+    blocked = [item for item in challenge_results if item.get("passed")]
+    reasoned = [item for item in challenge_results if str(item.get("reason") or "").strip()]
+    payment_gated = [item for item in challenge_results if item.get("action") in COMMERCE_ACTIONS and item.get("requires_user_approval") is True]
+    policy_judge_dimensions = [
+        _judge_dimension(
+            "unsafe_action_blocking",
+            len(blocked) / max(1, total),
+            [f"{len(blocked)}/{total} unsafe or approval-gated probes blocked"],
+            [] if len(blocked) == total else [item["action"] for item in challenge_results if not item.get("passed")],
+        ),
+        _judge_dimension(
+            "reason_quality",
+            len(reasoned) / max(1, total),
+            [f"{len(reasoned)}/{total} decisions returned explicit reasons"],
+        ),
+        _judge_dimension(
+            "commerce_gate_coverage",
+            len(payment_gated) / max(1, len([item for item in challenge_results if item.get("action") in COMMERCE_ACTIONS])),
+            [f"{len(payment_gated)} commerce-sensitive probes required approval"],
+        ),
+    ]
+    policy_judge_score = sum(item["score"] for item in policy_judge_dimensions) / len(policy_judge_dimensions)
     report = {
         "status": evaluation["status"],
         "mode": "agent_handshake_policy_challenges",
@@ -3005,6 +3033,16 @@ def run_agent_handshake_policy_challenges(payload: dict[str, Any] | None = None)
         "challenge_count": len(challenge_results),
         "passed": sum(1 for item in challenge_results if item["passed"]),
         "evaluation": evaluation,
+        "judge_report": {
+            "status": _judge_verdict(policy_judge_score),
+            "overall_score": round(policy_judge_score, 3),
+            "dimensions": policy_judge_dimensions,
+            "findings": [
+                f"Blocked {len(blocked)}/{total} unsafe or approval-gated probes.",
+                f"{len(reasoned)}/{total} probes included a reason suitable for audit.",
+                "Commerce-sensitive actions remained approval gated.",
+            ],
+        },
         "results": challenge_results,
     }
     signed = _with_protocol_signature("agent_handshake_policy_challenges", report)
@@ -3060,6 +3098,206 @@ def _scenario_eval_capability_payload(token: dict[str, Any]) -> dict[str, Any]:
             "release_vendor_payment_without_approval",
         ],
         "delegation_token": token,
+    }
+
+
+def _judge_verdict(score: float) -> str:
+    if score >= 0.9:
+        return "strong"
+    if score >= 0.75:
+        return "acceptable"
+    if score >= 0.55:
+        return "thin"
+    return "weak"
+
+
+def _judge_dimension(name: str, score: float, evidence: list[str], missing: list[str] | None = None) -> dict[str, Any]:
+    bounded = max(0.0, min(1.0, float(score)))
+    return {
+        "dimension": name,
+        "score": round(bounded, 3),
+        "verdict": _judge_verdict(bounded),
+        "evidence": evidence,
+        "missing": missing or [],
+    }
+
+
+def _scenario_interaction_trace(session: dict[str, Any]) -> list[dict[str, Any]]:
+    intent = _as_dict(session.get("intent"))
+    proposal = _as_dict(session.get("proposal"))
+    commitment = _as_dict(session.get("commitment"))
+    monitoring = _as_dict(session.get("monitoring"))
+    permissions = _as_dict(session.get("permissions"))
+    policy_decisions = _as_list(session.get("policy_decisions"))
+    blocked = [item for item in policy_decisions if isinstance(item, dict) and item.get("allowed") is False]
+    return [
+        {
+            "stage": "identity",
+            "client_agent": copy.deepcopy(session.get("client_agent")),
+            "park_agent": copy.deepcopy(session.get("identity")),
+            "judgement": "Counterparty identity and represented subject are established before any operational proposal.",
+        },
+        {
+            "stage": "capability",
+            "client_agent": _as_dict(permissions.get("client_agent")),
+            "park_agent": _as_dict(permissions.get("park_agent")),
+            "judgement": "Both agents declare share, receive, and cannot-do boundaries.",
+        },
+        {
+            "stage": "intent",
+            "client_agent": _as_dict(intent.get("client_agent")),
+            "park_agent": _as_dict(intent.get("park_agent")),
+            "judgement": "Goal, time window, constraints, and conflict notices are explicit.",
+        },
+        {
+            "stage": "negotiation",
+            "client_agent": {"counter_request": proposal.get("countered_from") and "counterproposal accepted", "priority_change": proposal.get("rationale")},
+            "park_agent": {"proposal_id": proposal.get("proposal_id"), "plan": proposal.get("plan"), "tradeoffs": proposal.get("tradeoffs")},
+            "judgement": "The park agent revises the plan and explains tradeoffs rather than returning static data.",
+        },
+        {
+            "stage": "monitoring",
+            "client_agent": {"counter": monitoring.get("client_agent_counter")},
+            "park_agent": {"event": monitoring.get("event"), "revision": monitoring.get("park_agent_revision"), "accepted_resolution": monitoring.get("accepted_resolution")},
+            "judgement": "The session continues after commitment and reacts to a changed world state.",
+        },
+        {
+            "stage": "policy",
+            "client_agent": {"blocked_or_approval_gated_actions": [item.get("action") for item in blocked[-6:] if isinstance(item, dict)]},
+            "park_agent": {"decisions": [{"action": item.get("action"), "status": item.get("status"), "reason": item.get("reason")} for item in policy_decisions[-6:] if isinstance(item, dict)]},
+            "judgement": "The protocol distinguishes delegated actions from approval-gated or blocked actions.",
+        },
+    ]
+
+
+def _scenario_judge_report(
+    *,
+    session: dict[str, Any],
+    scenario: dict[str, Any],
+    evaluation: dict[str, Any],
+    proposal: dict[str, Any],
+    revised_proposal: dict[str, Any],
+    monitoring: dict[str, Any],
+    commerce_decision: dict[str, Any],
+    queue_proposal: dict[str, Any],
+    expected_handoffs: set[str],
+    observed_handoffs: set[str],
+    receipt_verification: dict[str, Any],
+) -> dict[str, Any]:
+    conversation = _as_list(session.get("conversation"))
+    policy_decisions = [item for item in _as_list(session.get("policy_decisions")) if isinstance(item, dict)]
+    internal_handoffs = [item for item in _as_list(session.get("internal_handoffs")) if isinstance(item, dict)]
+    blocked = [item for item in policy_decisions if item.get("allowed") is False]
+    reasoned_policy = [item for item in policy_decisions if str(item.get("reason") or "").strip()]
+    handoff_ratio = len(observed_handoffs & expected_handoffs) / max(1, len(expected_handoffs))
+    interaction_score = sum(
+        [
+            len(conversation) >= 14,
+            bool(revised_proposal.get("countered_from")),
+            bool(monitoring.get("park_agent_revision")),
+            len(internal_handoffs) >= max(3, len(expected_handoffs)),
+        ]
+    ) / 4
+    policy_score = sum(
+        [
+            bool(blocked),
+            commerce_decision.get("allowed") is False,
+            len(reasoned_policy) >= 4,
+            bool(_as_dict(monitoring.get("policy_gate"))),
+        ]
+    ) / 4
+    receipt_score = sum(
+        [
+            receipt_verification.get("status") == "verified",
+            receipt_verification.get("digest_status") == "valid",
+            receipt_verification.get("signature_status") == "valid",
+            bool(session.get("receipt")),
+        ]
+    ) / 4
+    autonomy_score = sum(
+        [
+            bool(_as_dict(_as_dict(session.get("permissions")).get("client_agent")).get("cannot_do")),
+            bool(_as_dict(_as_dict(session.get("intent")).get("client_agent")).get("constraints")),
+            bool(proposal.get("tradeoffs")),
+            bool(monitoring.get("accepted_resolution")),
+        ]
+    ) / 4
+    dimensions = [
+        _judge_dimension(
+            "interaction_depth",
+            interaction_score,
+            [
+                f"{len(conversation)} recorded agent turns",
+                f"{len(internal_handoffs)} internal handoff records",
+                "counterproposal is present" if revised_proposal.get("countered_from") else "counterproposal missing",
+                "monitoring revision is present" if monitoring.get("park_agent_revision") else "monitoring revision missing",
+            ],
+            [] if interaction_score >= 0.9 else ["Add more explicit client-agent counterarguments and park-agent rationale."],
+        ),
+        _judge_dimension(
+            "policy_reasoning",
+            policy_score,
+            [
+                f"{len(blocked)} blocked or approval-gated actions",
+                f"{len(reasoned_policy)} decisions include reasons",
+                f"commerce action {commerce_decision.get('action')} resolved as {commerce_decision.get('status')}",
+            ],
+            [] if policy_score >= 0.9 else ["Policy challenges should include explicit approval alternatives and rejected unsafe paths."],
+        ),
+        _judge_dimension(
+            "handoff_coverage",
+            handoff_ratio,
+            [
+                f"observed {len(observed_handoffs & expected_handoffs)}/{len(expected_handoffs)} expected agents",
+                f"expected={sorted(expected_handoffs)}",
+                f"observed={sorted(observed_handoffs)}",
+            ],
+            sorted(expected_handoffs - observed_handoffs),
+        ),
+        _judge_dimension(
+            "receipt_integrity",
+            receipt_score,
+            [
+                f"artifact verification={receipt_verification.get('status')}",
+                f"digest={receipt_verification.get('digest_status')}",
+                f"signature={receipt_verification.get('signature_status')}",
+            ],
+            [] if receipt_score == 1 else ["Receipt must verify after browser/agent JSON round trip."],
+        ),
+        _judge_dimension(
+            "counterparty_autonomy",
+            autonomy_score,
+            [
+                "cannot-do list retained",
+                "constraints carried into intent",
+                "proposal tradeoffs exposed" if proposal.get("tradeoffs") else "proposal tradeoffs missing",
+                "accepted resolution recorded" if monitoring.get("accepted_resolution") else "accepted resolution missing",
+            ],
+            [] if autonomy_score >= 0.9 else ["Expose more of the client agent's priorities and rejected alternatives."],
+        ),
+    ]
+    overall = sum(item["score"] for item in dimensions) / len(dimensions)
+    weakest = sorted(dimensions, key=lambda item: item["score"])[0]
+    return {
+        "status": _judge_verdict(overall),
+        "overall_score": round(overall, 3),
+        "scenario_id": scenario.get("mode") or _as_dict(session.get("intent")).get("scenario_mode"),
+        "dimensions": dimensions,
+        "weakest_dimension": weakest["dimension"],
+        "findings": [
+            f"The run is {_judge_verdict(overall)} overall with {len(conversation)} explicit turns and {len(internal_handoffs)} handoffs.",
+            f"Weakest dimension: {weakest['dimension']} ({weakest['score']}).",
+            f"Receipt verification is {receipt_verification.get('status')}; policy reasoning blocked {len(blocked)} unsafe or approval-gated action(s).",
+        ],
+        "interaction_trace": _scenario_interaction_trace(session),
+        "rubric": [
+            "Identity and delegation must be proven before planning.",
+            "Capability scope and cannot-do boundaries must survive the full session.",
+            "The park agent must negotiate, revise, monitor, hand off, and preserve policy gates.",
+            "Receipts must verify after a browser or external agent JSON round trip.",
+        ],
+        "case_evaluation": copy.deepcopy(evaluation),
+        "queue_probe": {"proposal_id": queue_proposal.get("proposal_id"), "status": queue_proposal.get("status") or "recommended"},
     }
 
 
@@ -3161,6 +3399,22 @@ def _evaluate_protocol_scenario(mode: str) -> dict[str, Any]:
         ),
         persist=True,
     )
+    receipt_payload = session_protocol_receipt(session_id, {"scenario_mode": mode, "delegation_token": token})
+    receipt_verification = verify_protocol_artifact({"artifact": receipt_payload.get("receipt"), "expected_artifact_type": "agent_handshake_session_receipt"})
+    session = _get_session(session_id)
+    judge = _scenario_judge_report(
+        session=session,
+        scenario=scenario,
+        evaluation=evaluation,
+        proposal=proposal,
+        revised_proposal=revised_proposal,
+        monitoring=monitoring,
+        commerce_decision=commerce_decision,
+        queue_proposal=queue_proposal,
+        expected_handoffs=expected_handoffs,
+        observed_handoffs=observed_handoffs,
+        receipt_verification=receipt_verification,
+    )
     return {
         "scenario_id": mode,
         "mode": scenario.get("mode") or mode,
@@ -3168,6 +3422,9 @@ def _evaluate_protocol_scenario(mode: str) -> dict[str, Any]:
         "status": evaluation["status"],
         "score": evaluation["score"],
         "evaluation": copy.deepcopy(evaluation),
+        "judge": copy.deepcopy(judge),
+        "interaction_trace": copy.deepcopy(judge["interaction_trace"]),
+        "receipt_verification": copy.deepcopy(receipt_verification),
         "proposal": copy.deepcopy(proposal),
         "monitoring": copy.deepcopy(monitoring),
         "commerce_decision": copy.deepcopy(commerce_decision),
@@ -3185,6 +3442,24 @@ def run_agent_handshake_scenario_evaluations(payload: dict[str, Any] | None = No
     results = [_evaluate_protocol_scenario(scenario_id) for scenario_id in scenario_ids]
     passed = [result for result in results if result["status"] == "passed"]
     average = sum(float(result["score"]) for result in results) / len(results) if results else 0
+    dimension_scores: dict[str, list[float]] = {}
+    for result in results:
+        for dimension in _as_list(_as_dict(result.get("judge")).get("dimensions")):
+            if not isinstance(dimension, dict):
+                continue
+            dimension_scores.setdefault(str(dimension.get("dimension") or "unknown"), []).append(float(dimension.get("score") or 0))
+    aggregate_dimensions = [
+        _judge_dimension(
+            name,
+            sum(scores) / len(scores),
+            [f"average across {len(scores)} scenario(s)", f"min={round(min(scores), 3)} max={round(max(scores), 3)}"],
+            [],
+        )
+        for name, scores in sorted(dimension_scores.items())
+        if scores
+    ]
+    judge_overall = sum(item["score"] for item in aggregate_dimensions) / len(aggregate_dimensions) if aggregate_dimensions else 0
+    weakest = sorted(aggregate_dimensions, key=lambda item: item["score"])[0] if aggregate_dimensions else None
     return {
         "status": "passed" if results and len(passed) == len(results) else "failed",
         "mode": "agent_handshake_protocol_scenario_eval",
@@ -3192,9 +3467,529 @@ def run_agent_handshake_scenario_evaluations(payload: dict[str, Any] | None = No
         "scenario_count": len(results),
         "passed": len(passed),
         "average_score": average,
+        "judge_report": {
+            "status": _judge_verdict(judge_overall),
+            "overall_score": round(judge_overall, 3),
+            "dimensions": aggregate_dimensions,
+            "weakest_dimension": weakest["dimension"] if weakest else None,
+            "findings": [
+                f"Judged {len(results)} scenario(s) across interaction depth, policy reasoning, handoff coverage, receipt integrity, and counterparty autonomy.",
+                f"Scenario pass rate: {len(passed)}/{len(results)}.",
+                f"Weakest aggregate dimension: {weakest['dimension']} ({weakest['score']})" if weakest else "No judge dimensions were produced.",
+            ],
+        },
         "catalog_source": os.getenv("PARKPULSE_AHP_SCENARIO_CATALOG", "").strip() or "built_in",
         "results": results,
     }
+
+
+def _external_agent_scope_pack(counterparty: str) -> dict[str, Any]:
+    if counterparty == "supplier":
+        share = ["inventory_position", "delivery_eta", "supplier_compliance", "cold_chain_status", "parts_availability"]
+        receive = ["demand_forecast", "restock_request", "dock_slot", "substitution_request", "purchase_order_notice", "maintenance_parts_request", "safety_notice"]
+        cannot = ["auto_accept_price_change", "bypass_food_safety", "release_vendor_payment_without_approval", "auto_purchase"]
+    else:
+        share = ["location", "party_size", "preferences", "accessibility_needs", "budget", "ride_preference"]
+        receive = ["route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "compensation_offer"]
+        cannot = ["auto_purchase", "share_health_data", "accept_refund_without_user"]
+    return {"can_share": share, "can_receive": receive, "cannot_do": cannot, "scope": sorted(set(share + receive + ["policy_check", "session_commit"]))}
+
+
+def _external_agent_memory_context(agent_id: str, scenario_mode: str) -> dict[str, Any]:
+    try:
+        from mongo_memory import get_latest_memory_documents, get_memory_collection_count, init_operational_memory
+
+        status = init_operational_memory()
+        recent_sessions = get_latest_memory_documents("agent_handshake_sessions", 3)
+        recent_policy_events = get_latest_memory_documents("agent_handshake_policy_events", 3)
+        return {
+            "status": status.get("status") or status.get("mode") or "ready",
+            "mode": status.get("mode"),
+            "connected": status.get("connected"),
+            "collections": {
+                "agent_handshake_sessions": get_memory_collection_count("agent_handshake_sessions"),
+                "agent_handshake_policy_events": get_memory_collection_count("agent_handshake_policy_events"),
+            },
+            "retrieval": [
+                {
+                    "session_id": item.get("sessionId") or item.get("session_id") or item.get("id"),
+                    "client_agent_id": item.get("clientAgentId"),
+                    "state": item.get("state"),
+                    "updated_at": item.get("updatedAt") or item.get("updated_at"),
+                }
+                for item in recent_sessions
+                if isinstance(item, dict)
+            ],
+            "policy_memory": [
+                {"action": item.get("action"), "status": item.get("status"), "created_at": item.get("createdAt") or item.get("created_at")}
+                for item in recent_policy_events
+                if isinstance(item, dict)
+            ],
+            "query": {"agent_id": agent_id, "scenario_mode": scenario_mode},
+            "memory_role": "Ground the external agent with prior receipt and policy memory without granting new authority.",
+        }
+    except Exception as error:
+        return {
+            "status": "demo_fallback",
+            "mode": "in_memory",
+            "connected": False,
+            "readiness_issues": [str(error)[:240]],
+            "query": {"agent_id": agent_id, "scenario_mode": scenario_mode},
+            "memory_role": "Fallback memory still records this run in-process for the demo.",
+        }
+
+
+def _external_agent_trust_context(agent_id: str, represented_subject: str, counterparty: str) -> dict[str, Any]:
+    _load_trust_registry()
+    partner_id = represented_subject if counterparty == "supplier" else "personal_agent_network"
+    partner = get_partner(partner_id) or get_partner("demo_external_partner") or {}
+    status = trust_store_status()
+    return {
+        "agent_id": agent_id,
+        "represented_subject": represented_subject,
+        "counterparty": counterparty,
+        "partner_id": partner_id,
+        "partner_status": _as_dict(partner).get("status") or "sandbox",
+        "trust_tier": _as_dict(partner).get("trust_tier") or "sandbox",
+        "certification_required": True,
+        "trust_store": {
+            "mode": status.get("mode"),
+            "partner_count": status.get("partnerCount") or status.get("partner_count"),
+            "active_key": _as_dict(active_key_record()).get("kid"),
+        },
+    }
+
+
+def _external_agent_decision(label: str, reasoning: list[str], decision: dict[str, Any]) -> dict[str, Any]:
+    return {"at": _now_iso(), "label": label, "reasoning": reasoning, "decision": copy.deepcopy(decision)}
+
+
+def _replay_step(method: str, path: str, request: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "at": _now_iso(),
+        "method": method,
+        "path": path,
+        "request": copy.deepcopy(request),
+        "response": copy.deepcopy(response),
+        "status": response.get("status") or response.get("mode") or "ok",
+    }
+
+
+def issue_agent_consent_grant(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    subject = str(payload.get("subject") or payload.get("represents") or "guest_user_123")
+    agent_id = str(payload.get("agent_id") or payload.get("agentId") or "external_agent")
+    scopes = _normalize_scope(payload.get("scope") or payload.get("scopes")) or DEFAULT_DELEGATION_SCOPES
+    cannot_do = _normalize_scope(payload.get("cannot_do") or payload.get("cannotDo")) or sorted(CLIENT_BLOCKED_ACTIONS)
+    scenario_mode = str(payload.get("scenario_mode") or payload.get("scenarioMode") or "visit_planning")
+    ttl_seconds = max(60, min(24 * 60 * 60, int(payload.get("ttl_seconds") or payload.get("ttlSeconds") or 3 * 60 * 60)))
+    issued_at = int(time.time())
+    grant = {
+        "grant_id": f"consent_{hashlib.sha1(f'{subject}:{agent_id}:{scenario_mode}:{issued_at}'.encode('utf-8')).hexdigest()[:12]}",
+        "artifact_type": "agent_consent_grant",
+        "protocol_version": "parkpulse-ahp-0.1",
+        "subject": subject,
+        "agent_id": agent_id,
+        "scenario_mode": scenario_mode,
+        "approved_scopes": scopes,
+        "cannot_do": cannot_do,
+        "issued_at": issued_at,
+        "expires_at": issued_at + ttl_seconds,
+        "revocation": {
+            "status": "available",
+            "route": "POST /api/park/agent-handshake/consent/revoke",
+            "revocation_token_hint": hashlib.sha1(f"revoke:{subject}:{agent_id}:{issued_at}".encode("utf-8")).hexdigest()[:16],
+        },
+        "approval_callback": {
+            "required_for": PARK_APPROVAL_GATES,
+            "route": "POST /api/park/session/{session_id}/escalate",
+        },
+        "consent_text": "External agent may negotiate within approved scopes only; payment, refund, medical, identity-sensitive, food-safety bypass, vendor payment, and ride reopening actions require explicit approval.",
+    }
+    return _with_protocol_signature("agent_consent_grant", grant)
+
+
+def agent_handshake_live_state_feed(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    scenario_mode = str(payload.get("scenario_mode") or payload.get("scenarioMode") or "cold_chain_incident")
+    minute = int(time.time() // 60)
+    seed = int(hashlib.sha1(f"{scenario_mode}:{minute}".encode("utf-8")).hexdigest()[:8], 16)
+    if scenario_mode in SUPPLY_CHAIN_PROTOCOL_SCENARIOS:
+        signals = {
+            "inventory": [
+                {"sku": "peanut_free_pretzel", "zone": "Water Zone", "on_hand": 8 + seed % 4, "target": 24, "status": "low"},
+                {"sku": "lemonade", "zone": "Parade Zone", "on_hand": 18 + seed % 8, "target": 40, "status": "watch"},
+            ],
+            "cold_chain": {"lot": "LEM-42", "temperature_f": 44 + seed % 5, "minutes_above_threshold": 22 + seed % 20, "status": "excursion" if scenario_mode == "cold_chain_incident" else "normal"},
+            "supplier_eta": {"primary_supplier_minutes": 55 + seed % 15, "backup_supplier_minutes": 32 + seed % 12},
+            "receiving_dock": {"available_slots": ["11:20", "12:10"], "congestion": "medium"},
+        }
+    else:
+        signals = {
+            "rides": [
+                {"name": "Lazy River", "wait_minutes": 22 + seed % 8, "status": "open", "zone": "Water Zone"},
+                {"name": "Wave Pool", "wait_minutes": 0, "status": "safety_delay" if scenario_mode in {"incident_response", "commerce_resolution"} else "open", "zone": "Water Zone"},
+                {"name": "Indoor Arcade", "wait_minutes": 8 + seed % 5, "status": "open", "zone": "Indoor"},
+            ],
+            "food": [{"name": "Pizza Garden", "pickup_eta_minutes": 9 + seed % 6, "allergy_flags": ["peanut_safe_process"]}],
+            "weather": {"storm_risk": 30 + seed % 45, "heat_index": 82 + seed % 8},
+            "crowd": {"Water Zone": "high", "Indoor": "medium", "Parade Zone": "low"},
+        }
+    return {
+        "status": "ready",
+        "mode": "agent_handshake_live_state_feed",
+        "protocol_version": "parkpulse-ahp-0.1",
+        "scenario_mode": scenario_mode,
+        "generated_at": _now_iso(),
+        "freshness_seconds": 60,
+        "source": "deterministic_live_feed_adapter",
+        "signals": signals,
+        "production_binding": {
+            "expected_sources": ["queue telemetry", "food inventory", "weather", "supplier ETA", "maintenance status", "commerce gate"],
+            "fallback": "Use deterministic adapter when live feeds are unavailable; judge marks source explicitly.",
+        },
+    }
+
+
+def agent_handshake_protocol_docs() -> dict[str, Any]:
+    routes = [
+        {"method": "POST", "path": "/api/park/delegation-token", "purpose": "Issue a scoped delegation token for an external agent."},
+        {"method": "POST", "path": "/api/park/agent-handshake/consent-grant", "purpose": "Create a signed user/supplier consent grant with revocation metadata."},
+        {"method": "POST", "path": "/api/park/handshake", "purpose": "Start identity handshake and bind represented subject to agent id."},
+        {"method": "POST", "path": "/api/park/session/{session_id}/capabilities", "purpose": "Exchange share/receive/cannot-do capabilities."},
+        {"method": "POST", "path": "/api/park/session/{session_id}/intent", "purpose": "Declare goal, time window, and constraints."},
+        {"method": "POST", "path": "/api/park/session/{session_id}/propose", "purpose": "Park agent proposes a plan."},
+        {"method": "POST", "path": "/api/park/session/{session_id}/counter", "purpose": "External agent counters with priority changes."},
+        {"method": "POST", "path": "/api/park/session/{session_id}/commit", "purpose": "Commit accepted plan within delegated authority."},
+        {"method": "POST", "path": "/api/park/session/{session_id}/monitor", "purpose": "Monitor live state and renegotiate response."},
+        {"method": "POST", "path": "/api/park/agent-handshake/verify-artifact", "purpose": "Verify signed protocol artifacts."},
+        {"method": "POST", "path": "/api/park/agent-handshake/external-client-demo", "purpose": "Reference external client agent implementation with replay trace."},
+    ]
+    return {
+        "status": "ready",
+        "mode": "agent_handshake_protocol_docs",
+        "protocol_version": "parkpulse-ahp-0.1",
+        "state_machine": ["identity", "capability", "intent", "proposal", "counter", "commit", "monitor", "receipt", "verify"],
+        "routes": routes,
+        "artifact_types": ["agent_contract", "agent_consent_grant", "agent_handshake_session_receipt", "agent_handshake_policy_challenges", "agent_handshake_scenario_catalog"],
+        "security_model": {
+            "identity": "agent id and represented subject must match delegation token claims",
+            "authorization": "scope plus cannot-do boundaries are enforced on every sensitive operation",
+            "integrity": "signed artifacts use canonical JSON, digest, issuer, key id, and signature verification",
+            "approval": PARK_APPROVAL_GATES,
+        },
+        "replay_contract": {
+            "field": "protocol_replay",
+            "description": "Every reference external-agent run includes ordered request/response pairs for auditor replay.",
+        },
+    }
+
+
+def _external_agent_plan_alternatives(scenario_mode: str, proposal: dict[str, Any], live_state: dict[str, Any], counterparty: str) -> list[dict[str, Any]]:
+    base_plan = _as_list(proposal.get("plan"))
+    if counterparty == "supplier":
+        alternatives = [
+            {"id": "accept_initial", "label": "Accept initial park proposal", "safety": 0.72, "time": 0.68, "authority": 0.9, "service": 0.72, "plan": base_plan},
+            {"id": "safety_first_counter", "label": "Counter for safety hold plus backup substitute", "safety": 0.98, "time": 0.78, "authority": 0.96, "service": 0.82, "plan": ["Hold unsafe stock", "Use approved substitute", "Reserve dock slot", "Notify procurement"]},
+            {"id": "commerce_push", "label": "Ask for vendor payment release now", "safety": 0.55, "time": 0.72, "authority": 0.2, "service": 0.75, "plan": ["Release payment", "Ship substitute", "Close claim"]},
+        ]
+    else:
+        alternatives = [
+            {"id": "accept_initial", "label": "Accept initial family route", "safety": 0.86, "time": 0.74, "authority": 0.92, "service": 0.8, "plan": base_plan},
+            {"id": "time_first_counter", "label": "Counter for lower wait and walking", "safety": 0.9, "time": 0.92, "authority": 0.94, "service": 0.88, "plan": ["Lower-wait ride", "Indoor reset", "Allergy-safe food", "Parade anchor"]},
+            {"id": "refund_push", "label": "Ask agent to accept refund automatically", "safety": 0.8, "time": 0.78, "authority": 0.18, "service": 0.62, "plan": ["Accept refund", "Notify user later"]},
+        ]
+    weights = {"safety": 0.34, "time": 0.22, "authority": 0.28, "service": 0.16}
+    for item in alternatives:
+        item["utility"] = round(sum(float(item[key]) * weight for key, weight in weights.items()), 3)
+        item["rejection_reason"] = None if item["authority"] >= 0.7 else "Rejected because it exceeds delegated authority or requires explicit approval."
+        item["live_evidence"] = {"source": live_state.get("source"), "generated_at": live_state.get("generated_at"), "scenario_mode": scenario_mode}
+    return sorted(alternatives, key=lambda item: item["utility"], reverse=True)
+
+
+def _run_external_adversarial_probes(session_id: str, token: dict[str, Any], scenario_mode: str, receipt: dict[str, Any], counterparty: str) -> list[dict[str, Any]]:
+    probes: list[dict[str, Any]] = []
+    unsafe_action = "bypass_food_safety" if counterparty == "supplier" else "share_health_data"
+    unsafe = evaluate_policy_action(session_id, {"action": unsafe_action, "reason": "External agent adversarial unsafe-action probe.", "scenario_mode": scenario_mode, "delegation_token": token})
+    unsafe_decision = _as_dict(unsafe.get("decision"))
+    probes.append(
+        {
+            "probe": "unsafe_action",
+            "status": "passed" if unsafe_decision.get("allowed") is False else "failed",
+            "expected": "blocked_or_approval_required",
+            "observed": unsafe_decision.get("status"),
+            "reason": unsafe_decision.get("reason"),
+        }
+    )
+    limited = issue_delegation_token(
+        {
+            "subject": _as_dict(_as_dict(_get_session(session_id).get("client_agent"))).get("represents"),
+            "agent_id": _as_dict(_as_dict(_get_session(session_id).get("client_agent"))).get("agent_id"),
+            "scope": ["route_plan"],
+            "cannot_do": ["auto_purchase"],
+            "ttl_seconds": 600,
+        }
+    )["token"]
+    try:
+        evaluate_policy_action(session_id, {"action": "payment", "reason": "Missing policy_check scope probe.", "delegation_token": limited})
+        probes.append({"probe": "missing_scope", "status": "failed", "expected": "permission_error", "observed": "allowed"})
+    except PermissionError as error:
+        probes.append({"probe": "missing_scope", "status": "passed", "expected": "permission_error", "observed": "blocked", "reason": str(error)})
+    tampered = copy.deepcopy(receipt)
+    tampered["final_status"] = "tampered_by_external_agent"
+    tamper_verification = verify_protocol_artifact({"artifact": tampered, "expected_artifact_type": "agent_handshake_session_receipt"})
+    probes.append(
+        {
+            "probe": "tampered_receipt",
+            "status": "passed" if tamper_verification.get("status") == "rejected" and "sha256_mismatch" in _as_list(tamper_verification.get("failures")) else "failed",
+            "expected": "rejected_sha256_mismatch",
+            "observed": tamper_verification.get("status"),
+            "failures": tamper_verification.get("failures"),
+        }
+    )
+    commerce_action = "vendor_payment_release" if counterparty == "supplier" else "payment"
+    commerce = commerce_agent_evaluate(
+        session_id,
+        {
+            "action": commerce_action,
+            "amount": 99,
+            "reason": "External agent commerce-boundary adversarial probe.",
+            "scenario_mode": scenario_mode,
+            "delegation_token": token,
+        },
+    )
+    commerce_decision = _as_dict(commerce.get("decision"))
+    probes.append(
+        {
+            "probe": "commerce_boundary",
+            "status": "passed" if commerce_decision.get("allowed") is False and commerce_decision.get("requires_user_approval") is True else "failed",
+            "expected": "approval_required",
+            "observed": commerce_decision.get("status"),
+            "reason": commerce_decision.get("reason"),
+        }
+    )
+    return probes
+
+
+def _external_agent_judge(run: dict[str, Any]) -> dict[str, Any]:
+    transcript = _as_list(run.get("external_agent_transcript"))
+    adversarial = _as_list(run.get("adversarial_probes"))
+    verification = _as_dict(run.get("verification"))
+    session = _as_dict(run.get("session"))
+    memory = _as_dict(run.get("memory_context"))
+    trust = _as_dict(run.get("trust_context"))
+    dimensions = [
+        _judge_dimension(
+            "external_agent_autonomy",
+            sum([len(transcript) >= 6, any(item.get("label") == "proposal_review" for item in transcript), any(item.get("label") == "counterproposal" for item in transcript), any(item.get("label") == "receipt_verification" for item in transcript)]) / 4,
+            [f"{len(transcript)} external-agent decisions", "proposal review, counterproposal, and receipt verification are expected"],
+        ),
+        _judge_dimension(
+            "adversarial_resilience",
+            sum(1 for item in adversarial if isinstance(item, dict) and item.get("status") == "passed") / max(1, len(adversarial)),
+            [f"{sum(1 for item in adversarial if isinstance(item, dict) and item.get('status') == 'passed')}/{len(adversarial)} adversarial probes passed"],
+            [item.get("probe") for item in adversarial if isinstance(item, dict) and item.get("status") != "passed"],
+        ),
+        _judge_dimension(
+            "memory_grounding",
+            sum([bool(memory), bool(memory.get("memory_role")), memory.get("status") not in {None, "failed"}, "agent_handshake_sessions" in _as_dict(memory.get("collections"))]) / 4,
+            [f"memory mode={memory.get('mode')}", f"connected={memory.get('connected')}", f"sessions={_as_dict(memory.get('collections')).get('agent_handshake_sessions')}"],
+        ),
+        _judge_dimension(
+            "trust_boundary",
+            sum([bool(trust.get("agent_id")), bool(trust.get("trust_tier")), trust.get("certification_required") is True, bool(_as_dict(trust.get("trust_store")).get("active_key"))]) / 4,
+            [f"trust tier={trust.get('trust_tier')}", f"partner={trust.get('partner_id')}", f"active key={_as_dict(trust.get('trust_store')).get('active_key')}"],
+        ),
+        _judge_dimension(
+            "receipt_integrity",
+            sum([verification.get("status") == "verified", verification.get("digest_status") == "valid", verification.get("signature_status") == "valid", bool(session.get("receipt"))]) / 4,
+            [f"verification={verification.get('status')}", f"digest={verification.get('digest_status')}", f"signature={verification.get('signature_status')}"],
+        ),
+    ]
+    overall = sum(item["score"] for item in dimensions) / len(dimensions)
+    weakest = sorted(dimensions, key=lambda item: item["score"])[0]
+    return {
+        "status": _judge_verdict(overall),
+        "overall_score": round(overall, 3),
+        "dimensions": dimensions,
+        "weakest_dimension": weakest["dimension"],
+        "findings": [
+            f"External counterparty made {len(transcript)} independent decisions before final receipt verification.",
+            f"Adversarial probes passed {sum(1 for item in adversarial if isinstance(item, dict) and item.get('status') == 'passed')}/{len(adversarial)}.",
+            f"Memory grounding is {memory.get('status')} and trust tier is {trust.get('trust_tier')}.",
+        ],
+    }
+
+
+def run_external_client_agent_demo(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    scenario_mode = str(payload.get("scenario_mode") or payload.get("scenarioMode") or "cold_chain_incident")
+    if scenario_mode not in _protocol_scenario_catalog_raw():
+        scenario_mode = "cold_chain_incident"
+    scenario = _protocol_scenario(scenario_mode)
+    run = _as_dict(scenario.get("run"))
+    counterparty = "supplier" if scenario_mode in SUPPLY_CHAIN_PROTOCOL_SCENARIOS else "guest"
+    scope_pack = _external_agent_scope_pack(counterparty)
+    agent_id = str(payload.get("agent_id") or payload.get("agentId") or (f"{scenario_mode}_external_agent" if counterparty == "supplier" else "john_personal_agent"))
+    represented = str(payload.get("represents") or ("guest_user_123" if counterparty == "guest" else f"supplier_vendor_{scenario_mode}"))
+    memory_context = _external_agent_memory_context(agent_id, scenario_mode)
+    trust_context = _external_agent_trust_context(agent_id, represented, counterparty)
+    live_state = agent_handshake_live_state_feed({"scenario_mode": scenario_mode})
+    protocol_replay: list[dict[str, Any]] = []
+    transcript = [
+        _external_agent_decision(
+            "memory_and_trust_load",
+            ["Read prior handshake receipts and policy memories before asking for authority.", "Use trust tier and live evidence to limit assumptions about what the external agent can do."],
+            {"memory": memory_context, "trust": trust_context, "live_state": live_state},
+        ),
+        _external_agent_decision(
+            "scope_selection",
+            ["Share only scenario-relevant fields.", "Retain cannot-do actions even if the park can offer commerce or safety workflows."],
+            scope_pack,
+        ),
+    ]
+    consent_grant = issue_agent_consent_grant(
+        {
+            "subject": represented,
+            "agent_id": agent_id,
+            "scope": scope_pack["scope"],
+            "cannot_do": scope_pack["cannot_do"],
+            "scenario_mode": scenario_mode,
+        }
+    )
+    protocol_replay.append(_replay_step("POST", "/api/park/agent-handshake/consent-grant", {"subject": represented, "agent_id": agent_id, "scope": scope_pack["scope"], "scenario_mode": scenario_mode}, consent_grant))
+    token_response = issue_delegation_token(
+        {
+            "subject": represented,
+            "agent_id": agent_id,
+            "scope": scope_pack["scope"],
+            "cannot_do": scope_pack["cannot_do"],
+            "ttl_seconds": int(payload.get("ttl_seconds") or payload.get("ttlSeconds") or 3 * 60 * 60),
+        }
+    )
+    token = token_response["token"]
+    protocol_replay.append(_replay_step("POST", "/api/park/delegation-token", {"subject": represented, "agent_id": agent_id, "scope": scope_pack["scope"]}, token_response))
+    identity_request = {
+        "agent_id": agent_id,
+        "represents": represented,
+        "proof": "signed_supplier_token" if counterparty == "supplier" else "signed_token",
+        "requested_session": f"external_client_{scenario_mode}_{time.time_ns()}",
+        "delegation_token": token,
+    }
+    identity = identity_handshake(identity_request)
+    protocol_replay.append(_replay_step("POST", "/api/park/handshake", identity_request, identity))
+    session_id = identity["session"]["session_id"]
+    capability_request = {
+        "can_share": scope_pack["can_share"],
+        "can_receive": scope_pack["can_receive"],
+        "cannot_do": scope_pack["cannot_do"],
+        "delegation_token": token,
+    }
+    capability = capability_handshake(session_id, capability_request)
+    protocol_replay.append(_replay_step("POST", f"/api/park/session/{session_id}/capabilities", capability_request, capability))
+    intent_request = {
+        "goal": run.get("goal") or _as_dict(scenario).get("client_intent") or "external_agent_goal",
+        "time_window": "2_hours" if counterparty == "supplier" else "3_hours",
+        "constraints": run.get("constraints") or {"scenario_mode": scenario_mode},
+        "scenario_mode": scenario_mode,
+        "live_state_reference": {"source": live_state.get("source"), "generated_at": live_state.get("generated_at")},
+        "delegation_token": token,
+    }
+    intent = intent_handshake(session_id, intent_request)
+    protocol_replay.append(_replay_step("POST", f"/api/park/session/{session_id}/intent", intent_request, intent))
+    propose_request = {"planner": run.get("planner") or scenario_mode, "scenario_mode": scenario_mode, "live_state": live_state, "delegation_token": token}
+    proposed = propose_plan(session_id, propose_request)
+    protocol_replay.append(_replay_step("POST", f"/api/park/session/{session_id}/propose", propose_request, proposed))
+    proposal = _as_dict(proposed.get("proposal"))
+    alternatives = _external_agent_plan_alternatives(scenario_mode, proposal, live_state, counterparty)
+    chosen = alternatives[0] if alternatives else {}
+    transcript.append(
+        _external_agent_decision(
+            "proposal_review",
+            [
+                "Inspect plan against the user's/supplier's priority stack.",
+                "Score alternatives by safety, time, authority, and service continuity before countering.",
+                "Reject any route, substitution, or offer that conflicts with cannot-do boundaries.",
+            ],
+            {"proposal_id": proposal.get("proposal_id"), "plan": proposal.get("plan"), "tradeoffs": proposal.get("tradeoffs"), "alternatives": alternatives, "chosen_alternative": chosen.get("id"), "accepted_as_final": False},
+        )
+    )
+    counter_request = str(run.get("counter_request") or "reduce risk and preserve delegated authority")
+    priority_change = _as_dict(run.get("priority_change")) or {"safety": "highest", "time_saved": "medium"}
+    transcript.append(
+        _external_agent_decision(
+            "counterproposal",
+            ["The external agent changes priorities instead of passively accepting the first plan.", "Counter must stay within declared authority."],
+            {"counter_request": counter_request, "priority_change": priority_change},
+        )
+    )
+    counter_request_payload = {"counter_request": counter_request, "priority_change": priority_change, "selected_alternative": chosen, "scenario_mode": scenario_mode, "delegation_token": token}
+    revised = counter_proposal(session_id, counter_request_payload)
+    protocol_replay.append(_replay_step("POST", f"/api/park/session/{session_id}/counter", counter_request_payload, revised))
+    commit_request = {"accepted": True, "notify_user": counterparty == "guest", "notify_supplier": counterparty == "supplier", "scenario_mode": scenario_mode, "delegation_token": token}
+    commitment = commit_plan(session_id, commit_request)
+    protocol_replay.append(_replay_step("POST", f"/api/park/session/{session_id}/commit", commit_request, commitment))
+    transcript.append(
+        _external_agent_decision(
+            "commitment",
+            ["Accept only after ParkPulse revises the plan and preserves approval gates."],
+            {"accepted": True, "commitment_id": _as_dict(commitment.get("commitment")).get("commitment_id")},
+        )
+    )
+    monitor_request = {"event": run.get("monitor_event") or "live", "scenario_mode": scenario_mode, "live_state": live_state, "delegation_token": token}
+    monitored = monitor_session(session_id, monitor_request)
+    protocol_replay.append(_replay_step("POST", f"/api/park/session/{session_id}/monitor", monitor_request, monitored))
+    commerce_request = {
+        "action": run.get("commerce_action") or ("vendor_payment_release" if counterparty == "supplier" else "payment"),
+        "amount": 42,
+        "reason": run.get("commerce_reason") or f"{scenario_mode} external-agent commerce gate.",
+        "scenario_mode": scenario_mode,
+        "delegation_token": token,
+    }
+    commerce = commerce_agent_evaluate(session_id, commerce_request)
+    protocol_replay.append(_replay_step("POST", "/api/park/internal-agents/commerce/evaluate", commerce_request, commerce))
+    receipt_request = {"scenario_mode": scenario_mode, "delegation_token": token}
+    receipt_payload = session_protocol_receipt(session_id, receipt_request)
+    protocol_replay.append(_replay_step("POST", f"/api/park/session/{session_id}/receipt", receipt_request, receipt_payload))
+    receipt = _as_dict(receipt_payload.get("receipt"))
+    verification = verify_protocol_artifact({"artifact": receipt, "expected_artifact_type": "agent_handshake_session_receipt"})
+    protocol_replay.append(_replay_step("POST", "/api/park/agent-handshake/verify-artifact", {"artifact": {"receipt_id": receipt.get("receipt_id")}, "expected_artifact_type": "agent_handshake_session_receipt"}, verification))
+    transcript.append(
+        _external_agent_decision(
+            "receipt_verification",
+            ["Verify signed receipt before notifying represented subject.", "Reject the session if digest, signature, issuer, or artifact type fails."],
+            {"receipt_id": receipt.get("receipt_id"), "verification": verification},
+        )
+    )
+    adversarial_probes = _run_external_adversarial_probes(session_id, token, scenario_mode, receipt, counterparty)
+    session = get_session(session_id)["session"]
+    result = {
+        "status": "demo_complete",
+        "mode": "external_client_agent_simulator",
+        "protocol_version": "parkpulse-ahp-0.1",
+        "scenario_mode": scenario_mode,
+        "counterparty": counterparty,
+        "session_id": session_id,
+        "external_agent": {
+            "agent_id": agent_id,
+            "represents": represented,
+            "planner": "external_counterparty_policy_planner",
+            "decision_loop": ["load_memory", "select_scope", "handshake", "review_offer", "counter", "commit", "monitor", "verify_receipt", "probe_adversarial_cases"],
+        },
+        "consent_grant": consent_grant,
+        "live_state": live_state,
+        "memory_context": memory_context,
+        "trust_context": trust_context,
+        "external_agent_transcript": transcript,
+        "protocol_replay": protocol_replay,
+        "steps": [identity, capability, intent, proposed, revised, commitment, monitored, commerce, receipt_payload],
+        "adversarial_probes": adversarial_probes,
+        "receipt": receipt,
+        "verification": verification,
+        "session": session,
+    }
+    result["judge_report"] = _external_agent_judge(result)
+    return result
 
 
 def demo_handshake(park_state: dict[str, Any] | None = None) -> dict[str, Any]:
