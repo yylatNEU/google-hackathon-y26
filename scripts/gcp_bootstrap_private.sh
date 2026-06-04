@@ -33,6 +33,7 @@ gcloud services enable \
   artifactregistry.googleapis.com \
   bigquery.googleapis.com \
   cloudbuild.googleapis.com \
+  cloudscheduler.googleapis.com \
   eventarc.googleapis.com \
   fcm.googleapis.com \
   iam.googleapis.com \

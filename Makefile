@@ -4,7 +4,7 @@ PERF_CONCURRENCY ?= 50
 PERF_TARGET_P95_MS ?= 250
 TEST_PYTHON ?= /tmp/parkpulse_backend_venv/bin/python
 
-.PHONY: qa qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate loop-resilience loop-resilience-monitor live-agents-smoke live-feed-agent-smoke live-feed-training-closure live-feed-agent-report live-feed-learning-loop-validation test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-judge-smoke gcp-judge-smoke-strict gcp-deploy-private gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private gcp-verify-agent-roles
+.PHONY: qa qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate loop-resilience loop-resilience-monitor live-agents-smoke live-feed-agent-smoke live-feed-training-closure live-feed-agent-report live-feed-learning-loop-validation test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-judge-smoke gcp-judge-smoke-strict gcp-deploy-private gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private gcp-verify-agent-roles gcp-schedule-loop-resilience
 
 qa:
 	python3 scripts/qa_agent.py
@@ -92,3 +92,6 @@ gcp-validate-private:
 
 gcp-verify-agent-roles:
 	scripts/verify_private_cloud_run_agent_roles.sh
+
+gcp-schedule-loop-resilience:
+	scripts/schedule_operating_loop_resilience.sh

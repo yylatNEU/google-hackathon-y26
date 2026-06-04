@@ -1848,6 +1848,10 @@ export default function AgentHandshakePage() {
   }
 
   useEffect(() => {
+    window.location.replace(`/agent-handshake-full-demo.html${window.location.search || ""}`);
+  }, []);
+
+  useEffect(() => {
     void loadContract();
   }, []);
 

@@ -70,6 +70,7 @@ def _local_training_rows() -> list[dict[str, Any]]:
         _dedupe_training_rows,
         _delayed_outcome_attribution_training_rows,
         _heartbeat_training_signal_rows,
+        _live_feed_case_bank_training_rows,
         _sort_training_rows_latest_first,
     )
 
@@ -78,6 +79,7 @@ def _local_training_rows() -> list[dict[str, Any]]:
             [
                 *_heartbeat_training_signal_rows(),
                 *_delayed_outcome_attribution_training_rows(),
+                *_live_feed_case_bank_training_rows(),
                 *_bounded_memory_training_rows(),
             ]
         )
@@ -171,12 +173,22 @@ def _repair_hypothesis(scenario_key: str, sources: dict[str, Any]) -> dict[str, 
 def _build_report(progress: dict[str, Any], case_rows: list[dict[str, Any]], operating_report: dict[str, Any] | None, recorder: Any) -> dict[str, Any]:
     reconciliation = progress.get("source_reconciliation", {}) if isinstance(progress.get("source_reconciliation"), dict) else {}
     rows = reconciliation.get("rows", []) if isinstance(reconciliation.get("rows"), list) else []
-    conflicts = [row for row in rows if isinstance(row, dict) and row.get("conflict")]
+    conflicts = [row for row in rows if isinstance(row, dict) and row.get("active_conflict", row.get("conflict"))]
+    review_rows = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and (
+            row.get("active_conflict", row.get("conflict"))
+            or row.get("historical_drift")
+            or str(row.get("reconciled_decision") or "") in {"candidate_needs_more_current_evidence", "collect_more_source_evidence", "repair_weak_slice"}
+        )
+    ]
     local_rows = _local_training_rows()
     drilldowns = []
-    for conflict in conflicts:
-        scenario_key = str(conflict.get("scenario_key") or "unknown")
-        source_summaries = conflict.get("sources", {}) if isinstance(conflict.get("sources"), dict) else {}
+    for item in review_rows:
+        scenario_key = str(item.get("scenario_key") or "unknown")
+        source_summaries = item.get("sources", {}) if isinstance(item.get("sources"), dict) else {}
         scenario_case_rows = [row for row in case_rows if recorder._scenario_from_issue(row) == scenario_key]
         scenario_training_rows = [row for row in local_rows if str(row.get("scenario_key") or "unknown") == scenario_key]
         case_rewards = [recorder._reward(row) for row in scenario_case_rows if recorder._reward(row) > 0]
@@ -184,8 +196,11 @@ def _build_report(progress: dict[str, Any], case_rows: list[dict[str, Any]], ope
         drilldowns.append(
             {
                 "scenario_key": scenario_key,
-                "conflict_priority": conflict.get("conflict_priority"),
-                "reconciled_decision": conflict.get("reconciled_decision"),
+                "active_conflict": bool(item.get("active_conflict", item.get("conflict"))),
+                "historical_drift": bool(item.get("historical_drift")),
+                "conflict_priority": item.get("conflict_priority"),
+                "reconciled_decision": item.get("reconciled_decision"),
+                "next_action": item.get("next_action"),
                 "source_summaries": source_summaries,
                 "repair": _repair_hypothesis(scenario_key, source_summaries),
                 "case_bank_evidence": {
@@ -204,13 +219,16 @@ def _build_report(progress: dict[str, Any], case_rows: list[dict[str, Any]], ope
         )
     return {
         "created_at": _now_iso(),
-        "mode": "source_conflict_drilldown",
+        "mode": "source_reconciliation_drilldown",
         "progress_source": progress.get("source_report"),
-        "conflict_count": len(drilldowns),
+        "conflict_count": len(conflicts),
+        "review_item_count": len(drilldowns),
         "summary": {
-            "conflict_scenarios": [row.get("scenario_key") for row in drilldowns],
+            "conflict_scenarios": [row.get("scenario_key") for row in drilldowns if row.get("active_conflict")],
+            "historical_drift_scenarios": [row.get("scenario_key") for row in drilldowns if row.get("historical_drift")],
+            "watch_scenarios": [row.get("scenario_key") for row in drilldowns if not row.get("active_conflict") and str(row.get("reconciled_decision") or "") != "candidate_consistent_growth"],
             "highest_priority": drilldowns[0].get("scenario_key") if drilldowns else None,
-            "promotion_boundary": "Hold promotion for conflicted slices until row-level evidence and reward formulas agree across sources.",
+            "promotion_boundary": reconciliation.get("promotion_boundary") or "Hold promotion for conflicted slices until row-level evidence and reward formulas agree across current sources.",
         },
         "drilldowns": drilldowns,
     }
@@ -261,8 +279,8 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
             <section>
               <div class="section-head"><h2>{html.escape(str(item.get('scenario_key')))}</h2>{_badge(item.get('reconciled_decision'))}</div>
               <div class="grid">
-                <div><strong>Repair issue</strong><span>{html.escape(str(repair.get('primary_issue')))}</span><small>{html.escape(str(repair.get('hypothesis')))}</small></div>
-                <div><strong>Next patch</strong><span>{html.escape(str(repair.get('next_patch')))}</span><small>Priority {html.escape(str(item.get('conflict_priority')))}</small></div>
+                <div><strong>Active conflict</strong><span>{html.escape(str(item.get('active_conflict')))}</span><small>Historical drift: {html.escape(str(item.get('historical_drift')))}</small></div>
+                <div><strong>Next action</strong><span>{html.escape(str(item.get('next_action') or repair.get('next_patch')))}</span><small>Priority {html.escape(str(item.get('conflict_priority')))}</small></div>
                 <div><strong>Case rows</strong><span>{html.escape(str((item.get('case_bank_evidence') or {}).get('row_count')))}</span><small>Avg op reward {html.escape(str((item.get('case_bank_evidence') or {}).get('average_operational_reward')))}</small></div>
                 <div><strong>Training rows</strong><span>{html.escape(str((item.get('refreshed_training_evidence') or {}).get('row_count')))}</span><small>Avg reward {html.escape(str((item.get('refreshed_training_evidence') or {}).get('average_reward')))}</small></div>
               </div>
@@ -313,11 +331,11 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
 </head>
 <body>
   <header>
-    <h1>Source Conflict Drilldown</h1>
-    <p>Row-level evidence for slices where case-bank, operating-report training, and refreshed training disagree. Promotion remains held until these conflicts are repaired.</p>
+    <h1>Source Reconciliation Drilldown</h1>
+    <p>Row-level evidence for active conflicts, thin current slices, and historical drift. Current active sources gate promotion; older operating snapshots remain visible as drift evidence.</p>
   </header>
   <main>
-    {''.join(sections)}
+    {''.join(sections) if sections else '<section><h2>No Review Items</h2><p>Current active sources are aligned and no thin or drift slices were found.</p></section>'}
   </main>
 </body>
 </html>
