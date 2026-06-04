@@ -267,8 +267,31 @@ def _issue_counts(rows: list[dict[str, Any]], batch_summaries: list[dict[str, An
     return kind_counts, target_counts, domain_counts
 
 
-def _select_diverse_issue_plan(case_bank_rows: list[dict[str, Any]], batch_summaries: list[dict[str, Any]], cycle_index: int) -> dict[str, Any]:
+def _select_diverse_issue_plan(
+    case_bank_rows: list[dict[str, Any]],
+    batch_summaries: list[dict[str, Any]],
+    cycle_index: int,
+    *,
+    forced_issue_kind: str | None = None,
+    forced_target_id: str | None = None,
+    forced_intensity: int | None = None,
+) -> dict[str, Any]:
     kind_counts, target_counts, domain_counts = _issue_counts(case_bank_rows, batch_summaries)
+    if forced_issue_kind:
+        catalog_match = next((item for item in DIVERSITY_EVENT_CATALOG if str(item.get("kind")) == forced_issue_kind), {})
+        target = forced_target_id or str(catalog_match.get("target_id") or "foodCourt1")
+        domain = str(catalog_match.get("domain") or "targeted_validation")
+        return {
+            "kind": forced_issue_kind,
+            "target_id": target,
+            "intensity": forced_intensity or _safe_int(catalog_match.get("intensity"), 80),
+            "domain": domain,
+            "selection_mode": "targeted_slice_validation",
+            "cycle_index": cycle_index,
+            "prior_kind_count": kind_counts.get(forced_issue_kind, 0),
+            "prior_target_count": target_counts.get(target, 0),
+            "prior_domain_count": domain_counts.get(domain, 0),
+        }
     scored: list[tuple[float, dict[str, Any]]] = []
     for order, item in enumerate(DIVERSITY_EVENT_CATALOG):
         kind = str(item["kind"])
@@ -292,18 +315,40 @@ def _select_diverse_issue_plan(case_bank_rows: list[dict[str, Any]], batch_summa
     }
 
 
-async def _inject_operating_issue(parkpulse_api: Any, *, cycle_index: int, diversity_control: bool, case_bank_rows: list[dict[str, Any]], batch_summaries: list[dict[str, Any]]) -> dict[str, Any]:
-    if not diversity_control:
+async def _inject_operating_issue(
+    parkpulse_api: Any,
+    *,
+    cycle_index: int,
+    diversity_control: bool,
+    case_bank_rows: list[dict[str, Any]],
+    batch_summaries: list[dict[str, Any]],
+    forced_issue_kind: str | None = None,
+    forced_target_id: str | None = None,
+    forced_intensity: int | None = None,
+) -> dict[str, Any]:
+    if not diversity_control and not forced_issue_kind:
         result = await parkpulse_api.park_simulation.inject_random_unexpected_event(f"live_feed_operating_cycle_{cycle_index}")
         if isinstance(result, dict):
             result["selection_mode"] = "random_unexpected_event"
         return result
-    plan = _select_diverse_issue_plan(case_bank_rows, batch_summaries, cycle_index)
+    plan = _select_diverse_issue_plan(
+        case_bank_rows,
+        batch_summaries,
+        cycle_index,
+        forced_issue_kind=forced_issue_kind,
+        forced_target_id=forced_target_id,
+        forced_intensity=forced_intensity,
+    )
     result = await parkpulse_api.park_simulation.inject_event(str(plan["kind"]), str(plan["target_id"]), _safe_int(plan.get("intensity"), 75))
     if isinstance(result, dict):
         event = result.get("event", {}) if isinstance(result.get("event"), dict) else {}
-        event.setdefault("reason", f"Diversity-directed operating stress for underrepresented {plan['kind']} cases.")
-        event.setdefault("source", "live_feed_operating_cycle_diversity")
+        event.setdefault(
+            "reason",
+            f"Targeted validation stress for {plan['kind']} cases."
+            if plan["selection_mode"] == "targeted_slice_validation"
+            else f"Diversity-directed operating stress for underrepresented {plan['kind']} cases.",
+        )
+        event.setdefault("source", "live_feed_operating_cycle_targeted" if plan["selection_mode"] == "targeted_slice_validation" else "live_feed_operating_cycle_diversity")
         event.setdefault("unexpected", True)
         event.setdefault("signalReliabilityPct", 90)
         event.setdefault("visibility", "clear")
@@ -322,6 +367,9 @@ async def _run_cycle(
     case_bank_rows: list[dict[str, Any]],
     batch_summaries: list[dict[str, Any]],
     agent_timeout_seconds: float,
+    forced_issue_kind: str | None = None,
+    forced_target_id: str | None = None,
+    forced_intensity: int | None = None,
 ) -> dict[str, Any]:
     import parkpulse_api
     from live_feed_training_closure import close_live_feed_training_loop
@@ -333,6 +381,9 @@ async def _run_cycle(
         diversity_control=diversity_control,
         case_bank_rows=case_bank_rows,
         batch_summaries=batch_summaries,
+        forced_issue_kind=forced_issue_kind,
+        forced_target_id=forced_target_id,
+        forced_intensity=forced_intensity,
     )
     await parkpulse_api.park_simulation.step()
     load_results = await _load_all_live_feeds(parkpulse_api)
@@ -1240,6 +1291,9 @@ async def _async_main(args: argparse.Namespace) -> int:
             case_bank_rows=starting_case_bank_rows,
             batch_summaries=[row["summary"] for row in cycles],
             agent_timeout_seconds=args.agent_timeout_seconds,
+            forced_issue_kind=args.force_issue_kind,
+            forced_target_id=args.force_target_id,
+            forced_intensity=args.force_intensity,
         )
         cycles.append(result)
     cycle_summaries = [row["summary"] for row in cycles]
@@ -1298,6 +1352,9 @@ def main() -> int:
     parser.add_argument("--max-dominant-issue-ratio", type=float, default=0.3, help="Maximum share allowed for the most common issue kind.")
     parser.add_argument("--min-memory-applied-ratio", type=float, default=0.45, help="Minimum share of closed cases that must show memory use.")
     parser.add_argument("--no-diversity-control", action="store_true", help="Use random unexpected events instead of case-bank diversity-directed issue selection.")
+    parser.add_argument("--force-issue-kind", default=None, help="Force a specific issue kind for targeted slice validation.")
+    parser.add_argument("--force-target-id", default=None, help="Force a target id/zone for targeted slice validation.")
+    parser.add_argument("--force-intensity", type=int, default=None, help="Force issue intensity for targeted slice validation.")
     parser.add_argument("--training-detail", choices=["readiness", "full"], default="full")
     parser.add_argument("--training-timeout-seconds", type=float, default=90.0)
     parser.add_argument("--agent-timeout-seconds", type=float, default=180.0, help="Maximum seconds to wait for each live-feed agent cycle.")
