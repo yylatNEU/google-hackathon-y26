@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -52,6 +53,19 @@ def _assert_valid_protocol_signature(artifact: dict, artifact_type: str):
     assert signature["protocol_version"] == "parkpulse-ahp-0.1"
     assert signature["alg"] == certification_issuer_metadata()["signing"]["alg"]
     assert _verify_certification_claims({key: value for key, value in signature.items() if key != "sig"}, signature["sig"])
+
+
+def _simulate_browser_json_roundtrip(value):
+    def normalize(item):
+        if isinstance(item, dict):
+            return {key: normalize(nested) for key, nested in item.items()}
+        if isinstance(item, list):
+            return [normalize(nested) for nested in item]
+        if isinstance(item, float) and item.is_integer():
+            return int(item)
+        return item
+
+    return normalize(json.loads(json.dumps(value)))
 
 
 def _full_delegation_token():
@@ -416,6 +430,9 @@ def test_agent_contract_policy_challenges_and_receipt_are_signed():
     assert receipt["policy_gates_triggered"]
     assert receipt["conversation_digest"]
     assert verify_protocol_artifact({"artifact": receipt, "expected_artifact_type": "agent_handshake_session_receipt"})["status"] == "verified"
+    browser_roundtripped = _simulate_browser_json_roundtrip(receipt)
+    assert browser_roundtripped["case_evaluations"][0]["score"] == 1
+    assert verify_protocol_artifact({"artifact": browser_roundtripped, "expected_artifact_type": "agent_handshake_session_receipt"})["status"] == "verified"
     wrong_type = verify_protocol_artifact({"artifact": receipt, "expected_artifact_type": "agent_contract"})
     assert wrong_type["status"] == "rejected"
     assert "artifact_type_mismatch" in wrong_type["failures"]

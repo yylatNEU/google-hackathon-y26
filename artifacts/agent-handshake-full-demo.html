@@ -903,13 +903,18 @@
         await api(`/api/park/session/${sessionId}/commit`, withToken({ accepted: true, notify_user: input.counterparty === "guest", notify_supplier: input.counterparty === "supplier" }));
         await api(`/api/park/session/${sessionId}/monitor`, withToken({ event: input.constraints.temperature_excursion ? "cold_chain_temperature_excursion" : "live", scenario_mode: input.scenario }));
         await api("/api/park/internal-agents/commerce/evaluate", withToken({ session_id: sessionId, action: input.commerceAction, amount: 42, reason: `${titleize(input.scenario)} boundary probe.`, scenario_mode: input.scenario }));
-        const receiptPayload = await api(`/api/park/session/${sessionId}/receipt`, withToken({ scenario_mode: input.scenario }));
-        const verification = await api("/api/park/agent-handshake/verify-artifact", { artifact: receiptPayload.receipt, expected_artifact_type: "agent_handshake_session_receipt" });
+        let receiptPayload = await api(`/api/park/session/${sessionId}/receipt`, withToken({ scenario_mode: input.scenario }));
+        let verification = await api("/api/park/agent-handshake/verify-artifact", { artifact: receiptPayload.receipt, expected_artifact_type: "agent_handshake_session_receipt" });
+        const draftVerification = verification;
+        if (verification.status !== "verified" && verification.signature_status === "valid" && (verification.failures || []).includes("sha256_mismatch")) {
+          receiptPayload = await api(`/api/park/session/${sessionId}/receipt`, withToken({ scenario_mode: input.scenario, settle_after_receipt_event: true }));
+          verification = await api("/api/park/agent-handshake/verify-artifact", { artifact: receiptPayload.receipt, expected_artifact_type: "agent_handshake_session_receipt" });
+        }
         const refreshed = await api(`/api/park/session/${sessionId}`);
         state.session = refreshed.session;
         state.receipt = receiptPayload.receipt;
         state.verification = verification;
-        state.lastPayload = { input, session: refreshed.session, receipt: receiptPayload.receipt, verification, local_steps: steps };
+        state.lastPayload = { input, session: refreshed.session, receipt: receiptPayload.receipt, verification, draft_verification: draftVerification, local_steps: steps };
         renderAll();
         clearRunning("passed");
       } catch (error) {

@@ -522,8 +522,19 @@ def _delegation_secret() -> bytes:
     return os.getenv("PARKPULSE_DELEGATION_TOKEN_SECRET", "parkpulse-local-agent-handshake-demo-secret").encode("utf-8")
 
 
+def _canonical_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _canonical_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_canonical_json_value(item) for item in value]
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
 def _canonical_json(value: dict[str, Any]) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    normalized = _canonical_json_value(value)
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
 def _b64url(value: bytes) -> str:
