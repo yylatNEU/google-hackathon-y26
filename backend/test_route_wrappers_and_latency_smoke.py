@@ -91,8 +91,12 @@ def test_delivery_route_wrappers(monkeypatch):
     assert client.get("/api/park/delivery/contract").json()["name"] == "contract"
     assert client.get("/api/park/delivery/outbox?limit=1").json()["count"] == 1
     assert client.post("/api/park/delivery/guest-promotion", json={"payload": {"x": 1}}).json()["status"] == "delivered"
+    blocked_dispatch = client.post("/api/park/delivery/guest-promotion", headers={"x-parkpulse-role": "customer"}, json={"payload": {"x": 1}})
+    assert blocked_dispatch.status_code == 403
+    assert blocked_dispatch.json()["detail"]["authorization"]["capability"] == "dispatch_live_action"
     assert client.post("/api/park/delivery/worker-notification", json={"payload": {"x": 1}}).json()["dispatch"]["channel"] == "worker_device"
     assert client.post("/api/park/delivery/equipment-command", json={"payload": {"x": 1}}).json()["dispatch"]["channel"] == "equipment_controller"
+    assert client.post("/api/park/delivery/acknowledge", headers={"x-parkpulse-role": "customer"}, json={"dispatch_id": "d1"}).status_code == 403
     assert client.post("/api/park/delivery/acknowledge", json={"dispatch_id": "d1"}).json()["application"]["status"] == "applied"
     approval = client.post("/api/park/delivery/approval-decision", json={"dispatch_id": "d1", "decision": "approved"}).json()
     assert approval["approval"]["decision"] == "approved"
@@ -129,10 +133,13 @@ def test_memory_route_wrappers(monkeypatch):
     assert client.get("/api/park/memory/scorecards?limit=500").json()["limit"] == 50
     assert client.post("/api/park/memory/cache-replay", json={"scenario_key": "s", "persist": False}).json()["persist"] is False
     assert client.post("/api/park/memory/maintenance/repair", json={"query": "q", "collections": ["c"], "limit": 3}).json()["limit"] == 3
-    assert client.post("/api/park/autodream/run", json={"scenario_key": "s", "max_cases": 2}).json()["max_cases"] == 2
+    assert client.post("/api/park/autodream/run", json={"scenario_key": "s", "max_cases": 2}).status_code == 403
+    admin_headers = {"x-parkpulse-role": "ml_ops_admin"}
+    assert client.post("/api/park/autodream/run", headers=admin_headers, json={"scenario_key": "s", "max_cases": 2}).json()["max_cases"] == 2
     assert client.get("/api/park/autodream/status?limit=4").json()["limit"] == 4
-    assert client.post("/api/park/autodream/promote", json={"dream_learning_id": "d"}).json()["promoted"] == "d"
-    assert client.post("/api/park/autodream/review", json={"dream_learning_id": "d", "review_status": "approved"}).json()["status"] == "approved"
+    assert client.post("/api/park/autodream/promote", json={"dream_learning_id": "d"}).status_code == 403
+    assert client.post("/api/park/autodream/promote", headers=admin_headers, json={"dream_learning_id": "d"}).json()["promoted"] == "d"
+    assert client.post("/api/park/autodream/review", headers=admin_headers, json={"dream_learning_id": "d", "review_status": "approved"}).json()["status"] == "approved"
     assert client.post("/api/park/autodream/benchmark", json={"scenario_key": "s", "seeds": 2}).json()["storage"]["id"] == "bench-1"
     assert client.get("/api/park/autodream/benchmarks?limit=3").json()["count"] == 1
     assert client.get("/api/park/analytics?query=q").json()["dashboard"]["query"] == "q"

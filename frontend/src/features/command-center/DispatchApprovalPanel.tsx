@@ -10,6 +10,8 @@ export function DispatchApprovalPanel({
   isApproving,
   onExecute,
   onAcknowledge,
+  canExecute,
+  canAcknowledge,
 }: {
   dispatches: DispatchView[];
   humanApproval: boolean;
@@ -17,6 +19,8 @@ export function DispatchApprovalPanel({
   isApproving: boolean;
   onExecute: () => void;
   onAcknowledge: (dispatch: DispatchView, choice: "approved" | "held_for_review" | "acknowledged") => void;
+  canExecute: boolean;
+  canAcknowledge: boolean;
 }) {
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
@@ -28,12 +32,17 @@ export function DispatchApprovalPanel({
         <button
           type="button"
           onClick={onExecute}
-          disabled={isDispatching}
+          disabled={isDispatching || !canExecute}
           className="w-fit rounded border border-cyan-300 bg-cyan-300 px-4 py-2 text-xs font-black text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {isDispatching ? "Sending" : "Send through gate"}
         </button>
       </div>
+      {!canExecute && (
+        <div className="mt-3 rounded border border-slate-700 bg-slate-900 p-3 text-xs font-bold text-slate-300">
+          Signed Ops Team role is required to send live actions through the dispatch gate.
+        </div>
+      )}
 
       <div className="mt-4 grid gap-3">
         {dispatches.map((dispatch) => (
@@ -53,7 +62,7 @@ export function DispatchApprovalPanel({
                 <button
                   type="button"
                   onClick={() => onAcknowledge(dispatch, "approved")}
-                  disabled={isApproving}
+                  disabled={isApproving || !canAcknowledge}
                   className="rounded border border-emerald-400 bg-emerald-400 px-3 py-2 text-xs font-black text-slate-950 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Approve
@@ -61,7 +70,7 @@ export function DispatchApprovalPanel({
                 <button
                   type="button"
                   onClick={() => onAcknowledge(dispatch, "held_for_review")}
-                  disabled={isApproving}
+                  disabled={isApproving || !canAcknowledge}
                   className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-amber-300 hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Hold

@@ -184,9 +184,13 @@ def _candidate_rows(
 
 
 def _customer_candidates(details: dict[str, Any]) -> list[dict[str, Any]]:
+    if not details:
+        return []
     quality = details.get("data_quality", {}) if isinstance(details.get("data_quality"), dict) else {}
     feed = details.get("feed_contract", {}) if isinstance(details.get("feed_contract"), dict) else {}
     picks = details.get("recommended_public_options", {}) if isinstance(details.get("recommended_public_options"), dict) else {}
+    if not quality and not feed and not picks:
+        return []
     best_ride = picks.get("best_ride", {}) if isinstance(picks.get("best_ride"), dict) else {}
     best_food = picks.get("best_food", {}) if isinstance(picks.get("best_food"), dict) else {}
     return [

@@ -126,6 +126,86 @@ export type ReviewTrainingLedger = {
   readiness_issues?: string[];
 };
 
+export type ReviewLabelDecision = "approve_label" | "edit_label" | "reject_label" | "needs_more_evidence";
+
+export type ReviewLabelCandidate = {
+  id?: string;
+  agent_id?: string;
+  training_scope?: string;
+  source?: string;
+  priority?: string;
+  input_summary?: string;
+  proposed_label?: string;
+  label_options?: string[];
+  evidence?: Record<string, unknown>;
+  recommendation?: {
+    proposed_label?: string;
+    confidence?: number;
+    confidence_status?: string;
+    auto_label_eligible?: boolean;
+  };
+  safety_notes?: string[];
+  review_status?: string;
+  boundary?: string;
+  decision?: {
+    decision?: ReviewLabelDecision;
+    final_label?: string;
+    eligible_for_supervised_training?: boolean;
+  };
+};
+
+export type ReviewLabelPipeline = {
+  status?: string;
+  mode?: string;
+  summary?: {
+    candidate_count?: number;
+    open_count?: number;
+    decided_count?: number;
+    approved_label_count?: number;
+    training_candidate_count?: number;
+  };
+  candidates?: ReviewLabelCandidate[];
+  decided?: ReviewLabelCandidate[];
+  label_options?: ReviewLabelDecision[];
+  auto_label_rule?: {
+    enabled?: boolean;
+    confidence_threshold?: number;
+  };
+  training_rule?: string;
+  boundary?: string;
+  uses_seed_data?: boolean;
+  labels_or_reward_changed?: boolean;
+  llm_used_for_reward_or_label?: boolean;
+  readiness_issues?: string[];
+};
+
+export type RoleAccessContracts = {
+  status?: string;
+  mode?: string;
+  principle?: string;
+  roles?: Array<{
+    id?: string;
+    label?: string;
+    surface?: string;
+    primary_users?: string[];
+    can_read?: string[];
+    can_do?: string[];
+    cannot_read?: string[];
+    cannot_do?: string[];
+    evidence_products?: string[];
+    ui_contract?: string;
+    llm_contract?: string;
+  }>;
+  role_count?: number;
+  global_boundaries?: string[];
+  route_matrix?: Record<string, string>;
+  data_products?: string[];
+  uses_seed_data?: boolean;
+  loads_bigquery_per_tick?: boolean;
+  llm_control_authority?: boolean;
+  readiness_issues?: string[];
+};
+
 export type LiveWeatherLoadResult = {
   status?: string;
   mode?: string;
@@ -250,6 +330,11 @@ export function useCommandCenter() {
   const [liveOperatorSignalLoad, setLiveOperatorSignalLoad] = useState<LiveOperatorSignalLoadResult | null>(null);
   const [liveFeedRefreshSupervisor, setLiveFeedRefreshSupervisor] = useState<LiveFeedRefreshSupervisorResult | null>(null);
   const [liveAgentsSmoke, setLiveAgentsSmoke] = useState<LiveAgentsSmokeReport | null>(null);
+  const [reviewLabelPipeline, setReviewLabelPipeline] = useState<ReviewLabelPipeline | null>(null);
+  const [roleAccess, setRoleAccess] = useState<RoleAccessContracts | null>(null);
+  const [isReviewLabelPipelineLoading, setIsReviewLabelPipelineLoading] = useState(false);
+  const [isAutoLabelingReviewLabels, setIsAutoLabelingReviewLabels] = useState(false);
+  const [isRoleAccessLoading, setIsRoleAccessLoading] = useState(false);
 
   const activeEvalScores = useMemo<EvalScore[]>(() => {
     const scorecard = runTelemetry?.eval?.scorecard;
@@ -280,6 +365,12 @@ export function useCommandCenter() {
   const policyGate = runTelemetry?.governance?.gate_status;
   const evalScore = runTelemetry?.eval?.scorecard?.overall;
   const memoryMode = runTelemetry?.memory?.mode ?? integrationStatus?.mongo?.mode ?? "unavailable";
+  const canManageFeeds = true;
+  const canReviewCases = true;
+  const canReviewLabels = true;
+  const canStartTraining = true;
+  const canExecute = true;
+  const canAcknowledge = true;
 
   const refreshIntegrationStatus = useCallback(async () => {
     try {
@@ -386,6 +477,45 @@ export function useCommandCenter() {
     }
   }, []);
 
+  const refreshReviewLabelPipeline = useCallback(async () => {
+    setIsReviewLabelPipelineLoading(true);
+    try {
+      const response = await fetchParkPulseApi("/api/park/review-label-pipeline?limit=40", { timeoutMs: 12000 });
+      setReviewLabelPipeline((await response.json()) as ReviewLabelPipeline);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Review label pipeline failed.";
+      setReviewLabelPipeline({
+        status: "error",
+        mode: "review_label_pipeline",
+        candidates: [],
+        decided: [],
+        readiness_issues: [message],
+        labels_or_reward_changed: false,
+        llm_used_for_reward_or_label: false,
+      });
+    } finally {
+      setIsReviewLabelPipelineLoading(false);
+    }
+  }, []);
+
+  const refreshRoleAccess = useCallback(async () => {
+    setIsRoleAccessLoading(true);
+    try {
+      const response = await fetchParkPulseApi("/api/park/role-access-contracts", { timeoutMs: 12000 });
+      setRoleAccess((await response.json()) as RoleAccessContracts);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Role access contracts failed.";
+      setRoleAccess({
+        status: "error",
+        mode: "role_access_contracts",
+        roles: [],
+        readiness_issues: [message],
+      });
+    } finally {
+      setIsRoleAccessLoading(false);
+    }
+  }, []);
+
   const refreshStaleLiveFeeds = useCallback(async () => {
     setIsRefreshingStaleFeeds(true);
     setErrorMessage(null);
@@ -403,6 +533,7 @@ export function useCommandCenter() {
       const queuedCount = payload.queued_sources?.length ?? 0;
       setStatusMessage(`Live feed refresh ${payload.status ?? "complete"}: ${refreshedCount} refreshed / ${queuedCount} queued.`);
       await refreshLiveFeedHealth();
+      void refreshReviewLabelPipeline();
       void refreshActualTraining();
       void refreshOperatingLoopResilience();
     } catch (error) {
@@ -412,7 +543,7 @@ export function useCommandCenter() {
     } finally {
       setIsRefreshingStaleFeeds(false);
     }
-  }, [refreshActualTraining, refreshLiveFeedHealth, refreshOperatingLoopResilience]);
+  }, [refreshActualTraining, refreshLiveFeedHealth, refreshOperatingLoopResilience, refreshReviewLabelPipeline]);
 
   const recordReviewDecision = useCallback(
     async (caseId: string, decision: "approve_for_state" | "request_corroboration" | "hold_for_review" | "escalate") => {
@@ -427,6 +558,7 @@ export function useCommandCenter() {
         });
         setStatusMessage(`Review case ${decision.replaceAll("_", " ")}.`);
         await refreshLiveFeedHealth();
+        void refreshReviewLabelPipeline();
         void refreshActualTraining();
         void refreshOperatingLoopResilience();
       } catch (error) {
@@ -435,8 +567,70 @@ export function useCommandCenter() {
         setIsLiveFeedHealthLoading(false);
       }
     },
-    [refreshActualTraining, refreshLiveFeedHealth, refreshOperatingLoopResilience],
+    [refreshActualTraining, refreshLiveFeedHealth, refreshOperatingLoopResilience, refreshReviewLabelPipeline],
   );
+
+  const recordReviewLabelDecision = useCallback(
+    async (candidate: ReviewLabelCandidate, decision: ReviewLabelDecision, finalLabel?: string) => {
+      setIsReviewLabelPipelineLoading(true);
+      setErrorMessage(null);
+      try {
+        const response = await fetchParkPulseApi("/api/park/review-label-pipeline/decision", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            candidate,
+            candidate_id: candidate.id,
+            decision,
+            final_label: finalLabel,
+            reviewer: "ops_reviewer",
+            reason: "Reviewed from command center.",
+          }),
+          timeoutMs: 12000,
+        });
+        const payload = (await response.json()) as { status?: string; readiness_issues?: string[] };
+        if (payload.status === "error") {
+          setErrorMessage(payload.readiness_issues?.[0] ?? "Unable to record review label decision.");
+        } else {
+          setStatusMessage(`Review label ${decision.replaceAll("_", " ")}.`);
+        }
+        await refreshReviewLabelPipeline();
+        void refreshActualTraining();
+        void refreshOperatingLoopResilience();
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Unable to record review label decision.");
+      } finally {
+        setIsReviewLabelPipelineLoading(false);
+      }
+    },
+    [refreshActualTraining, refreshOperatingLoopResilience, refreshReviewLabelPipeline],
+  );
+
+  const autoLabelHighConfidenceReviewLabels = useCallback(async () => {
+    setIsAutoLabelingReviewLabels(true);
+    setErrorMessage(null);
+    try {
+      const response = await fetchParkPulseApi("/api/park/review-label-pipeline/auto-label", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reviewer: "parkpulse-command-center", confidence_threshold: 0.7 }),
+        timeoutMs: 12000,
+      });
+      const payload = (await response.json()) as { status?: string; recorded_count?: number; skipped_count?: number; readiness_issues?: string[] };
+      if (payload.status === "error") {
+        setErrorMessage(payload.readiness_issues?.[0] ?? "Auto-label failed.");
+      } else {
+        setStatusMessage(`Auto-label ${payload.status ?? "complete"}: ${payload.recorded_count ?? 0} recorded / ${payload.skipped_count ?? 0} skipped.`);
+      }
+      await refreshReviewLabelPipeline();
+      void refreshActualTraining();
+      void refreshOperatingLoopResilience();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Auto-label failed.");
+    } finally {
+      setIsAutoLabelingReviewLabels(false);
+    }
+  }, [refreshActualTraining, refreshOperatingLoopResilience, refreshReviewLabelPipeline]);
 
   const loadFeed = useCallback(
     async <T extends LiveWeatherLoadResult>(
@@ -503,6 +697,10 @@ export function useCommandCenter() {
       if (cancelled) return;
       await refreshLiveFeedHealth();
       if (cancelled) return;
+      await refreshReviewLabelPipeline();
+      if (cancelled) return;
+      await refreshRoleAccess();
+      if (cancelled) return;
       void refreshActualTraining();
       window.setTimeout(() => {
         if (!cancelled) void refreshLiveAgentsSmoke();
@@ -513,7 +711,7 @@ export function useCommandCenter() {
     return () => {
       cancelled = true;
     };
-  }, [refreshActualTraining, refreshGcpLiveReadiness, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshLiveFeedHealth, refreshOperatingLoopResilience]);
+  }, [refreshActualTraining, refreshGcpLiveReadiness, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshLiveFeedHealth, refreshOperatingLoopResilience, refreshReviewLabelPipeline, refreshRoleAccess]);
 
   const runAgent = useCallback(async () => {
     setIsRunning(true);
@@ -708,7 +906,15 @@ export function useCommandCenter() {
     integrationStatus,
     gcpLiveReadiness,
     operatingLoopResilience,
+    canManageFeeds,
+    canReviewCases,
+    canReviewLabels,
+    canStartTraining,
+    canExecute,
+    canAcknowledge,
     actualTraining,
+    reviewLabelPipeline,
+    roleAccess,
     selectedAction,
     policyGate,
     evalScore,
@@ -718,6 +924,9 @@ export function useCommandCenter() {
     isApproving,
     isTrainingLoading,
     isStartingGcpTraining,
+    isReviewLabelPipelineLoading: isReviewLabelPipelineLoading || isAutoLabelingReviewLabels,
+    isAutoLabelingReviewLabels,
+    isRoleAccessLoading,
     isLiveFeedHealthLoading: isLiveFeedHealthLoading || isRefreshingStaleFeeds,
     isLoadingLiveWeather,
     isLoadingLiveRideOps,
@@ -741,9 +950,13 @@ export function useCommandCenter() {
     refreshGcpLiveReadiness,
     refreshOperatingLoopResilience,
     refreshLiveAgentsSmoke,
+    refreshReviewLabelPipeline,
+    refreshRoleAccess,
     refreshLiveFeedHealth,
     refreshStaleLiveFeeds,
     recordReviewDecision,
+    recordReviewLabelDecision,
+    autoLabelHighConfidenceReviewLabels,
     loadLiveWeatherFeed,
     loadLiveRideOpsFeed,
     loadLiveGuestFlowFeed,

@@ -60,6 +60,8 @@ export function LiveFeedReviewPanel({
   onLoadFoodOps,
   onLoadOperatorSignal,
   onReviewDecision,
+  canManageFeeds,
+  canReviewCases,
 }: {
   health: LiveFeedHealth | null;
   ledger: ReviewTrainingLedger | null;
@@ -86,6 +88,8 @@ export function LiveFeedReviewPanel({
   onLoadFoodOps: () => void;
   onLoadOperatorSignal: () => void;
   onReviewDecision: (caseId: string, decision: "approve_for_state" | "request_corroboration" | "hold_for_review" | "escalate") => void;
+  canManageFeeds: boolean;
+  canReviewCases: boolean;
 }) {
   const feeds = health?.feeds ?? [];
   const reviews = health?.open_reviews ?? ledger?.open_reviews ?? ledger?.rows?.filter((row) => row.status !== "closed").slice(0, 6) ?? [];
@@ -112,7 +116,7 @@ export function LiveFeedReviewPanel({
           <button
             type="button"
             onClick={onLoadWeather}
-            disabled={isLoadingWeather}
+            disabled={isLoadingWeather || !canManageFeeds}
             className="w-fit rounded border border-cyan-300 bg-cyan-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-cyan-200 disabled:opacity-50"
           >
             {isLoadingWeather ? "Loading weather" : "Load weather"}
@@ -120,7 +124,7 @@ export function LiveFeedReviewPanel({
           <button
             type="button"
             onClick={onLoadRideOps}
-            disabled={isLoadingRideOps}
+            disabled={isLoadingRideOps || !canManageFeeds}
             className="w-fit rounded border border-emerald-300 bg-emerald-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-emerald-200 disabled:opacity-50"
           >
             {isLoadingRideOps ? "Loading rides" : "Load rides"}
@@ -128,18 +132,18 @@ export function LiveFeedReviewPanel({
           <button
             type="button"
             onClick={onLoadGuestFlow}
-            disabled={isLoadingGuestFlow}
+            disabled={isLoadingGuestFlow || !canManageFeeds}
             className="w-fit rounded border border-sky-300 bg-sky-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-sky-200 disabled:opacity-50"
           >
             {isLoadingGuestFlow ? "Loading flow" : "Load flow"}
           </button>
-          <button type="button" onClick={onLoadStaffing} disabled={isLoadingStaffing} className="w-fit rounded border border-violet-300 bg-violet-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-violet-200 disabled:opacity-50">
+          <button type="button" onClick={onLoadStaffing} disabled={isLoadingStaffing || !canManageFeeds} className="w-fit rounded border border-violet-300 bg-violet-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-violet-200 disabled:opacity-50">
             {isLoadingStaffing ? "Loading staffing" : "Load staffing"}
           </button>
-          <button type="button" onClick={onLoadFoodOps} disabled={isLoadingFoodOps} className="w-fit rounded border border-orange-300 bg-orange-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-orange-200 disabled:opacity-50">
+          <button type="button" onClick={onLoadFoodOps} disabled={isLoadingFoodOps || !canManageFeeds} className="w-fit rounded border border-orange-300 bg-orange-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-orange-200 disabled:opacity-50">
             {isLoadingFoodOps ? "Loading food" : "Load food"}
           </button>
-          <button type="button" onClick={onLoadOperatorSignal} disabled={isLoadingOperatorSignal} className="w-fit rounded border border-rose-300 bg-rose-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-rose-200 disabled:opacity-50">
+          <button type="button" onClick={onLoadOperatorSignal} disabled={isLoadingOperatorSignal || !canManageFeeds} className="w-fit rounded border border-rose-300 bg-rose-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-rose-200 disabled:opacity-50">
             {isLoadingOperatorSignal ? "Loading reports" : "Load reports"}
           </button>
           <button
@@ -153,13 +157,18 @@ export function LiveFeedReviewPanel({
           <button
             type="button"
             onClick={onRefreshStale}
-            disabled={isLoading}
+            disabled={isLoading || !canManageFeeds}
             className="w-fit rounded border border-lime-300 bg-lime-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-lime-200 disabled:opacity-50"
           >
             Refresh stale
           </button>
         </div>
       </div>
+      {!canManageFeeds && (
+        <div className="mt-3 rounded border border-slate-700 bg-slate-900 p-3 text-xs font-bold text-slate-300">
+          Signed Ops Team or ML / Ops Admin role is required to load or refresh live feeds.
+        </div>
+      )}
 
       <div className="mt-4 grid gap-2 md:grid-cols-5">
         {[
@@ -325,7 +334,7 @@ export function LiveFeedReviewPanel({
                       <button
                         key={decision}
                         type="button"
-                        disabled={isLoading}
+                        disabled={isLoading || !canReviewCases}
                         onClick={() => onReviewDecision(review.id ?? "", decision as "approve_for_state" | "request_corroboration" | "hold_for_review" | "escalate")}
                         className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-200 transition hover:border-cyan-300 hover:text-cyan-100 disabled:opacity-50"
                       >

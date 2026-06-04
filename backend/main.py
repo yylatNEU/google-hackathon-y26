@@ -663,23 +663,38 @@ def _role_auth_secret() -> str:
 
 
 def _signed_role_required() -> bool:
-    return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_TOKEN"), True)
+    return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION"), False)
 
 
 def _dev_role_issuer_enabled() -> bool:
     configured = os.getenv("PARKPULSE_ENABLE_DEV_ROLE_ISSUER")
     if configured is not None:
         return _truthy(configured, True)
-    env = str(os.getenv("PARKPULSE_ENV") or os.getenv("ENVIRONMENT") or "local").strip().lower()
-    if env in {"prod", "production"}:
-        return False
-    if identity_provider_readiness().get("external_identity_ready"):
-        return False
-    return True
+    return False
 
 
 def _role_session_ttl_seconds() -> int:
     return max(300, _int_env("PARKPULSE_ROLE_SESSION_TTL_SECONDS", 3600))
+
+
+def _role_session_issuer_key() -> str:
+    return os.getenv("PARKPULSE_ROLE_SESSION_ISSUER_KEY") or ""
+
+
+def _trusted_role_issuer_enabled() -> bool:
+    return bool(_role_session_issuer_key().strip())
+
+
+def _issuer_key_from_scope(scope: dict[str, Any]) -> str:
+    return str(_request_headers(scope).get("x-parkpulse-role-issuer-key") or "")
+
+
+def _issuer_key_matches(candidate: str) -> bool:
+    import hmac
+
+    expected = _role_session_issuer_key().strip()
+    supplied = str(candidate or "").strip()
+    return bool(expected and supplied and hmac.compare_digest(expected, supplied))
 
 
 def _extract_role_token(headers: dict[str, str]) -> str | None:
@@ -709,19 +724,19 @@ def _request_role_context(scope: dict[str, Any], payload: dict[str, Any] | None 
             "expires_at": token_status.get("expires_at"),
             "token_status": token_status.get("status"),
         }
+    role = headers.get("x-parkpulse-role") or headers.get("x-role")
+    if not role and isinstance(payload, dict):
+        role = payload.get("role") or payload.get("actor_role") or payload.get("actorRole")
     if _signed_role_required():
         return {
             "status": "unauthenticated",
             "authenticated": False,
             "auth_method": "signed_role_session_required",
-            "role": normalize_role(None, default=default),
+            "role": normalize_role(str(role) if role is not None else None, default=default),
             "subject": "",
             "token_status": token_status.get("status"),
-            "reason": token_status.get("reason") or "Signed role session token is required.",
+            "reason": "Signed ParkPulse role session is required for this mutation.",
         }
-    role = headers.get("x-parkpulse-role") or headers.get("x-role")
-    if not role and isinstance(payload, dict):
-        role = payload.get("role") or payload.get("actor_role") or payload.get("actorRole")
     return {
         "status": "authenticated",
         "authenticated": True,
@@ -734,7 +749,7 @@ def _request_role_context(scope: dict[str, Any], payload: dict[str, Any] | None 
 
 def _authorization_response(decision: dict[str, Any]) -> dict[str, Any]:
     return {
-        "status": "forbidden",
+        "status": "blocked",
         "mode": "role_authorization_gate",
         "authorization": decision,
         "readiness_issues": [decision.get("reason") or "Role is not authorized for this capability."],
@@ -754,6 +769,21 @@ def _record_role_authorization(scope: dict[str, Any], decision: dict[str, Any]) 
         **decision,
     }
     _write_jsonl_event(_role_authorization_log_path(), event)
+    try:
+        from park_role_access_audit import record_role_access_audit_event
+
+        identity = decision.get("identity") if isinstance(decision.get("identity"), dict) else {}
+        record_role_access_audit_event(
+            "mutation_allowed" if decision.get("allowed") else "mutation_denied",
+            role=decision.get("role"),
+            subject=identity.get("subject"),
+            capability=decision.get("capability"),
+            resource=decision.get("resource"),
+            status=decision.get("status"),
+            reason=decision.get("reason"),
+        )
+    except Exception:
+        pass
 
 
 async def _authorize_or_send(
@@ -775,8 +805,33 @@ async def _authorize_or_send(
     _record_role_authorization(scope, decision)
     if decision.get("allowed"):
         return decision
-    await _send_json(send, 401 if decision.get("status") == "unauthenticated" else 403, _authorization_response(decision))
+    await _send_json(send, 403, _authorization_response(decision))
     return None
+
+
+def _role_authorization_payload(payload: dict[str, Any], scope: dict[str, Any] | None = None) -> dict[str, Any]:
+    capability = str(payload.get("capability") or "").strip()
+    if not capability:
+        return {"status": "error", "mode": "role_authorization_check", "readiness_issues": ["capability is required."]}
+    identity = _request_role_context(scope or {}, payload, default="ops_team") if scope is not None else {}
+    role = payload.get("role") or payload.get("actor_role") or payload.get("actorRole") or identity.get("role")
+    decision = authorize_role_action(
+        str(role or "ops_team"),
+        capability,
+        resource=str(payload.get("resource") or ""),
+        detail=str(payload.get("detail") or ""),
+        default_role="ops_team",
+    )
+    if identity:
+        decision["identity"] = identity
+    return {
+        "status": decision.get("status"),
+        "mode": "role_authorization_check",
+        "authorization": decision,
+        "uses_seed_data": False,
+        "loads_bigquery_per_tick": False,
+        "llm_control_authority": False,
+    }
 
 
 def _identity_readiness_payload() -> dict[str, Any]:
@@ -11529,7 +11584,7 @@ async def app(scope, receive, send):
         if not _dev_role_issuer_enabled():
             await _send_json(
                 send,
-                403,
+                404,
                 {
                     "status": "disabled",
                     "mode": "signed_role_session_issuer",
@@ -11571,8 +11626,62 @@ async def app(scope, receive, send):
         await _send_json(
             send,
             200,
-            {**_identity_readiness_payload(), "auth_contract": "Protected endpoints require a signed role session by default; role headers are ignored unless signed-token enforcement is explicitly disabled."},
+            {
+                **_identity_readiness_payload(),
+                "identity": _request_role_context(scope, None, default="ops_team"),
+                "trusted_issuer_enabled": _trusted_role_issuer_enabled(),
+                "auth_contract": "Protected endpoints require a signed role session by default; role headers are ignored unless signed-token enforcement is explicitly disabled.",
+            },
         )
+        return
+
+    if method == "GET" and path == "/api/park/auth/audit":
+        try:
+            from park_role_access_audit import role_access_audit_status
+
+            await _send_json(send, 200, role_access_audit_status())
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "role_access_audit", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "POST" and path == "/api/park/auth/operator-session":
+        request_payload = await _read_json_body(receive)
+        try:
+            from park_role_access_audit import record_role_access_audit_event
+
+            if not _trusted_role_issuer_enabled():
+                await _send_json(send, 404, {"status": "disabled", "mode": "trusted_role_session_issuer", "readiness_issues": ["Trusted role session issuer is not configured."]})
+                return
+            if not _issuer_key_matches(_issuer_key_from_scope(scope)):
+                record_role_access_audit_event("role_session_denied", status="blocked", reason="invalid issuer key")
+                await _send_json(send, 403, {"status": "blocked", "mode": "trusted_role_session_issuer", "readiness_issues": ["Role session issuer key is invalid."]})
+                return
+            role = normalize_role(str(request_payload.get("role") or "ops_team"))
+            if not role_access_contracts(role).get("role_count"):
+                record_role_access_audit_event("role_session_denied", role=role, status="invalid_role", reason="unknown role")
+                await _send_json(send, 400, {"status": "invalid_role", "mode": "trusted_role_session_issuer", "role": role})
+                return
+            subject = str(request_payload.get("subject") or "parkpulse-operator")
+            token = sign_role_session(subject, role, _role_auth_secret(), ttl_seconds=_role_session_ttl_seconds(), issuer="parkpulse-trusted-issuer")
+            verified = verify_role_session(token, _role_auth_secret())
+            record_role_access_audit_event("role_session_issued", role=role, subject=subject, status="issued")
+            await _send_json(
+                send,
+                200,
+                {
+                    "status": "issued",
+                    "mode": "trusted_role_session_issuer",
+                    "role": role,
+                    "subject": subject,
+                    "token": token,
+                    "token_type": "Bearer",
+                    "expires_at": verified.get("expires_at"),
+                    "dev_issuer": False,
+                    "boundary": "Trusted server-side issuer only. Store the returned token client-side and send it as x-parkpulse-role-token.",
+                },
+            )
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "trusted_role_session_issuer", "readiness_issues": [str(error)[:240]]})
         return
 
     if method == "GET" and path == "/api/park/staff-training/scenarios":
@@ -12618,19 +12727,24 @@ async def app(scope, receive, send):
 
     if method == "POST" and path == "/api/park/review-label-pipeline/decision":
         request_payload = await _read_json_body(receive)
-        if not await _authorize_or_send(send, scope, "start_offline_training", "review_label_decision", request_payload, default_role="ml_ops_admin"):
+        role_authorization = await _authorize_or_send(send, scope, "record_supervised_label", "review_label_decision", request_payload, default_role="ml_ops_admin")
+        if not role_authorization:
             return
         try:
             from review_label_pipeline import record_review_label_decision
 
-            await _send_json(send, 200, record_review_label_decision(request_payload))
+            result = record_review_label_decision(request_payload)
+            if isinstance(result, dict):
+                result["role_authorization"] = role_authorization
+            await _send_json(send, 200, result)
         except Exception as error:
             await _send_json(send, 200, {"status": "error", "mode": "review_label_decision", "readiness_issues": [str(error)[:240]]})
         return
 
     if method == "POST" and path == "/api/park/review-label-pipeline/auto-label":
         request_payload = await _read_json_body(receive)
-        if not await _authorize_or_send(send, scope, "start_offline_training", "review_label_auto_label", request_payload, default_role="ml_ops_admin"):
+        role_authorization = await _authorize_or_send(send, scope, "record_supervised_label", "review_label_auto_label", request_payload, default_role="ml_ops_admin")
+        if not role_authorization:
             return
         try:
             from park_actual_training import actual_training_status
@@ -12671,7 +12785,7 @@ async def app(scope, receive, send):
                 reviewer=str(request_payload.get("reviewer") or "parkpulse-auto-labeler"),
                 confidence_threshold=confidence_threshold,
             )
-            await _send_json(send, 200, {**result, "pipeline_before": pipeline.get("summary")})
+            await _send_json(send, 200, {**result, "pipeline_before": pipeline.get("summary"), "role_authorization": role_authorization})
         except Exception as error:
             await _send_json(send, 200, {"status": "error", "mode": "review_label_auto_label", "readiness_issues": [str(error)[:240]]})
         return
@@ -13051,6 +13165,14 @@ async def app(scope, receive, send):
         if not await _authorize_or_send(send, scope, "read_role_contracts", "role_access_contracts", None, default_role="ops_team"):
             return
         await _send_json(send, 200, role_access_contracts(role))
+        return
+
+    if method == "POST" and path == "/api/park/role-access/authorize":
+        request_payload = await _read_json_body(receive)
+        try:
+            await _send_json(send, 200, _role_authorization_payload(request_payload, scope))
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "role_authorization_check", "readiness_issues": [str(error)[:240]]})
         return
 
     if method == "POST" and path == "/api/park/ops-mcp/call":
@@ -15786,7 +15908,8 @@ async def app(scope, receive, send):
             request_payload = json.loads(body.decode("utf-8") or "{}")
         except json.JSONDecodeError:
             request_payload = {}
-        if not await _authorize_or_send(send, scope, "acknowledge_dispatch", "delivery_acknowledge", request_payload, default_role="ops_team"):
+        role_authorization = await _authorize_or_send(send, scope, "acknowledge_dispatch", "delivery_acknowledge", request_payload, default_role="ops_team")
+        if not role_authorization:
             return
         dispatch_id = str(request_payload.get("dispatch_id") or request_payload.get("id") or "")
         actor = str(request_payload.get("actor") or "operator")
@@ -15806,6 +15929,7 @@ async def app(scope, receive, send):
                 {
                     "status": dispatch.get("status", "acknowledged"),
                     "dispatch": dispatch,
+                    "role_authorization": role_authorization,
                     "application": application,
                     "state": state,
                     "delivery": {
@@ -15836,9 +15960,12 @@ async def app(scope, receive, send):
         mode = str(payload.get("mode") or "auto")
         execute = str(payload.get("execute", "true")).lower() not in {"0", "false", "no"}
         capability = "dispatch_live_action" if execute else "read_ops_evidence"
-        if not await _authorize_or_send(send, scope, capability, "operator_command", payload, default_role="ops_team"):
+        role_authorization = await _authorize_or_send(send, scope, capability, "operator_command", payload, default_role="ops_team")
+        if not role_authorization:
             return
         response_payload = await _build_operator_payload_with_runtime(message, mode, execute, "post_full_runtime")
+        if isinstance(response_payload, dict):
+            response_payload["role_authorization"] = role_authorization
         await _send_json(send, 200, response_payload)
         return
 

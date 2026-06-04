@@ -59,12 +59,14 @@ export function ActualTrainingPanel({
   isStartingGcpTraining,
   onRefresh,
   onStartGcpTraining,
+  canStartTraining,
 }: {
   training: ActualTraining | null;
   isLoading: boolean;
   isStartingGcpTraining: boolean;
   onRefresh: () => void;
   onStartGcpTraining: () => void;
+  canStartTraining: boolean;
 }) {
   const policies = training?.model?.ranked_policies ?? [];
   const topPolicy = policies[0];
@@ -96,13 +98,18 @@ export function ActualTrainingPanel({
           <button
             type="button"
             onClick={onStartGcpTraining}
-            disabled={isLoading || training?.gcp_ml?.bigquery?.ready === false}
+            disabled={isLoading || training?.gcp_ml?.bigquery?.ready === false || !canStartTraining}
             className="w-fit rounded border border-emerald-300 bg-emerald-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isStartingGcpTraining ? "Starting BQML" : "Start BigQuery ML"}
           </button>
         </div>
       </div>
+      {!canStartTraining && (
+        <div className="mt-3 rounded border border-slate-700 bg-slate-900 p-3 text-xs font-bold text-slate-300">
+          Signed ML / Ops Admin role is required to start offline training jobs.
+        </div>
+      )}
 
       <div className="mt-4 grid gap-2 md:grid-cols-6">
         {[

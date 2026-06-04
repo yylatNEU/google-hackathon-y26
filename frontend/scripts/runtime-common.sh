@@ -23,6 +23,7 @@ parkpulse_prepare_runtime() {
     --exclude '.next-dev' \
     --exclude '.next-build' \
     --exclude '.package-lock.hash' \
+    --exclude 'dist' \
     --exclude 'node_modules' \
     --exclude 'playwright-report' \
     --exclude 'test-results' \

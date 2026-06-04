@@ -1,6 +1,7 @@
 const localApiUrls = ["http://127.0.0.1:8000", "http://127.0.0.1:8017"];
 const defaultRequestTimeoutMs = 12000;
 const transientTransportAttempts = 2;
+const roleSessionTokenStorageKey = "parkpulse.roleSessionToken";
 export const longRunningRequestTimeoutMs = 30000;
 
 type ParkPulseRequestInit = RequestInit & {
@@ -9,6 +10,63 @@ type ParkPulseRequestInit = RequestInit & {
 
 const roleTokenCache = new Map<string, { token: string; expiresAt: number }>();
 const roleTokenInflight = new Map<string, Promise<string>>();
+
+function browserSessionStorage() {
+  try {
+    return typeof globalThis.sessionStorage !== "undefined" ? globalThis.sessionStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+function browserLocalStorage() {
+  try {
+    return typeof globalThis.localStorage !== "undefined" ? globalThis.localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+function stripRoleTokenFromUrl() {
+  if (typeof globalThis.location === "undefined" || typeof globalThis.history === "undefined") return;
+  const url = new URL(globalThis.location.href);
+  if (!url.searchParams.has("roleToken")) return;
+  url.searchParams.delete("roleToken");
+  globalThis.history.replaceState(globalThis.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+export function getParkPulseRoleSessionToken() {
+  if (typeof globalThis.location !== "undefined") {
+    const token = new URLSearchParams(globalThis.location.search).get("roleToken");
+    if (token) {
+      browserSessionStorage()?.setItem(roleSessionTokenStorageKey, token);
+      browserLocalStorage()?.removeItem(roleSessionTokenStorageKey);
+      stripRoleTokenFromUrl();
+      return token;
+    }
+  }
+  const sessionToken = browserSessionStorage()?.getItem(roleSessionTokenStorageKey);
+  if (sessionToken) return sessionToken;
+  const legacyToken = browserLocalStorage()?.getItem(roleSessionTokenStorageKey);
+  if (legacyToken) {
+    browserSessionStorage()?.setItem(roleSessionTokenStorageKey, legacyToken);
+    browserLocalStorage()?.removeItem(roleSessionTokenStorageKey);
+    return legacyToken;
+  }
+  return "";
+}
+
+export function setParkPulseRoleSessionToken(token: string) {
+  const storage = browserSessionStorage();
+  if (!storage) return;
+  const normalized = token.trim();
+  if (normalized) {
+    storage.setItem(roleSessionTokenStorageKey, normalized);
+  } else {
+    storage.removeItem(roleSessionTokenStorageKey);
+  }
+  browserLocalStorage()?.removeItem(roleSessionTokenStorageKey);
+}
 
 export function getApiUrls(): string[] {
   const urlOverride =
@@ -182,11 +240,17 @@ export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestIni
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         const headerEntries = headersToEntries(requestInit.headers);
-      const requestedRole = headerValue(headerEntries, "x-parkpulse-role");
-      const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
-      const localStaffTraining = path.startsWith("/api/park/staff-training") && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?/.test(apiUrl);
-      const token = requestedRole && !hasAuthorization && path !== "/api/park/auth/dev-session" && !localStaffTraining ? await getOptionalSignedRoleToken(apiUrl, requestedRole, timeoutMs) : undefined;
-      const signedHeaders = token ? { ...Object.fromEntries(headerEntries), authorization: `Bearer ${token}` } : requestInit.headers;
+        const requestedRole = headerValue(headerEntries, "x-parkpulse-role");
+        const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
+        const hasRoleToken = Boolean(headerValue(headerEntries, "x-parkpulse-role-token"));
+        const localStaffTraining = path.startsWith("/api/park/staff-training") && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?/.test(apiUrl);
+        const storedRoleToken = !hasAuthorization && !hasRoleToken && path !== "/api/park/auth/dev-session" ? getParkPulseRoleSessionToken() : "";
+        const token =
+          requestedRole && !hasAuthorization && !hasRoleToken && !storedRoleToken && path !== "/api/park/auth/dev-session" && !localStaffTraining
+            ? await getOptionalSignedRoleToken(apiUrl, requestedRole, timeoutMs)
+            : undefined;
+        const roleToken = storedRoleToken || token || "";
+        const signedHeaders = roleToken ? { ...Object.fromEntries(headerEntries), "x-parkpulse-role-token": roleToken } : requestInit.headers;
         const response = await request(`${apiUrl}${path}`, { ...requestInit, headers: signedHeaders }, timeoutMs);
         if (response.ok) {
           const contentType = responseContentType(response).toLowerCase();

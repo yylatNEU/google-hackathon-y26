@@ -6,6 +6,8 @@ import { EvalReceiptPanel } from "./EvalReceiptPanel";
 import { LiveFeedReviewPanel } from "./LiveFeedReviewPanel";
 import { ParkStateStrip } from "./ParkStateStrip";
 import { ProductLoopPanel } from "./ProductLoopPanel";
+import { ReviewLabelPipelinePanel } from "./ReviewLabelPipelinePanel";
+import { RoleAccessPanel } from "./RoleAccessPanel";
 import { StaffTrainingAnalyticsPanel } from "./StaffTrainingAnalyticsPanel";
 import { useCommandCenter } from "./useCommandCenter";
 
@@ -89,6 +91,23 @@ export function CommandCenter() {
           onLoadFoodOps={() => void command.loadLiveFoodOpsFeed()}
           onLoadOperatorSignal={() => void command.loadLiveOperatorSignalFeed()}
           onReviewDecision={(caseId, decision) => void command.recordReviewDecision(caseId, decision)}
+          canManageFeeds={command.canManageFeeds}
+          canReviewCases={command.canReviewCases}
+        />
+
+        <ReviewLabelPipelinePanel
+          pipeline={command.reviewLabelPipeline}
+          isLoading={command.isReviewLabelPipelineLoading}
+          onRefresh={() => void command.refreshReviewLabelPipeline()}
+          onAutoLabel={() => void command.autoLabelHighConfidenceReviewLabels()}
+          onDecision={(candidate, decision, finalLabel) => void command.recordReviewLabelDecision(candidate, decision, finalLabel)}
+          canReviewLabels={command.canReviewLabels}
+        />
+
+        <RoleAccessPanel
+          contracts={command.roleAccess}
+          isLoading={command.isRoleAccessLoading}
+          onRefresh={() => void command.refreshRoleAccess()}
         />
 
         <StaffTrainingAnalyticsPanel />
@@ -152,6 +171,7 @@ export function CommandCenter() {
             isStartingGcpTraining={command.isStartingGcpTraining}
             onRefresh={() => void command.refreshActualTraining()}
             onStartGcpTraining={() => void command.refreshActualTraining({ runGcpTraining: true })}
+            canStartTraining={command.canStartTraining}
           />
           <DispatchApprovalPanel
             dispatches={command.dispatches}
@@ -160,6 +180,8 @@ export function CommandCenter() {
             isApproving={command.isApproving}
             onExecute={() => void command.executeSelectedAction()}
             onAcknowledge={(dispatch, choice) => void command.acknowledgeDispatch(dispatch, choice)}
+            canExecute={command.canExecute}
+            canAcknowledge={command.canAcknowledge}
           />
           <EvalReceiptPanel
             evals={command.activeEvalScores}
