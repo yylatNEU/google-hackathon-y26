@@ -80,6 +80,7 @@ from park_staff_roleplay import (
     seed_staff_training_demo_data,
     staff_training_analytics,
     staff_training_certification_packet,
+    staff_training_golden_eval,
     staff_training_policy_pack,
     staff_training_readiness,
     staff_training_receipts,
@@ -11665,6 +11666,12 @@ async def app(scope, receive, send):
         if not await _authorize_or_send(send, scope, "read_staff_training_analytics", "staff_training_demo_seed", None, default_role="ops_team"):
             return
         await _send_json(send, 200, seed_staff_training_demo_data())
+        return
+
+    if method == "GET" and path == "/api/park/staff-training/golden-eval":
+        if not await _authorize_or_send(send, scope, "read_staff_training_analytics", "staff_training_golden_eval", None, default_role="ops_team"):
+            return
+        await _send_json(send, 200, staff_training_golden_eval())
         return
 
     if method == "POST" and path == "/api/park/staff-training/sessions":
