@@ -174,7 +174,7 @@ public class RoleAuthService {
         if ("read_worker_tasks".equals(capability) || "acknowledge_dispatch".equals(capability)) {
             return WORKER_TASK_ROLES.contains(role);
         }
-        if ("dispatch_live_action".equals(capability)) {
+        if ("dispatch_live_action".equals(capability) || "run_live_outcome_cycle".equals(capability)) {
             return "ops_team".equals(role);
         }
         if ("read_platform_status".equals(capability) || "manage_platform_store".equals(capability) || "manage_agent_trust".equals(capability)) {

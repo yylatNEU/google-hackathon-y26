@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from env_bootstrap import load_backend_env
 from agent_role_skills import build_agent_role_product_readiness_report, build_deliberate_role_eval_report, build_deliberate_role_negative_fixtures, build_real_deliberate_role_eval_report, evaluate_agent_role_trace, list_agent_role_skills, route_agent_role
@@ -198,6 +198,8 @@ _evidence_refresh_jobs: dict[str, dict[str, Any]] = {}
 _monitor_evidence_cache: dict[str, tuple[float, float, dict[str, Any]]] = {}
 _monitor_evidence_refreshing: set[str] = set()
 _monitor_evidence_lock = threading.Lock()
+_monitor_evidence_mongo_client: Any | None = None
+_monitor_evidence_mongo_lock = threading.Lock()
 _monitor_evidence_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-monitor-evidence")
 _live_feed_health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _live_feed_weather_refresh_task: asyncio.Task | None = None
@@ -7868,6 +7870,76 @@ def _monitor_evidence_cache_key(limit: int) -> str:
     return f"monitor-evidence-limit-{max(1, min(limit, 80))}"
 
 
+def _monitor_evidence_storage_mode() -> str:
+    requested = (os.getenv("PARKPULSE_MONITOR_EVIDENCE_STORAGE") or "local").strip().lower().replace("-", "_")
+    if requested in {"mongo", "mongodb"}:
+        return "mongodb"
+    if requested in {"redis", "upstash"}:
+        return "redis"
+    return "local"
+
+
+def _monitor_evidence_strip_secret(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        return raw[1:-1].strip()
+    return raw
+
+
+def _monitor_evidence_mongo_uri() -> str:
+    return _monitor_evidence_strip_secret(
+        os.getenv("MONGODB_DIRECT_URI")
+        or os.getenv("MONGODB_URI")
+        or os.getenv("MONGO_URI")
+        or os.getenv("PARKPULSE_MONGODB_URI")
+    )
+
+
+def _monitor_evidence_mongo_database_name() -> str:
+    configured = os.getenv("PARKPULSE_MONITOR_EVIDENCE_MONGO_DATABASE") or os.getenv("MONGODB_DATABASE")
+    if configured and configured.strip():
+        return configured.strip()
+    uri = _monitor_evidence_mongo_uri()
+    if uri:
+        path = urlsplit(uri).path.strip("/")
+        if path:
+            return path.split("/")[0]
+    return "parkpulse"
+
+
+def _monitor_evidence_mongo_collection_name() -> str:
+    return (os.getenv("PARKPULSE_MONITOR_EVIDENCE_MONGO_COLLECTION") or "monitor_evidence_snapshots").strip() or "monitor_evidence_snapshots"
+
+
+def _monitor_evidence_mongo_client_ref() -> Any | None:
+    global _monitor_evidence_mongo_client
+    if _monitor_evidence_mongo_client is not None:
+        return _monitor_evidence_mongo_client
+    uri = _monitor_evidence_mongo_uri()
+    if not uri:
+        return None
+    with _monitor_evidence_mongo_lock:
+        if _monitor_evidence_mongo_client is not None:
+            return _monitor_evidence_mongo_client
+        try:
+            from mongo_memory import _ensure_mongo_driver, _normalized_mongodb_uri
+            import mongo_memory
+
+            if not _ensure_mongo_driver() or mongo_memory.MongoClient is None:
+                return None
+            timeout_ms = max(250, _int_env("PARKPULSE_MONITOR_EVIDENCE_MONGO_TIMEOUT_MS", _int_env("MONGODB_OPERATION_TIMEOUT_MS", 1500)))
+            _monitor_evidence_mongo_client = mongo_memory.MongoClient(
+                _normalized_mongodb_uri(uri),
+                serverSelectionTimeoutMS=timeout_ms,
+                connectTimeoutMS=timeout_ms,
+                socketTimeoutMS=timeout_ms,
+                retryWrites=True,
+            )
+            return _monitor_evidence_mongo_client
+        except Exception:
+            return None
+
+
 def _monitor_evidence_snapshot_path(limit: int) -> Path:
     configured = os.getenv("PARKPULSE_MONITOR_EVIDENCE_SNAPSHOT_PATH")
     if configured:
@@ -7875,6 +7947,38 @@ def _monitor_evidence_snapshot_path(limit: int) -> Path:
     else:
         path = Path("output") / f"{_monitor_evidence_cache_key(limit)}.json"
     return path if path.is_absolute() else Path.cwd() / path
+
+
+def _monitor_evidence_snapshot_store(limit: int) -> dict[str, Any]:
+    requested = _monitor_evidence_storage_mode()
+    local_path = _monitor_evidence_snapshot_path(limit)
+    if requested == "redis":
+        redis_url = os.getenv("PARKPULSE_MONITOR_EVIDENCE_REDIS_URL") or os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_REST_URL")
+        return {
+            "backend": "redis",
+            "mode": "redis_snapshot_cache",
+            "shared_across_instances": True,
+            "status": "redis_configured" if redis_url else "redis_unconfigured",
+            "local_fallback_path": str(local_path),
+        }
+    if requested == "mongodb":
+        mongo_uri = _monitor_evidence_mongo_uri()
+        return {
+            "backend": "mongodb",
+            "mode": "mongodb_snapshot_cache",
+            "shared_across_instances": True,
+            "status": "mongodb_configured" if mongo_uri else "mongodb_unconfigured",
+            "database": _monitor_evidence_mongo_database_name() if mongo_uri else None,
+            "collection": os.getenv("PARKPULSE_MONITOR_EVIDENCE_MONGO_COLLECTION", "monitor_evidence_snapshots"),
+            "local_fallback_path": str(local_path),
+        }
+    return {
+        "backend": "local_json",
+        "mode": "json_snapshot_cache",
+        "shared_across_instances": False,
+        "status": "ready" if local_path.exists() else "will_initialize_on_first_read",
+        "path": str(local_path),
+    }
 
 
 def _monitor_evidence_copy(payload: dict[str, Any]) -> dict[str, Any]:
@@ -7921,11 +8025,17 @@ def _monitor_evidence_filter_case(payload: dict[str, Any], case_id: str | None) 
     return graph
 
 
+def _monitor_evidence_limit_from_key(key: str) -> int:
+    suffix = str(key).rsplit("-", 1)[-1]
+    return int(suffix) if suffix.isdigit() else 30
+
+
 def _monitor_evidence_with_cache_metadata(payload: dict[str, Any], *, key: str, expires_at: float, created_at: float, state: str) -> dict[str, Any]:
     graph = _monitor_evidence_copy(payload)
     now = time.monotonic()
     current_watermark = _monitor_source_watermark()
     graph_watermark = _monitor_dict(graph.get("source_watermark"))
+    limit = _monitor_evidence_limit_from_key(key)
     graph["evidence_cache"] = {
         "key": key,
         "state": state,
@@ -7933,7 +8043,8 @@ def _monitor_evidence_with_cache_metadata(payload: dict[str, Any], *, key: str, 
         "fresh_for_seconds": round(max(0.0, expires_at - now), 3),
         "refreshing": key in _monitor_evidence_refreshing,
         "mode": "backend_snapshot_stale_while_revalidate",
-        "snapshot_path": str(_monitor_evidence_snapshot_path(int(str(key).rsplit("-", 1)[-1]) if str(key).rsplit("-", 1)[-1].isdigit() else 30)),
+        "snapshot_path": str(_monitor_evidence_snapshot_path(limit)),
+        "snapshot_store": _monitor_evidence_snapshot_store(limit),
         "source_fingerprint": graph_watermark.get("fingerprint"),
         "current_source_fingerprint": current_watermark.get("fingerprint"),
         "source_current": graph_watermark.get("fingerprint") == current_watermark.get("fingerprint"),
@@ -7941,7 +8052,90 @@ def _monitor_evidence_with_cache_metadata(payload: dict[str, Any], *, key: str, 
     return graph
 
 
+def _monitor_evidence_snapshot_created_monotonic(payload: dict[str, Any], fallback_path: Path | None = None, *, prefer_epoch: bool = False) -> float:
+    created_epoch = _safe_float(payload.get("created_epoch"), 0)
+    if prefer_epoch and created_epoch > 0:
+        return time.monotonic() - max(0.0, time.time() - created_epoch)
+    created_at = _safe_float(payload.get("created_monotonic"), 0)
+    if created_at > 0:
+        return created_at
+    if created_epoch > 0:
+        return time.monotonic() - max(0.0, time.time() - created_epoch)
+    if fallback_path is not None:
+        try:
+            created_epoch = fallback_path.stat().st_mtime
+            return time.monotonic() - max(0.0, time.time() - created_epoch)
+        except OSError:
+            pass
+    return time.monotonic()
+
+
+def _monitor_evidence_snapshot_payload(limit: int, graph: dict[str, Any]) -> dict[str, Any]:
+    bounded_limit = max(1, min(limit, 80))
+    source_watermark = _monitor_dict(graph.get("source_watermark"))
+    now_epoch = time.time()
+    return {
+        "status": "ready",
+        "mode": "monitor_evidence_snapshot",
+        "created_at": datetime.fromtimestamp(now_epoch, tz=timezone.utc).isoformat(),
+        "created_epoch": now_epoch,
+        "created_monotonic": time.monotonic(),
+        "ttl_seconds": _monitor_evidence_cache_ttl_seconds(),
+        "key": _monitor_evidence_cache_key(bounded_limit),
+        "limit": bounded_limit,
+        "source_fingerprint": source_watermark.get("fingerprint"),
+        "source_watermark": source_watermark,
+        "graph": graph,
+    }
+
+
+def _read_monitor_evidence_mongo_snapshot(limit: int, current_watermark: dict[str, Any] | None = None) -> tuple[float, float, dict[str, Any]] | None:
+    if _monitor_evidence_storage_mode() != "mongodb" or not _monitor_evidence_mongo_uri():
+        return None
+    client = _monitor_evidence_mongo_client_ref()
+    if client is None:
+        return None
+    key = _monitor_evidence_cache_key(limit)
+    try:
+        max_time_ms = max(250, _int_env("PARKPULSE_MONITOR_EVIDENCE_MONGO_QUERY_TIMEOUT_MS", 1000))
+        collection = client[_monitor_evidence_mongo_database_name()][_monitor_evidence_mongo_collection_name()]
+        payload = collection.find_one({"_id": key}, {"_id": 0}, max_time_ms=max_time_ms)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    graph = _monitor_dict(payload.get("graph"))
+    if not graph:
+        return None
+    if current_watermark and _monitor_dict(graph.get("source_watermark")).get("fingerprint") != current_watermark.get("fingerprint"):
+        return None
+    created_at = _monitor_evidence_snapshot_created_monotonic(payload, prefer_epoch=True)
+    ttl = _safe_float(payload.get("ttl_seconds"), _monitor_evidence_cache_ttl_seconds())
+    return created_at + max(5.0, ttl), created_at, graph
+
+
+def _write_monitor_evidence_mongo_snapshot(limit: int, graph: dict[str, Any]) -> bool:
+    if _monitor_evidence_storage_mode() != "mongodb" or not _monitor_evidence_mongo_uri():
+        return False
+    client = _monitor_evidence_mongo_client_ref()
+    if client is None:
+        return False
+    key = _monitor_evidence_cache_key(limit)
+    try:
+        payload = _monitor_evidence_snapshot_payload(limit, graph)
+        payload["_id"] = key
+        payload["storage_backend"] = "mongodb"
+        collection = client[_monitor_evidence_mongo_database_name()][_monitor_evidence_mongo_collection_name()]
+        collection.replace_one({"_id": key}, payload, upsert=True)
+        return True
+    except Exception:
+        return False
+
+
 def _read_monitor_evidence_snapshot(limit: int, current_watermark: dict[str, Any] | None = None) -> tuple[float, float, dict[str, Any]] | None:
+    mongo_snapshot = _read_monitor_evidence_mongo_snapshot(limit, current_watermark)
+    if mongo_snapshot:
+        return mongo_snapshot
     path = _monitor_evidence_snapshot_path(limit)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -7952,29 +8146,18 @@ def _read_monitor_evidence_snapshot(limit: int, current_watermark: dict[str, Any
         return None
     if current_watermark and _monitor_dict(graph.get("source_watermark")).get("fingerprint") != current_watermark.get("fingerprint"):
         return None
-    created_at = _safe_float(payload.get("created_monotonic"), 0)
-    if created_at <= 0:
-        try:
-            created_at = path.stat().st_mtime
-            created_at = time.monotonic() - max(0.0, time.time() - created_at)
-        except OSError:
-            created_at = time.monotonic()
+    created_at = _monitor_evidence_snapshot_created_monotonic(payload, fallback_path=path)
     ttl = _monitor_evidence_cache_ttl_seconds()
     expires_at = created_at + ttl
     return expires_at, created_at, graph
 
 
 def _write_monitor_evidence_snapshot(limit: int, graph: dict[str, Any]) -> None:
+    _write_monitor_evidence_mongo_snapshot(limit, graph)
     path = _monitor_evidence_snapshot_path(limit)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "status": "ready",
-        "mode": "monitor_evidence_snapshot",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "created_monotonic": time.monotonic(),
-        "limit": max(1, min(limit, 80)),
-        "graph": graph,
-    }
+    payload = _monitor_evidence_snapshot_payload(limit, graph)
+    payload["storage_backend"] = "local_json"
     path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
 
 
@@ -13369,6 +13552,7 @@ async def app(scope, receive, send):
             if not await _authorize_or_send(send, scope, "read_product_learning", "product_learning_loop", None, default_role="ops_team"):
                 return
             operational_backlog = None
+            state = None
             try:
                 from agent_ops_ledger import build_operational_backlog
 
@@ -13387,7 +13571,15 @@ async def app(scope, receive, send):
                 )
             except Exception:
                 operational_backlog = None
-            await _send_json(send, 200, product_learning_loop_status(limit=int(limit_raw) if limit_raw else 500, operational_backlog=operational_backlog))
+            await _send_json(
+                send,
+                200,
+                product_learning_loop_status(
+                    limit=int(limit_raw) if limit_raw else 500,
+                    operational_backlog=operational_backlog,
+                    park_state=state,
+                ),
+            )
         except Exception as error:
             await _send_json(send, 200, {"status": "error", "mode": "product_learning_loop", "readiness_issues": [str(error)[:240]]})
         return

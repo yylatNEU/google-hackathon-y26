@@ -110,3 +110,40 @@ def test_safe_migrate_platform_store_upgrades_v1_registry_columns(tmp_path, monk
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(platform_store_registry)")}
     assert {"data_model", "source_of_truth"} <= columns
+
+
+def test_monitor_evidence_snapshot_can_use_shared_redis_contract(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARKPULSE_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("PARKPULSE_PLATFORM_DB", str(tmp_path / "park_data.db"))
+    monkeypatch.setenv("PARKPULSE_MONITOR_EVIDENCE_STORAGE", "redis")
+    monkeypatch.setenv("PARKPULSE_MONITOR_EVIDENCE_REDIS_URL", "redis://example.invalid:6379/0")
+
+    result = platform_store.safe_migrate_platform_store(actor="test")
+    monitor_record = next(row for row in result["registered_stores"] if row["store_key"] == "monitor_evidence_snapshot")
+
+    assert monitor_record["mode"] == "redis_snapshot_cache"
+    assert monitor_record["status"] == "redis_configured"
+    assert monitor_record["shared_across_instances"] is True
+    assert monitor_record["source_of_truth"] is False
+    assert monitor_record["metadata"]["local_fallback_path"].endswith("monitor-evidence-limit-40.json")
+
+
+def test_monitor_evidence_snapshot_can_use_shared_mongodb_contract(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARKPULSE_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("PARKPULSE_PLATFORM_DB", str(tmp_path / "park_data.db"))
+    monkeypatch.setenv("PARKPULSE_MONITOR_EVIDENCE_STORAGE", "mongodb")
+    monkeypatch.setenv("MONGODB_DIRECT_URI", "mongodb://example.invalid/parkpulse_shared")
+    monkeypatch.setenv("PARKPULSE_MONITOR_EVIDENCE_MONGO_DATABASE", "parkpulse_monitor")
+    monkeypatch.setenv("PARKPULSE_MONITOR_EVIDENCE_MONGO_COLLECTION", "monitor_snapshots_test")
+
+    result = platform_store.safe_migrate_platform_store(actor="test")
+    monitor_record = next(row for row in result["registered_stores"] if row["store_key"] == "monitor_evidence_snapshot")
+
+    assert monitor_record["mode"] == "mongodb_snapshot_cache"
+    assert monitor_record["status"] == "mongodb_configured"
+    assert monitor_record["shared_across_instances"] is True
+    assert monitor_record["source_of_truth"] is False
+    assert monitor_record["metadata"]["backend"] == "mongodb"
+    assert monitor_record["metadata"]["connection_env"] == "MONGODB_DIRECT_URI|MONGODB_URI|MONGO_URI"
+    assert monitor_record["metadata"]["database"] == "parkpulse_monitor"
+    assert monitor_record["metadata"]["collection"] == "monitor_snapshots_test"

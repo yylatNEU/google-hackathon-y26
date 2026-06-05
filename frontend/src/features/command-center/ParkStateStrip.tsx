@@ -48,6 +48,7 @@ export function ParkStateStrip({
           <span className={isConnected ? "text-emerald-200" : "text-amber-200"}>{isConnected ? "Live runtime" : "Runtime disconnected"}</span>
           <span className="rounded bg-slate-900 px-2.5 py-1 text-slate-200">Park time {simTime}</span>
           <span className="rounded bg-slate-900 px-2.5 py-1 text-slate-400">Updated {updated}</span>
+          <span data-testid="api-targets" data-api-targets={apiTargets} className="sr-only">{apiTargets}</span>
         </div>
         <button
           type="button"

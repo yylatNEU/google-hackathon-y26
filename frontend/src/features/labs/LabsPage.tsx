@@ -1,7 +1,6 @@
 "use client";
 
 const labItems = [
-  "AutoDream and learned reruns",
   "Digital-twin benchmark gauntlets",
   "Industrial dossiers",
   "BigQuery priors",

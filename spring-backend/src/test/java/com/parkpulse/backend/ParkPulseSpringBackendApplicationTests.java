@@ -190,6 +190,93 @@ class ParkPulseSpringBackendApplicationTests {
 	}
 
 	@Test
+	void liveFeedRoutesRunNativelyInSpringWithRoleGates() throws Exception {
+		Path runtime = Path.of("target/test-parkpulse-runtime");
+		Files.deleteIfExists(runtime.resolve("live_feed_events.jsonl"));
+		Files.deleteIfExists(runtime.resolve("review_ledger.jsonl"));
+
+		mockMvc.perform(get("/api/park/live-feed-health"))
+			.andExpect(status().isUnauthorized());
+
+		mockMvc.perform(get("/api/park/live-feed-health").header("authorization", "Bearer " + signedRoleToken("customer")))
+			.andExpect(status().isForbidden());
+
+		mockMvc.perform(get("/api/park/live-feed-health?limit=3").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.mode", equalTo("live_feed_health_and_review_contract_spring")))
+			.andExpect(jsonPath("$.summary.required_feed_count", equalTo(6)))
+			.andExpect(jsonPath("$.feeds[0].source", equalTo("weather")));
+
+		mockMvc.perform(get("/api/park/live-feeds/weather").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.config.source", equalTo("weather")));
+
+		mockMvc.perform(
+				post("/api/park/live-feeds/weather/load")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.mode", equalTo("live_weather_feed_load_spring")))
+			.andExpect(jsonPath("$.event_count", equalTo(3)))
+			.andExpect(jsonPath("$.durability.stored", equalTo(true)))
+			.andExpect(jsonPath("$.durability.ledger.mode", equalTo("spring_live_feed_jsonl_ledger")));
+
+		mockMvc.perform(
+				post("/api/park/live-feeds/refresh-stale")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"sources\":[\"weather\"]}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.mode", equalTo("live_feed_refresh_supervisor_spring")))
+			.andExpect(jsonPath("$.after_feeds[0].status", equalTo("ready")))
+			.andExpect(jsonPath("$.durability.stored", equalTo(true)));
+
+		mockMvc.perform(get("/api/park/review-training-ledger?limit=1").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.mode", equalTo("review_training_ledger_spring")))
+			.andExpect(jsonPath("$.rows[0].review_session_id", equalTo("review-spring-queue")));
+
+		mockMvc.perform(
+				post("/api/park/review-training-ledger")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"review_session_id\":\"review-spring-queue\",\"decision\":\"approve\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("recorded")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.stored", equalTo(true)))
+			.andExpect(jsonPath("$.ledger.mode", equalTo("spring_review_training_jsonl_ledger")));
+
+		mockMvc.perform(
+				post("/api/park/live-feed-events")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"events\":[{\"source\":\"weather\"},{\"source\":\"ride-ops\"}]}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("normalized_live_feed_ingest_spring")))
+			.andExpect(jsonPath("$.event_count", equalTo(2)))
+			.andExpect(jsonPath("$.stored", equalTo(true)))
+			.andExpect(jsonPath("$.ledger.mode", equalTo("spring_live_feed_jsonl_ledger")));
+
+		org.assertj.core.api.Assertions.assertThat(Files.readString(runtime.resolve("live_feed_events.jsonl")))
+			.contains("parkpulse.live_feed.signal")
+			.contains("ride-ops");
+		org.assertj.core.api.Assertions.assertThat(Files.readString(runtime.resolve("review_ledger.jsonl")))
+			.contains("review-spring-queue")
+			.contains("java_spring");
+	}
+
+	@Test
 	void reliabilityDiagnosticsAndAuthorizationAuditRunNativelyInSpring() throws Exception {
 		mockMvc.perform(get("/api/park/reliability").header("authorization", "Bearer " + signedRoleToken("customer")))
 			.andExpect(status().isForbidden());

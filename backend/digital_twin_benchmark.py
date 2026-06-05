@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import hashlib
+import os
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,8 +17,8 @@ PlannerFn = Callable[[dict[str, Any], str, dict[str, Any]], Awaitable[dict[str, 
 OptimizerFn = Callable[[dict[str, Any], str, dict[str, Any] | None, dict[str, Any] | None], dict[str, Any]]
 ContextBuilderFn = Callable[[str, dict[str, Any], dict[str, Any]], dict[str, Any]]
 
-HISTORY_PATH = Path(__file__).with_name("digital_twin_benchmark_history.json")
-REPORTS_DIR = Path(__file__).with_name("digital_twin_reports")
+HISTORY_PATH = Path(os.getenv("PARKPULSE_DIGITAL_TWIN_BENCHMARK_HISTORY_PATH", "") or Path(__file__).with_name("digital_twin_benchmark_history.json"))
+REPORTS_DIR = Path(os.getenv("PARKPULSE_DIGITAL_TWIN_REPORTS_DIR", "") or Path(__file__).with_name("digital_twin_reports"))
 MAX_HISTORY_ROWS = 40
 
 
@@ -1019,6 +1020,7 @@ def _read_history(path: Path) -> list[dict[str, Any]]:
 
 
 def _write_history(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rows, indent=2, sort_keys=True), encoding="utf-8")
 
 

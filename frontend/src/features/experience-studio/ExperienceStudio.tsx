@@ -295,6 +295,12 @@ type ExperienceDraft = {
     staffRunOfShow?: Array<{ phase?: string; who?: string; detail?: string; reviewGate?: string }>;
     signageSet?: Array<{ placement?: string; headline?: string; body?: string }>;
     preArrivalEmail?: { subject?: string; previewText?: string; body?: string };
+    craftArtifacts?: {
+      status?: string;
+      purpose?: string;
+      samples?: Array<{ id?: string; label?: string; channel?: string; copy?: string; whyItHelps?: string; reviewGate?: string }>;
+      craftNotes?: string[];
+    };
     productionDetail?: {
       guestChoiceModel?: string[];
       contentCompletenessChecklist?: string[];
@@ -879,6 +885,7 @@ export function ExperienceStudio() {
   const [revisionSection, setRevisionSection] = useState("staff_script");
   const [revisionFeedback, setRevisionFeedback] = useState("Make this section more magical, but keep accessibility plain and make staff language less operational.");
   const [latestSectionRevision, setLatestSectionRevision] = useState<SectionRevisionPayload | null>(null);
+  const [showAdvancedReview, setShowAdvancedReview] = useState(false);
   const [studioMemory, setStudioMemory] = useState<StudioMemoryPayload | null>(null);
   const [isLoadingMemory, setIsLoadingMemory] = useState(false);
   const [conversationInput, setConversationInput] = useState(
@@ -1050,7 +1057,7 @@ export function ExperienceStudio() {
       const generatedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
       setLastGeneratedAt(generatedAt);
       setGenerationCount((current) => current + 1);
-      setMessage(payload.draft?.sourceIntegrity?.readyForHandoff ? `Creative package generated at ${generatedAt}` : `Draft generated at ${generatedAt} with blockers because verified venue data is incomplete`);
+      setMessage(payload.draft?.sourceIntegrity?.readyForHandoff ? `Creative package generated at ${generatedAt} for demo handoff review` : `Draft generated at ${generatedAt} with blockers because verified venue data is incomplete`);
       void refreshStudioMemory();
       window.setTimeout(() => draftResultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
     } catch {
@@ -1231,7 +1238,7 @@ export function ExperienceStudio() {
       setWorkflowStatus(payload.draftRecord.status ?? workflowStatus);
       const summary = payload.summary ?? payload.draftRecord;
       if (summary?.id) setSavedDrafts((current) => current.map((item) => item.id === summary.id ? { ...item, ...summary } : item));
-      setMessage(payload.draftRecord.draft.sourceIntegrity?.readyForHandoff ? "Draft content updated" : "Draft content updated; source-integrity gate still blocks handoff");
+      setMessage(payload.draftRecord.draft.sourceIntegrity?.readyForHandoff ? "Draft content updated for demo handoff review" : "Draft content updated; source-integrity gate still blocks demo handoff");
       void refreshStudioMemory();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Draft update failed");
@@ -1449,6 +1456,7 @@ export function ExperienceStudio() {
   const draftMissing = draft?.sourceIntegrity?.missingRealInputs ?? [];
   const creativePackage = draft?.creativePackage;
   const experienceReviewAgent = draft?.experienceReviewAgent ?? creativePackage?.reviewAgentReview ?? null;
+  const hasAdvancedReview = Boolean(experienceReviewAgent || creativePackage?.creativePackageVariants?.length);
   const experienceReasoning = draft?.experienceReasoning ?? creativePackage?.designReasoning ?? null;
   const creativeSynthesis = draft?.creativeSynthesis ?? creativePackage?.creativeSynthesis ?? null;
   const profileIntelligence = draft?.profileIntelligence ?? readiness?.realInputs?.profileIntelligence ?? null;
@@ -1951,7 +1959,7 @@ export function ExperienceStudio() {
                         {lastGeneratedAt ? <div className="mt-2 w-fit rounded border border-emerald-400/40 bg-emerald-950/25 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-100">Generated at {lastGeneratedAt}</div> : null}
                       </div>
                       <div className={`rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${draft.sourceIntegrity?.readyForHandoff ? "border-emerald-400/40 bg-emerald-950/25 text-emerald-100" : "border-amber-400/40 bg-amber-950/25 text-amber-100"}`}>
-                        {draft.sourceIntegrity?.readyForHandoff ? "handoff ready" : "handoff blocked"}
+                        {draft.sourceIntegrity?.readyForHandoff ? "demo handoff ready" : "demo handoff blocked"}
                       </div>
                     </div>
                     {draft.creativeBrief ? (
@@ -2032,7 +2040,49 @@ export function ExperienceStudio() {
                             </div>
                           </div>
                         ) : null}
-                        {experienceReviewAgent ? (
+                        {creativePackage.craftArtifacts?.samples?.length ? (
+                          <div className="mt-3 rounded border border-fuchsia-300/25 bg-[#151914] p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <div className="text-[10px] font-black uppercase tracking-widest text-fuchsia-100">Creative lead samples</div>
+                                <div className="mt-1 text-xs leading-relaxed text-slate-400">{creativePackage.craftArtifacts.purpose}</div>
+                              </div>
+                              <div className="rounded border border-fuchsia-300/30 bg-fuchsia-950/20 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-fuchsia-100">
+                                {formatStatus(creativePackage.craftArtifacts.status)}
+                              </div>
+                            </div>
+                            <div className="mt-3 grid gap-2 lg:grid-cols-3">
+                              {creativePackage.craftArtifacts.samples.slice(0, 3).map((sample) => (
+                                <div key={sample.id ?? sample.label} className="rounded border border-slate-800 bg-[#0d1115] p-2">
+                                  <div className="text-xs font-black text-slate-100">{sample.label}</div>
+                                  <div className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-500">{formatStatus(sample.channel)}</div>
+                                  <div className="mt-2 text-[11px] leading-relaxed text-slate-300">{sample.copy}</div>
+                                  <div className="mt-2 text-[11px] leading-relaxed text-slate-500">{sample.whyItHelps}</div>
+                                  <div className="mt-1 text-[11px] leading-relaxed text-amber-100">Review: {sample.reviewGate}</div>
+                                </div>
+                              ))}
+                            </div>
+                            {creativePackage.craftArtifacts.craftNotes?.length ? (
+                              <div className="mt-2 text-[11px] leading-relaxed text-slate-500">Notes: {compactList(creativePackage.craftArtifacts.craftNotes, 3)}</div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {hasAdvancedReview ? (
+                          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded border border-lime-300/20 bg-[#151914] p-3">
+                            <div>
+                              <div className="text-[10px] font-black uppercase tracking-widest text-lime-100">Advanced review package</div>
+                              <div className="mt-1 text-[11px] font-bold text-slate-500">Review-agent findings and creative alternatives render on demand.</div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setShowAdvancedReview((value) => !value)}
+                              className="rounded border border-lime-300/40 bg-slate-950 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-lime-100 transition hover:border-lime-200"
+                            >
+                              {showAdvancedReview ? "Hide review" : "Show review"}
+                            </button>
+                          </div>
+                        ) : null}
+                        {showAdvancedReview && experienceReviewAgent ? (
                           <div className="mt-3 rounded border border-lime-300/25 bg-lime-950/10 p-3">
                             <div className="flex flex-wrap items-start justify-between gap-2">
                               <div>
@@ -2058,7 +2108,7 @@ export function ExperienceStudio() {
                             </div>
                           </div>
                         ) : null}
-                        {creativePackage.creativePackageVariants?.length ? (
+                        {showAdvancedReview && creativePackage.creativePackageVariants?.length ? (
                           <div className="mt-3 rounded border border-slate-800 bg-[#151914] p-3">
                             <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Creative alternatives</div>
                             <div className="mt-2 grid gap-2 lg:grid-cols-3">

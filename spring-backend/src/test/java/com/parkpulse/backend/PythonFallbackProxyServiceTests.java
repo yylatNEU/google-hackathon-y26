@@ -198,5 +198,40 @@ class PythonFallbackProxyServiceTests {
         assertThat(eventContractResponse.getStatusCode().value()).isEqualTo(409);
         assertThat(new String(eventContractResponse.getBody(), StandardCharsets.UTF_8))
             .contains("GET /api/park/events/contract");
+
+        MockHttpServletRequest liveFeedHealthRequest = new MockHttpServletRequest("GET", "/api/park/live-feed-health");
+        ResponseEntity<byte[]> liveFeedHealthResponse = service.forward(liveFeedHealthRequest, new byte[0]);
+
+        assertThat(liveFeedHealthResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(liveFeedHealthResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/live-feed-health");
+
+        MockHttpServletRequest liveFeedConfigRequest = new MockHttpServletRequest("GET", "/api/park/live-feeds/weather");
+        ResponseEntity<byte[]> liveFeedConfigResponse = service.forward(liveFeedConfigRequest, new byte[0]);
+
+        assertThat(liveFeedConfigResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(liveFeedConfigResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/live-feeds/{source}");
+
+        MockHttpServletRequest liveFeedLoadRequest = new MockHttpServletRequest("POST", "/api/park/live-feeds/ride-ops/load");
+        ResponseEntity<byte[]> liveFeedLoadResponse = service.forward(liveFeedLoadRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(liveFeedLoadResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(liveFeedLoadResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/live-feeds/{source}/load");
+
+        MockHttpServletRequest liveFeedRefreshRequest = new MockHttpServletRequest("POST", "/api/park/live-feeds/refresh-stale");
+        ResponseEntity<byte[]> liveFeedRefreshResponse = service.forward(liveFeedRefreshRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(liveFeedRefreshResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(liveFeedRefreshResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/live-feeds/refresh-stale");
+
+        MockHttpServletRequest reviewLedgerRequest = new MockHttpServletRequest("GET", "/api/park/review-training-ledger");
+        ResponseEntity<byte[]> reviewLedgerResponse = service.forward(reviewLedgerRequest, new byte[0]);
+
+        assertThat(reviewLedgerResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(reviewLedgerResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/review-training-ledger");
     }
 }

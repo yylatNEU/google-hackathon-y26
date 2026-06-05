@@ -17933,8 +17933,6 @@ def _agent_operations_state(
             return "active_current_run" if max(path_pressure, zone_pressure, event_risk) >= 80 else "standby"
         if agent_id in {"logic_audit_agent", "gcp_eval_judge_agent"}:
             return "proof_eval_only"
-        if agent_id == "autodream_agent":
-            return "offline_learning"
         return "standby"
 
     def contribution_for(agent_id: str) -> str:
@@ -17970,8 +17968,6 @@ def _agent_operations_state(
             return "Callable diagnostic service checks retrieval quality, stale memory, and vector-search readiness."
         if agent_id == "delivery_proof_agent":
             return "Callable proof service verifies dispatch receipts, receiver acknowledgement, and stream evidence."
-        if agent_id == "autodream_agent":
-            return "Runs off-hours counterfactual learning; cannot affect live park state."
         if agent_id == "gcp_eval_judge_agent":
             return "Scores groundedness, safety, response, and revision quality after action."
         if agent_id == "customer_support_agent":
@@ -17997,7 +17993,6 @@ def _agent_operations_state(
         "customer_support_agent",
         "memory_ops_agent",
         "delivery_proof_agent",
-        "autodream_agent",
     ]
     agents = []
     for agent_id in agent_ids:
@@ -18018,7 +18013,7 @@ def _agent_operations_state(
                 "lastContribution": contribution,
                 "activationTrigger": trigger,
                 "nextExpectedWork": _agent_next_expected_work(agent_id, status),
-                "handoffTo": "decision_bridge_agent" if agent_id not in {"decision_bridge_agent", "delivery_proof_agent", "gcp_eval_judge_agent", "memory_ops_agent", "autodream_agent"} else "delivery_proof_agent" if agent_id == "decision_bridge_agent" else "operator_evidence_dock",
+                "handoffTo": "decision_bridge_agent" if agent_id not in {"decision_bridge_agent", "delivery_proof_agent", "gcp_eval_judge_agent", "memory_ops_agent"} else "delivery_proof_agent" if agent_id == "decision_bridge_agent" else "operator_evidence_dock",
                 "executionMode": execution,
             }
         )
@@ -18034,7 +18029,7 @@ def _agent_operations_state(
             "activeCurrentRun": counts.get("active_current_run", 0),
             "standby": counts.get("standby", 0),
             "proofEvalOnly": counts.get("proof_eval_only", 0),
-            "offlineLearning": counts.get("offline_learning", 0),
+            "offlineLearning": 0,
             "showtimeRows": len(loop_rows),
             "activePolicy": active_policy,
         },
@@ -18071,7 +18066,6 @@ def _agent_activation_trigger(agent_id: str) -> str:
         "delivery_proof_agent": "Callable after dispatch, acknowledgement, or stream evidence needs proof.",
         "customer_support_agent": "Guest-facing kiosk/app question.",
         "memory_ops_agent": "Callable memory quality or retrieval readiness check.",
-        "autodream_agent": "Off-hours replay or counterfactual learning window.",
     }
     return triggers.get(agent_id, "Specialist trigger.")
 
@@ -18083,7 +18077,6 @@ def _agent_current_role(status: str) -> str:
         "active_current_run": "active in current park frame",
         "standby": "standby specialist",
         "proof_eval_only": "proof/eval only",
-        "offline_learning": "offline learning",
     }.get(status, "standby")
 
 
@@ -18096,16 +18089,12 @@ def _agent_execution_mode(status: str) -> str:
         return "advisory specialist contribution"
     if status == "proof_eval_only":
         return "scores or verifies; no live dispatch"
-    if status == "offline_learning":
-        return "offline only; no live dispatch"
     return "standby until triggered"
 
 
 def _agent_next_expected_work(agent_id: str, status: str) -> str:
     if status == "online_callable":
         return "Answer direct service calls and refresh evidence when invoked."
-    if status == "offline_learning":
-        return "Review outcomes after the operating window closes."
     if status == "proof_eval_only":
         return "Wait for dispatch or outcome telemetry."
     if agent_id == "decision_bridge_agent":

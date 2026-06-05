@@ -446,7 +446,7 @@ export default function MonitorPage() {
   const [monitor, setMonitor] = useState<MonitorData | null>(null);
   const [cases, setCases] = useState<CaseIndex | null>(null);
   const [agentOps, setAgentOps] = useState<AgentOpsLedger | null>(null);
-  const [reviewLedger, setReviewLedger] = useState<ReviewLedger | null>(null);
+  const [reviewLedger] = useState<ReviewLedger | null>(null);
   const [policyDoctrine, setPolicyDoctrine] = useState<PolicyDoctrine | null>(null);
   const [monitorEvidence, setMonitorEvidence] = useState<MonitorEvidenceGraph | null>(null);
   const [selectedPolicyRef, setSelectedPolicyRef] = useState("");

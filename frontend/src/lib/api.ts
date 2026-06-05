@@ -81,6 +81,14 @@ export function getApiUrls(): string[] {
   const configured = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.NEXT_PUBLIC_API_URL;
   const sameOrigin = typeof globalThis.location !== "undefined" ? globalThis.location.origin : undefined;
   const configuredUrls = [viteEnv?.VITE_API_URL, configured].filter(Boolean) as string[];
+  const sameOriginLocal = (() => {
+    if (!sameOrigin) return false;
+    try {
+      return localApiHostnames.has(new URL(sameOrigin).hostname);
+    } catch {
+      return false;
+    }
+  })();
   const localDevSameOrigin = (() => {
     if (!sameOrigin) return false;
     try {
@@ -92,6 +100,7 @@ export function getApiUrls(): string[] {
     }
   })();
   if (localDevSameOrigin && sameOrigin) return Array.from(new Set([...localApiUrls, sameOrigin]));
+  if (sameOrigin && !sameOriginLocal) return Array.from(new Set([...configuredUrls, sameOrigin]));
   const fallbacks = [...localApiUrls, sameOrigin];
   return Array.from(new Set([...configuredUrls, ...fallbacks].filter(Boolean) as string[]));
 }

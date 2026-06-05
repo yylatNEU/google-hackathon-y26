@@ -106,6 +106,63 @@ def _monitor_evidence_snapshot_path() -> Path:
     return Path.cwd() / "output" / "monitor-evidence-limit-40.json"
 
 
+def _monitor_evidence_snapshot_store() -> dict[str, Any]:
+    requested = os.getenv("PARKPULSE_MONITOR_EVIDENCE_STORAGE", "local").strip().lower() or "local"
+    local_path = _monitor_evidence_snapshot_path()
+    base_metadata = {
+        "override_env": "PARKPULSE_MONITOR_EVIDENCE_STORAGE",
+        "path_override_env": "PARKPULSE_MONITOR_EVIDENCE_SNAPSHOT_PATH",
+        "derived_from": ["agent_ops_ledger", "review_ledger", "live_feed_events", "policy_books", "case_index"],
+        "cache_invalidation": "source_watermark_fingerprint",
+    }
+    if requested in {"redis", "upstash"}:
+        redis_url = os.getenv("PARKPULSE_MONITOR_EVIDENCE_REDIS_URL") or os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_REST_URL")
+        return {
+            "mode": "redis_snapshot_cache",
+            "path": Path("redis/monitor-evidence"),
+            "shared": True,
+            "status": "redis_configured" if redis_url else "redis_unconfigured",
+            "metadata": {
+                **base_metadata,
+                "backend": "redis",
+                "connection_env": "PARKPULSE_MONITOR_EVIDENCE_REDIS_URL",
+                "local_fallback_path": str(local_path),
+            },
+        }
+    if requested in {"mongo", "mongodb"}:
+        mongo_uri = (
+            os.getenv("MONGODB_DIRECT_URI")
+            or os.getenv("MONGODB_URI")
+            or os.getenv("MONGO_URI")
+            or os.getenv("PARKPULSE_MONGODB_URI")
+        )
+        return {
+            "mode": "mongodb_snapshot_cache",
+            "path": Path("mongodb/monitor_evidence_snapshots"),
+            "shared": True,
+            "status": "mongodb_configured" if mongo_uri else "mongodb_unconfigured",
+            "metadata": {
+                **base_metadata,
+                "backend": "mongodb",
+                "connection_env": "MONGODB_DIRECT_URI|MONGODB_URI|MONGO_URI",
+                "database": os.getenv("PARKPULSE_MONITOR_EVIDENCE_MONGO_DATABASE") or os.getenv("MONGODB_DATABASE") or "parkpulse",
+                "collection": os.getenv("PARKPULSE_MONITOR_EVIDENCE_MONGO_COLLECTION", "monitor_evidence_snapshots"),
+                "local_fallback_path": str(local_path),
+            },
+        }
+    return {
+        "mode": "json_snapshot_cache",
+        "path": local_path,
+        "shared": False,
+        "status": "ready" if local_path.exists() else "will_initialize_on_first_read",
+        "metadata": {
+            **base_metadata,
+            "backend": "local_json",
+            "production_target": "redis_or_mongodb_snapshot_cache",
+        },
+    }
+
+
 def _store_record(
     *,
     store_key: str,
@@ -147,6 +204,7 @@ def _observed_store_records() -> list[dict[str, Any]]:
     trust_path = Path(os.getenv("PARKPULSE_AGENT_TRUST_DB", runtime_dir / "agent_trust.db"))
     delivery_path = Path(os.getenv("PARKPULSE_DELIVERY_OUTBOX", runtime_dir / "delivery_outbox.jsonl"))
     live_feed_path = Path(os.getenv("PARKPULSE_LIVE_FEED_PATH", runtime_dir / "live_feed_events.jsonl"))
+    monitor_snapshot_store = _monitor_evidence_snapshot_store()
     legacy_path = _legacy_platform_db_path()
     legacy_tables = _sqlite_tables(legacy_path)
     return [
@@ -236,21 +294,16 @@ def _observed_store_records() -> list[dict[str, Any]]:
         _store_record(
             store_key="monitor_evidence_snapshot",
             authority="derived_monitor_evidence_graph_cache",
-            mode="json_snapshot_cache",
-            path=_monitor_evidence_snapshot_path(),
+            mode=str(monitor_snapshot_store["mode"]),
+            path=monitor_snapshot_store["path"],
             data_classification="derived_case_trace_review_policy_graph",
             data_model="derived_snapshot",
             source_of_truth=False,
-            shared_across_instances=False,
+            shared_across_instances=bool(monitor_snapshot_store["shared"]),
             required_for_core=False,
-            status="ready" if _monitor_evidence_snapshot_path().exists() else "will_initialize_on_first_read",
+            status=str(monitor_snapshot_store["status"]),
             record_count=None,
-            metadata={
-                "override_env": "PARKPULSE_MONITOR_EVIDENCE_SNAPSHOT_PATH",
-                "derived_from": ["agent_ops_ledger", "review_ledger", "live_feed_events", "policy_books", "case_index"],
-                "cache_invalidation": "source_watermark_fingerprint",
-                "production_target": "shared_mongodb_or_redis_snapshot",
-            },
+            metadata=monitor_snapshot_store["metadata"],
         ),
         _store_record(
             store_key="agent_ops_ledger",

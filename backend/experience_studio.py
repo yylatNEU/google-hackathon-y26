@@ -3413,6 +3413,73 @@ def _venue_data_gap_analysis(real_inputs: dict[str, Any], intelligence: dict[str
     }
 
 
+def _high_craft_artifacts(
+    selected_name: str,
+    selected_terms: list[str],
+    route: list[dict[str, Any]],
+    template_id: str,
+    creative_brief: dict[str, str],
+    current_options_phrase: str,
+) -> dict[str, Any]:
+    first_stop = str((route[0] or {}).get("stop") or "the first stop") if route else "the first stop"
+    final_stop = str((route[-1] or {}).get("stop") or "the final stop") if route else "the final stop"
+    middle_stop = str((route[min(1, len(route) - 1)] or {}).get("stop") or final_stop) if route else final_stop
+    motif = next((term for term in selected_terms if str(term).strip()), "trail")
+    sensory = str(creative_brief.get("sensoryLevel") or "balanced")
+    pace = str(creative_brief.get("walkingPace") or "flexible")
+    if template_id == "rainy-day":
+        lead = f"Rain can change the shape of the day without taking the day away. {selected_name} starts at {first_stop}, keeps the next step visible, and gives families a dry place to choose what feels right."
+        moment = f"At {middle_stop}, invite guests to find the {motif} detail, take a breath, and decide whether to continue toward {final_stop} or stay with current indoor options."
+        sign = "A dry little detour starts here."
+    elif template_id == "kid-quest":
+        lead = f"{selected_name} gives kids a small mission and caregivers a simple way to keep the pace. Start at {first_stop}; every clue is optional."
+        moment = f"At {middle_stop}, ask kids to spot one {motif} clue before the group decides whether to continue or pause."
+        sign = "Your next clue is close."
+    elif template_id == "low-sensory":
+        lead = f"{selected_name} keeps the visit quiet, predictable, and easy to leave. Start at {first_stop}, then use each stop as a choice point."
+        moment = f"At {middle_stop}, keep the cue short: look for the {motif} marker, check comfort, then continue only if the group is ready."
+        sign = "Quiet route choice point."
+    else:
+        lead = f"{selected_name} turns verified park stops into a clear guest story. Start at {first_stop}, follow the visible cue, and close at {final_stop}."
+        moment = f"At {middle_stop}, use the {motif} cue as a small story beat before guests choose the next step."
+        sign = "Your next story cue starts here."
+    return {
+        "status": "review_ready_samples",
+        "purpose": "Concrete sample copy for a creative lead to judge craft, not just package completeness.",
+        "samples": [
+            {
+                "id": "lead_guest_story",
+                "label": "Lead guest story",
+                "channel": "guest_app_or_email",
+                "copy": lead,
+                "whyItHelps": "Shows the actual tone and promise of the experience in guest-facing language.",
+                "reviewGate": "Brand, digital, and accessibility owners confirm claims and reading level.",
+            },
+            {
+                "id": "route_moment",
+                "label": "Route moment",
+                "channel": "route_storyboard",
+                "copy": moment,
+                "whyItHelps": "Makes one middle beat feel designed instead of procedurally listed.",
+                "reviewGate": "Experience owner confirms the object, location, and skip path.",
+            },
+            {
+                "id": "signage_headline",
+                "label": "Signage headline",
+                "channel": "signage",
+                "copy": sign,
+                "whyItHelps": "Gives the signage team a short, inspectable headline instead of a generic instruction.",
+                "reviewGate": "Signage owner confirms placement, contrast, line length, and rain readability.",
+            },
+        ],
+        "craftNotes": [
+            f"Keep sensory level {sensory} and pace {pace}.",
+            f"Use '{current_options_phrase}' only where current status matters; avoid repeating it in every sentence.",
+            "Keep operational promises out of creative copy and in owner review notes.",
+        ],
+    }
+
+
 def _studio_quality_eval(
     route: list[dict[str, Any]],
     channel_matrix: list[dict[str, Any]],
@@ -3426,7 +3493,7 @@ def _studio_quality_eval(
         "specificity": 90 if route and all(item.get("guestCopy") and item.get("staffNote") for item in route if isinstance(item, dict)) else 55,
         "venueGrounding": 92 if route and all(item.get("source") for item in route if isinstance(item, dict)) else 65,
         "sectionCompleteness": min(100, 50 + len(section_dossiers) * 7 + len(channel_matrix) * 3),
-        "creativeQuality": 88 if (package.get("executiveConcept") or {}).get("name") and (package.get("creativeSynthesis") or {}).get("concepts") else 70,
+        "creativeQuality": 92 if (package.get("executiveConcept") or {}).get("name") and (package.get("creativeSynthesis") or {}).get("concepts") and (package.get("craftArtifacts") or {}).get("samples") else 70,
         "reviewReadiness": 72 if quality_gaps else 88,
         "memoryUse": 90 if memory_application.get("usedForGeneration") else 60,
         "publishRisk": 55 if venue_gap_analysis.get("missingForProduction") else 85,
@@ -3813,6 +3880,7 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
             "previewText": email_variant.get("previewText") or f"{venue_name} has an optional {str(template.get('label', 'experience')).lower()} drafted for {audience}.",
             "body": email_variant.get("body") or next((str(item.get("copy")) for item in messages if str(item.get("channel") or "").lower() == "pre-arrival email"), ""),
         },
+        "craftArtifacts": _high_craft_artifacts(selected_name, selected_terms, route, template_id, creative_brief, current_options_phrase),
         "productionDetail": {
             "guestChoiceModel": [
                 "Guests can start, pause, skip ahead, or stop without penalty.",

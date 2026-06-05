@@ -38,7 +38,7 @@ def test_cache_accuracy_replay_exercises_cache_modes(monkeypatch, tmp_path):
     assert react["metrics"]["cacheReplay"]["staleUsableServeRate"] == 1.0
 
 
-def test_autodream_preview_runs_cache_replay_audit(monkeypatch, tmp_path):
+def test_autodream_run_is_retired_without_cache_replay(monkeypatch, tmp_path):
     monkeypatch.delenv("MONGODB_URI", raising=False)
     monkeypatch.setenv("PARKPULSE_RUNTIME_DIR", str(tmp_path))
 
@@ -52,15 +52,14 @@ def test_autodream_preview_runs_cache_replay_audit(monkeypatch, tmp_path):
 
     result = park_autodream_agent.run_autodream("ride_down", max_cases=1, persist=False)
 
-    assert result["status"] == "complete"
-    assert result["summary"]["cache_replay_status"] == "failed"
-    assert result["summary"]["cache_replay_pass_rate"] < 1.0
-    assert result["cache_replay_audit"]["summary"]["roles_checked"] == len(park_autodream_agent.AUTODREAM_CACHE_REPLAY_ROLES)
-    assert result["dream_run"]["cacheReplayAudit"]["status"] == "failed"
-    assert any("stale_usable_cache_not_served" in failure for failure in result["cache_replay_audit"]["summary"]["failures"])
+    assert result["status"] == "retired"
+    assert result["summary"]["learnings_generated"] == 0
+    assert result["cache_replay_audit"]["status"] == "disabled"
+    assert result["storage"]["dream_learning_ids"] == []
+    assert "retired" in result["operator_review"]["note"]
 
 
-def test_autodream_promotion_requires_readiness_contract(monkeypatch, tmp_path):
+def test_autodream_promotion_is_retired(monkeypatch, tmp_path):
     monkeypatch.delenv("MONGODB_URI", raising=False)
     monkeypatch.setenv("PARKPULSE_RUNTIME_DIR", str(tmp_path))
 
@@ -72,66 +71,128 @@ def test_autodream_promotion_requires_readiness_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(park_autodream_agent, "export_analytics_rows", lambda rows: {"status": "preview", "row_counts": {key: len(value) for key, value in rows.items()}})
     mongo_memory.init_operational_memory()
 
-    dream = park_autodream_agent.run_autodream("ride_down", max_cases=1, persist=True)
-    dream_learning_id = dream["storage"]["dream_learning_ids"][0]
-    initial_readiness = mongo_memory.get_autodream_promotion_readiness(dream_learning_id)
-    assert initial_readiness["promotion_ready"] is False
-    assert "paired_benchmark_not_passed" in initial_readiness["blockers"]
+    promoted = park_autodream_agent.promote_autodream_learning("dream-retired")
 
-    promoted = park_autodream_agent.promote_autodream_learning(dream_learning_id)
-
-    assert promoted["status"] == "promoted"
+    assert promoted["status"] == "retired"
     readiness = promoted["promotion_readiness"]
-    assert readiness["promotion_ready"] is True
-    assert readiness["cache_replay_passed"] is True
-    assert readiness["paired_benchmark_passed"] is True
-    assert readiness["regression_risk"] is False
-    assert readiness["ground_truth_lift"] >= 0
-    assert promoted["promotion"]["promotion_readiness"]["promotion_ready"] is True
+    assert readiness["promotion_ready"] is False
+    assert readiness["blockers"] == ["autodream_retired"]
+    assert promoted["promotion"]["status"] == "retired"
     status = park_autodream_agent.autodream_status(4)
-    assert status["summary"]["promotion_ready"] >= 1
+    assert status["status"] == "retired"
+    assert status["summary"]["promotion_ready"] == 0
 
 
-def test_autodream_regression_triggers_rollback_watch(monkeypatch, tmp_path):
+def test_autodream_review_and_status_are_retired(monkeypatch, tmp_path):
     monkeypatch.delenv("MONGODB_URI", raising=False)
     monkeypatch.setenv("PARKPULSE_RUNTIME_DIR", str(tmp_path))
 
     import mongo_memory
     import park_autodream_agent
-    from park_simulation import ParkSimulation
 
     memory = mongo_memory.OperationalMemory()
     monkeypatch.setattr(mongo_memory, "_memory", memory)
     monkeypatch.setattr(park_autodream_agent, "export_analytics_rows", lambda rows: {"status": "preview", "row_counts": {key: len(value) for key, value in rows.items()}})
     mongo_memory.init_operational_memory()
 
-    dream = park_autodream_agent.run_autodream("ride_down", max_cases=1, persist=True)
-    dream_learning_id = dream["storage"]["dream_learning_ids"][0]
-    promoted = park_autodream_agent.promote_autodream_learning(dream_learning_id)
-    promoted_id = promoted["promotion"]["promoted_document_id"]
-    state = ParkSimulation()._state()
-    mongo_memory.record_outcome_event(
-        {
-            "loop_id": "rollback-watch-test",
-            "response_metrics": {"takeRate": 0.1, "reactiveFollowThroughRate": 0.1, "positiveResponseRate": 0.15},
-            "state_impact": {"queued_guest_delta": 40, "density_delta": 8, "comfort_delta": -3},
-            "scorecard": {"overall": 42},
-            "learning": {"take_rate_signal": "regression"},
-        },
-        "decision-rollback-watch",
-        state,
-    )
-
-    rollback = mongo_memory.get_rollback_watch_documents("ride_down")
-    readiness = mongo_memory.get_autodream_promotion_readiness(dream_learning_id)
-    context = mongo_memory.retrieve_operational_context("ride_down autodream promoted learning", state, agent_role="react_agent", cache_policy="fresh_retrieval")
-    retrieved_learning_ids = {row.get("_id") for row in context["retrieved"]["learnings"]}
+    review = park_autodream_agent.review_autodream_learning("dream-retired", "approved", reviewer="qa")
     status = park_autodream_agent.autodream_status(4)
 
-    assert rollback["count"] >= 1
-    assert any(row["_id"] == promoted_id for row in rollback["documents"])
-    assert readiness["promotion_ready"] is False
-    assert readiness["regression_risk"] is True
-    assert "rollback_watch" in readiness["blockers"]
-    assert promoted_id not in retrieved_learning_ids
-    assert status["summary"]["rollback_watch"] >= 1
+    assert review["status"] == "retired"
+    assert review["review"]["review_status"] == "approved"
+    assert status["latest_dream_runs"] == []
+    assert status["latest_dream_learnings"] == []
+    assert status["summary"]["rollback_watch"] == 0
+
+
+def test_retired_autodream_promotions_do_not_enter_live_context(monkeypatch, tmp_path):
+    monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.setenv("PARKPULSE_RUNTIME_DIR", str(tmp_path))
+
+    import mongo_memory
+
+    memory = mongo_memory.OperationalMemory()
+    monkeypatch.setattr(mongo_memory, "_memory", memory)
+    mongo_memory.init_operational_memory()
+
+    state = {"guestFlow": {"activeScenario": {"key": "ride_down"}}, "alerts": []}
+    old_learning = {
+        "_id": "learning_autodream_old",
+        "documentType": "agent_learning",
+        "scenarioKey": "ride_down",
+        "lesson": "autodream legacy rule",
+        "rule": "legacy autodream rule must not guide live operations",
+        "sourceDreamLearningId": "dream-old",
+        "tags": ["ride_down", "autodream_promoted"],
+    }
+    safe_learning = {
+        "_id": "learning_live_safe",
+        "documentType": "agent_learning",
+        "scenarioKey": "ride_down",
+        "lesson": "live safe rule",
+        "rule": "use current ride downtime dispatch protocol",
+        "tags": ["ride_down", "live"],
+    }
+    old_playbook = {
+        "_id": "pb_autodream_old",
+        "documentType": "playbook",
+        "incidentType": "ride_down",
+        "title": "AutoDream Playbook",
+        "summary": "legacy autodream playbook",
+        "sourceDreamLearningId": "dream-old",
+        "tags": ["autodream_promoted"],
+    }
+    safe_playbook = {
+        "_id": "pb_live_safe",
+        "documentType": "playbook",
+        "incidentType": "ride_down",
+        "title": "Live Ride Down Playbook",
+        "summary": "dispatch maintenance and guest recovery",
+        "tags": ["ride_down", "live"],
+    }
+    memory._fallback["agent_learnings"].extend([old_learning, safe_learning])
+    memory._fallback["playbooks"].extend([old_playbook, safe_playbook])
+
+    fresh = mongo_memory.retrieve_operational_context(
+        "ride_down legacy autodream rule",
+        state,
+        limit=6,
+        agent_role="react_agent",
+        cache_policy="fresh_retrieval",
+        persist_trace=False,
+    )
+    assert {row.get("_id") for row in fresh["retrieved"]["learnings"]}.isdisjoint({"learning_autodream_old"})
+    assert {row.get("_id") for row in fresh["retrieved"]["playbooks"]}.isdisjoint({"pb_autodream_old"})
+
+    memory._fallback["role_context_cache"].append(
+        {
+            "_id": "role_context_ride_down_react_agent",
+            "documentType": "role_context_cache",
+            "scenarioKey": "ride_down",
+            "agentRole": "react_agent",
+            "freshUntil": mongo_memory._utc_after(60),
+            "usableUntil": mongo_memory._utc_after(120),
+            "stateFingerprint": mongo_memory._state_fingerprint(state),
+            "stateSemanticSummary": mongo_memory._state_semantic_summary(state),
+            "trustLevel": "fresh",
+            "retrieved": {
+                "playbooks": [old_playbook, safe_playbook],
+                "incidents": [],
+                "learnings": [old_learning, safe_learning],
+            },
+            "roleSpecific": {"candidateRules": [old_learning, safe_learning]},
+            "rollup": {"rollbackState": "active"},
+        }
+    )
+    cached = mongo_memory.retrieve_operational_context(
+        "ride_down legacy autodream rule",
+        state,
+        limit=6,
+        agent_role="react_agent",
+        cache_policy="normal",
+        persist_trace=False,
+    )
+    assert cached["retrieved"]["method"] == "role_context_cache"
+    assert {row.get("_id") for row in cached["retrieved"]["learnings"]}.isdisjoint({"learning_autodream_old"})
+    assert {row.get("_id") for row in cached["retrieved"]["playbooks"]}.isdisjoint({"pb_autodream_old"})
+    assert {row.get("_id") for row in cached["role_context"]["roleSpecific"]["candidateRules"]}.isdisjoint({"learning_autodream_old"})

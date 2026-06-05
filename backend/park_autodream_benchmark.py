@@ -7,6 +7,8 @@ from mongo_memory import get_latest_memory_documents
 from park_optimizer import optimize_park_response
 from park_twin_engine import simulate_action_plan
 
+AUTODREAM_RETIREMENT_REASON = "AutoDream has been retired; paired replay benchmarks are disabled."
+
 
 def _number(value: Any, fallback: float = 0.0) -> float:
     try:
@@ -156,83 +158,20 @@ def run_autodream_benchmark(
 ) -> dict[str, Any]:
     scenario = scenario_key or _active_scenario(state)
     safe_seeds = max(1, min(20, int(seeds or 5)))
-    rule = _promoted_rule(scenario, promoted_rule_id)
-    if not rule:
-        return {
-            "status": "no_promoted_rule",
-            "scenario_key": scenario,
-            "promoted_rule_id": promoted_rule_id,
-            "message": "Promote an AutoDream rule for this scenario before running the paired benchmark.",
-        }
-
-    baseline_context = {"retrieved": {"learnings": []}}
-    learned_context = {"retrieved": {"learnings": [rule]}}
-    pairs = []
-    for index in range(safe_seeds):
-        seed = f"autodream_benchmark:{scenario}:{rule.get('_id')}:{index + 1}"
-        baseline = _run_once(deepcopy(state), scenario, seed, baseline_context)
-        learned = _run_once(deepcopy(state), scenario, seed, learned_context)
-        take_lift = round(learned["take_rate"] - baseline["take_rate"], 3)
-        queue_lift = baseline["queue_after"] - learned["queue_after"]
-        score_lift = round(learned["overall_score"] - baseline["overall_score"], 1)
-        learned_wins_seed = (take_lift >= 0.005 or queue_lift > 0) and score_lift >= -2
-        pairs.append(
-            {
-                "seed": seed,
-                "baseline": baseline,
-                "learned": learned,
-                "lift": {
-                    "take_rate": take_lift,
-                    "moved_guests": learned["moved_guests"] - baseline["moved_guests"],
-                    "queue_after": queue_lift,
-                    "wait_after": baseline["wait_after"] - learned["wait_after"],
-                    "overall_score": score_lift,
-                },
-                "winner": "learned" if learned_wins_seed else "baseline",
-            }
-        )
-
-    learned_wins = sum(1 for pair in pairs if pair["winner"] == "learned")
-    avg_baseline_take = round(sum(pair["baseline"]["take_rate"] for pair in pairs) / len(pairs), 3)
-    avg_learned_take = round(sum(pair["learned"]["take_rate"] for pair in pairs) / len(pairs), 3)
-    avg_baseline_score = round(sum(pair["baseline"]["overall_score"] for pair in pairs) / len(pairs), 1)
-    avg_learned_score = round(sum(pair["learned"]["overall_score"] for pair in pairs) / len(pairs), 1)
-    take_lift = round(avg_learned_take - avg_baseline_take, 3)
-    win_rate = round(learned_wins / len(pairs), 3)
-    confidence = _confidence(len(pairs), win_rate, take_lift)
     return {
-        "status": "complete",
-        "mode": "paired_replay_benchmark",
-        "source": "park_twin_engine.simulate_action_plan",
+        "status": "retired",
+        "mode": "retired_autodream_benchmark",
         "scenario_key": scenario,
-        "promoted_rule": {
-            "_id": rule.get("_id"),
-            "sourceDreamLearningId": rule.get("sourceDreamLearningId"),
-            "outcomeLabel": rule.get("outcomeLabel"),
-            "confidence": rule.get("confidence"),
-            "collection": rule.get("benchmarkCollection"),
-        },
-        "sample_size": len(pairs),
-        "minimum_sample_size": 5,
-        "confidence": confidence,
+        "promoted_rule_id": promoted_rule_id,
+        "sample_size": 0,
+        "requested_seeds": safe_seeds,
+        "confidence": "disabled",
         "summary": {
-            "baseline_take_rate": avg_baseline_take,
-            "learned_take_rate": avg_learned_take,
-            "take_rate_lift": take_lift,
-            "baseline_overall_score": avg_baseline_score,
-            "learned_overall_score": avg_learned_score,
-            "overall_score_lift": round(avg_learned_score - avg_baseline_score, 1),
-            "learned_wins": learned_wins,
-            "win_rate": win_rate,
-            "queued_guests_avoided": sum(pair["lift"]["queue_after"] for pair in pairs),
-            "wait_minutes_avoided": sum(pair["lift"]["wait_after"] for pair in pairs),
+            "retired": True,
+            "reason": AUTODREAM_RETIREMENT_REASON,
+            "win_rate": 0,
+            "take_rate_lift": 0,
         },
-        "recommendation": (
-            "Benchmark validates this promoted rule for matching scenarios."
-            if confidence == "validated"
-            else "Benchmark indicates regression risk; keep the rule review-gated or roll it back."
-            if confidence == "regression_risk"
-            else "Benchmark is directional only; collect more paired seeds before broad generalization."
-        ),
-        "pairs": pairs,
+        "pairs": [],
+        "recommendation": AUTODREAM_RETIREMENT_REASON,
     }

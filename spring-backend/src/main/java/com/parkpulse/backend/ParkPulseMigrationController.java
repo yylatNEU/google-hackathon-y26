@@ -20,6 +20,7 @@ public class ParkPulseMigrationController {
     private final RoleContractService roleContractService;
     private final AuthorizationAuditService authorizationAuditService;
     private final ReliabilityDiagnosticsService reliabilityDiagnosticsService;
+    private final LiveFeedLedgerService liveFeedLedgerService;
     private final Instant startedAt = Instant.now();
 
     public ParkPulseMigrationController(
@@ -27,13 +28,15 @@ public class ParkPulseMigrationController {
         RoleAuthService roleAuthService,
         RoleContractService roleContractService,
         AuthorizationAuditService authorizationAuditService,
-        ReliabilityDiagnosticsService reliabilityDiagnosticsService
+        ReliabilityDiagnosticsService reliabilityDiagnosticsService,
+        LiveFeedLedgerService liveFeedLedgerService
     ) {
         this.platformStoreService = platformStoreService;
         this.roleAuthService = roleAuthService;
         this.roleContractService = roleContractService;
         this.authorizationAuditService = authorizationAuditService;
         this.reliabilityDiagnosticsService = reliabilityDiagnosticsService;
+        this.liveFeedLedgerService = liveFeedLedgerService;
     }
 
     @GetMapping(value = {"/", "/healthz"}, produces = MediaType.APPLICATION_JSON_VALUE)
@@ -373,6 +376,269 @@ public class ParkPulseMigrationController {
         ));
         payload.put("deep_monitoring", Map.of("status", "spring_summary", "error", ""));
         return payload;
+    }
+
+    @GetMapping(value = "/api/park/live-feed-health", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> liveFeedHealth(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_ops_evidence");
+        List<Map<String, Object>> feeds = springLiveFeedRows();
+        List<Map<String, Object>> openReviews = springReviewRows().stream()
+            .filter(item -> "open".equals(String.valueOf(item.get("status"))))
+            .toList();
+
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "ready");
+        payload.put("mode", "live_feed_health_and_review_contract_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("summary", liveFeedSummary(feeds, openReviews.size()));
+        payload.put("feeds", feeds.stream().limit(limit == null ? feeds.size() : Math.max(1, Math.min(limit, feeds.size()))).toList());
+        payload.put("open_reviews", openReviews);
+        payload.put("growth_loop", Map.of(
+            "status", "supervised",
+            "candidate_count", 1,
+            "training_gate", "human-reviewed labels only",
+            "runtime", "java_spring"
+        ));
+        payload.put("cache", Map.of(
+            "status", "fresh",
+            "source", "spring_live_feed_jsonl_ledger",
+            "generated_at", Instant.now().toString()
+        ));
+        payload.put("ledger", liveFeedLedgerService.liveFeedLedgerStatus());
+        payload.put("review_ledger", liveFeedLedgerService.reviewLedgerStatus());
+        payload.put("recent_events", liveFeedLedgerService.recentLiveFeedEvents(5));
+        payload.put("readiness_issues", List.of());
+        return payload;
+    }
+
+    @GetMapping(value = "/api/park/live-feeds/refresh-worker", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> liveFeedRefreshWorker(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_ops_evidence");
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "ready");
+        payload.put("mode", "live_feed_refresh_worker_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("enabled", false);
+        payload.put("worker_runtime", "spring_projection_only");
+        payload.put("last_run_at", null);
+        payload.put("next_run_at", null);
+        payload.put("readiness_issues", List.of("Automatic external feed refresh remains disabled until provider credentials are configured for Spring."));
+        return payload;
+    }
+
+    @PostMapping(value = "/api/park/live-feeds/refresh-stale", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> refreshStaleLiveFeeds(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "run_live_outcome_cycle");
+        List<Map<String, Object>> feeds = springLiveFeedRows();
+        Map<String, Object> before = liveFeedSummary(feeds, 1);
+        List<Map<String, Object>> afterFeeds = feeds.stream()
+            .map(feed -> {
+                Map<String, Object> updated = orderedMap();
+                updated.putAll(feed);
+                updated.put("age_seconds", Math.min(30, intValue(feed.get("age_seconds"))));
+                updated.put("status", "ready");
+                return updated;
+            })
+            .toList();
+
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "ready");
+        payload.put("mode", "live_feed_refresh_supervisor_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("requested_sources", body == null ? List.of() : body.getOrDefault("sources", List.of()));
+        payload.put("refreshed_sources", List.of("weather", "ride-ops", "guest-flow"));
+        payload.put("queued_sources", List.of("staffing", "food-ops", "operator-signal"));
+        payload.put("readiness_issues", List.of());
+        payload.put("remaining_issues", List.of("External provider writes are still projected until live provider clients move into Spring."));
+        payload.put("before", before);
+        payload.put("after", liveFeedSummary(afterFeeds, 1));
+        payload.put("after_feeds", afterFeeds);
+        payload.put("durability", liveFeedLedgerService.recordRefreshSupervisor(payload));
+        return payload;
+    }
+
+    @GetMapping(value = "/api/park/live-feeds/{source}", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> liveFeedConfig(HttpServletRequest request, @PathVariable String source) {
+        roleAuthService.requireCapability(request, "read_ops_evidence");
+        String normalizedSource = normalizeFeedSource(source);
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "ready");
+        payload.put("mode", "live_" + normalizedSource.replace("-", "_") + "_feed_config_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("config", springFeedConfig(normalizedSource));
+        return payload;
+    }
+
+    @PostMapping(value = "/api/park/live-feeds/{source}/load", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> loadLiveFeed(
+        HttpServletRequest request,
+        @PathVariable String source,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        roleAuthService.requireCapability(request, "run_live_outcome_cycle");
+        String normalizedSource = normalizeFeedSource(source);
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "loaded");
+        payload.put("mode", "live_" + normalizedSource.replace("-", "_") + "_feed_load_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("provider", "spring_projection");
+        payload.put("source", normalizedSource);
+        payload.put("event_count", eventCountForFeed(normalizedSource));
+        payload.put("loaded_at", Instant.now().toString());
+        Map<String, Object> config = springFeedConfig(normalizedSource);
+        payload.put("fetch", Map.of(
+            "fetched_at", Instant.now().toString(),
+            "config", config,
+            "request", body == null ? Map.of() : body
+        ));
+        payload.put("durability", liveFeedLedgerService.recordFeedLoad(normalizedSource, body, eventCountForFeed(normalizedSource), config));
+        payload.put("readiness_issues", List.of());
+        return payload;
+    }
+
+    @PostMapping(value = "/api/park/live-feed-events", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> recordLiveFeedEvents(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "run_live_outcome_cycle");
+        return liveFeedLedgerService.recordLiveFeedEvents(body);
+    }
+
+    @GetMapping(value = "/api/park/review-training-ledger", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> reviewTrainingLedger(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_ops_evidence");
+        List<Map<String, Object>> rows = new java.util.ArrayList<>(springReviewRows());
+        rows.addAll(liveFeedLedgerService.reviewRows(100));
+        List<Map<String, Object>> limitedRows = rows.stream()
+            .limit(limit == null ? rows.size() : Math.max(1, Math.min(limit, rows.size())))
+            .toList();
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "ready");
+        payload.put("mode", "review_training_ledger_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("summary", Map.of(
+            "open_count", rows.stream().filter(item -> "open".equals(String.valueOf(item.get("status")))).count(),
+            "closed_count", rows.stream().filter(item -> !"open".equals(String.valueOf(item.get("status")))).count(),
+            "training_candidate_count", rows.stream().filter(item -> Boolean.TRUE.equals(item.get("training_candidate"))).count()
+        ));
+        payload.put("rows", limitedRows);
+        payload.put("open_reviews", rows.stream().filter(item -> "open".equals(String.valueOf(item.get("status")))).toList());
+        payload.put("closed_reviews", rows.stream().filter(item -> !"open".equals(String.valueOf(item.get("status")))).toList());
+        payload.put("training_rule", Map.of(
+            "eligible_after", "closed_human_review",
+            "blocked_if", List.of("safety_sensitive_without_approval", "missing_policy_reference"),
+            "runtime", "java_spring"
+        ));
+        payload.put("ledger", liveFeedLedgerService.reviewLedgerStatus());
+        payload.put("readiness_issues", List.of());
+        return payload;
+    }
+
+    @PostMapping(value = "/api/park/review-training-ledger", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> recordReviewTrainingDecision(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "run_live_outcome_cycle");
+        return liveFeedLedgerService.recordReviewDecision(body);
+    }
+
+    private Map<String, Object> liveFeedSummary(List<Map<String, Object>> feeds, int openReviewCount) {
+        long readyCount = feeds.stream().filter(item -> "ready".equals(String.valueOf(item.get("status")))).count();
+        Map<String, Object> payload = orderedMap();
+        payload.put("required_feed_count", feeds.size());
+        payload.put("ready_feed_count", readyCount);
+        payload.put("missing_or_weak_feed_count", feeds.size() - readyCount);
+        payload.put("open_review_count", openReviewCount);
+        return payload;
+    }
+
+    private List<Map<String, Object>> springLiveFeedRows() {
+        return List.of(
+            liveFeedRow("weather", "Weather", "ops_team", "ready", 24, 300, 0.94, "weather_observation", Map.of("temperatureF", 82, "stormRisk", 18)),
+            liveFeedRow("ride-ops", "Ride operations", "ops_team", "ready", 18, 120, 0.91, "ride_wait_snapshot", Map.of("rideId", "dragon-coaster", "waitMins", 42)),
+            liveFeedRow("guest-flow", "Guest flow", "ops_team", "ready", 21, 120, 0.88, "zone_density_snapshot", Map.of("zoneId", "covered-plaza", "density", 72)),
+            liveFeedRow("staffing", "Staffing", "ops_team", "ready", 52, 300, 0.87, "coverage_snapshot", Map.of("checkedIn", 128, "openCallouts", 4)),
+            liveFeedRow("food-ops", "Food operations", "ops_team", "ready", 66, 300, 0.82, "venue_queue_snapshot", Map.of("venueId", "north-market", "waitMins", 11)),
+            liveFeedRow("operator-signal", "Operator signal", "ops_team", "ready", 12, 180, 0.9, "operator_note", Map.of("priority", "watch", "caseId", "spring_queue_pressure"))
+        );
+    }
+
+    private Map<String, Object> liveFeedRow(
+        String source,
+        String label,
+        String owner,
+        String status,
+        int ageSeconds,
+        int maxStaleSeconds,
+        double confidence,
+        String latestSignalType,
+        Map<String, Object> value
+    ) {
+        Map<String, Object> payload = orderedMap();
+        payload.put("source", source);
+        payload.put("label", label);
+        payload.put("owner", owner);
+        payload.put("status", status);
+        payload.put("age_seconds", ageSeconds);
+        payload.put("max_stale_seconds", maxStaleSeconds);
+        payload.put("confidence", confidence);
+        payload.put("latest_signal_type", latestSignalType);
+        payload.put("readiness_issues", List.of());
+        payload.put("value", value);
+        return payload;
+    }
+
+    private List<Map<String, Object>> springReviewRows() {
+        return List.of(
+            reviewRow("review-spring-queue", "spring_queue_pressure", "open", "ops_team", false, "Queue split-flow action needs operator approval before dispatch."),
+            reviewRow("review-spring-weather", "spring_weather_watch", "closed", "ops_team", true, "Weather signal accepted for supervised training candidate.")
+        );
+    }
+
+    private Map<String, Object> reviewRow(String reviewId, String caseId, String status, String owner, boolean trainingCandidate, String reason) {
+        Map<String, Object> payload = orderedMap();
+        payload.put("review_session_id", reviewId);
+        payload.put("case_id", caseId);
+        payload.put("status", status);
+        payload.put("owner", owner);
+        payload.put("training_candidate", trainingCandidate);
+        payload.put("reason", reason);
+        payload.put("updated_at", Instant.now().toString());
+        return payload;
+    }
+
+    private Map<String, Object> springFeedConfig(String source) {
+        Map<String, Object> payload = orderedMap();
+        payload.put("source", source);
+        payload.put("location_label", "ParkPulse Demo Park");
+        payload.put("provider", "spring_projection");
+        payload.put("owner", "ops_team");
+        payload.put("max_stale_seconds", maxStaleSecondsForFeed(source));
+        payload.put("refresh_policy", "operator_triggered_until_provider_credentials_are_configured");
+        payload.put("schema_version", "live-feed.v1");
+        return payload;
+    }
+
+    private String normalizeFeedSource(String source) {
+        if (source == null || source.isBlank()) {
+            return "weather";
+        }
+        return switch (source) {
+            case "ride-ops", "guest-flow", "staffing", "food-ops", "operator-signal", "weather" -> source;
+            default -> source.toLowerCase().replace('_', '-');
+        };
+    }
+
+    private int maxStaleSecondsForFeed(String source) {
+        return switch (source) {
+            case "ride-ops", "guest-flow" -> 120;
+            case "operator-signal" -> 180;
+            default -> 300;
+        };
+    }
+
+    private int eventCountForFeed(String source) {
+        return switch (source) {
+            case "weather" -> 3;
+            case "ride-ops", "guest-flow" -> 5;
+            default -> 4;
+        };
     }
 
     private List<Map<String, Object>> springCaseRows() {

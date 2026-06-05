@@ -183,6 +183,154 @@ def test_dynamic_live_ticket_generation_backtest_matrix(monkeypatch, tmp_path):
     assert all(ticket["live_ops_authority"] is True for ticket in tickets.values())
 
 
+def test_place_risk_generates_accident_complaint_and_accessibility_tickets(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    state = {
+        "placeRiskGraph": {
+            "places": [
+                {
+                    "id": "west_plaza",
+                    "name": "West Plaza",
+                    "currentLoad": 92,
+                    "waitMinutes": 31,
+                    "riskFactors": ["poor_shade", "long_wait"],
+                    "evidence": ["heatIndexF=104", "shadeCoverage=18", "queueWaitMinutes=31"],
+                },
+                {
+                    "id": "coaster_exit_merge",
+                    "name": "Coaster Exit Merge",
+                    "currentLoad": 94,
+                    "riskFactors": ["narrow_path", "crowd_bottleneck"],
+                    "evidence": ["pathCongestion=94", "widthM=3.8"],
+                },
+                {
+                    "id": "accessibility_detour",
+                    "name": "Accessibility Detour",
+                    "currentLoad": 83,
+                    "riskFactors": ["misplaced_accessibility_route"],
+                    "evidence": ["accessibleRouteBlocked=true", "privacyRisk=high"],
+                },
+            ]
+        },
+        "simTime": {"day": 1, "hour": 15, "minute": 20},
+    }
+
+    candidates = loop.generate_place_risk_ticket_candidates(state)
+    tickets = loop.product_learning_loop_status(park_state=state, incident_seed="place-risk-backtest")["park_issue_tickets"]
+    issue_types = {candidate["issue_type"] for candidate in candidates}
+
+    assert {"heat_exhaustion_concern", "injury_or_safety_incident", "accessibility_accommodation"} <= issue_types
+    assert any(ticket["source"] == "place_risk" and ticket["issue_type"] == "injury_or_safety_incident" for ticket in tickets)
+    assert any(ticket["ticket_generation_trace"]["matched_rule"] == "narrow_congested_path_injury_risk" for ticket in tickets)
+    assert any("shadeCoverage=18" in ticket["ticket_generation_trace"]["causal_chain"] for ticket in tickets)
+    assert all(ticket["live_ops_authority"] is True for ticket in tickets)
+    assert any(ticket["requires_human_ack"] is True for ticket in tickets if ticket["issue_type"] == "injury_or_safety_incident")
+
+
+def test_seeded_random_incident_generation_is_repeatable(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    state = {
+        "placeRiskGraph": {
+            "places": [
+                {
+                    "id": "covered_plaza_leak",
+                    "name": "Covered Plaza Leak",
+                    "currentLoad": 98,
+                    "riskFactors": ["wet_surface", "crowd_bottleneck"],
+                    "evidence": ["waterLeak=true", "currentLoad=98"],
+                }
+            ]
+        },
+        "simTime": {"day": 1, "hour": 16, "minute": 5},
+    }
+
+    first = loop.generate_random_incident_ticket_candidates(state, seed="wet-surface-backtest")
+    second = loop.generate_random_incident_ticket_candidates(state, seed="wet-surface-backtest")
+
+    assert first == second
+    assert first
+    assert first[0]["source"] == "random_incident"
+    assert first[0]["issue_type"] == "injury_or_safety_incident"
+    assert first[0]["matched_rule"] == "seeded_slip_trip_or_collision"
+
+
+def test_auto_learning_governance_auto_drafts_low_risk_shadow_candidate(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    backlog = {
+        "issues": [
+            {
+                "id": "queue-merge-watch-a",
+                "domain": "Ride Ops",
+                "title": "Queue merge conflict complaints at mild threshold",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "merge complaint cluster",
+                "recommendedNext": "Clarify merge signage and staff script.",
+                "evidence": ["mergeComplaints=3"],
+            },
+            {
+                "id": "queue-merge-watch-b",
+                "domain": "Ride Ops",
+                "title": "Queue merge conflict repeated after show wave",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "merge complaint cluster repeated",
+                "recommendedNext": "Clarify merge signage and staff script.",
+                "evidence": ["mergeComplaints=4"],
+            },
+        ]
+    }
+
+    status = loop.product_learning_loop_status(operational_backlog=backlog)
+    candidates = status["auto_learning_candidates"]
+
+    assert status["auto_learning_candidate_count"] >= 1
+    assert status["shadow_ready_candidate_count"] >= 1
+    candidate = next(item for item in candidates if item["scenario_id"] == "line_cutting_conflict")
+    assert candidate["governance_status"] == "candidate_auto_drafted"
+    assert candidate["shadow_deployment"]["status"] == "shadow_ready"
+    assert candidate["shadow_deployment"]["live_active"] is False
+    assert all(gate["status"] == "pass" for gate in candidate["automated_eval_gates"])
+
+
+def test_auto_learning_governance_blocks_high_risk_and_refund_exceptions(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    backlog = {
+        "issues": [
+            {
+                "id": "food-court-a-backlog",
+                "domain": "Food",
+                "title": "Food pickup backlog driving refund pressure",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "mobile backlog 180 orders / ETA 32m",
+                "recommendedNext": "Open mobile-order recovery desk.",
+                "evidence": ["mobileOrderBacklog=180", "pickupEtaMinutes=32"],
+            },
+            {
+                "id": "first-aid-heat-watch",
+                "domain": "First Aid",
+                "title": "Heat concern reports increasing near west plaza",
+                "severity": "critical",
+                "status": "unresolved",
+                "current": "heat index 104F",
+                "recommendedNext": "Pre-stage first aid and water at west plaza.",
+                "evidence": ["heatIndexF=104"],
+            },
+        ]
+    }
+
+    status = loop.product_learning_loop_status(operational_backlog=backlog)
+    exceptions = {item["scenario_id"]: item for item in status["human_exception_queue"]}
+
+    assert "refund_request" in exceptions
+    assert "heat_exhaustion_concern" in exceptions
+    assert exceptions["refund_request"]["governance_status"] == "human_exception_required"
+    assert "protected_or_high_risk_issue_type" in exceptions["refund_request"]["exception_reasons"]
+    assert exceptions["heat_exhaustion_concern"]["shadow_deployment"]["status"] == "blocked"
+    assert status["auto_learning_governance"]["eval_contract"]["auto_promote_live_ops"] is False
+
+
 def test_product_learning_api_backtests_dynamic_park_live_ticket_generation(monkeypatch, tmp_path):
     reset_loop(monkeypatch, tmp_path)
     main._hot_endpoint_cache.pop("park_state_lite", None)

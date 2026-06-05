@@ -163,11 +163,11 @@ def test_memory_route_wrappers(monkeypatch):
     monkeypatch.setattr(memory_ops_agent, "build_memory_ops_report", lambda query: {"report": query})
     monkeypatch.setattr(memory_ops_agent, "run_memory_ops_repair", lambda query, collections, limit: {"query": query, "collections": collections, "limit": limit})
     monkeypatch.setattr(cache_accuracy_replay, "run_cache_accuracy_replay", lambda state, **kwargs: {"state": bool(state), **kwargs})
-    monkeypatch.setattr(park_autodream_agent, "run_autodream", lambda scenario_key, **kwargs: {"scenario_key": scenario_key, **kwargs})
-    monkeypatch.setattr(park_autodream_agent, "autodream_status", lambda limit: {"limit": limit})
-    monkeypatch.setattr(park_autodream_agent, "promote_autodream_learning", lambda *args: {"promoted": args[0]})
-    monkeypatch.setattr(park_autodream_agent, "review_autodream_learning", lambda *args: {"reviewed": args[0], "status": args[1]})
-    monkeypatch.setattr(park_autodream_benchmark, "run_autodream_benchmark", lambda state, **kwargs: {"status": "complete", **kwargs})
+    monkeypatch.setattr(park_autodream_agent, "run_autodream", lambda scenario_key, **kwargs: {"status": "retired", "scenario_key": scenario_key, **kwargs})
+    monkeypatch.setattr(park_autodream_agent, "autodream_status", lambda limit: {"status": "retired", "limit": limit})
+    monkeypatch.setattr(park_autodream_agent, "promote_autodream_learning", lambda *args: {"status": "retired", "dream_learning_id": args[0]})
+    monkeypatch.setattr(park_autodream_agent, "review_autodream_learning", lambda *args: {"status": "retired", "dream_learning_id": args[0], "review_status": args[1]})
+    monkeypatch.setattr(park_autodream_benchmark, "run_autodream_benchmark", lambda state, **kwargs: {"status": "retired", **kwargs})
     monkeypatch.setattr(bigquery_analytics, "analytics_learning_summary", lambda dashboard: {"dashboard": dashboard})
 
     client = client_for(register_memory_routes)
@@ -179,12 +179,18 @@ def test_memory_route_wrappers(monkeypatch):
     assert client.post("/api/park/memory/maintenance/repair", json={"query": "q", "collections": ["c"], "limit": 3}).json()["limit"] == 3
     assert client.post("/api/park/autodream/run", json={"scenario_key": "s", "max_cases": 2}).status_code == 403
     admin_headers = {"x-parkpulse-role": "ml_ops_admin"}
-    assert client.post("/api/park/autodream/run", headers=admin_headers, json={"scenario_key": "s", "max_cases": 2}).json()["max_cases"] == 2
-    assert client.get("/api/park/autodream/status?limit=4").json()["limit"] == 4
+    retired_run = client.post("/api/park/autodream/run", headers=admin_headers, json={"scenario_key": "s", "max_cases": 2}).json()
+    assert retired_run["status"] == "retired"
+    assert retired_run["max_cases"] == 2
+    assert client.get("/api/park/autodream/status?limit=4").json()["status"] == "retired"
     assert client.post("/api/park/autodream/promote", json={"dream_learning_id": "d"}).status_code == 403
-    assert client.post("/api/park/autodream/promote", headers=admin_headers, json={"dream_learning_id": "d"}).json()["promoted"] == "d"
-    assert client.post("/api/park/autodream/review", headers=admin_headers, json={"dream_learning_id": "d", "review_status": "approved"}).json()["status"] == "approved"
-    assert client.post("/api/park/autodream/benchmark", json={"scenario_key": "s", "seeds": 2}).json()["storage"]["id"] == "bench-1"
+    assert client.post("/api/park/autodream/promote", headers=admin_headers, json={"dream_learning_id": "d"}).json()["status"] == "retired"
+    retired_review = client.post("/api/park/autodream/review", headers=admin_headers, json={"dream_learning_id": "d", "review_status": "approved"}).json()
+    assert retired_review["status"] == "retired"
+    assert retired_review["review_status"] == "approved"
+    retired_benchmark = client.post("/api/park/autodream/benchmark", json={"scenario_key": "s", "seeds": 2}).json()
+    assert retired_benchmark["status"] == "retired"
+    assert "storage" not in retired_benchmark
     assert client.get("/api/park/autodream/benchmarks?limit=3").json()["count"] == 1
     assert client.get("/api/park/analytics?query=q").json()["dashboard"]["query"] == "q"
 

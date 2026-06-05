@@ -26,6 +26,7 @@ FRONTEND_DIR = REPO_ROOT / "frontend"
 BACKEND_DIR = REPO_ROOT / "backend"
 SPRING_BACKEND_DIR = REPO_ROOT / "spring-backend"
 REPORT_DIR = REPO_ROOT / "output" / "qa"
+QA_RUNTIME_DIR = REPORT_DIR / "runtime"
 
 TEXT_SUFFIXES = {
     ".css",
@@ -489,7 +490,15 @@ print(f"Compiled {count} backend Python files")
         [python_executable(), "-c", code],
         REPO_ROOT,
         timeout_seconds=120,
-    )
+        )
+
+
+def qa_runtime_env() -> dict[str, str]:
+    QA_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    return {
+        "PARKPULSE_DIGITAL_TWIN_BENCHMARK_HISTORY_PATH": str(QA_RUNTIME_DIR / "digital_twin_benchmark_history.json"),
+        "PARKPULSE_DIGITAL_TWIN_REPORTS_DIR": str(QA_RUNTIME_DIR / "digital_twin_reports"),
+    }
 
 
 def backend_smoke_check() -> CheckResult:
@@ -520,7 +529,7 @@ async def main():
 
 asyncio.run(main())
 """
-    env = {"PYTHONPATH": str(BACKEND_DIR)}
+    env = {"PYTHONPATH": str(BACKEND_DIR), **qa_runtime_env()}
     return run_command(
         "Backend smoke",
         [python_executable(), "-c", code],
@@ -536,6 +545,7 @@ def agent_role_eval_gate_check() -> CheckResult:
         [sys.executable, "scripts/agent_role_eval_gate.py"],
         REPO_ROOT,
         timeout_seconds=90,
+        env=qa_runtime_env(),
     )
 
 
@@ -555,6 +565,7 @@ def spring_backend_check() -> CheckResult:
         [str(mvnw), "test"],
         SPRING_BACKEND_DIR,
         timeout_seconds=180,
+        env=qa_runtime_env(),
     )
 
 
@@ -604,6 +615,7 @@ def frontend_e2e_check() -> CheckResult:
         backend_env["PYTHONPATH"] = str(BACKEND_DIR)
         backend_env["PARKPULSE_ALLOWED_ORIGINS"] = frontend_url
         backend_env["PARKPULSE_ENABLE_DEV_ROLE_ISSUER"] = "true"
+        backend_env.update(qa_runtime_env())
         backend = subprocess.Popen(
             [python_executable(), "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", str(backend_port)],
             cwd=BACKEND_DIR,
@@ -700,6 +712,39 @@ def skipped(name: str, reason: str) -> CheckResult:
     return CheckResult(name=name, status="skipped", summary=reason)
 
 
+def tracked_source_status() -> list[str]:
+    try:
+        completed = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=REPO_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ["!! unable to read git source status"]
+    return sorted(line for line in completed.stdout.splitlines() if line.strip())
+
+
+def source_stability_check(before_status: list[str]) -> CheckResult:
+    after_status = tracked_source_status()
+    if after_status == before_status:
+        return CheckResult(
+            name="Tracked source stability",
+            status="pass",
+            summary="No tracked source files changed during QA",
+            details={"tracked_status": after_status},
+        )
+    return CheckResult(
+        name="Tracked source stability",
+        status="fail",
+        summary="Tracked source files changed while QA was running",
+        details={"before": before_status, "after": after_status},
+    )
+
+
 def quality_score(results: Iterable[CheckResult]) -> int:
     score = 100
     for result in results:
@@ -712,7 +757,17 @@ def quality_score(results: Iterable[CheckResult]) -> int:
     return max(score, 0)
 
 
-def render_report(results: list[CheckResult], generated_at: str, quick: bool, score: int) -> str:
+def qa_mode(args: argparse.Namespace) -> str:
+    if args.live_only:
+        return "live"
+    if args.quick:
+        return "quick"
+    if args.source_stability:
+        return "release"
+    return "full"
+
+
+def render_report(results: list[CheckResult], generated_at: str, mode: str, score: int) -> str:
     failures = [result for result in results if result.status == "fail"]
     warnings = [result for result in results if result.status == "warn"]
     skipped_results = [result for result in results if result.status == "skipped"]
@@ -722,7 +777,7 @@ def render_report(results: list[CheckResult], generated_at: str, quick: bool, sc
         "# Routine QA Agent Report",
         "",
         f"- Generated: {generated_at}",
-        f"- Mode: {'quick' if quick else 'full'}",
+        f"- Mode: {mode}",
         f"- Overall status: {overall}",
         f"- Quality score: {score}/100",
         f"- Checks: {len(results)} total, {len(failures)} failed, {len(warnings)} warned, {len(skipped_results)} skipped",
@@ -758,7 +813,9 @@ def render_report(results: list[CheckResult], generated_at: str, quick: bool, sc
             "## Routine",
             "",
             "- Run `make qa` before demos, merges, or deploys.",
-            "- Run `make qa-quick` while iterating on small backend or UI changes.",
+            "- Run `make qa-fast` while iterating on small backend or UI changes.",
+            "- Run `make qa-live` for the isolated browser/API contract.",
+            "- Run `make qa-release` before merging or pushing release candidates.",
             "- Treat failed checks as release blockers; warnings are review items unless `--fail-on-warning` is used.",
             "",
         ]
@@ -771,15 +828,16 @@ def write_reports(results: list[CheckResult], args: argparse.Namespace) -> tuple
     generated_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     score = quality_score(results)
+    mode = qa_mode(args)
     payload = {
         "generated_at": generated_at,
-        "mode": "quick" if args.quick else "full",
+        "mode": mode,
         "quality_score": score,
         "overall_status": "fail" if any(result.status == "fail" for result in results) else "warn" if any(result.status == "warn" for result in results) else "pass",
         "results": [asdict(result) for result in results],
     }
 
-    markdown = render_report(results, generated_at, args.quick, score)
+    markdown = render_report(results, generated_at, mode, score)
     markdown_path = REPORT_DIR / f"{stamp}.md"
     json_path = REPORT_DIR / f"{stamp}.json"
     markdown_path.write_text(markdown)
@@ -794,6 +852,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quick", action="store_true", help="Skip the production frontend build.")
     parser.add_argument("--backend-only", action="store_true", help="Run only backend and static checks.")
     parser.add_argument("--frontend-only", action="store_true", help="Run only frontend and static checks.")
+    parser.add_argument("--live-only", action="store_true", help="Run only the isolated frontend browser/API contract.")
+    parser.add_argument("--source-stability", action="store_true", help="Fail if tracked source files change while QA is running.")
     parser.add_argument("--fail-on-warning", action="store_true", help="Exit non-zero when warnings are present.")
     parser.add_argument("--no-report", action="store_true", help="Do not write output/qa reports.")
     return parser.parse_args()
@@ -801,16 +861,23 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.backend_only and args.frontend_only:
-        print("--backend-only and --frontend-only cannot be used together", file=sys.stderr)
+    exclusive_modes = [args.backend_only, args.frontend_only, args.live_only]
+    if sum(1 for enabled in exclusive_modes if enabled) > 1:
+        print("--backend-only, --frontend-only, and --live-only cannot be combined", file=sys.stderr)
         return 2
 
+    if args.source_stability:
+        os.environ.update(qa_runtime_env())
+
+    before_source_status = tracked_source_status() if args.source_stability else []
     results: list[CheckResult] = [project_inventory(), static_hygiene_scan()]
 
-    if not args.frontend_only:
+    if args.live_only:
+        results.extend([frontend_build_check(), frontend_e2e_check()])
+    elif not args.frontend_only:
         results.extend([backend_compile_check(), backend_smoke_check(), agent_role_eval_gate_check(), spring_backend_check()])
 
-    if not args.backend_only:
+    if not args.backend_only and not args.live_only:
         results.extend([frontend_lint_check(), frontend_typecheck()])
         if args.quick:
             results.append(skipped("Frontend production build", "Skipped in quick mode"))
@@ -818,6 +885,9 @@ def main() -> int:
         else:
             results.append(frontend_build_check())
             results.append(frontend_e2e_check())
+
+    if args.source_stability:
+        results.append(source_stability_check(before_source_status))
 
     score = quality_score(results)
     failures = [result for result in results if result.status == "fail"]

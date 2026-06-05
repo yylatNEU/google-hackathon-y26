@@ -59,8 +59,8 @@ ANALYTICS_TABLES = [
     },
     {
         "name": "dream_eval_results",
-        "purpose": "Offline AutoDream counterfactual lessons, confidence, review status, and promotion outcomes.",
-        "agent_use": "Analyze which dream-generated lessons were promoted and later improved live outcomes.",
+        "purpose": "Archived retired AutoDream counterfactual lessons, confidence, review status, and promotion outcomes.",
+        "agent_use": "Archive-only inspection; retired dream-generated lessons are not promoted into live use.",
     },
 ]
 

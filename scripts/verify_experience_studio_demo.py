@@ -32,6 +32,213 @@ def _memory(base_url: str) -> dict[str, Any]:
     return _request(base_url, "GET", "/api/park/experience-studio/memory?limit=5", timeout=10)
 
 
+def _simulated_stakeholder_review(draft: dict[str, Any], section_revision: dict[str, Any], post_rule_package: dict[str, Any]) -> dict[str, Any]:
+    """Separate demo-review lane: this is not the app's in-package review agent."""
+    package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
+    qa = package.get("studioQualityEval") if isinstance(package.get("studioQualityEval"), dict) else {}
+    venue_gaps = package.get("venueDataGapAnalysis") if isinstance(package.get("venueDataGapAnalysis"), dict) else {}
+    variants = package.get("creativePackageVariants") if isinstance(package.get("creativePackageVariants"), list) else []
+    craft_samples = ((package.get("craftArtifacts") or {}).get("samples") or []) if isinstance(package.get("craftArtifacts"), dict) else []
+    section_delta = section_revision.get("qaDelta") if isinstance(section_revision.get("qaDelta"), dict) else {}
+    score = float(qa.get("score") or 0)
+    production_ready = bool(venue_gaps.get("productionRealVenueReady"))
+    findings = [
+        {
+            "severity": "critical",
+            "title": "The in-app Review Agent is useful but not independent review.",
+            "evidence": "It is generated from the same package and QA heuristics it reviews.",
+            "recommendation": "Keep it as a draft assistant, but demo this separate simulated stakeholder review before approval.",
+        },
+        {
+            "severity": "high" if not production_ready else "medium",
+            "title": "Handoff readiness needs demo-only language.",
+            "evidence": "The package can be saved and handed off while production-real venue gaps may still exist.",
+            "recommendation": "Label the handoff as demo/channel-owner review, not production publish readiness.",
+        },
+        {
+            "severity": "high",
+            "title": "The package is complete, but still risks feeling template-heavy.",
+            "evidence": "Many sections repeat optionality, current-options, review, and comfort language.",
+            "recommendation": "Add two or three higher-craft sample artifacts that a park creative lead would actually reuse.",
+        },
+        {
+            "severity": "medium",
+            "title": "The conversational loop should visibly change the recommendation.",
+            "evidence": "The verifier proves generation, but not a skeptical user asking follow-up questions and seeing the plan adapt.",
+            "recommendation": "Demo one clarification turn that changes route emphasis, tone, or channel priority before generation.",
+        },
+    ]
+    if section_delta.get("delta") is None or float(section_delta.get("delta") or 0) <= 0:
+        findings.append(
+            {
+                "severity": "high",
+                "title": "Section revision must show visible improvement.",
+                "evidence": "A review loop is only convincing if before/after copy and QA movement are obvious.",
+                "recommendation": "Show the revised staff script next to the old one and require a positive QA delta.",
+            }
+        )
+    return {
+        "reviewerId": "internal_codex_simulated_stakeholder",
+        "reviewerName": "Internal Codex Simulated Stakeholder",
+        "role": "skeptical park experience-design lead",
+        "source": "separate reviewer lane, outside the app-generated Experience Review Agent",
+        "status": "needs_demo_revision" if findings else "accepted",
+        "verdict": "reviewable_demo_not_final_approval",
+        "wouldApproveForDemo": True,
+        "wouldApproveForProduction": False,
+        "confidence": 0.78,
+        "score": max(55, min(88, round(score - (8 if not production_ready else 3) + min(len(variants), 3), 1))),
+        "summary": "The implementation now demonstrates a real end-to-end creative workflow, but the demo should be honest that the app Review Agent is an internal draft aid. The separate stakeholder lane should challenge believability, production readiness, and creative craft.",
+        "acceptanceCriteria": [
+            {"criterion": "Generate a complete final package", "status": "passed" if package else "blocked"},
+            {"criterion": "Show creative alternatives", "status": "passed" if variants else "blocked"},
+            {"criterion": "Show higher-craft creative samples", "status": "passed" if len(craft_samples) >= 3 else "review"},
+            {"criterion": "Run targeted section revision", "status": "passed" if section_revision.get("status") == "revised" else "blocked"},
+            {"criterion": "Show independent stakeholder critique", "status": "passed"},
+            {"criterion": "Avoid claiming production publish readiness", "status": "review" if not production_ready else "passed"},
+            {"criterion": "Show memory/rule influence without feedback-loop training", "status": "passed" if (post_rule_package.get("approvedRuleInfluence") or {}).get("usedForGeneration") else "review"},
+        ],
+        "findings": findings,
+        "recommendedDemoStory": [
+            "Designer asks for rainy-day family journey.",
+            "Planner shows profile-backed recommendation and open questions.",
+            "Studio generates final package with variants.",
+            "Internal Codex simulated stakeholder challenges the package.",
+            "Review Agent revises one section and shows QA delta.",
+            "Draft is saved, approved for channel-owner review, handed off, and memory/rule receipts are shown.",
+        ],
+    }
+
+
+def _demo_risk_assessment(readiness: dict[str, Any], draft: dict[str, Any], simulated_stakeholder_review: dict[str, Any], one_learning_loop: dict[str, Any]) -> dict[str, Any]:
+    package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
+    craft_samples = ((package.get("craftArtifacts") or {}).get("samples") or []) if isinstance(package.get("craftArtifacts"), dict) else []
+    venue_gaps = (package.get("venueDataGapAnalysis") or {}).get("missingForProduction") if isinstance(package.get("venueDataGapAnalysis"), dict) else []
+    role_gate = readiness.get("roleGate") if isinstance(readiness.get("roleGate"), dict) else {}
+    risks = [
+        {
+            "id": "independent_review",
+            "status": "pass" if simulated_stakeholder_review.get("reviewerId") else "block",
+            "severity": "critical",
+            "check": "Demo separates app Review Agent from internal Codex simulated stakeholder review.",
+        },
+        {
+            "id": "creative_craft",
+            "status": "pass" if len(craft_samples) >= 3 else "review",
+            "severity": "high",
+            "check": "Final package includes concrete creative lead samples, not only checklist sections.",
+        },
+        {
+            "id": "handoff_language",
+            "status": "review" if venue_gaps else "pass",
+            "severity": "high",
+            "check": "Report must describe handoff as demo/channel-owner review while production venue gaps remain.",
+        },
+        {
+            "id": "learning_boundary",
+            "status": "pass" if one_learning_loop.get("nextGenerationEvidence", {}).get("usesApprovedRules") else "block",
+            "severity": "critical",
+            "check": "Learning loop uses human-promoted rules, not automatic feedback training.",
+        },
+        {
+            "id": "role_gate_visibility",
+            "status": "review" if role_gate.get("enabled") is False else "pass",
+            "severity": "medium",
+            "check": "Demo clearly discloses whether Experience Studio role gates are enabled.",
+        },
+    ]
+    return {
+        "status": "review_required" if any(item["status"] == "review" for item in risks) else "demo_ready",
+        "purpose": "Grades whether the demo is believable, not only whether backend calls succeeded.",
+        "risks": risks,
+        "summary": "The demo is strong enough to show the loop, but still needs explicit demo-only handoff language and role-gate disclosure when running locally.",
+    }
+
+
+def _demo_run_rail(conversation_plan: dict[str, Any], generated: dict[str, Any], section_revision: dict[str, Any], simulated_stakeholder_review: dict[str, Any], one_learning_loop: dict[str, Any], handoff: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {"step": "designer_prompt", "status": conversation_plan.get("status"), "evidence": "Planner parsed rainy-day family journey request."},
+        {"step": "planner_questions", "status": "ready", "evidence": f"{len(conversation_plan.get('clarifyingQuestions') or [])} refinement prompt(s) generated."},
+        {"step": "package_generation", "status": generated.get("status"), "evidence": "Final package, route, channels, QA, variants, and craft samples generated."},
+        {"step": "simulated_stakeholder_review", "status": simulated_stakeholder_review.get("status"), "evidence": simulated_stakeholder_review.get("verdict")},
+        {"step": "targeted_revision", "status": section_revision.get("status"), "evidence": f"QA delta {(section_revision.get('qaDelta') or {}).get('delta')}."},
+        {"step": "demo_handoff_review", "status": handoff.get("status"), "evidence": "Draft moved to channel-owner review handoff; not production publish."},
+        {"step": "bounded_learning_loop", "status": one_learning_loop.get("status"), "evidence": "One approved rule promoted and verified in next generation."},
+    ]
+
+
+def _one_learning_loop(
+    initial_draft: dict[str, Any],
+    revised_draft: dict[str, Any],
+    section_revision: dict[str, Any],
+    simulated_stakeholder_review: dict[str, Any],
+    promoted_rule: dict[str, Any],
+    generated_after_rule: dict[str, Any],
+    before_counts: dict[str, Any],
+    after_counts: dict[str, Any],
+) -> dict[str, Any]:
+    initial_package = initial_draft.get("creativePackage") if isinstance(initial_draft.get("creativePackage"), dict) else {}
+    revised_package = revised_draft.get("creativePackage") if isinstance(revised_draft.get("creativePackage"), dict) else {}
+    post_rule_draft = generated_after_rule.get("draft") if isinstance(generated_after_rule.get("draft"), dict) else {}
+    post_rule_package = post_rule_draft.get("creativePackage") if isinstance(post_rule_draft.get("creativePackage"), dict) else {}
+    before_qa = initial_package.get("studioQualityEval") if isinstance(initial_package.get("studioQualityEval"), dict) else {}
+    after_qa = revised_package.get("studioQualityEval") if isinstance(revised_package.get("studioQualityEval"), dict) else {}
+    promoted = promoted_rule.get("rule") if isinstance(promoted_rule.get("rule"), dict) else {}
+    applied_rules = (post_rule_package.get("approvedRuleInfluence") or {}).get("appliedRules") if isinstance(post_rule_package.get("approvedRuleInfluence"), dict) else []
+    return {
+        "status": "started",
+        "loopId": f"learning_loop_{promoted.get('id') or 'demo'}",
+        "loopType": "bounded_finished_work_learning_loop",
+        "learningBoundary": "This is not automatic model training. The loop stores audit receipts, applies a reviewer-requested section revision, promotes one human-approved finished-work rule, then verifies the next generation can read that rule as bounded context.",
+        "sourceSignal": {
+            "type": "simulated_internal_codex_stakeholder_review",
+            "status": simulated_stakeholder_review.get("status"),
+            "verdict": simulated_stakeholder_review.get("verdict"),
+            "topFinding": ((simulated_stakeholder_review.get("findings") or [{}])[0] or {}).get("title"),
+        },
+        "revisionApplied": {
+            "status": section_revision.get("status"),
+            "sectionId": section_revision.get("sectionId"),
+            "feedback": section_revision.get("feedback"),
+            "qaDelta": section_revision.get("qaDelta", {}),
+        },
+        "promotion": {
+            "status": promoted_rule.get("status"),
+            "ruleId": promoted.get("id"),
+            "rule": promoted.get("rule"),
+            "authority": "human_promoted_rules_only",
+        },
+        "nextGenerationEvidence": {
+            "status": generated_after_rule.get("status"),
+            "usesApprovedRules": (post_rule_package.get("approvedRuleInfluence") or {}).get("usedForGeneration") is True,
+            "appliedRuleCount": len(applied_rules or []),
+            "selectedConceptName": (post_rule_draft.get("creativeSynthesis") or {}).get("selectedConceptName"),
+            "packageChecklist": ((post_rule_package.get("productionDetail") or {}).get("contentCompletenessChecklist") or []),
+        },
+        "memoryDeltas": {
+            name: int(after_counts.get(name, 0) or 0) - int(before_counts.get(name, 0) or 0)
+            for name in sorted(set(before_counts) | set(after_counts))
+        },
+        "qualityMovement": {
+            "beforeScore": before_qa.get("score"),
+            "afterRevisionScore": after_qa.get("score"),
+            "sectionRevisionDelta": (section_revision.get("qaDelta") or {}).get("delta"),
+        },
+        "loopStages": [
+            {"stage": "critic_signal", "status": simulated_stakeholder_review.get("status"), "artifact": "simulatedStakeholderReview"},
+            {"stage": "targeted_revision", "status": section_revision.get("status"), "artifact": "sectionRevision"},
+            {"stage": "human_approval", "status": "approved", "artifact": "draftStatus"},
+            {"stage": "rule_promotion", "status": promoted_rule.get("status"), "artifact": "approvedRuleLifecycle.promotion"},
+            {"stage": "next_generation_receipt", "status": generated_after_rule.get("status"), "artifact": "approvedRuleLifecycle.postPromotionGeneration"},
+        ],
+        "nextLoopCandidate": {
+            "candidate": "creative_craft_examples",
+            "reason": "The next loop should promote a high-craft artifact pattern only after a creative lead accepts one of the sample artifacts.",
+            "notYetPromoted": True,
+        },
+    }
+
+
 def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
     started = time.time()
     readiness = _request(base_url, "GET", "/api/park/experience-studio/readiness", timeout=10)
@@ -155,6 +362,10 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
     before_counts = before.get("collectionCounts", {}) if isinstance(before.get("collectionCounts"), dict) else {}
     after_counts = after.get("collectionCounts", {}) if isinstance(after.get("collectionCounts"), dict) else {}
     connection = after.get("memoryConnection", {}) if isinstance(after.get("memoryConnection"), dict) else {}
+    simulated_stakeholder_review = _simulated_stakeholder_review(draft, section_revision, post_rule_package)
+    one_learning_loop = _one_learning_loop(initial_draft, draft, section_revision, simulated_stakeholder_review, promoted_rule, generated_after_rule, before_counts, after_counts)
+    demo_risk_assessment = _demo_risk_assessment(readiness, draft, simulated_stakeholder_review, one_learning_loop)
+    demo_run_rail = _demo_run_rail(conversation_plan, generated, section_revision, simulated_stakeholder_review, one_learning_loop, handoff)
     return {
         "status": "passed",
         "baseUrl": base_url,
@@ -194,6 +405,10 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "creativeVariantCount": len(creative_package.get("creativePackageVariants") or []),
             "sectionRevisionStatus": section_revision.get("status"),
             "sectionRevisionDelta": (section_revision.get("qaDelta") or {}).get("delta"),
+            "simulatedStakeholderStatus": simulated_stakeholder_review.get("status"),
+            "simulatedStakeholderVerdict": simulated_stakeholder_review.get("verdict"),
+            "oneLearningLoopStatus": one_learning_loop.get("status"),
+            "demoRiskStatus": demo_risk_assessment.get("status"),
         },
         "statuses": {
             "conversationPlan": conversation_plan.get("status"),
@@ -206,6 +421,7 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "postRuleGenerate": generated_after_rule.get("status"),
             "handoff": handoff.get("status"),
             "handoffReview": handoff_review.get("status") if handoff_review else "skipped",
+            "oneLearningLoop": one_learning_loop.get("status"),
         },
         "conversationPlan": {
             "parsedBrief": conversation_plan.get("parsedBrief", {}),
@@ -215,6 +431,8 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "recommendedOptionId": conversation_plan.get("recommendedOptionId"),
             "recommendedPlan": conversation_plan.get("recommendedPlan", {}),
         },
+        "demoRunRail": demo_run_rail,
+        "demoRiskAssessment": demo_risk_assessment,
         "finalGeneratedResult": {
             "title": draft.get("title"),
             "audience": draft.get("audience"),
@@ -232,6 +450,7 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "reasoningTrace": draft.get("reasoningTrace", []),
             "profileIntelligence": draft.get("profileIntelligence", {}),
             "experienceReviewAgent": draft.get("experienceReviewAgent", {}),
+            "simulatedStakeholderReview": simulated_stakeholder_review,
             "sectionRevision": {
                 "status": section_revision.get("status"),
                 "sectionId": section_revision.get("sectionId"),
@@ -261,6 +480,7 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
                 "packageChecklist": ((post_rule_package.get("productionDetail") or {}).get("contentCompletenessChecklist") or []),
             },
         },
+        "oneLearningLoop": one_learning_loop,
     }
 
 
@@ -274,6 +494,9 @@ def _render_html(report: dict[str, Any]) -> str:
         ("No feedback loop", report.get("contracts", {}).get("noFeedbackLoop")),
         ("Studio Core", report.get("contracts", {}).get("studioCoreId")),
         ("Review Agent", report.get("contracts", {}).get("reviewAgentStatus")),
+        ("Simulated stakeholder", report.get("contracts", {}).get("simulatedStakeholderStatus")),
+        ("One learning loop", report.get("contracts", {}).get("oneLearningLoopStatus")),
+        ("Demo risk", report.get("contracts", {}).get("demoRiskStatus")),
         ("Creative variants", report.get("contracts", {}).get("creativeVariantCount")),
         ("Section revision", report.get("contracts", {}).get("sectionRevisionStatus")),
         ("Revision QA delta", report.get("contracts", {}).get("sectionRevisionDelta")),
@@ -353,6 +576,7 @@ def _render_html(report: dict[str, Any]) -> str:
 
   <nav class="tabs" aria-label="Report sections">
     <button class="tab active" data-view="overview">Overview</button>
+    <button class="tab" data-view="demo">Demo Run</button>
     <button class="tab" data-view="planner">Planner</button>
     <button class="tab" data-view="final">Final Package</button>
     <button class="tab" data-view="synthesis">Creative Synthesis</button>
@@ -361,6 +585,8 @@ def _render_html(report: dict[str, Any]) -> str:
     <button class="tab" data-view="channels">Channels</button>
     <button class="tab" data-view="profile">Profile Intelligence</button>
     <button class="tab" data-view="review">Review</button>
+    <button class="tab" data-view="stakeholder">Stakeholder</button>
+    <button class="tab" data-view="learning">Learning Loop</button>
     <button class="tab" data-view="memory">Memory</button>
     <button class="tab" data-view="raw">Raw JSON</button>
   </nav>
@@ -370,6 +596,7 @@ def _render_html(report: dict[str, Any]) -> str:
     <div class="grid4" id="metrics" style="margin-top:14px"></div>
     <table><tbody>{summary_rows}</tbody></table>
   </section>
+  <section id="view-demo" class="view"><h2>Demo Run</h2><div id="demoRun" class="stack" style="margin-top:14px"></div></section>
   <section id="view-planner" class="view"><h2>Conversation Planner</h2><div id="planner" class="stack" style="margin-top:14px"></div></section>
   <section id="view-final" class="view"><h2>Final Package</h2><div id="final" class="stack" style="margin-top:14px"></div></section>
   <section id="view-synthesis" class="view"><h2>Creative Synthesis</h2><div id="creativeSynthesis" class="stack" style="margin-top:14px"></div></section>
@@ -378,6 +605,8 @@ def _render_html(report: dict[str, Any]) -> str:
   <section id="view-channels" class="view"><h2>Channel Artifacts</h2><div id="channels" class="grid2" style="margin-top:14px"></div></section>
   <section id="view-profile" class="view"><h2>Profile Intelligence</h2><div id="profileIntel" class="stack" style="margin-top:14px"></div></section>
   <section id="view-review" class="view"><h2>Review Gates</h2><div id="review" class="grid2" style="margin-top:14px"></div></section>
+  <section id="view-stakeholder" class="view"><h2>Simulated Stakeholder Review</h2><div id="stakeholderReview" class="stack" style="margin-top:14px"></div></section>
+  <section id="view-learning" class="view"><h2>One Learning Loop</h2><div id="learningLoop" class="stack" style="margin-top:14px"></div></section>
   <section id="view-memory" class="view"><h2>Memory Receipts</h2><div id="memory" class="stack" style="margin-top:14px"></div></section>
   <section id="view-raw" class="view"><h2>Raw JSON</h2><pre id="raw"></pre></section>
 </main>
@@ -386,6 +615,9 @@ def _render_html(report: dict[str, Any]) -> str:
   const report = JSON.parse(document.getElementById("reportData").textContent);
   const result = report.finalGeneratedResult || {{}};
   const ruleLifecycle = report.approvedRuleLifecycle || {{}};
+  const learningLoop = report.oneLearningLoop || {{}};
+  const demoRunRail = report.demoRunRail || [];
+  const demoRisk = report.demoRiskAssessment || {{}};
   const postRule = ruleLifecycle.postPromotionGeneration || {{}};
   const plan = report.conversationPlan || {{}};
   const plannerIntel = plan.plannerIntelligence || {{}};
@@ -395,6 +627,7 @@ def _render_html(report: dict[str, Any]) -> str:
   const profileIntel = result.profileIntelligence || {{}};
   const profileReady = profileIntel.readiness || {{}};
   const reviewAgent = result.experienceReviewAgent || pkg.reviewAgentReview || {{}};
+  const stakeholderReview = result.simulatedStakeholderReview || {{}};
   const sectionRevision = result.sectionRevision || {{}};
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({{ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }}[char]));
   const list = (items) => (Array.isArray(items) && items.length ? `<ul>${{items.map((item) => `<li>${{esc(typeof item === "string" ? item : JSON.stringify(item))}}</li>`).join("")}}</ul>` : "<p>None.</p>");
@@ -403,15 +636,24 @@ def _render_html(report: dict[str, Any]) -> str:
   document.getElementById("metrics").innerHTML = [
     metric("Route stops", (result.route || []).length, result.title),
     metric("Channel artifacts", (result.messages || []).length, "App, signage, email, staff cue"),
-    metric("Ready", result.sourceIntegrity?.readyForHandoff ? "yes" : "review", "Source-integrity gate"),
+    metric("Demo handoff", result.sourceIntegrity?.readyForHandoff ? "ready" : "review", "Not production publish"),
     metric("Profile intel", profileReady.status || result.sourceIntegrity?.profileIntelligenceStatus || "unknown", result.sourceIntegrity?.realVenueReady ? "Real-venue-ready" : "Creative-ready, review gated"),
     metric("Approved rules", postRule.approvedRuleInfluence?.usedForGeneration ? "active" : "inactive", `${{postRule.approvedRuleInfluence?.ruleCount || 0}} rule context`),
     metric("QA score", pkg.studioQualityEval?.score ?? "n/a", pkg.studioQualityEval?.status || "not scored"),
     metric("Review agent", reviewAgent.status || "unknown", reviewAgent.approvalRecommendation || "no recommendation"),
+    metric("Stakeholder", stakeholderReview.status || "unknown", stakeholderReview.verdict || "no verdict"),
+    metric("Learning loop", learningLoop.status || "unknown", learningLoop.loopType || "not started"),
+    metric("Demo risk", demoRisk.status || "unknown", "Believability checks"),
     metric("Variants", (pkg.creativePackageVariants || []).length, "Selected plus alternatives"),
     metric("Revision delta", sectionRevision.qaDelta?.delta ?? "n/a", sectionRevision.sectionId || "no targeted revision"),
     metric("Venue gaps", (pkg.venueDataGapAnalysis?.missingForProduction || []).length, pkg.venueDataGapAnalysis?.productionRealVenueReady ? "production ready" : "review required")
   ].join("");
+  document.getElementById("demoRun").innerHTML = `
+    <div class="card"><h3>Demo risk assessment</h3><p>${{esc(demoRisk.summary || "")}}</p><div class="label">Purpose</div><div class="value">${{esc(demoRisk.purpose || "")}}</div></div>
+    <div class="grid2">
+      <div class="card"><h3>Run rail</h3>${{list((demoRunRail || []).map((item) => `${{item.step}} / ${{item.status}} - ${{item.evidence}}`))}}</div>
+      <div class="card"><h3>Risk grades</h3>${{list((demoRisk.risks || []).map((item) => `${{item.status}} / ${{item.severity}} / ${{item.id}} - ${{item.check}}`))}}</div>
+    </div>`;
   document.getElementById("planner").innerHTML = `
     <div class="grid4">
       ${{metric("Template", plan.parsedBrief?.templateId || "n/a", plan.parsedBrief?.templateLabel || "")}}
@@ -443,10 +685,12 @@ def _render_html(report: dict[str, Any]) -> str:
       <div class="card"><h3>Pre-arrival email</h3><div class="label">Subject</div><div class="value">${{esc(pkg.preArrivalEmail?.subject)}}</div><div class="label">Body</div><div class="value">${{esc(pkg.preArrivalEmail?.body)}}</div></div>
       <div class="card"><h3>Signage set</h3>${{list((pkg.signageSet || []).map((item) => `${{item.placement}} - ${{item.headline}}: ${{item.body}}`))}}</div>
     </div>
+    <div class="card"><h3>Creative Lead Samples</h3><p>${{esc(pkg.craftArtifacts?.purpose || "")}}</p><div class="grid3">${{(pkg.craftArtifacts?.samples || []).map((sample) => `<div class="card"><h3>${{esc(sample.label || sample.id)}}</h3><div class="label">${{esc(sample.channel || "")}}</div><div class="value">${{esc(sample.copy || "")}}</div><div class="label">Why it helps</div><div class="value">${{esc(sample.whyItHelps || "")}}</div><div class="label">Review</div><div class="value">${{esc(sample.reviewGate || "")}}</div></div>`).join("") || "<p>No craft samples returned.</p>"}}</div><div class="label">Craft notes</div>${{list(pkg.craftArtifacts?.craftNotes || [])}}</div>
     <div class="grid2">
       <div class="card"><h3>Experience Review Agent</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(reviewAgent.status || "unknown")}}</div></div><div><div class="label">Score</div><div class="value">${{esc(reviewAgent.score ?? "n/a")}}</div></div><div><div class="label">Recommendation</div><div class="value">${{esc(reviewAgent.approvalRecommendation || "n/a")}}</div></div></div><div class="label">Findings</div>${{list(reviewAgent.findings || [])}}<div class="label">Revision targets</div>${{list((reviewAgent.sectionTargets || []).map((item) => `${{item.section}}: ${{item.reason}}`))}}<div class="label">Memory judgment</div><pre>${{esc(jsonText(reviewAgent.memoryJudgment || {{}}))}}</pre></div>
       <div class="card"><h3>Section Revision Result</h3><div class="grid3"><div><div class="label">Section</div><div class="value">${{esc(sectionRevision.sectionId || "n/a")}}</div></div><div><div class="label">Status</div><div class="value">${{esc(sectionRevision.status || "unknown")}}</div></div><div><div class="label">QA delta</div><div class="value">${{esc(sectionRevision.qaDelta?.delta ?? "n/a")}}</div></div></div><div class="label">Feedback</div><div class="value">${{esc(sectionRevision.feedback || "")}}</div><div class="label">Before</div><pre>${{esc(jsonText(sectionRevision.beforeSection || {{}}))}}</pre><div class="label">After</div><pre>${{esc(jsonText(sectionRevision.afterSection || {{}}))}}</pre></div>
     </div>
+    <div class="card"><h3>Internal Codex Simulated Stakeholder</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(stakeholderReview.status || "unknown")}}</div></div><div><div class="label">Production approval</div><div class="value">${{esc(stakeholderReview.wouldApproveForProduction ? "yes" : "no")}}</div></div><div><div class="label">Score</div><div class="value">${{esc(stakeholderReview.score ?? "n/a")}}</div></div></div><p>${{esc(stakeholderReview.summary || "")}}</p><div class="label">Top objections</div>${{list((stakeholderReview.findings || []).map((item) => `${{item.severity}} - ${{item.title}} ${{item.recommendation}}`))}}</div>
     <div class="card"><h3>Creative Alternatives</h3><div class="grid3">${{(pkg.creativePackageVariants || []).map((variant) => `<div class="card"><h3>${{esc(variant.name || variant.id)}} ${{variant.status === "selected" ? "(selected)" : ""}}</h3><p>${{esc(variant.positioning || "")}}</p><div class="label">Guest promise</div><div class="value">${{esc(variant.guestPromise || "")}}</div><div class="label">When to use</div><div class="value">${{esc(variant.whenToUse || "")}}</div><div class="label">Review risks</div>${{list(variant.reviewRisks || [])}}</div>`).join("") || "<p>No creative alternatives returned.</p>"}}</div></div>
     <div class="grid2">
       <div class="card"><h3>Section dossiers</h3>${{list((pkg.sectionDossiers || []).map((item) => `${{item.section}}: ${{item.purpose}} Review: ${{item.reviewGate}}`))}}</div>
@@ -549,6 +793,38 @@ def _render_html(report: dict[str, Any]) -> str:
     <div class="card"><h3>Source integrity</h3><pre>${{esc(jsonText(result.sourceIntegrity || {{}}))}}</pre></div>
     <div class="card"><h3>Reasoning trace</h3><pre>${{esc(jsonText(result.reasoningTrace || []))}}</pre></div>
     <div class="card"><h3>Handoff</h3><pre>${{esc(jsonText(result.handoff || {{}}))}}</pre></div>`;
+  document.getElementById("stakeholderReview").innerHTML = `
+    <div class="grid4">
+      ${{metric("Reviewer", stakeholderReview.reviewerName || "n/a", stakeholderReview.role || "")}}
+      ${{metric("Status", stakeholderReview.status || "unknown", stakeholderReview.verdict || "")}}
+      ${{metric("Demo approval", stakeholderReview.wouldApproveForDemo ? "yes" : "no", "Would use in hackathon demo")}}
+      ${{metric("Production approval", stakeholderReview.wouldApproveForProduction ? "yes" : "no", "Separate from channel-owner review")}}
+    </div>
+    <div class="card"><h3>Summary</h3><p>${{esc(stakeholderReview.summary || "")}}</p><div class="label">Source</div><div class="value">${{esc(stakeholderReview.source || "")}}</div></div>
+    <div class="grid2">
+      <div class="card"><h3>Acceptance Criteria</h3>${{list((stakeholderReview.acceptanceCriteria || []).map((item) => `${{item.status}} - ${{item.criterion}}`))}}</div>
+      <div class="card"><h3>Recommended Demo Story</h3>${{list(stakeholderReview.recommendedDemoStory || [])}}</div>
+    </div>
+    <div class="grid2">
+      ${{(stakeholderReview.findings || []).map((item) => `<div class="card"><h3>${{esc(item.severity)}} - ${{esc(item.title)}}</h3><div class="label">Evidence</div><div class="value">${{esc(item.evidence || "")}}</div><div class="label">Recommendation</div><div class="value">${{esc(item.recommendation || "")}}</div></div>`).join("") || "<p>No stakeholder findings returned.</p>"}}
+    </div>`;
+  document.getElementById("learningLoop").innerHTML = `
+    <div class="grid4">
+      ${{metric("Status", learningLoop.status || "unknown", learningLoop.loopType || "")}}
+      ${{metric("Rule", learningLoop.promotion?.status || "unknown", learningLoop.promotion?.ruleId || "")}}
+      ${{metric("Next gen", learningLoop.nextGenerationEvidence?.usesApprovedRules ? "uses rule" : "no rule", `${{learningLoop.nextGenerationEvidence?.appliedRuleCount || 0}} applied`)}}
+      ${{metric("QA delta", learningLoop.qualityMovement?.sectionRevisionDelta ?? "n/a", "Targeted revision movement")}}
+    </div>
+    <div class="card"><h3>Boundary</h3><p>${{esc(learningLoop.learningBoundary || "")}}</p></div>
+    <div class="grid2">
+      <div class="card"><h3>Loop stages</h3>${{list((learningLoop.loopStages || []).map((item) => `${{item.stage}} / ${{item.status}} / ${{item.artifact}}`))}}</div>
+      <div class="card"><h3>Source signal</h3><pre>${{esc(jsonText(learningLoop.sourceSignal || {{}}))}}</pre></div>
+      <div class="card"><h3>Revision applied</h3><pre>${{esc(jsonText(learningLoop.revisionApplied || {{}}))}}</pre></div>
+      <div class="card"><h3>Promotion</h3><pre>${{esc(jsonText(learningLoop.promotion || {{}}))}}</pre></div>
+      <div class="card"><h3>Next generation evidence</h3><pre>${{esc(jsonText(learningLoop.nextGenerationEvidence || {{}}))}}</pre></div>
+      <div class="card"><h3>Next loop candidate</h3><pre>${{esc(jsonText(learningLoop.nextLoopCandidate || {{}}))}}</pre></div>
+    </div>
+    <div class="card"><h3>Memory deltas</h3><pre>${{esc(jsonText(learningLoop.memoryDeltas || {{}}))}}</pre></div>`;
   document.getElementById("memory").innerHTML = `
     <div class="grid2"><div class="card"><h3>Collection deltas</h3><pre>${{esc(jsonText(report.deltas || {{}}))}}</pre></div>
     <div class="card"><h3>Lifecycle statuses</h3><pre>${{esc(jsonText(report.statuses || {{}}))}}</pre></div></div>

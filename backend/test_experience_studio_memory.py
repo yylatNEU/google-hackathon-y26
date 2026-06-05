@@ -189,6 +189,7 @@ def test_conversation_plan_creates_generator_ready_brief_without_learning_loop(m
     assert package["studioQualityEval"]["score"] > 0
     assert package["studioQualityEval"]["qaChecklist"]
     assert package["creativePackageVariants"]
+    assert len(package["craftArtifacts"]["samples"]) >= 3
     assert package["reviewAgentReview"]["agentId"] == "experience_studio_review_agent"
     assert generated["draft"]["experienceReviewAgent"]["agentId"] == "experience_studio_review_agent"
     route_copy = [stop["guestCopy"] for stop in generated["draft"]["route"]]

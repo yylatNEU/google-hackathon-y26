@@ -946,6 +946,14 @@
       margin-bottom: 14px;
     }
 
+    .final-badge-stack {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
+
     .final-result h4 {
       margin: 4px 0 6px;
       font-size: 19px;
@@ -962,8 +970,8 @@
 
     .final-plan-list {
       display: grid;
-      gap: 8px;
-      margin: 12px 0;
+      gap: 10px;
+      margin: 14px 0;
       padding: 0;
       list-style: none;
       counter-reset: finalPlan;
@@ -977,11 +985,35 @@
       align-items: center;
       border: 1px solid rgba(255,255,255,.12);
       border-radius: 8px;
-      padding: 9px;
+      padding: 10px;
       background: rgba(255,255,255,.055);
       color: var(--ink);
       font-size: 14px;
       font-weight: 950;
+    }
+
+    .completion-strip {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border: 1px solid rgba(131, 227, 119, .3);
+      border-radius: 8px;
+      padding: 9px 10px;
+      margin: 12px 0 2px;
+      background: rgba(131, 227, 119, .075);
+      color: #e5f5e6;
+      font-size: 12px;
+      line-height: 1.35;
+      font-weight: 900;
+    }
+
+    .completion-strip span {
+      color: var(--green);
+      font-size: 10px;
+      font-weight: 1000;
+      text-transform: uppercase;
+      white-space: nowrap;
     }
 
     .final-plan-list li::before {
@@ -1061,7 +1093,7 @@
     }
 
     .dialogue-result ol {
-      margin: 8px 0 0;
+      margin: 9px 0 10px;
       padding-left: 18px;
       color: var(--ink);
       font-size: 13px;
@@ -1480,6 +1512,8 @@
       .metrics, .form-grid, .policy-grid, .story-grid, .outcome-grid { grid-template-columns: 1fr; }
       .live-bubbles { grid-template-columns: 1fr; }
       .chat-line.client, .chat-line.park { margin-left: 0; margin-right: 0; }
+      .final-result-head, .completion-strip { flex-direction: column; align-items: flex-start; }
+      .final-badge-stack { justify-content: flex-start; }
       .node { position: relative; left: auto !important; right: auto !important; top: auto !important; bottom: auto !important; width: auto; margin: 10px; }
       .core { position: relative; left: auto; top: auto; transform: none; width: auto; margin: 10px; }
       .pulse, .stage svg { display: none; }
@@ -1502,9 +1536,9 @@
           <input id="apiUrl" class="api-box" aria-label="API URL" />
           <span id="apiHealth" class="badge warn">checking api</span>
           <a id="servedLink" class="button-link" href="http://127.0.0.1:3003/agent-handshake-full-demo.html?api=http://127.0.0.1:8001">Open localhost page</a>
-          <button id="runExternal" class="primary">Run agent demo</button>
+          <button id="runExternal" class="primary">Run guest case</button>
           <button id="runCustom">Edit and run</button>
-          <button id="runSupply" class="green">Supply-chain case</button>
+          <button id="runSupply" class="green">Run supply-chain case</button>
           <button id="runJudge" class="amber">Quality sweep</button>
         </div>
       </div>
@@ -1702,7 +1736,7 @@
               <div class="kicker">Editable payload</div>
               <h2>External agent input</h2>
             </div>
-            <span id="counterpartyBadge" class="badge info">supplier</span>
+            <span id="counterpartyBadge" class="badge info">guest</span>
           </div>
           <div class="form-grid">
             <label><span>Counterparty</span><select id="counterparty"><option value="supplier">Supplier agent</option><option value="guest">Guest agent</option></select></label>
@@ -2063,7 +2097,7 @@
         state.verification = verification;
         state.lastPayload = { input, session: refreshed.session, receipt: receiptPayload.receipt, verification, draft_verification: draftVerification, local_steps: steps };
         renderAll();
-        clearRunning("passed");
+        clearRunning(input.counterparty === "supplier" ? "supply complete" : "guest complete");
         startLivePlayback();
       } catch (error) {
         showError(error);
@@ -2084,7 +2118,7 @@
         state.verification = verification;
         state.lastPayload = payload;
         renderAll();
-        clearRunning("passed");
+        clearRunning("supply complete");
         startLivePlayback();
       } catch (error) {
         showError(error);
@@ -2115,7 +2149,7 @@
         state.verification = payload.verification;
         state.lastPayload = payload;
         renderAll();
-        clearRunning("passed");
+        clearRunning("guest complete");
         startLivePlayback();
       } catch (error) {
         showError(error);
@@ -2390,6 +2424,8 @@
     function finalResultData() {
       const result = externalAgentResult();
       const accepted = state.receipt?.accepted_plan || {};
+      const scenario = scenarios[state.selectedScenario] || scenarios.visit_planning;
+      const caseLabel = scenario.kind === "supplier" ? "Supply-chain case" : "Guest case";
       const plan = Array.isArray(result?.final_plan) && result.final_plan.length
         ? result.final_plan
         : Array.isArray(accepted.plan) && accepted.plan.length
@@ -2408,7 +2444,9 @@
       const represented = result?.represented_subject || state.session?.client_agent?.represents || currentInput().represents;
       return {
         ready: Boolean(state.session),
+        caseLabel,
         title: result?.recipient === "supplier operator" ? "Final supply-chain handoff" : `Final plan for ${represented}`,
+        completionText: `Handshake complete. Final result delivered to ${scenario.kind === "supplier" ? "the supplier agent" : "the guest agent"}.`,
         message: result?.message_to_represented_party || (plan.length ? `Tell ${represented}: your accepted plan is ${plan.join(", ")}.` : "Run the handshake to generate the final handoff."),
         plan,
         allowed,
@@ -2432,7 +2470,10 @@
               <h4>Waiting for negotiated output</h4>
               <p>Run the handshake. The final answer will appear here as the product-facing handoff, while raw receipt data stays below as evidence.</p>
             </div>
-            <span class="badge">waiting</span>
+            <div class="final-badge-stack">
+              <span class="badge info">${safe(data.caseLabel)}</span>
+              <span class="badge">waiting</span>
+            </div>
           </div>`;
         return data;
       }
@@ -2449,7 +2490,14 @@
             <h4>${safe(data.title)}</h4>
             <p>${safe(data.message)}</p>
           </div>
-          <span class="badge good">${safe(data.verification)}</span>
+          <div class="final-badge-stack">
+            <span class="badge info">${safe(data.caseLabel)}</span>
+            <span class="badge good">${safe(data.verification)}</span>
+          </div>
+        </div>
+        <div class="completion-strip">
+          <strong>${safe(data.completionText)}</strong>
+          <span>Run complete</span>
         </div>
         <ol class="final-plan-list">
           ${plan.map((item) => `<li>${safe(item)}</li>`).join("")}
@@ -2884,7 +2932,9 @@
     function scrollFinalResultIntoView() {
       const card = $("finalResult");
       if (!card) return;
-      const top = Math.max(0, window.scrollY + card.getBoundingClientRect().top - 310);
+      const headerHeight = document.querySelector(".topbar")?.getBoundingClientRect().height || 0;
+      const offset = Math.min(Math.max(300, headerHeight + 20), Math.max(280, window.innerHeight - 180));
+      const top = Math.max(0, window.scrollY + card.getBoundingClientRect().top - offset);
       window.scrollTo({ top, behavior: "smooth" });
     }
 

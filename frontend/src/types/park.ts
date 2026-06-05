@@ -804,7 +804,7 @@ export type ParkAgentOperations = {
     id: string;
     name: string;
     role: string;
-    status: "online_callable" | "online" | "active_current_run" | "standby" | "proof_eval_only" | "offline_learning" | string;
+    status: "online_callable" | "online" | "active_current_run" | "standby" | "proof_eval_only" | string;
     currentRole: string;
     lastContribution: string;
     activationTrigger: string;

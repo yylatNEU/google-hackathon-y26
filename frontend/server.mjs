@@ -1,5 +1,6 @@
-import { createReadStream, existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { Buffer } from "node:buffer";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +9,12 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const distDir = resolve(__dirname, "dist");
 const port = Number(process.env.PORT || 3000);
 const apiBaseUrl = (process.env.PARKPULSE_API_URL || "").replace(/\/$/, "");
+const apiIdentityAudience = (process.env.PARKPULSE_API_IDENTITY_AUDIENCE || apiBaseUrl).replace(/\/$/, "");
+const identityTokenRefreshSkewMs = 60_000;
+let cachedIdentityToken = null;
+let cachedIdentityTokenAudience = "";
+let cachedIdentityTokenExpiresAt = 0;
+let identityTokenInflight = null;
 
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -32,14 +39,52 @@ function sendJson(response, status, payload) {
 
 async function identityToken(audience) {
   if (!audience) return null;
-  const metadataUrl =
-    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity" +
-    `?audience=${encodeURIComponent(audience)}&format=full`;
-  const response = await fetch(metadataUrl, { headers: { "Metadata-Flavor": "Google" } });
-  if (!response.ok) {
-    throw new Error(`metadata identity token failed: ${response.status}`);
+  const now = Date.now();
+  if (cachedIdentityToken && cachedIdentityTokenAudience === audience && cachedIdentityTokenExpiresAt - identityTokenRefreshSkewMs > now) {
+    return cachedIdentityToken;
   }
-  return response.text();
+  if (identityTokenInflight) {
+    return identityTokenInflight;
+  }
+  identityTokenInflight = (async () => {
+    const metadataUrl =
+      "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity" +
+      `?audience=${encodeURIComponent(audience)}&format=full`;
+    const response = await fetch(metadataUrl, { headers: { "Metadata-Flavor": "Google" } });
+    if (!response.ok) {
+      throw new Error(`metadata identity token failed: ${response.status}`);
+    }
+    cachedIdentityToken = await response.text();
+    cachedIdentityTokenAudience = audience;
+    cachedIdentityTokenExpiresAt = decodeJwtExpiryMs(cachedIdentityToken) || now + 45 * 60_000;
+    return cachedIdentityToken;
+  })();
+  try {
+    return await identityTokenInflight;
+  } finally {
+    identityTokenInflight = null;
+  }
+}
+
+function shouldSendIdentityToken(apiUrl) {
+  if (process.env.PARKPULSE_API_IDENTITY_AUDIENCE) return true;
+  try {
+    const url = new URL(apiUrl);
+    return url.hostname.endsWith(".run.app") || url.hostname.includes("googleapis.com");
+  } catch {
+    return false;
+  }
+}
+
+function decodeJwtExpiryMs(token) {
+  try {
+    const [, payload] = token.split(".");
+    if (!payload) return 0;
+    const decoded = JSON.parse(Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+    return Number(decoded.exp || 0) * 1000;
+  } catch {
+    return 0;
+  }
 }
 
 async function proxyApi(request, response) {
@@ -52,11 +97,14 @@ async function proxyApi(request, response) {
     const targetUrl = new URL(request.url || "/", apiBaseUrl);
     const headers = new Headers();
     for (const [key, value] of Object.entries(request.headers)) {
-      if (!value || ["host", "connection", "content-length"].includes(key.toLowerCase())) continue;
+      if (!value || ["host", "connection", "content-length", "authorization", "x-serverless-authorization"].includes(key.toLowerCase())) continue;
       headers.set(key, Array.isArray(value) ? value.join(",") : value);
     }
-    const token = await identityToken(apiBaseUrl);
-    if (token) headers.set("authorization", `Bearer ${token}`);
+    const token = shouldSendIdentityToken(apiBaseUrl) ? await identityToken(apiIdentityAudience) : null;
+    if (token) {
+      headers.set("authorization", `Bearer ${token}`);
+      headers.set("x-serverless-authorization", `Bearer ${token}`);
+    }
 
     const upstream = await fetch(targetUrl, {
       method: request.method,
@@ -83,7 +131,7 @@ async function serveStatic(request, response) {
   const pathname = decodeURIComponent(requestUrl.pathname);
   const normalized = normalize(pathname).replace(/^(\.\.[/\\])+/, "");
   const candidate = join(distDir, normalized);
-  const filePath = existsSync(candidate) && !candidate.endsWith("/") ? candidate : join(distDir, "index.html");
+  let filePath = candidate.endsWith("/") ? join(distDir, "index.html") : candidate;
 
   if (!filePath.startsWith(distDir)) {
     response.writeHead(403);
@@ -92,15 +140,37 @@ async function serveStatic(request, response) {
   }
 
   try {
-    await readFile(filePath);
+    const fileStat = await stat(filePath);
+    if (!fileStat.isFile()) {
+      filePath = join(distDir, "index.html");
+      await stat(filePath);
+    }
     response.writeHead(200, {
       "content-type": contentTypes[extname(filePath)] || "application/octet-stream",
       "cache-control": filePath.endsWith("index.html") ? "no-store" : "public, max-age=31536000, immutable",
     });
+    if (request.method === "HEAD") {
+      response.end();
+      return;
+    }
     createReadStream(filePath).pipe(response);
   } catch {
-    response.writeHead(404);
-    response.end("Not found");
+    const fallbackPath = join(distDir, "index.html");
+    try {
+      await stat(fallbackPath);
+      response.writeHead(200, {
+        "content-type": contentTypes[extname(fallbackPath)] || "application/octet-stream",
+        "cache-control": "no-store",
+      });
+      if (request.method === "HEAD") {
+        response.end();
+        return;
+      }
+      createReadStream(fallbackPath).pipe(response);
+    } catch {
+      response.writeHead(404);
+      response.end("Not found");
+    }
   }
 }
 

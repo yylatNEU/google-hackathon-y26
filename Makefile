@@ -4,10 +4,19 @@ PERF_CONCURRENCY ?= 50
 PERF_TARGET_P95_MS ?= 250
 TEST_PYTHON ?= /tmp/parkpulse_backend_venv/bin/python
 
-.PHONY: qa qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate loop-resilience loop-resilience-monitor live-agents-smoke live-feed-agent-smoke live-feed-training-closure live-feed-agent-report live-feed-learning-loop-validation experience-studio-dev experience-studio-demo-verify test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-judge-smoke gcp-judge-smoke-strict gcp-deploy-private gcp-deploy-private-diagnostics gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private gcp-verify-agent-roles gcp-preflight-mongo-model gcp-schedule-loop-resilience
+.PHONY: qa qa-fast qa-release qa-live qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate loop-resilience loop-resilience-monitor live-agents-smoke live-feed-agent-smoke live-feed-training-closure live-feed-agent-report live-feed-learning-loop-validation experience-studio-dev experience-studio-demo-verify test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-judge-smoke gcp-judge-smoke-strict gcp-deploy-private gcp-deploy-private-diagnostics gcp-deploy-frontend gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private gcp-verify-agent-roles gcp-preflight-mongo-model gcp-schedule-loop-resilience
 
 qa:
 	python3 scripts/qa_agent.py
+
+qa-fast:
+	python3 scripts/qa_agent.py --quick
+
+qa-release:
+	python3 scripts/qa_agent.py --source-stability --fail-on-warning
+
+qa-live:
+	python3 scripts/qa_agent.py --live-only
 
 qa-quick:
 	python3 scripts/qa_agent.py --quick
@@ -86,6 +95,9 @@ gcp-deploy-private:
 
 gcp-deploy-private-diagnostics:
 	scripts/deploy_private_cloud_run_diagnostics.sh
+
+gcp-deploy-frontend:
+	scripts/deploy_frontend_cloud_run.sh
 
 gcp-dev-private:
 	scripts/dev_private_gcp.sh

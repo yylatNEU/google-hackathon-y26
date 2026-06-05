@@ -214,7 +214,7 @@ def _agent_for_tool(name: str, args: dict[str, Any], context: dict[str, Any]) ->
         "get_staff_constraints": "staffing_agent",
         "get_food_capacity": "food_demand_agent",
         "simulate_action": "ride_ops_agent",
-        "tick_simulation": "autodream_agent",
+        "tick_simulation": "planning_agent",
         "compare_action_candidates": "decision_bridge_agent",
         "validate_policy": "safety_policy_agent",
         "score_decision_quality": "gcp_eval_judge_agent",

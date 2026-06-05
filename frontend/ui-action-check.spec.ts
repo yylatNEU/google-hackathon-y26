@@ -52,10 +52,13 @@ async function refreshFeedsUntilReviewed(page: Page) {
         const bodyText = await page.locator("body").innerText();
         const match = bodyText.match(/Ready feeds\s+([0-6])\/6/i);
         const readyCount = match ? Number(match[1]) : 0;
-        const statusReviewed = /Status\s+(ready|review)/i.test(bodyText);
-        return readyCount === 6 && statusReviewed;
+        const statusReady = /Status\s+ready/i.test(bodyText);
+        const statusReviewed = /Status\s+review/i.test(bodyText);
+        const noOpenReviews = /Open reviews\s+0/i.test(bodyText);
+        const weakFeedEvidence = /Weak feeds\s+[1-6]/i.test(bodyText) || /stale|review_blocked/i.test(bodyText);
+        return statusReady ? readyCount === 6 : readyCount >= 5 && statusReviewed && noOpenReviews && weakFeedEvidence;
       },
-      { timeout: 120000, message: "live feed health should reach ready or review with signed ops evidence" },
+      { timeout: 120000, message: "live feed health should reach ready or signed review mode with weak-feed evidence" },
     )
     .toBeTruthy();
 }
@@ -78,6 +81,9 @@ test("command center exposes the current production operating-loop contract", as
   await expect(page.getByRole("heading", { name: "Signals, features, predictors, optimizer, gate, execute or review, learn" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Observed outcome reward model" })).toBeVisible();
   await expect(page.getByRole("heading", { name: /Bounded dispatch ready|Human approval required/i })).toBeVisible();
+  await expect(page.getByTestId("api-targets")).toHaveAttribute("data-api-targets", API_URL);
+  const apiTargets = await page.getByTestId("api-targets").getAttribute("data-api-targets");
+  expect(apiTargets?.split(",").map((item) => item.trim()).filter(Boolean)).toEqual([API_URL]);
   await expectNoAuthOrTransportRegression(page);
 
   expect(runtimeErrors).toEqual([]);

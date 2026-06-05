@@ -291,7 +291,7 @@ def test_autodream_benchmark_and_mongo_measurement_paths(monkeypatch, capsys):
     assert park_autodream_benchmark._primary_ride({"guestFlow": {"rides": []}})["id"] == "dragonCoaster"
     assert park_autodream_benchmark._find_ride(state, "missing") == {}
     assert park_autodream_benchmark._promoted_rule("ride_down", "missing") is None
-    assert park_autodream_benchmark.run_autodream_benchmark(state, scenario_key="food_spike")["status"] == "no_promoted_rule"
+    assert park_autodream_benchmark.run_autodream_benchmark(state, scenario_key="food_spike")["status"] == "retired"
 
     def fake_optimize(current_state, scenario_key, context=None):
         learned = bool((context or {}).get("retrieved", {}).get("learnings"))
@@ -320,9 +320,9 @@ def test_autodream_benchmark_and_mongo_measurement_paths(monkeypatch, capsys):
     monkeypatch.setattr(park_autodream_benchmark, "optimize_park_response", fake_optimize)
     monkeypatch.setattr(park_autodream_benchmark, "simulate_action_plan", fake_simulate)
     benchmark = park_autodream_benchmark.run_autodream_benchmark(state, scenario_key="ride_down", seeds=5)
-    assert benchmark["status"] == "complete"
-    assert benchmark["confidence"] == "validated"
-    assert benchmark["summary"]["learned_wins"] == 5
+    assert benchmark["status"] == "retired"
+    assert benchmark["confidence"] == "disabled"
+    assert benchmark["pairs"] == []
     assert park_autodream_benchmark._confidence(0, 0, 0) == "no_signal"
     assert park_autodream_benchmark._confidence(2, 0.8, 0.1) == "early_signal"
     assert park_autodream_benchmark._confidence(4, 0.8, 0.1) == "directional"

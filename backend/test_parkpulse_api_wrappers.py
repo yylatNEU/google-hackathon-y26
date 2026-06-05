@@ -220,11 +220,11 @@ def test_parkpulse_api_endpoint_wrappers_cover_recent_surfaces(monkeypatch, tmp_
     monkeypatch.setattr(parkpulse_api, "record_approval_decision", lambda dispatch_id, actor, decision, reason=None, channel=None: {"id": dispatch_id, "status": "approved_for_execution", "approvalDecision": {"decision": decision, "actor": actor, "reason": reason}, "approvalDelivery": {"pubsub": {"status": "published"}}, "channel": channel})
     monkeypatch.setattr(parkpulse_api, "build_memory_ops_report", lambda query: {"overall_status": "healthy", "query": query})
     monkeypatch.setattr(parkpulse_api, "run_memory_ops_repair", lambda query, collections, limit: {"status": "repaired", "collections": collections, "limit": limit})
-    monkeypatch.setattr(parkpulse_api, "run_autodream", lambda scenario_key, max_cases=8, persist=True: {"status": "complete", "scenario_key": scenario_key, "max_cases": max_cases, "persist": persist})
-    monkeypatch.setattr(parkpulse_api, "autodream_status", lambda limit=8: {"status": "ready", "limit": limit})
-    monkeypatch.setattr(parkpulse_api, "promote_autodream_learning", lambda dream_learning_id, target, reviewer: {"status": "promoted", "id": dream_learning_id, "target": target, "reviewer": reviewer})
-    monkeypatch.setattr(parkpulse_api, "review_autodream_learning", lambda dream_learning_id, status, reviewer, reason: {"status": status, "id": dream_learning_id, "reason": reason})
-    monkeypatch.setattr(parkpulse_api, "run_autodream_benchmark", lambda current_state, **kwargs: {"status": "complete", "summary": {"wins": 1}, **kwargs})
+    monkeypatch.setattr(parkpulse_api, "run_autodream", lambda scenario_key, max_cases=8, persist=True: {"status": "retired", "scenario_key": scenario_key, "max_cases": max_cases, "persist": persist})
+    monkeypatch.setattr(parkpulse_api, "autodream_status", lambda limit=8: {"status": "retired", "limit": limit})
+    monkeypatch.setattr(parkpulse_api, "promote_autodream_learning", lambda dream_learning_id, target, reviewer: {"status": "retired", "id": dream_learning_id, "target": target, "reviewer": reviewer})
+    monkeypatch.setattr(parkpulse_api, "review_autodream_learning", lambda dream_learning_id, status, reviewer, reason: {"status": "retired", "review_status": status, "id": dream_learning_id, "reason": reason})
+    monkeypatch.setattr(parkpulse_api, "run_autodream_benchmark", lambda current_state, **kwargs: {"status": "retired", "summary": {"retired": True}, **kwargs})
     monkeypatch.setattr(parkpulse_api, "record_mongo_autodream_benchmark", lambda benchmark: {"status": "stored", "benchmark_id": "bench-1"})
     monkeypatch.setattr(parkpulse_api, "get_latest_memory_documents", lambda collection, limit: [{"_id": "bench-1", "limit": limit}])
     monkeypatch.setattr(parkpulse_api, "analytics_learning_summary", lambda dashboard: {"status": "analytics", "dashboard": dashboard})
@@ -291,11 +291,17 @@ def test_parkpulse_api_endpoint_wrappers_cover_recent_surfaces(monkeypatch, tmp_
     assert run(parkpulse_api.park_memory("ride"))["memory_ops"]["overall_status"] == "healthy"
     assert run(parkpulse_api.park_memory_maintenance("ride"))["query"] == "ride"
     assert run(parkpulse_api.park_memory_maintenance_repair(parkpulse_api.MemoryOpsRepairRequest(query="ride", collections=["playbooks"], limit=5)))["status"] == "repaired"
-    assert run(parkpulse_api.park_autodream_run(parkpulse_api.AutoDreamRunRequest(scenario_key="ride_down", max_cases=2, persist=False)))["max_cases"] == 2
-    assert run(parkpulse_api.park_autodream_status(6))["limit"] == 6
-    assert run(parkpulse_api.park_autodream_promote(parkpulse_api.AutoDreamPromoteRequest(dream_learning_id="dream-1")))["status"] == "promoted"
-    assert run(parkpulse_api.park_autodream_review(parkpulse_api.AutoDreamReviewRequest(dream_learning_id="dream-1", review_status="approved", reason="ok")))["status"] == "approved"
-    assert run(parkpulse_api.park_autodream_benchmark(parkpulse_api.AutoDreamBenchmarkRequest(scenario_key="ride_down", seeds=2)))["storage"]["status"] == "stored"
+    autodream_run = run(parkpulse_api.park_autodream_run(parkpulse_api.AutoDreamRunRequest(scenario_key="ride_down", max_cases=2, persist=False)))
+    assert autodream_run["status"] == "retired"
+    assert autodream_run["max_cases"] == 2
+    assert run(parkpulse_api.park_autodream_status(6))["status"] == "retired"
+    assert run(parkpulse_api.park_autodream_promote(parkpulse_api.AutoDreamPromoteRequest(dream_learning_id="dream-1")))["status"] == "retired"
+    retired_review = run(parkpulse_api.park_autodream_review(parkpulse_api.AutoDreamReviewRequest(dream_learning_id="dream-1", review_status="approved", reason="ok")))
+    assert retired_review["status"] == "retired"
+    assert retired_review["review_status"] == "approved"
+    retired_benchmark = run(parkpulse_api.park_autodream_benchmark(parkpulse_api.AutoDreamBenchmarkRequest(scenario_key="ride_down", seeds=2)))
+    assert retired_benchmark["status"] == "retired"
+    assert "storage" not in retired_benchmark
     assert run(parkpulse_api.park_autodream_benchmarks(99))["latest_benchmarks"][0]["limit"] == 25
     assert run(parkpulse_api.park_analytics("ride"))["status"] == "analytics"
     assert run(parkpulse_api.park_integration_status())["status"] == "integrated"

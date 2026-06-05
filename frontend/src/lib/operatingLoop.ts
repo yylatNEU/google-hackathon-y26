@@ -27,6 +27,8 @@ export type OperatingLoopViewModel = {
   stages: OperatingLoopStage[];
 };
 
+// Backend receipts are intentionally heterogeneous across scan/react/proact paths.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyRecord = Record<string, any>;
 
 export type OperatingLoopInputs = {

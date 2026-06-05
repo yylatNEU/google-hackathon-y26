@@ -16,28 +16,28 @@ class MemoryOpsRepairRequest(BaseModel):
 
 
 class AutoDreamRunRequest(BaseModel):
-    scenario_key: str = Field(default="proactive_eventops")
-    max_cases: int = Field(default=8, ge=1, le=25)
-    persist: bool = Field(default=True)
+    scenario_key: str = Field(default="proactive_eventops", description="Retired AutoDream compatibility scenario key.")
+    max_cases: int = Field(default=8, ge=1, le=25, description="Compatibility value echoed by the retired AutoDream response.")
+    persist: bool = Field(default=True, description="Compatibility flag; retired AutoDream does not persist dream runs or learnings.")
 
 
 class AutoDreamPromoteRequest(BaseModel):
-    dream_learning_id: str
-    target: str = Field(default="agent_learnings")
-    reviewer: str = Field(default="operator")
+    dream_learning_id: str = Field(description="Archived dream learning id; promotion is retired and always blocked.")
+    target: str = Field(default="agent_learnings", description="Compatibility target; retired AutoDream does not promote.")
+    reviewer: str = Field(default="operator", description="Compatibility reviewer label.")
 
 
 class AutoDreamReviewRequest(BaseModel):
-    dream_learning_id: str
-    review_status: str = Field(default="rejected")
-    reviewer: str = Field(default="operator")
-    reason: str = Field(default="")
+    dream_learning_id: str = Field(description="Archived dream learning id; review is retired and archive-only.")
+    review_status: str = Field(default="rejected", description="Compatibility review status echoed in the retired response.")
+    reviewer: str = Field(default="operator", description="Compatibility reviewer label.")
+    reason: str = Field(default="", description="Compatibility reason echoed in the retired response.")
 
 
 class AutoDreamBenchmarkRequest(BaseModel):
-    scenario_key: str | None = Field(default=None)
-    promoted_rule_id: str | None = Field(default=None)
-    seeds: int = Field(default=5, ge=1, le=20)
+    scenario_key: str | None = Field(default=None, description="Retired AutoDream benchmark compatibility scenario key.")
+    promoted_rule_id: str | None = Field(default=None, description="Compatibility promoted rule id; benchmarks are retired.")
+    seeds: int = Field(default=5, ge=1, le=20, description="Compatibility seed count echoed by the retired benchmark response.")
 
 
 class CacheAccuracyReplayRequest(BaseModel):
@@ -190,7 +190,6 @@ def register_memory_routes(app: Any, deps: dict[str, Any]) -> None:
         from park_autodream_agent import run_autodream
 
         role_authorization = _enforce_role_capability(http_request, "start_offline_training", "autodream.run")
-        await current_state()
         deps["clear_hot_endpoint_cache"]()
         result = run_autodream(request.scenario_key, max_cases=request.max_cases, persist=request.persist)
         if isinstance(result, dict):
@@ -230,7 +229,7 @@ def register_memory_routes(app: Any, deps: dict[str, Any]) -> None:
         from mongo_memory import record_autodream_benchmark
         from park_autodream_benchmark import run_autodream_benchmark
 
-        state = await current_state()
+        state = {"guestFlow": {"activeScenario": {"key": request.scenario_key or "ride_down"}}}
         benchmark = run_autodream_benchmark(
             state,
             scenario_key=request.scenario_key,

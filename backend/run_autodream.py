@@ -14,12 +14,12 @@ SCENARIOS = ["ride_down", "staff_shortage", "food_spike", "storm_response", "pro
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run ParkPulse offline AutoDream learning.")
-    parser.add_argument("--scenario", action="append", choices=SCENARIOS, help="Scenario to run. Can be repeated.")
-    parser.add_argument("--all-scenarios", action="store_true", help="Run every supported AutoDream scenario.")
-    parser.add_argument("--max-cases", type=int, default=8, help="Maximum historical cases to inspect per scenario.")
-    parser.add_argument("--preview", action="store_true", help="Generate learnings without persisting them.")
-    parser.add_argument("--live-analytics", action="store_true", help="Allow live BigQuery reads and exports from configured credentials.")
+    parser = argparse.ArgumentParser(description="Report the retired ParkPulse AutoDream contract.")
+    parser.add_argument("--scenario", action="append", choices=SCENARIOS, help="Retired scenario contract to report. Can be repeated.")
+    parser.add_argument("--all-scenarios", action="store_true", help="Report every retired AutoDream scenario contract.")
+    parser.add_argument("--max-cases", type=int, default=8, help="Retired compatibility value echoed in the response.")
+    parser.add_argument("--preview", action="store_true", help="Compatibility flag; retired AutoDream does not generate or persist learnings.")
+    parser.add_argument("--live-analytics", action="store_true", help="Compatibility flag; retired AutoDream does not read or export analytics.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     return parser.parse_args()
 
@@ -50,8 +50,9 @@ def main() -> int:
         except Exception as error:  # pragma: no cover - keeps scheduled runs reporting partial failures
             errors.append({"scenario_key": scenario, "error": str(error)[:500]})
 
+    retired = bool(runs) and all(run.get("status") == "retired" for run in runs)
     payload = {
-        "status": "complete" if not errors else "partial_error",
+        "status": "partial_error" if errors else "retired" if retired else "complete",
         "mode": "preview" if args.preview else "persisted",
         "scenarios": scenarios,
         "run_count": len(runs),
@@ -62,12 +63,12 @@ def main() -> int:
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print(f"AutoDream {payload['status']} ({payload['mode']}): {len(runs)}/{len(scenarios)} scenarios")
+        print(f"AutoDream {payload['status']} ({payload['mode']}): {len(runs)}/{len(scenarios)} retired scenario contracts")
         for run in runs:
             summary = run.get("summary", {})
             print(
                 "- "
-                f"{run.get('scenario_key')}: {run.get('dream_run_id')} "
+                f"{run.get('scenario_key')}: retired, "
                 f"{summary.get('learnings_generated', 0)} learnings, prior={summary.get('prior_source')}"
             )
         for error in errors:

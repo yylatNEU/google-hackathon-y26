@@ -974,12 +974,14 @@ def test_parkpulse_new_api_surfaces_and_cache_branches(monkeypatch):
     assert agent_benchmark["episodes"][0]["planner"]["runtime"] == "api_agent_benchmark"
     assert run(parkpulse_api.park_memory_maintenance("ride"))
     assert run(parkpulse_api.park_memory_maintenance_repair(parkpulse_api.MemoryOpsRepairRequest(query="ride", limit=2)))["status"] in {"complete", "skipped", "repaired"}
-    assert run(parkpulse_api.park_autodream_run(parkpulse_api.AutoDreamRunRequest(scenario_key="ride_down", max_cases=1, persist=False)))["scenario_key"] == "ride_down"
-    assert "summary" in run(parkpulse_api.park_autodream_status(2))
-    monkeypatch.setattr(parkpulse_api, "promote_autodream_learning", lambda *args: {"status": "promoted"})
-    monkeypatch.setattr(parkpulse_api, "review_autodream_learning", lambda *args: {"status": "reviewed"})
-    assert run(parkpulse_api.park_autodream_promote(parkpulse_api.AutoDreamPromoteRequest(dream_learning_id="dream-1")))["status"] == "promoted"
-    assert run(parkpulse_api.park_autodream_review(parkpulse_api.AutoDreamReviewRequest(dream_learning_id="dream-1", reason="no")))["status"] == "reviewed"
+    retired_autodream = run(parkpulse_api.park_autodream_run(parkpulse_api.AutoDreamRunRequest(scenario_key="ride_down", max_cases=1, persist=False)))
+    assert retired_autodream["scenario_key"] == "ride_down"
+    assert retired_autodream["status"] == "retired"
+    assert run(parkpulse_api.park_autodream_status(2))["status"] == "retired"
+    monkeypatch.setattr(parkpulse_api, "promote_autodream_learning", lambda *args: {"status": "retired"})
+    monkeypatch.setattr(parkpulse_api, "review_autodream_learning", lambda *args: {"status": "retired"})
+    assert run(parkpulse_api.park_autodream_promote(parkpulse_api.AutoDreamPromoteRequest(dream_learning_id="dream-1")))["status"] == "retired"
+    assert run(parkpulse_api.park_autodream_review(parkpulse_api.AutoDreamReviewRequest(dream_learning_id="dream-1", reason="no")))["status"] == "retired"
     assert "status" in run(parkpulse_api.park_analytics("ride"))
     assert run(parkpulse_api.gcp_improvement_status())
     assert "ready" in run(parkpulse_api.gcp_trace_eval_status())
@@ -1073,11 +1075,11 @@ def test_parkpulse_proactive_learned_run_and_autodream_cli(monkeypatch, capsys):
     assert learned["learning_proof"]["mode"] == "learned_second_action"
 
     monkeypatch.setattr(mongo_memory, "init_operational_memory", lambda: {"status": "ok"})
-    monkeypatch.setattr(park_autodream_agent, "run_autodream", lambda scenario, max_cases, persist: {"scenario_key": scenario, "dream_run_id": "dream-run-1", "summary": {"learnings_generated": 1, "prior_source": "unit"}, "persisted": persist, "max_cases": max_cases})
-    monkeypatch.setattr(park_autodream_agent, "autodream_status", lambda limit: {"summary": {"pending_review": 1, "promoted": 0, "rejected": 0}, "limit": limit})
+    monkeypatch.setattr(park_autodream_agent, "run_autodream", lambda scenario, max_cases, persist: {"status": "retired", "scenario_key": scenario, "summary": {"learnings_generated": 0, "prior_source": "disabled"}, "persisted": persist, "max_cases": max_cases})
+    monkeypatch.setattr(park_autodream_agent, "autodream_status", lambda limit: {"status": "retired", "summary": {"pending_review": 0, "promoted": 0, "rejected": 0}, "limit": limit})
     monkeypatch.setattr(sys, "argv", ["run_autodream.py", "--scenario", "ride_down", "--scenario", "ride_down", "--max-cases", "2"])
     assert run_autodream.main() == 0
-    assert "AutoDream complete" in capsys.readouterr().out
+    assert "AutoDream retired" in capsys.readouterr().out
 
     monkeypatch.setattr(park_autodream_agent, "run_autodream", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(sys, "argv", ["run_autodream.py", "--all-scenarios", "--preview", "--json"])
@@ -1191,7 +1193,7 @@ def test_parkpulse_api_and_memory_last_branch_paths(monkeypatch):
     monkeypatch.setattr(mongo_memory, "_memory", memory)
     assert mongo_memory.record_raw_signal({"source": "tail", "text": "x"}).startswith("signal_")
     stored = memory.record_dream_run({"dream_run_id": "dream-wrapper"}, [{"id": "dream-wrapper-learning", "lesson": "L", "rule": "R"}])
-    assert mongo_memory.review_dream_learning(stored["dream_learning_ids"][0], "archived")["status"] == "archived"
+    assert mongo_memory.review_dream_learning(stored["dream_learning_ids"][0], "archived")["status"] == "retired"
 
 
 def test_parkpulse_api_new_operator_stream_and_benchmark_paths(monkeypatch):
@@ -1284,10 +1286,11 @@ def test_parkpulse_api_new_operator_stream_and_benchmark_paths(monkeypatch):
     assert "phase_1.done" in stream_body
     assert "run.complete" in stream_body
 
-    monkeypatch.setattr(parkpulse_api, "run_autodream_benchmark", lambda state, scenario_key=None, promoted_rule_id=None, seeds=5: {"status": "complete", "scenario_key": scenario_key, "promoted_rule": {"_id": "rule-1"}, "sample_size": seeds})
+    monkeypatch.setattr(parkpulse_api, "run_autodream_benchmark", lambda state, scenario_key=None, promoted_rule_id=None, seeds=5: {"status": "retired", "scenario_key": scenario_key, "sample_size": 0, "requested_seeds": seeds})
     monkeypatch.setattr(parkpulse_api, "record_mongo_autodream_benchmark", lambda benchmark: {"status": "stored", "benchmark_id": "bench-1"})
     benchmark = run(parkpulse_api.park_autodream_benchmark(parkpulse_api.AutoDreamBenchmarkRequest(scenario_key="ride_down", seeds=2)))
-    assert benchmark["storage"]["benchmark_id"] == "bench-1"
+    assert benchmark["status"] == "retired"
+    assert "storage" not in benchmark
     monkeypatch.setattr(parkpulse_api, "get_latest_memory_documents", lambda collection, limit: [{"_id": "bench-1"}])
     assert run(parkpulse_api.park_autodream_benchmarks(50))["count"] == 1
 
@@ -1770,15 +1773,17 @@ def test_mongo_memory_remaining_branch_paths(monkeypatch):
     dream_id = dream_store["dream_learning_ids"][0]
     assert fallback.promote_dream_learning("missing")["status"] == "not_found"
     promoted_playbook = fallback.promote_dream_learning(dream_id, target="playbooks", reviewer="qa")
+    assert promoted_playbook["status"] == "retired"
     assert promoted_playbook["target"] == "playbooks"
-    assert fallback.review_dream_learning(dream_id, "archived")["status"] == "already_promoted"
+    assert fallback.latest_documents("playbooks", 10)[0].get("_id") != promoted_playbook.get("promoted_document_id")
+    assert fallback.review_dream_learning(dream_id, "archived")["status"] == "retired"
     dream_store_2 = fallback.record_dream_run(
         {"dream_run_id": "dream-run-tail-2", "scenario_key": "food_spike", "status": "complete"},
         [{"id": "dream-learning-tail-2", "lesson": "Suppress item", "rule": "Hide constrained stock", "scenarioKey": "food_spike"}],
     )
     dream_id_2 = dream_store_2["dream_learning_ids"][0]
     assert fallback.review_dream_learning("missing", "bad")["status"] == "not_found"
-    assert fallback.review_dream_learning(dream_id_2, "needs_more_evidence", reviewer="qa", reason="thin")["status"] == "needs_more_evidence"
+    assert fallback.review_dream_learning(dream_id_2, "needs_more_evidence", reviewer="qa", reason="thin")["status"] == "retired"
 
     monkeypatch.setenv("MONGODB_URI", "mongodb://example")
     monkeypatch.setattr(mongo_memory, "MongoClient", FakeMongoClient)
@@ -1795,9 +1800,9 @@ def test_mongo_memory_remaining_branch_paths(monkeypatch):
     assert partial["status"] == "partial_error"
     connected.db.playbooks.find_error = False
     connected.db.dream_learnings.rows.append({"_id": "dream-db", "scenarioKey": "ride_down", "lesson": "Lesson", "rule": "Rule", "tags": []})
-    assert connected.promote_dream_learning("dream-db")["status"] == "promoted"
+    assert connected.promote_dream_learning("dream-db")["status"] == "retired"
     connected.db.dream_learnings.rows = FakeCursor([{"_id": "dream-db-review", "scenarioKey": "ride_down", "lesson": "Lesson", "rule": "Rule", "tags": []}])
-    assert connected.review_dream_learning("dream-db-review", "archived")["status"] == "archived"
+    assert connected.review_dream_learning("dream-db-review", "archived")["status"] == "retired"
 
     class FailingMemory:
         mode = "mongodb"
@@ -1914,26 +1919,27 @@ def test_memory_ops_agent_reports_depth_and_embedding_coverage(monkeypatch):
     assert repair["repair"]["collections"]["playbooks"]["updated"] >= 1
 
 
-def test_autodream_agent_generates_offline_review_learnings(monkeypatch):
+def test_autodream_agent_is_retired(monkeypatch):
     monkeypatch.delenv("MONGODB_URI", raising=False)
     memory = OperationalMemory()
     memory.initialize()
     monkeypatch.setattr(mongo_memory, "_memory", memory)
     result = park_autodream_agent.run_autodream("ride_down", max_cases=2, persist=True)
 
-    assert result["status"] == "complete"
+    assert result["status"] == "retired"
     assert result["offline_only"] is True
-    assert result["operator_review"]["required"] is True
-    assert result["dream_learnings"]
-    assert result["storage"]["status"] == "stored"
-    assert memory.latest_documents("dream_runs", 1)[0]["offlineOnly"] is True
-    assert memory.latest_documents("dream_learnings", 1)[0]["reviewStatus"] == "pending_operator_review"
+    assert result["operator_review"]["required"] is False
+    assert result["dream_learnings"] == []
+    assert result["storage"]["status"] == "disabled"
+    assert memory.latest_documents("dream_runs", 1) == []
+    assert memory.latest_documents("dream_learnings", 1) == []
     status = park_autodream_agent.autodream_status()
-    dream_learning_id = status["latest_dream_learnings"][0]["_id"]
-    promotion = park_autodream_agent.promote_autodream_learning(dream_learning_id, "agent_learnings", "test_operator")
-    assert promotion["status"] == "promoted"
-    assert memory.latest_documents("agent_learnings", 1)[0]["sourceDreamLearningId"] == dream_learning_id
-    assert park_autodream_agent.autodream_status()["summary"]["promoted"] >= 1
+    promotion = park_autodream_agent.promote_autodream_learning("dream-retired", "agent_learnings", "test_operator")
+    review = park_autodream_agent.review_autodream_learning("dream-retired", "approved", "test_operator")
+    assert status["status"] == "retired"
+    assert promotion["status"] == "retired"
+    assert review["status"] == "retired"
+    assert memory.latest_documents("agent_learnings", 1) == []
 
 
 def test_small_branch_coverage_for_actions_delivery_simulation_and_agents():

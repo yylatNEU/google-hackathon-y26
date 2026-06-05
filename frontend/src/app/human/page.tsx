@@ -86,12 +86,6 @@ function score(value?: number) {
   return typeof value === "number" ? `${Math.round(value)}/100` : "--";
 }
 
-function short(value?: string | null) {
-  const text = value?.trim();
-  if (!text) return "--";
-  return text.length > 130 ? `${text.slice(0, 127)}...` : text;
-}
-
 function dispatchMessage(dispatch: NonNullable<HumanRun["run_telemetry"]>["delivery"] extends infer Delivery ? Delivery extends { dispatches?: Array<infer Dispatch> } ? Dispatch : never : never) {
   return dispatch.message ?? dispatch.payload?.message ?? dispatch.payload?.task ?? dispatch.payload?.command ?? "Runtime payload body missing.";
 }

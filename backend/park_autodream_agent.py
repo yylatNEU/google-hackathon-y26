@@ -20,7 +20,8 @@ from park_replay_store import replay_collaboration_context
 
 
 SCENARIOS = ["ride_down", "staff_shortage", "food_spike", "storm_response", "proactive_eventops"]
-AUTODREAM_CACHE_REPLAY_ROLES = ["scan_agent", "react_agent", "proact_agent", "maintenance_agent", "autodream_agent"]
+AUTODREAM_CACHE_REPLAY_ROLES = ["scan_agent", "react_agent", "proact_agent", "maintenance_agent"]
+AUTODREAM_RETIREMENT_REASON = "AutoDream has been retired; ParkPulse no longer runs offline dream learning, promotion, or paired replay benchmarks."
 
 
 def _utc_now() -> str:
@@ -236,162 +237,84 @@ def run_autodream(
     persist: bool = True,
 ) -> dict[str, Any]:
     scenario = scenario_key if scenario_key in SCENARIOS else "proactive_eventops"
-    memory_dashboard = get_operational_memory_dashboard(f"{scenario} outcome take rate follow through eval failure")
-    priors = build_bigquery_agent_priors(scenario, memory_dashboard, allow_live_query=False)
-    replay_context = replay_collaboration_context(5)
-    cache_replay_audit = _run_cache_replay_audit(memory_dashboard, scenario, persist=persist)
-    outcomes = _candidate_outcomes(memory_dashboard, scenario, max_cases)
-
-    learnings: list[dict[str, Any]] = []
-    simulated_cases: list[dict[str, Any]] = []
-    for row in outcomes:
-        if not isinstance(row, dict):
-            continue
-        row_scenario = _scenario_from_row(row, scenario)
-        signal = _outcome_signal(row)
-        learning = _counterfactual_for_signal(row_scenario, signal, priors)
-        learning["sourceOutcomeId"] = row.get("_id")
-        learning["source"] = "autodream_off_hours"
-        learnings.append(learning)
-        simulated_cases.append(
-            {
-                "sourceOutcomeId": row.get("_id"),
-                "scenarioKey": row_scenario,
-                "signal": signal,
-                "counterfactualLabel": learning["outcomeLabel"],
-                "confidence": learning["confidence"],
-            }
-        )
-
-    created_at = _utc_now()
-    fingerprint = f"{scenario}:{created_at}:{len(learnings)}:{priors.get('source')}"
-    dream_run_id = f"dream_run_{hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()[:12]}"
-    dream_run = {
-        "_id": dream_run_id,
-        "dreamRunId": dream_run_id,
-        "createdAt": created_at,
-        "scenarioKey": scenario,
-        "offlineOnly": True,
-        "executionWindow": "off_hours",
-        "status": "review_required",
-        "inputSummary": {
-            "outcomeCases": len(outcomes),
-            "generatedLearnings": len(learnings),
-            "bigQueryPriorSource": priors.get("source"),
-            "replayReady": replay_context.get("ready"),
-            "cacheReplayStatus": cache_replay_audit.get("status"),
-        },
-        "simulatedCases": simulated_cases,
-        "guardrails": [
-            "offline_only_no_live_action_execution",
-            "do_not_write_live_park_state",
-            "human_review_required_before_playbook_promotion",
-            "cache_accuracy_replay_required_before_promotion",
-        ],
-        "bigqueryPriors": {
-            "source": priors.get("source"),
-            "queryName": priors.get("query_name"),
-            "bestPrior": priors.get("best_prior"),
-            "weakestPrior": priors.get("weakest_prior"),
-        },
-        "cacheReplayAudit": {
-            "status": cache_replay_audit.get("status"),
-            "summary": cache_replay_audit.get("summary"),
-        },
-    }
-    storage = record_dream_run(dream_run, learnings) if persist else {"status": "preview", "dream_run_id": dream_run_id, "dream_learning_ids": []}
-    result = {
-        "status": "complete",
-        "mode": "offline_autodream",
+    return {
+        "status": "retired",
+        "mode": "retired_autodream",
         "agent_id": "autodream_agent",
-        "dream_run_id": dream_run_id,
         "scenario_key": scenario,
+        "max_cases": max(1, min(25, int(max_cases or 1))),
+        "persist": bool(persist),
         "offline_only": True,
-        "storage": storage,
+        "storage": {"status": "disabled", "dream_run_id": None, "dream_learning_ids": []},
         "summary": {
-            "cases_reviewed": len(outcomes),
-            "learnings_generated": len(learnings),
-            "review_required": True,
-            "prior_source": priors.get("source"),
-            "cache_replay_status": cache_replay_audit.get("status"),
-            "cache_replay_pass_rate": cache_replay_audit.get("summary", {}).get("pass_rate"),
+            "retired": True,
+            "cases_reviewed": 0,
+            "learnings_generated": 0,
+            "review_required": False,
+            "prior_source": "disabled",
+            "cache_replay_status": "disabled",
+            "cache_replay_pass_rate": None,
+            "reason": AUTODREAM_RETIREMENT_REASON,
         },
-        "dream_run": dream_run,
-        "dream_learnings": learnings,
-        "cache_replay_audit": cache_replay_audit,
+        "dream_run": {
+            "status": "retired",
+            "offlineOnly": True,
+            "scenarioKey": scenario,
+            "guardrails": ["feature_retired_no_live_or_offline_execution"],
+        },
+        "dream_learnings": [],
+        "cache_replay_audit": {
+            "status": "disabled",
+            "summary": {
+                "roles_checked": 0,
+                "roles_passed": 0,
+                "pass_rate": None,
+                "failures": ["autodream_retired"],
+            },
+            "replays": [],
+        },
         "operator_review": {
-            "required": True,
-            "promotion_targets": ["agent_learnings", "playbooks"],
-            "note": "AutoDream outputs are not live operational actions. Promote only after operator review and passing cache accuracy replay.",
+            "required": False,
+            "promotion_targets": [],
+            "note": AUTODREAM_RETIREMENT_REASON,
         },
+        "analytics": {"status": "disabled", "row_counts": {"dream_eval_results": 0}},
     }
-    analytics_rows = build_dream_analytics_rows(result)
-    result["analytics"] = export_analytics_rows(analytics_rows) if persist else {"status": "preview", "row_counts": {key: len(value) for key, value in analytics_rows.items()}}
-    return result
 
 
 def autodream_status(limit: int = 8) -> dict[str, Any]:
     safe_limit = max(1, min(25, int(limit or 8)))
-    dream_runs = get_latest_memory_documents("dream_runs", safe_limit)
-    dream_learnings = get_latest_memory_documents("dream_learnings", safe_limit * 2)
-    readiness_rows = []
-    for item in dream_learnings:
-        if not item.get("_id"):
-            continue
-        readiness = get_autodream_promotion_readiness(item["_id"])
-        stored_readiness = item.get("promotionReadiness", {}) if isinstance(item.get("promotionReadiness"), dict) else {}
-        rollback_active = bool((readiness.get("rollback_watch", {}) if isinstance(readiness.get("rollback_watch"), dict) else {}).get("active"))
-        if stored_readiness.get("promotion_ready") and not readiness.get("regression_risk") and not rollback_active:
-            readiness = {
-                **readiness,
-                **stored_readiness,
-                "status": "ready",
-                "promotion_ready": True,
-                "blockers": [],
-            }
-        readiness_rows.append(readiness)
-    rollback_watch = get_rollback_watch_documents(limit=safe_limit * 3)
-    readiness_by_id = {row.get("dream_learning_id"): row for row in readiness_rows}
-    dream_learnings = [
-        {**item, "promotionReadiness": readiness_by_id.get(item.get("_id"), {})}
-        for item in dream_learnings
-    ]
-    pending = [item for item in dream_learnings if item.get("reviewStatus") == "pending_operator_review"]
-    promoted = [item for item in dream_learnings if item.get("reviewStatus") == "promoted" or item.get("promoted")]
-    rejected = [item for item in dream_learnings if item.get("reviewStatus") == "rejected"]
-    archived = [item for item in dream_learnings if item.get("reviewStatus") == "archived"]
-    needs_more_evidence = [item for item in dream_learnings if item.get("reviewStatus") == "needs_more_evidence"]
-    improved = [item for item in dream_learnings if item.get("promotionMeasurementStatus") == "improved" or (item.get("promotionImpact", {}) if isinstance(item.get("promotionImpact"), dict) else {}).get("status") == "improved"]
-    neutral = [item for item in dream_learnings if item.get("promotionMeasurementStatus") == "neutral" or (item.get("promotionImpact", {}) if isinstance(item.get("promotionImpact"), dict) else {}).get("status") == "neutral"]
-    regressed = [item for item in dream_learnings if item.get("promotionMeasurementStatus") == "regressed" or (item.get("promotionImpact", {}) if isinstance(item.get("promotionImpact"), dict) else {}).get("status") == "regressed"]
     return {
         "agent_id": "autodream_agent",
-        "mode": "offline_learning",
+        "mode": "retired_autodream",
         "offline_only": True,
-        "status": "ready",
+        "status": "retired",
+        "limit": safe_limit,
         "summary": {
-            "dream_runs": len(dream_runs),
-            "dream_learnings": len(dream_learnings),
-            "pending_review": len(pending),
-            "promoted": len(promoted),
-            "rejected": len(rejected),
-            "archived": len(archived),
-            "needs_more_evidence": len(needs_more_evidence),
-            "impact_improved": len(improved),
-            "impact_neutral": len(neutral),
-            "impact_regressed": len(regressed),
-            "promotion_ready": sum(1 for item in readiness_rows if item.get("promotion_ready")),
-            "promotion_blocked": sum(1 for item in readiness_rows if not item.get("promotion_ready")),
-            "rollback_watch": rollback_watch.get("count", 0),
+            "retired": True,
+            "dream_runs": 0,
+            "dream_learnings": 0,
+            "pending_review": 0,
+            "promoted": 0,
+            "rejected": 0,
+            "archived": 0,
+            "needs_more_evidence": 0,
+            "impact_improved": 0,
+            "impact_neutral": 0,
+            "impact_regressed": 0,
+            "promotion_ready": 0,
+            "promotion_blocked": 0,
+            "rollback_watch": 0,
+            "reason": AUTODREAM_RETIREMENT_REASON,
         },
-        "latest_dream_runs": dream_runs,
-        "latest_dream_learnings": dream_learnings,
-        "promotion_readiness": readiness_rows,
-        "rollback_watch": rollback_watch,
+        "latest_dream_runs": [],
+        "latest_dream_learnings": [],
+        "promotion_readiness": [],
+        "rollback_watch": {"status": "retired", "count": 0, "documents": []},
         "operator_review": {
-            "required_for_promotion": True,
-            "allowed_targets": ["agent_learnings", "playbooks"],
-            "allowed_review_statuses": ["rejected", "archived", "needs_more_evidence"],
+            "required_for_promotion": False,
+            "allowed_targets": [],
+            "allowed_review_statuses": [],
         },
     }
 
@@ -401,40 +324,27 @@ def promote_autodream_learning(
     target: str = "agent_learnings",
     reviewer: str = "operator",
 ) -> dict[str, Any]:
-    scenario = _dream_learning_scenario(dream_learning_id)
-    memory_dashboard = get_operational_memory_dashboard(f"{scenario} cache promotion safety")
-    cache_replay_audit = _run_cache_replay_audit(memory_dashboard, scenario, persist=True, roles=["react_agent", "proact_agent", "autodream_agent"])
-    benchmark = _run_promotion_readiness_benchmark(dream_learning_id, scenario, memory_dashboard)
-    readiness = get_autodream_promotion_readiness(dream_learning_id, cache_replay_audit, benchmark)
-    if not readiness.get("promotion_ready"):
-        return {
-            "agent_id": "autodream_agent",
-            "mode": "operator_review_promotion",
-            "offline_source": True,
-            "status": "blocked_promotion_readiness",
-            "promotion": {
-                "status": "blocked_promotion_readiness",
-                "dream_learning_id": dream_learning_id,
-                "target": target,
-                "reviewer": reviewer,
-                "reason": "Promotion readiness requires cache replay, paired benchmark, and no regression risk.",
-                "blockers": readiness.get("blockers", []),
-            },
-            "cache_replay_audit": cache_replay_audit,
-            "paired_benchmark": benchmark,
-            "promotion_readiness": readiness,
-            "post_status": autodream_status(8),
-        }
-    promotion = promote_dream_learning(dream_learning_id, target, reviewer, readiness)
     return {
         "agent_id": "autodream_agent",
-        "mode": "operator_review_promotion",
+        "mode": "retired_autodream_promotion",
         "offline_source": True,
-        "promotion": promotion,
-        "status": promotion.get("status", "unknown"),
-        "cache_replay_audit": cache_replay_audit,
-        "paired_benchmark": benchmark,
-        "promotion_readiness": readiness,
+        "status": "retired",
+        "promotion": {
+            "status": "retired",
+            "dream_learning_id": dream_learning_id,
+            "target": target,
+            "reviewer": reviewer,
+            "reason": AUTODREAM_RETIREMENT_REASON,
+            "blockers": ["autodream_retired"],
+        },
+        "cache_replay_audit": {"status": "disabled", "summary": {"failures": ["autodream_retired"]}},
+        "paired_benchmark": {"status": "retired", "summary": {"reason": AUTODREAM_RETIREMENT_REASON}},
+        "promotion_readiness": {
+            "status": "retired",
+            "dream_learning_id": dream_learning_id,
+            "promotion_ready": False,
+            "blockers": ["autodream_retired"],
+        },
         "post_status": autodream_status(8),
     }
 
@@ -445,12 +355,17 @@ def review_autodream_learning(
     reviewer: str = "operator",
     reason: str = "",
 ) -> dict[str, Any]:
-    review = review_dream_learning(dream_learning_id, review_status, reviewer, reason)
     return {
         "agent_id": "autodream_agent",
-        "mode": "operator_review",
+        "mode": "retired_autodream_review",
         "offline_source": True,
-        "review": review,
-        "status": review.get("status", "unknown"),
+        "status": "retired",
+        "review": {
+            "status": "retired",
+            "dream_learning_id": dream_learning_id,
+            "review_status": review_status,
+            "reviewer": reviewer,
+            "reason": reason or AUTODREAM_RETIREMENT_REASON,
+        },
         "post_status": autodream_status(8),
     }

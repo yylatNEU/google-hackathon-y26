@@ -130,7 +130,7 @@ public class PlatformStoreService {
         Map<String, Object> result = orderedMap();
         result.put("status", "active");
         result.put("mode", "continuous_java_spring_migration");
-        result.put("current_slice", "spring_backend_gateway_plus_agent_trust_handshake_authority");
+        result.put("current_slice", "spring_backend_gateway_plus_live_feed_health_and_review_authority");
         result.put("spring_owned_routes", List.of(
             "/",
             "/healthz",
@@ -147,6 +147,13 @@ public class PlatformStoreService {
             "/api/park/policy-doctrine/{policy_ref}",
             "/api/park/agent-monitoring",
             "/api/park/agent-monitoring/deep",
+            "/api/park/live-feed-health",
+            "/api/park/live-feed-events",
+            "/api/park/live-feeds/refresh-worker",
+            "/api/park/live-feeds/refresh-stale",
+            "/api/park/live-feeds/{source}",
+            "/api/park/live-feeds/{source}/load",
+            "/api/park/review-training-ledger",
             "/api/park/role-access-contracts",
             "/api/park/reliability",
             "/api/park/latency-diagnostics",
@@ -198,7 +205,7 @@ public class PlatformStoreService {
             "/api/park/backend-gateway/status"
         ));
         result.put("spring_gateway_routes", List.of("/api/**", "/readyz/deep"));
-        result.put("python_owned_routes", "agent orchestration, Gemini/Vertex, Mongo memory, live feeds, remaining simulation surfaces, and live GCP delivery adapters are reached through the Spring gateway until each route group is migrated natively.");
+        result.put("python_owned_routes", "agent orchestration, Gemini/Vertex, Mongo memory, remaining simulation surfaces, product-learning routes, and live GCP delivery adapters are reached through the Spring gateway until each route group is migrated natively.");
         result.put("handoff_rule", "Move one bounded route group at a time only after parity tests and SQLite authority checks pass.");
         result.put("rollback", "Stop the Spring service and keep Python serving the same SQLite-backed authority.");
         result.put("platform_store", compactStatus());
@@ -300,6 +307,7 @@ public class PlatformStoreService {
         Path agentOpsPath = envPath("PARKPULSE_AGENT_OPS_LEDGER", runtimeDir.resolve("agent_ops_ledger.jsonl"));
         Path reviewPath = envPath("PARKPULSE_REVIEW_LEDGER_LOG_PATH", runtimeDir.resolve("review_ledger.jsonl"));
         Path monitorEvidencePath = envPath("PARKPULSE_MONITOR_EVIDENCE_SNAPSHOT_PATH", Path.of(System.getProperty("user.dir")).getParent().resolve("output").resolve("monitor-evidence-limit-40.json"));
+        Map<String, Object> monitorSnapshotStore = monitorEvidenceSnapshotStore(monitorEvidencePath);
         Path policyBooksPath = Path.of(System.getProperty("user.dir")).getParent().resolve("backend").resolve("policy_books");
         Path legacyPath = legacyPlatformDbPath();
         List<String> legacyTables = sqliteTables(legacyPath);
@@ -316,12 +324,7 @@ public class PlatformStoreService {
         records.add(storeRecord("agent_ops_ledger", "agent_run_receipt_and_eval_ledger", "jsonl_receipt_ledger", agentOpsPath, "agent_decision_trace_receipts", false, false, Files.exists(agentOpsPath) ? "ready" : "will_initialize_on_first_write", jsonlCount(agentOpsPath), Map.of("override_env", "PARKPULSE_AGENT_OPS_LEDGER")));
         records.add(storeRecord("review_ledger", "human_review_training_ledger", "jsonl_or_mongodb", reviewPath, "human_review_sessions_and_dispositions", liveFeedMongo, false, liveFeedMongo ? "mongodb_configured" : "local_jsonl", jsonlCount(reviewPath), Map.of("override_env", "PARKPULSE_REVIEW_LEDGER_LOG_PATH")));
         records.add(storeRecord("policy_books", "policy_doctrine_source_files", "versioned_json_documents", policyBooksPath, "policy_doctrine", true, true, Files.exists(policyBooksPath) ? "ready" : "missing", Files.exists(policyBooksPath) ? jsonFileCount(policyBooksPath) : 0, Map.of("legacy_policy_book", policyBooksPath.getParent().resolve("policy_book.json").toString())));
-        records.add(storeRecord("monitor_evidence_snapshot", "derived_monitor_evidence_graph_cache", "json_snapshot_cache", monitorEvidencePath, "derived_case_trace_review_policy_graph", false, false, Files.exists(monitorEvidencePath) ? "ready" : "will_initialize_on_first_read", null, Map.of(
-            "override_env", "PARKPULSE_MONITOR_EVIDENCE_SNAPSHOT_PATH",
-            "derived_from", List.of("agent_ops_ledger", "review_ledger", "live_feed_events", "policy_books", "case_index"),
-            "cache_invalidation", "source_watermark_fingerprint",
-            "production_target", "shared_mongodb_or_redis_snapshot"
-        )));
+        records.add(storeRecord("monitor_evidence_snapshot", "derived_monitor_evidence_graph_cache", monitorSnapshotStore.get("mode").toString(), Path.of(monitorSnapshotStore.get("path").toString()), "derived_case_trace_review_policy_graph", Boolean.TRUE.equals(monitorSnapshotStore.get("shared")), false, monitorSnapshotStore.get("status").toString(), null, castMap(monitorSnapshotStore.get("metadata"))));
         String legacyStatus = !Files.exists(legacyPath) ? "not_present" : legacyTables.isEmpty() ? "legacy_empty" : "legacy_non_empty_preserved";
         records.add(storeRecord("legacy_repo_park_data_db", "legacy_artifact_not_current_source_of_truth", "sqlite_legacy", legacyPath, "legacy_platform_database", false, false, legacyStatus, sqliteCount(legacyPath, legacyTables), Map.of("tables", legacyTables, "safe_migration_action", "preserved_without_copy_or_delete")));
         return records;
@@ -486,6 +489,56 @@ public class PlatformStoreService {
         } catch (Exception error) {
             return null;
         }
+    }
+
+    private Map<String, Object> monitorEvidenceSnapshotStore(Path localPath) {
+        String requested = env("PARKPULSE_MONITOR_EVIDENCE_STORAGE", "local").toLowerCase(Locale.ROOT).trim();
+        Map<String, Object> baseMetadata = Map.of(
+            "override_env", "PARKPULSE_MONITOR_EVIDENCE_STORAGE",
+            "path_override_env", "PARKPULSE_MONITOR_EVIDENCE_SNAPSHOT_PATH",
+            "derived_from", List.of("agent_ops_ledger", "review_ledger", "live_feed_events", "policy_books", "case_index"),
+            "cache_invalidation", "source_watermark_fingerprint"
+        );
+        if (List.of("redis", "upstash").contains(requested)) {
+            String redisUrl = firstPresent("PARKPULSE_MONITOR_EVIDENCE_REDIS_URL", "REDIS_URL", "UPSTASH_REDIS_REST_URL");
+            Map<String, Object> metadata = orderedMap();
+            metadata.putAll(baseMetadata);
+            metadata.put("backend", "redis");
+            metadata.put("connection_env", "PARKPULSE_MONITOR_EVIDENCE_REDIS_URL");
+            metadata.put("local_fallback_path", localPath.toString());
+            return Map.of("mode", "redis_snapshot_cache", "path", "redis/monitor-evidence", "shared", true, "status", redisUrl.isBlank() ? "redis_unconfigured" : "redis_configured", "metadata", metadata);
+        }
+        if (List.of("mongo", "mongodb").contains(requested)) {
+            String mongoUri = firstPresent("MONGODB_DIRECT_URI", "MONGODB_URI", "MONGO_URI", "PARKPULSE_MONGODB_URI");
+            Map<String, Object> metadata = orderedMap();
+            metadata.putAll(baseMetadata);
+            metadata.put("backend", "mongodb");
+            metadata.put("connection_env", "MONGODB_DIRECT_URI|MONGODB_URI|MONGO_URI");
+            metadata.put("database", env("PARKPULSE_MONITOR_EVIDENCE_MONGO_DATABASE", env("MONGODB_DATABASE", "parkpulse")));
+            metadata.put("collection", env("PARKPULSE_MONITOR_EVIDENCE_MONGO_COLLECTION", "monitor_evidence_snapshots"));
+            metadata.put("local_fallback_path", localPath.toString());
+            return Map.of("mode", "mongodb_snapshot_cache", "path", "mongodb/monitor_evidence_snapshots", "shared", true, "status", mongoUri.isBlank() ? "mongodb_unconfigured" : "mongodb_configured", "metadata", metadata);
+        }
+        Map<String, Object> metadata = orderedMap();
+        metadata.putAll(baseMetadata);
+        metadata.put("backend", "local_json");
+        metadata.put("production_target", "redis_or_mongodb_snapshot_cache");
+        return Map.of("mode", "json_snapshot_cache", "path", localPath.toString(), "shared", false, "status", Files.exists(localPath) ? "ready" : "will_initialize_on_first_read", "metadata", metadata);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> castMap(Object value) {
+        return value instanceof Map<?, ?> ? (Map<String, Object>) value : Map.of();
+    }
+
+    private String firstPresent(String... keys) {
+        for (String key : keys) {
+            String value = env(key, "");
+            if (!value.isBlank()) {
+                return value;
+            }
+        }
+        return "";
     }
 
     private boolean columnExists(Connection connection, String tableName, String columnName) throws SQLException {

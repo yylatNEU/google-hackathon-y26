@@ -59,7 +59,7 @@ ROLE_FORBIDDEN_REASONS = {
     "customer": "Customer surfaces can ask for help and read guest-safe guidance only.",
     "onsite_worker": "Onsite worker surfaces can act on assigned tasks but cannot inspect model, BigQuery, or promotion internals.",
     "ops_team": "Ops surfaces can review live evidence and action receipts but cannot mutate learning authority.",
-    "ml_ops_admin": "ML/admin surfaces can inspect and start offline learning jobs but cannot dispatch live park actions.",
+    "ml_ops_admin": "ML/admin surfaces can inspect retired learning archives and evaluation metadata but cannot dispatch live park actions.",
 }
 
 

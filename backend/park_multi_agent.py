@@ -268,7 +268,6 @@ AGENT_DEPARTMENT_OVERRIDES: dict[str, str] = {
     "logic_audit_agent": "compliance",
     "memory_ops_agent": "maintenance",
     "delivery_proof_agent": "qa_judge",
-    "autodream_agent": "qa_judge",
     "gcp_eval_judge_agent": "qa_judge",
     "tool_executor_agent": "tool_executor",
 }
@@ -453,15 +452,6 @@ AGENT_REGISTRY: list[dict[str, Any]] = [
         "owns": ["delivery receipts", "receiver acknowledgement", "Dataflow stream evidence"],
         "blocked": ["dispatching without policy gate", "inventing delivery success", "editing agent reasoning"],
         "policy_refs": ["PARK-EVAL-001", "PARK-EVAL-003", "PARK-EVAL-006"],
-    },
-    {
-        "agent_id": "autodream_agent",
-        "name": "AutoDream Off-Hours Agent",
-        "role": "Replays historical outcomes offline, generates counterfactual lessons, and writes review-required dream learnings.",
-        "mode": ["offline_learning", "maintenance"],
-        "owns": ["dream runs", "counterfactual learning", "historical incident synthesis", "promotion candidates"],
-        "blocked": ["live action execution", "live park_state writes", "automatic playbook promotion without human review"],
-        "policy_refs": ["PARK-EVAL-001", "PARK-EVAL-006", "PARK-OPS-001"],
     },
     {
         "agent_id": "gcp_eval_judge_agent",
@@ -789,7 +779,6 @@ AGENT_POLICY_SCOPES: dict[str, list[dict[str, str]]] = {
     "decision_bridge_agent": [{"target": "scenario", "action": "proactive_commit"}],
     "logic_audit_agent": [{"target": "scenario", "action": ""}],
     "memory_ops_agent": [{"target": "scenario", "action": ""}],
-    "autodream_agent": [{"target": "scenario", "action": "revise_overlay_after_outcome"}],
     "tool_executor_agent": [{"target": "scenario", "action": "proactive_commit"}],
 }
 
@@ -812,7 +801,7 @@ AGENT_BUILDER_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "event_setup_agent": ["get_park_state", "simulate_action", "write_decision_memory"],
     "event_creative_agent": ["get_park_state", "retrieve_similar_incidents", "get_campaign_calendar", "get_guest_segments", "get_demand_forecast", "get_weather_events", "get_zone_density", "draft_campaign", "launch_pause_promo", "redirect_offer"],
     "traffic_flow_agent": ["get_zone_density", "simulate_action", "score_outcome"],
-    "planning_agent": ["get_park_state", "retrieve_similar_incidents", "simulate_action", "score_outcome", "validate_policy", "write_decision_memory"],
+    "planning_agent": ["get_park_state", "retrieve_similar_incidents", "tick_simulation", "simulate_action", "score_outcome", "validate_policy", "write_decision_memory"],
     "placement_agent": ["get_park_state", "simulate_action", "validate_policy"],
     "safety_policy_agent": ["get_incident_reports", "get_ride_inspection_status", "get_zone_density", "get_weather", "get_policy_book", "policy_gate", "validate_policy", "inspect_runtime_status", "inspect_delivery_receipts", "safety_alert", "close_reopen_recommendation", "require_human_approval"],
     "finance_agent": ["get_ticket_sales", "get_refund_data", "get_labor_cost", "get_pos_revenue", "get_outage_impact", "score_decision_quality", "score_outcome", "revenue_impact_report", "refund_recommendation", "budget_alert"],
@@ -821,7 +810,6 @@ AGENT_BUILDER_TOOL_ALLOWLIST: dict[str, list[str]] = {
     "logic_audit_agent": ["get_policy_books", "get_privacy_rules", "get_safety_rules", "get_labor_rules", "get_audit_logs", "inspect_runtime_status", "inspect_observability_contract", "score_decision_quality", "block_action", "require_approval", "generate_compliance_note"],
     "memory_ops_agent": ["retrieve_similar_incidents", "inspect_runtime_status"],
     "delivery_proof_agent": ["inspect_delivery_receipts", "inspect_runtime_status", "inspect_observability_contract"],
-    "autodream_agent": ["retrieve_similar_incidents", "tick_simulation", "simulate_action", "score_outcome", "write_decision_memory"],
     "gcp_eval_judge_agent": ["get_full_trace", "get_tool_calls", "get_outcomes", "get_policy_references", "score_decision_quality", "inspect_observability_contract", "inspect_delivery_receipts", "score_decision", "flag_failure", "create_regression_test"],
     "tool_executor_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "dispatch_receiver_payload", "execute_approved_action"],
 }
@@ -850,7 +838,6 @@ AGENT_BUILDER_BLOCKED_TOOLS: dict[str, list[str]] = {
     "logic_audit_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "write_decision_memory"],
     "memory_ops_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command"],
     "delivery_proof_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command", "write_decision_memory"],
-    "autodream_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command"],
     "gcp_eval_judge_agent": ["dispatch_guest_message", "dispatch_worker_task", "dispatch_equipment_command"],
     "tool_executor_agent": ["policy_gate", "validate_policy", "score_decision_quality"],
 }
@@ -1315,7 +1302,7 @@ def _agent_builder_decision_rights(agent_id: str, can_dispatch: bool) -> list[st
         return ["rehearse_scenarios", "draft_multi_wave_plan", "recommend_precommit"]
     if agent_id == "delivery_proof_agent":
         return ["verify_delivery", "mark_unproven", "request_retry"]
-    if agent_id in {"memory_ops_agent", "autodream_agent"}:
+    if agent_id == "memory_ops_agent":
         return ["offline_analysis", "recommend_learning"]
     if can_dispatch:
         return ["propose_action", "bounded_dispatch_after_policy_gate"]
@@ -1335,7 +1322,7 @@ def _agent_builder_handoff(agent_id: str) -> str:
         return "decision_bridge_agent"
     if agent_id == "delivery_proof_agent":
         return "operator_evidence_dock"
-    if agent_id in {"memory_ops_agent", "autodream_agent"}:
+    if agent_id == "memory_ops_agent":
         return "operator_review"
     return "decision_bridge_agent"
 
@@ -1345,7 +1332,7 @@ def _agent_builder_execution_boundary(agent_id: str, can_dispatch: bool) -> str:
         return "executes real receiver actions only from approved action envelopes; cannot create recommendations or skip trace outcome recording"
     if agent_id == "customer_support_agent":
         return "customer self-service only; no operator dispatch, staff tasking, equipment control, policy disclosure, or private data access"
-    if agent_id in {"memory_ops_agent", "autodream_agent"}:
+    if agent_id == "memory_ops_agent":
         return "offline only; no live dispatch"
     if agent_id in {"safety_policy_agent", "logic_audit_agent", "gcp_eval_judge_agent"}:
         return "review only; can block or score but cannot dispatch"
@@ -1377,7 +1364,7 @@ def _agent_builder_human_approval_rules(agent_id: str) -> list[str]:
         ]
     if agent_id in {"ride_ops_agent", "facilities_energy_agent", "staffing_agent", "safety_policy_agent"}:
         rules.extend(["ride safety, equipment, labor, medical, weather, or evacuation boundary is active"])
-    if agent_id in {"memory_ops_agent", "autodream_agent"}:
+    if agent_id == "memory_ops_agent":
         rules.append("learning would be promoted into live playbooks")
     if agent_id == "delivery_proof_agent":
         rules.append("receipt is missing for an action that affected equipment, staffing, safety, or customer-care commitments")
@@ -1395,7 +1382,7 @@ def _agent_builder_fit(agent_id: str) -> str:
         return "Customer-facing Agent Builder kiosk agent with read-only public context and two customer-only UI actions."
     if agent_id in {"safety_policy_agent", "logic_audit_agent", "gcp_eval_judge_agent"}:
         return "Governed reviewer agent with registry-approved tools, trace spans, and no direct receiver dispatch."
-    if agent_id in {"memory_ops_agent", "autodream_agent"}:
+    if agent_id == "memory_ops_agent":
         return "Offline Agent Engine task with memory tools and human promotion gate."
     if agent_id == "delivery_proof_agent":
         return "Observable proof agent that verifies Pub/Sub, Firestore, FCM, Dataflow, and receiver acknowledgement receipts."

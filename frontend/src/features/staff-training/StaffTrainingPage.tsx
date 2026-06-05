@@ -96,6 +96,29 @@ type ProductLearningTicketResult = {
   readiness_issues?: string[];
 };
 
+type AutoLearningCandidate = {
+  id?: string;
+  scenario_id?: string;
+  source?: string;
+  pattern?: string;
+  proposed_change_type?: string;
+  governance_status?: string;
+  confidence?: number;
+  evidence_count?: number;
+  risk_class?: string;
+  exception_reasons?: string[];
+  shadow_deployment?: {
+    status?: string;
+    live_active?: boolean;
+  };
+  draft?: {
+    title?: string;
+    target_surface?: string;
+    content_summary?: string;
+    activation?: string;
+  };
+};
+
 type TrainingSession = {
   id?: string;
   assignment_id?: string;
@@ -135,6 +158,7 @@ type TurnScore = {
 type Analytics = {
   status?: string;
   session_count?: number;
+  average_score?: number;
   scenario_summary?: Array<{ scenario_id?: string; title?: string; session_count?: number; average_overall?: number; critical_miss_count?: number }>;
   weakest_dimensions?: Array<{ dimension?: string; average?: number }>;
 };
@@ -206,10 +230,19 @@ type ProductLearningLoop = {
   status?: string;
   park_issue_ticket_count?: number;
   dynamic_park_issue_ticket_count?: number;
+  operational_backlog_issue_ticket_count?: number;
+  place_risk_issue_ticket_count?: number;
+  random_incident_issue_ticket_count?: number;
   training_gap_ticket_count?: number;
   learning_signal_count?: number;
+  auto_learning_candidate_count?: number;
+  shadow_ready_candidate_count?: number;
+  human_exception_candidate_count?: number;
   park_issue_tickets?: ProductLearningTicket[];
   training_gap_tickets?: ProductLearningTicket[];
+  auto_learning_candidates?: AutoLearningCandidate[];
+  shadow_deployment_candidates?: AutoLearningCandidate[];
+  human_exception_queue?: AutoLearningCandidate[];
   product_learning_signals?: Array<{
     id?: string;
     source?: string;
@@ -225,9 +258,18 @@ type ProductLearningLoop = {
     live_tickets_improve_training?: string;
     training_gaps_help_ops?: string;
     training_gaps_create_live_issues?: boolean;
+    low_risk_auto_learning?: string;
+    human_on_exception?: boolean;
     llm_guest_controls_score?: boolean;
     simulated_data_feeds_reward_model?: boolean;
   };
+};
+
+const backendGeneratedTicketSources = new Set(["dynamic_park", "place_risk", "random_incident"]);
+const backendGeneratedTicketSourcePriority: Record<string, number> = {
+  place_risk: 0,
+  random_incident: 1,
+  dynamic_park: 2,
 };
 
 const dimensionLabels: Record<string, string> = {
@@ -407,6 +449,18 @@ export function StaffTrainingPage() {
   const selectedScenario = useMemo(
     () => scenarios.find((scenario) => scenario.id === selectedScenarioId) ?? scenarios[0],
     [scenarios, selectedScenarioId],
+  );
+  const backendGeneratedTickets = useMemo(
+    () =>
+      (productLearning?.park_issue_tickets ?? [])
+        .filter((ticket) => backendGeneratedTicketSources.has(ticket.source ?? ""))
+        .sort((left, right) => {
+          const leftPriority = backendGeneratedTicketSourcePriority[left.source ?? ""] ?? 9;
+          const rightPriority = backendGeneratedTicketSourcePriority[right.source ?? ""] ?? 9;
+          if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+          return label(left.issue_type).localeCompare(label(right.issue_type));
+        }),
+    [productLearning?.park_issue_tickets],
   );
   const transcript = session?.transcript ?? [];
   const scorecard = session?.scorecard;
@@ -772,6 +826,18 @@ export function StaffTrainingPage() {
           <div>
             <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Manager assignments</div>
             <h2 className="mt-1 text-xl font-black text-slate-50">Seasonal onboarding queue</h2>
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              {[
+                ["Sessions", analytics?.session_count ?? 0],
+                ["Avg score", typeof analytics?.average_score === "number" ? `${Math.round(analytics.average_score)}/5` : "--"],
+                ["Weakest", analytics?.weakest_dimensions?.[0]?.dimension ?? "--"],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded border border-slate-800 bg-slate-950 p-2">
+                  <div className="text-[9px] font-black uppercase tracking-widest text-slate-500">{label}</div>
+                  <div className="mt-1 truncate text-sm font-black text-teal-100">{value}</div>
+                </div>
+              ))}
+            </div>
             <div className="mt-4 grid gap-2">
               <label className="text-[10px] font-black uppercase tracking-widest text-slate-500" htmlFor="assignment-name">Staff member</label>
               <input
@@ -898,9 +964,9 @@ export function StaffTrainingPage() {
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Product learning loop</div>
-                <h3 className="mt-1 text-lg font-black text-slate-100">Dynamic park issues improve training. Training gaps improve ops guidance.</h3>
+                <h3 className="mt-1 text-lg font-black text-slate-100">Backend-generated live issues improve training. Training gaps improve ops guidance.</h3>
                 <p className="mt-2 max-w-4xl text-sm font-semibold leading-relaxed text-slate-500">
-                  Live issue tickets are generated from backend operational backlog signals. Staff roleplay gaps stay simulated and reviewed.
+                  Live issue tickets are generated from operational backlog, place-risk, and seeded incident signals. Staff roleplay gaps stay simulated and reviewed.
                 </p>
               </div>
               <button
@@ -912,11 +978,13 @@ export function StaffTrainingPage() {
               </button>
             </div>
 
-            <div className="mt-4 grid gap-2 md:grid-cols-3">
+            <div className="mt-4 grid gap-2 md:grid-cols-4">
               <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Live issue tickets</div>
                 <div className="mt-2 text-2xl font-black text-slate-50">{productLearning?.park_issue_ticket_count ?? 0}</div>
-                <div className="mt-1 text-xs font-bold text-slate-500">{productLearning?.dynamic_park_issue_ticket_count ?? 0} generated from dynamic park backlog.</div>
+                <div className="mt-1 text-xs font-bold text-slate-500">
+                  {productLearning?.operational_backlog_issue_ticket_count ?? productLearning?.dynamic_park_issue_ticket_count ?? 0} backlog / {productLearning?.place_risk_issue_ticket_count ?? 0} place / {productLearning?.random_incident_issue_ticket_count ?? 0} incident.
+                </div>
               </div>
               <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Training gap tickets</div>
@@ -928,13 +996,18 @@ export function StaffTrainingPage() {
                 <div className="mt-2 text-2xl font-black text-slate-50">{productLearning?.learning_signal_count ?? 0}</div>
                 <div className="mt-1 text-xs font-bold text-slate-500">Reviewed candidates for prompts, scenarios, policy cards, and ops checklists.</div>
               </div>
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Auto governance</div>
+                <div className="mt-2 text-2xl font-black text-slate-50">{productLearning?.auto_learning_candidate_count ?? 0}</div>
+                <div className="mt-1 text-xs font-bold text-slate-500">{productLearning?.shadow_ready_candidate_count ?? 0} shadow-ready / {productLearning?.human_exception_candidate_count ?? 0} exceptions.</div>
+              </div>
             </div>
 
             <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_1fr]">
               <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
-                <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Dynamic park live issues</div>
+                <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Backend-generated live issues</div>
                 <div className="mt-3 space-y-2">
-                  {(productLearning?.park_issue_tickets ?? []).filter((ticket) => ticket.source === "dynamic_park").slice(0, 4).map((ticket) => (
+                  {backendGeneratedTickets.slice(0, 6).map((ticket) => (
                     <div key={ticket.id} className="rounded border border-slate-800 bg-slate-950 p-2 text-xs">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
@@ -943,12 +1016,12 @@ export function StaffTrainingPage() {
                         </div>
                         <span className="shrink-0 rounded border border-rose-300/40 bg-rose-300/10 px-2 py-1 text-[10px] font-black text-rose-100">{label(ticket.severity)}</span>
                       </div>
-                      <div className="mt-2 text-[10px] font-black uppercase tracking-widest text-slate-500">{ticket.id}</div>
+                      <div className="mt-2 text-[10px] font-black uppercase tracking-widest text-slate-500">{label(ticket.source)} / {ticket.id}</div>
                     </div>
                   ))}
-                  {!(productLearning?.park_issue_tickets ?? []).some((ticket) => ticket.source === "dynamic_park") && (
+                  {!backendGeneratedTickets.length && (
                     <div className="rounded border border-dashed border-slate-700 bg-slate-950 p-3 text-sm font-bold text-slate-500">
-                      No dynamic park backlog issue is currently above threshold.
+                      No backend-generated live issue is currently above threshold.
                     </div>
                   )}
                 </div>
@@ -998,7 +1071,7 @@ export function StaffTrainingPage() {
               </div>
             </div>
 
-            <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_340px]">
+            <div className="mt-4 grid gap-3 xl:grid-cols-[1fr_320px_320px]">
               <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
                 {(productLearning?.product_learning_signals ?? []).slice(0, 6).map((signal) => (
                   <div key={signal.id ?? `${signal.source}-${signal.pattern}`} className="rounded border border-slate-800 bg-[#0d171b] p-3">
@@ -1023,10 +1096,35 @@ export function StaffTrainingPage() {
                 )}
               </div>
               <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="text-[10px] font-black uppercase tracking-widest text-emerald-300">Auto learning governance</div>
+                <div className="mt-3 space-y-2">
+                  {(productLearning?.shadow_deployment_candidates ?? []).slice(0, 3).map((candidate) => (
+                    <div key={candidate.id} className="rounded border border-emerald-300/20 bg-emerald-300/5 p-2 text-xs">
+                      <div className="font-black text-slate-100">{candidate.draft?.title ?? label(candidate.scenario_id)}</div>
+                      <div className="mt-1 text-slate-500">{candidate.draft?.content_summary}</div>
+                      <div className="mt-2 text-[10px] font-black uppercase tracking-widest text-emerald-200">Shadow ready / confidence {Math.round((candidate.confidence ?? 0) * 100)}%</div>
+                    </div>
+                  ))}
+                  {(productLearning?.human_exception_queue ?? []).slice(0, 3).map((candidate) => (
+                    <div key={candidate.id} className="rounded border border-amber-300/20 bg-amber-300/5 p-2 text-xs">
+                      <div className="font-black text-slate-100">{label(candidate.scenario_id)}</div>
+                      <div className="mt-1 text-slate-500">{(candidate.exception_reasons ?? []).map(label).join(", ")}</div>
+                      <div className="mt-2 text-[10px] font-black uppercase tracking-widest text-amber-200">Human-on-exception</div>
+                    </div>
+                  ))}
+                  {!(productLearning?.shadow_deployment_candidates ?? []).length && !(productLearning?.human_exception_queue ?? []).length && (
+                    <div className="rounded border border-dashed border-slate-700 bg-slate-950 p-3 text-sm font-bold text-slate-500">
+                      No auto-governance candidates yet.
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Loop contract</div>
                 <div className="mt-3 space-y-2 text-xs font-semibold leading-relaxed text-slate-400">
                   <div>Live tickets to training: {productLearning?.loop_contract?.live_tickets_improve_training ?? "reviewed signal only"}</div>
                   <div>Training gaps to ops: {productLearning?.loop_contract?.training_gaps_help_ops ?? "reviewed guidance only"}</div>
+                  <div>Low-risk auto learning: {productLearning?.loop_contract?.low_risk_auto_learning ?? "not configured"}</div>
                   <div>Training gaps create live issues: {productLearning?.loop_contract?.training_gaps_create_live_issues ? "yes" : "no"}</div>
                   <div>LLM guest controls score: {productLearning?.loop_contract?.llm_guest_controls_score ? "yes" : "no"}</div>
                   <div>Simulated data feeds reward model: {productLearning?.loop_contract?.simulated_data_feeds_reward_model ? "yes" : "no"}</div>
