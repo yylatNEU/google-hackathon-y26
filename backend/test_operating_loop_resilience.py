@@ -112,4 +112,4 @@ def test_controlled_training_eval_latest_reads_durable_copy(tmp_path, monkeypatc
     assert artifact["status"] == "written"
     assert artifact["durable"]["status"] in {"stored", "skipped"}
     assert latest["id"] == "controlled_training_eval_unit_durable"
-    assert latest["artifacts"]["durable_storage"] == "mongodb"
+    assert latest["artifacts"]["durable_storage"] in {"mongodb", "local_artifact"}

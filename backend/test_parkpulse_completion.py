@@ -1800,6 +1800,18 @@ def test_controlled_eval_durable_write_does_not_claim_fallback_storage(monkeypat
     assert failing.mode == "demo_fallback_degraded"
 
 
+def test_controlled_eval_record_rejects_configured_mongo_fallback(monkeypatch):
+    monkeypatch.setenv("MONGODB_URI", "mongodb+srv://user:pass@example.mongodb.net/?appName=ParkPulse")
+    memory = OperationalMemory()
+    memory.uri = "mongodb+srv://user:pass@example.mongodb.net/?appName=ParkPulse"
+    memory.connected = False
+    memory.mode = "demo_fallback_degraded"
+    memory.db = None
+
+    with pytest.raises(RuntimeError, match="controlled_training_evals unavailable"):
+        memory.record_controlled_training_eval({"id": "controlled-eval-no-fallback"})
+
+
 def test_memory_ops_agent_reports_depth_and_embedding_coverage(monkeypatch):
     monkeypatch.setenv("MONGODB_URI", "mongodb://example")
     monkeypatch.setattr(mongo_memory, "MongoClient", FakeMongoClient)

@@ -2807,6 +2807,8 @@ class OperationalMemory:
         if collection is not None:
             collection.replace_one({"_id": report_id}, document, upsert=True)
         else:
+            if self.uri or os.getenv("MONGODB_URI", "").strip() or os.getenv("MONGODB_DIRECT_URI", "").strip():
+                raise RuntimeError("MongoDB collection controlled_training_evals unavailable while MongoDB is configured.")
             self._fallback["controlled_training_evals"] = [
                 row for row in self._fallback["controlled_training_evals"] if row.get("_id") != report_id
             ]
@@ -4979,6 +4981,8 @@ def get_latest_role_access_audit_events(limit: int = 20) -> list[dict[str, Any]]
 
 
 def record_controlled_training_eval(report: dict[str, Any]) -> dict[str, Any]:
+    if (_memory.mode != "mongodb" or not _memory.connected) and (os.getenv("MONGODB_DIRECT_URI", "").strip() or os.getenv("MONGODB_URI", "").strip()):
+        init_operational_memory(force=True)
     return _safe_memory_call(
         "mongo.controlled_training_eval.record",
         lambda: _memory.record_controlled_training_eval(report),

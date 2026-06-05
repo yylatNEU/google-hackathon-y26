@@ -68,7 +68,7 @@ def latest_controlled_training_eval() -> dict[str, Any]:
     with open(latest, "r", encoding="utf-8") as handle:
         report = json.load(handle)
     if isinstance(report, dict):
-        report["artifacts"] = {**report.get("artifacts", {}), "latest_eval_path": latest}
+        report["artifacts"] = {**report.get("artifacts", {}), "latest_eval_path": latest, "durable_storage": "local_artifact"}
         return report
     return {"status": "error", "mode": "controlled_eval_training_gate_latest", "readiness_issues": [f"Latest eval report is not an object: {latest}"]}
 
