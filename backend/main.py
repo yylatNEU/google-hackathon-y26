@@ -1161,18 +1161,27 @@ async def _refresh_due_live_feeds_payload(request_payload: dict[str, Any] | None
     }
 
 
-async def _training_live_feed_preflight_payload(request_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+async def _training_live_feed_preflight_payload(
+    request_payload: dict[str, Any] | None = None,
+    *,
+    default_refresh: bool = True,
+) -> dict[str, Any]:
     payload = request_payload if isinstance(request_payload, dict) else {}
     refresh_flag = payload.get("refreshLiveFeeds")
     if refresh_flag is None:
         refresh_flag = payload.get("refresh_live_feeds")
-    if not _truthy(None if refresh_flag is None else str(refresh_flag), True):
+    if not _truthy(None if refresh_flag is None else str(refresh_flag), default_refresh):
         return {
-            "status": "skipped",
+            "status": "no_due_feeds",
             "mode": "training_live_feed_preflight",
             "created_at": _now_iso(),
+            "refresh_status": "not_requested",
+            "requested_sources": [],
+            "refreshed_sources": [],
+            "queued_sources": [],
+            "result_count": 0,
             "readiness_issues": [],
-            "boundary": "Training live-feed preflight was explicitly disabled for this request.",
+            "boundary": "Training live-feed refresh was not requested for this dry run; no evidence feeds were refreshed.",
             "uses_seed_data": False,
             "llm_control_authority": False,
         }
@@ -12670,36 +12679,35 @@ async def app(scope, receive, send):
                 validate_raw = request_payload.get("validateTables")
             if validate_raw is None:
                 validate_raw = (query.get("validateTables") or query.get("validate_tables") or [None])[0]
-            live_feed_preflight = await _training_live_feed_preflight_payload(request_payload)
             controlled_eval_override = request_payload.get("controlledEval") if isinstance(request_payload.get("controlledEval"), dict) else request_payload.get("controlled_eval") if isinstance(request_payload.get("controlled_eval"), dict) else None
-            dry_run_kwargs = {
-                "validate_tables": _truthy(None if validate_raw is None else str(validate_raw), False),
-                "live_feed_preflight": live_feed_preflight,
-                "controlled_eval": controlled_eval_override,
-            }
             timeout_seconds = _float_env("PARKPULSE_GCP_TRAINING_DRY_RUN_TIMEOUT_SECONDS", 12.0)
             min_rows = int(min_rows_raw) if min_rows_raw else 3
+
+            async def _build_dry_run_payload() -> dict[str, Any]:
+                live_feed_preflight = await _training_live_feed_preflight_payload(request_payload, default_refresh=False)
+                dry_run_kwargs = {
+                    "validate_tables": _truthy(None if validate_raw is None else str(validate_raw), False),
+                    "live_feed_preflight": live_feed_preflight,
+                    "controlled_eval": controlled_eval_override,
+                }
+                try:
+                    return await asyncio.to_thread(
+                        gcp_training_dry_run_readiness,
+                        min_rows,
+                        **dry_run_kwargs,
+                    )
+                except TypeError as type_error:
+                    if "controlled_eval" not in str(type_error) and "unexpected keyword" not in str(type_error):
+                        raise
+                    dry_run_kwargs.pop("controlled_eval", None)
+                    return await asyncio.to_thread(
+                        gcp_training_dry_run_readiness,
+                        min_rows,
+                        **dry_run_kwargs,
+                    )
+
             try:
-                payload = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        gcp_training_dry_run_readiness,
-                        min_rows,
-                        **dry_run_kwargs,
-                    ),
-                    timeout=timeout_seconds,
-                )
-            except TypeError as type_error:
-                if "controlled_eval" not in str(type_error) and "unexpected keyword" not in str(type_error):
-                    raise
-                dry_run_kwargs.pop("controlled_eval", None)
-                payload = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        gcp_training_dry_run_readiness,
-                        min_rows,
-                        **dry_run_kwargs,
-                    ),
-                    timeout=timeout_seconds,
-                )
+                payload = await asyncio.wait_for(_build_dry_run_payload(), timeout=timeout_seconds)
             except TimeoutError:
                 payload = {
                     "status": "blocked",
@@ -12707,10 +12715,10 @@ async def app(scope, receive, send):
                     "timeout_seconds": timeout_seconds,
                     "min_sample_count": min_rows,
                     "controlled_eval_gate": {"allowed": False, "status": "not_evaluated_due_to_timeout"},
-                    "live_feed_preflight": live_feed_preflight if isinstance(live_feed_preflight, dict) else {"status": "not_checked"},
+                    "live_feed_preflight": {"status": "timeout", "refresh_status": "timeout", "readiness_issues": [f"GCP training dry run exceeded {timeout_seconds:g}s before live-feed preflight completed."]},
                     "table_validation": {
                         "status": "timeout",
-                        "readiness_issues": [f"GCP training dry run exceeded {timeout_seconds:g}s before table validation completed."],
+                        "readiness_issues": [f"GCP training dry run exceeded {timeout_seconds:g}s before readiness validation completed."],
                     },
                     "bqml_start": {
                         "would_start": False,
