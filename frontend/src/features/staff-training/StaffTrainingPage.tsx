@@ -971,6 +971,95 @@ export function StaffTrainingPage() {
               </div>
             </div>
 
+            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Create live issue ticket</div>
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    Source
+                    <select value={liveIssueSource} onChange={(event) => setLiveIssueSource(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300">
+                      <option value="employee">Employee</option>
+                      <option value="guest">Guest</option>
+                    </select>
+                  </label>
+                  <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    Issue
+                    <select value={liveIssueType} onChange={(event) => setLiveIssueType(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300">
+                      {scenarios.map((scenario) => <option key={scenario.id} value={scenario.id}>{scenario.title}</option>)}
+                    </select>
+                  </label>
+                  <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    Severity
+                    <select value={liveIssueSeverity} onChange={(event) => setLiveIssueSeverity(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300">
+                      <option value="critical">Critical</option>
+                      <option value="high">High</option>
+                      <option value="medium">Medium</option>
+                      <option value="low">Low</option>
+                    </select>
+                  </label>
+                  <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    Location
+                    <input value={liveIssueLocation} onChange={(event) => setLiveIssueLocation(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300" />
+                  </label>
+                </div>
+                <label className="mt-2 grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  Summary
+                  <textarea value={liveIssueSummary} onChange={(event) => setLiveIssueSummary(event.target.value)} rows={3} className="resize-y rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-semibold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300" />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void createLiveIssueTicket()}
+                  disabled={isLoading || !liveIssueSummary.trim()}
+                  className="mt-3 w-full rounded border border-rose-300 bg-rose-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-rose-200 disabled:opacity-50"
+                >
+                  Create live issue
+                </button>
+              </div>
+
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="text-[10px] font-black uppercase tracking-widest text-amber-300">Create training gap ticket</div>
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    Scenario
+                    <select value={manualGapScenarioId} onChange={(event) => setManualGapScenarioId(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300">
+                      {scenarios.map((scenario) => <option key={scenario.id} value={scenario.id}>{scenario.title}</option>)}
+                    </select>
+                  </label>
+                  <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    Gap
+                    <select value={manualGapType} onChange={(event) => setManualGapType(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300">
+                      <option value="empathy">Empathy</option>
+                      <option value="policy_correctness">Policy</option>
+                      <option value="escalation_decision">Escalation</option>
+                      <option value="clarity">Clarity</option>
+                      <option value="safety_awareness">Safety</option>
+                      <option value="de_escalation">De-escalation</option>
+                      <option value="brand_tone">Brand tone</option>
+                    </select>
+                  </label>
+                  <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500 md:col-span-2">
+                    Severity
+                    <select value={manualGapSeverity} onChange={(event) => setManualGapSeverity(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300">
+                      <option value="coaching">Coaching</option>
+                      <option value="critical_training_gap">Critical training gap</option>
+                    </select>
+                  </label>
+                </div>
+                <label className="mt-2 grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  Evidence
+                  <textarea value={manualGapEvidence} onChange={(event) => setManualGapEvidence(event.target.value)} rows={3} className="resize-y rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-semibold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300" />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void createManualTrainingGapTicket()}
+                  disabled={isLoading || !manualGapEvidence.trim()}
+                  className="mt-3 w-full rounded border border-amber-300 bg-amber-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-amber-200 disabled:opacity-50"
+                >
+                  Create training gap
+                </button>
+              </div>
+            </div>
+
             <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_340px]">
               <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
                 {(productLearning?.product_learning_signals ?? []).slice(0, 6).map((signal) => (
@@ -1420,6 +1509,13 @@ export function StaffTrainingPage() {
                 <div className="text-[10px] font-black uppercase tracking-widest text-emerald-300">Debrief</div>
                 <div className={`mt-2 text-2xl font-black ${session.debrief.result === "pass" ? "text-emerald-200" : "text-amber-200"}`}>{session.debrief.result?.replaceAll("_", " ")}</div>
                 <p className="mt-2 text-sm font-semibold leading-relaxed text-slate-300">{session.debrief.summary}</p>
+                {session.training_gap_ticket && (
+                  <div className="mt-3 rounded border border-slate-800 bg-slate-950 p-3 text-xs font-semibold leading-relaxed text-slate-400">
+                    <div className="text-[10px] font-black uppercase tracking-widest text-amber-300">Training gap ticket</div>
+                    <div className="mt-1 text-slate-200">{session.training_gap_ticket.status === "created" ? session.training_gap_ticket.ticket?.id : label(session.training_gap_ticket.status)}</div>
+                    <div className="mt-1">{session.training_gap_ticket.ticket?.boundary ?? "Passed sessions without open gaps do not create training tickets."}</div>
+                  </div>
+                )}
                 {session.debrief.recommended_retry && (
                   <button
                     type="button"

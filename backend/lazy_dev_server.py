@@ -36,7 +36,7 @@ class LazyThreadingHTTPServer(ThreadingHTTPServer):
 
 
 class LazyAsgiHandler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
+    protocol_version = "HTTP/1.0"
 
     def setup(self) -> None:
         super().setup()
@@ -59,6 +59,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
         print(f"{self.address_string()} - {format % args}")
 
     def _run_asgi(self) -> None:
+        self.close_connection = True
         parsed = urlsplit(self.path)
         try:
             body = self.rfile.read(int(self.headers.get("content-length", "0") or 0))
@@ -102,10 +103,11 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                     self.send_response(int(response["status"]))
                     for key, value in response["headers"]:
                         header = key.decode("latin-1") if isinstance(key, bytes) else str(key)
-                        if header.lower() == "content-length":
+                        if header.lower() in {"content-length", "connection"}:
                             continue
                         header_value = value.decode("latin-1") if isinstance(value, bytes) else str(value)
                         self.send_header(header, header_value)
+                    self.send_header("connection", "close")
                     self.end_headers()
                     stream_started = True
             elif message["type"] == "http.response.body":
@@ -159,12 +161,15 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             sent_content_length = False
             for key, value in response["headers"]:
                 header = key.decode("latin-1") if isinstance(key, bytes) else str(key)
+                if header.lower() == "connection":
+                    continue
                 header_value = value.decode("latin-1") if isinstance(value, bytes) else str(value)
                 if header.lower() == "content-length":
                     sent_content_length = True
                 self.send_header(header, header_value)
             if not sent_content_length:
                 self.send_header("content-length", str(len(body_bytes)))
+            self.send_header("connection", "close")
             self.end_headers()
             self.wfile.write(body_bytes)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
@@ -177,6 +182,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             self.send_header("content-type", "application/json")
             self.send_header("cache-control", "no-store")
             self.send_header("access-control-allow-origin", "*")
+            self.send_header("connection", "close")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -191,6 +197,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             self.send_header("access-control-allow-methods", "GET,POST,PUT,OPTIONS")
             self.send_header("access-control-allow-headers", "authorization,content-type,x-parkpulse-role,x-parkpulse-role-token")
             self.send_header("access-control-max-age", "600")
+            self.send_header("connection", "close")
             self.send_header("content-length", "0")
             self.end_headers()
             return True

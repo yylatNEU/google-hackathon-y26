@@ -309,12 +309,12 @@ public class PythonFallbackProxyService {
     private int resolveTimeoutMs(Environment environment) {
         String raw = environment.getProperty("PARKPULSE_PYTHON_BACKEND_TIMEOUT_MS");
         if (raw == null || raw.isBlank()) {
-            raw = environment.getProperty("parkpulse.python-backend-timeout-ms", "25000");
+            raw = environment.getProperty("parkpulse.python-backend-timeout-ms", "2500");
         }
         try {
             return Math.max(500, Integer.parseInt(raw));
         } catch (NumberFormatException error) {
-            return 25000;
+            return 2500;
         }
     }
 

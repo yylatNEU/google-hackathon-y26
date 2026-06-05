@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -260,6 +261,54 @@ def _latest_studio_memory(collection: str, limit: int) -> list[dict[str, Any]]:
         return []
 
 
+def _active_learning_rules(template_id: str, audience: str, channel_targets: list[str] | None = None, limit: int = 12) -> list[dict[str, Any]]:
+    channel_set = {str(item) for item in (channel_targets or []) if str(item).strip()}
+    rows = _latest_studio_memory("experience_studio_learning_rules", max(limit * 3, 20))
+    active: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("approvalStatus") or "") != "approved":
+            continue
+        scope = row.get("scope") if isinstance(row.get("scope"), dict) else {}
+        row_template = str(scope.get("templateId") or row.get("templateId") or "")
+        if row_template and row_template != template_id:
+            continue
+        rule_channels = {str(item) for item in _as_text_list(scope.get("channels") or row.get("channels"))}
+        if rule_channels and channel_set and not rule_channels.intersection(channel_set):
+            continue
+        active.append(
+            {
+                "id": row.get("id") or row.get("_id"),
+                "rule": row.get("rule"),
+                "lesson": row.get("lesson"),
+                "sourceDraftId": row.get("sourceDraftId"),
+                "templateId": row_template or template_id,
+                "audience": scope.get("audience") or audience,
+                "channels": sorted(rule_channels),
+                "tags": _as_text_list(row.get("tags")),
+                "guardrails": _as_text_list(row.get("guardrails")),
+                "promotedBy": row.get("promotedBy"),
+                "updatedAt": row.get("updatedAt"),
+            }
+        )
+    return active[: max(1, min(limit, 50))]
+
+
+def _learning_rule_context(template_id: str, audience: str, channel_targets: list[str] | None = None) -> dict[str, Any]:
+    rules = _active_learning_rules(template_id, audience, channel_targets)
+    return {
+        "status": "ready" if rules else "no_approved_rules",
+        "mode": "human_approved_learning_rules_v1",
+        "source": "experience_studio_learning_rules",
+        "ruleCount": len(rules),
+        "rules": rules,
+        "appliedRules": [str(rule.get("rule")) for rule in rules if rule.get("rule")],
+        "guardrails": list(dict.fromkeys(guardrail for rule in rules for guardrail in _as_text_list(rule.get("guardrails")))),
+        "learningBoundary": "Rules are human-promoted from finished work and can shape generation, but they cannot override Venue Profile facts, route locks, banned claims, or review gates.",
+    }
+
+
 def _studio_memory_count(collection: str) -> int:
     try:
         from mongo_memory import get_memory_collection_count
@@ -468,6 +517,148 @@ def get_experience_studio_draft(draft_id: str) -> dict[str, Any]:
             if str(record.get("id")) == draft_id:
                 return {"status": "ready", "mode": "experience_studio_saved_draft", "draftRecord": record, "summary": _compact_record(record)}
     return {"status": "not_found", "message": f"Draft {draft_id} was not found."}
+
+
+def list_experience_studio_learning_rules(limit: int = 30) -> dict[str, Any]:
+    rows = _latest_studio_memory("experience_studio_learning_rules", max(1, min(limit, 100)))
+    return {
+        "status": "ready",
+        "mode": "experience_studio_learning_rules",
+        "rules": rows,
+        "count": len(rows),
+        "learningPolicy": _memory_learning_policy(),
+    }
+
+
+def _promotable_rule_candidates(record: dict[str, Any]) -> list[dict[str, Any]]:
+    draft = record.get("draft") if isinstance(record.get("draft"), dict) else {}
+    package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
+    synthesis = draft.get("creativeSynthesis") if isinstance(draft.get("creativeSynthesis"), dict) else package.get("creativeSynthesis") if isinstance(package.get("creativeSynthesis"), dict) else {}
+    concept_name = str(synthesis.get("selectedConceptName") or (package.get("executiveConcept") or {}).get("name") or draft.get("title") or "approved concept")
+    venue_pattern = package.get("venuePattern") if isinstance(package.get("venuePattern"), dict) else {}
+    production = package.get("productionDetail") if isinstance(package.get("productionDetail"), dict) else {}
+    memory = package.get("memoryInfluence") if isinstance(package.get("memoryInfluence"), dict) else {}
+    must_include = _as_text_list(venue_pattern.get("mustInclude"))
+    checklist = _as_text_list(production.get("contentCompletenessChecklist"))
+    reusable = _as_text_list(memory.get("reusablePatterns"))
+    return [
+        {
+            "id": "concept_continuity",
+            "label": "Concept continuity",
+            "rule": f"For {record.get('templateId')}, keep a named concept such as {concept_name} visible across final package, app, email, signage, and staff cue.",
+            "lesson": "Finished packages are easier to review when the same named concept anchors every artifact.",
+            "tags": ["concept", "channel_consistency"],
+            "guardrails": ["selected concept identity can guide copy but cannot override route locks or Venue Profile facts"],
+        },
+        {
+            "id": "route_requirements",
+            "label": "Route requirements",
+            "rule": f"For {record.get('templateId')}, include {', '.join(must_include[:4]) or 'explicit opt-out, current-options caveat, and owner review gates'} before a package is considered complete.",
+            "lesson": "Finished routes need concrete proof points, not just story copy.",
+            "tags": ["route", "review_readiness"],
+            "guardrails": ["must-include items are review requirements, not live operational claims"],
+        },
+        {
+            "id": "complete_package_shape",
+            "label": "Complete package shape",
+            "rule": f"For {record.get('templateId')}, generate a complete package checklist: {', '.join(checklist[:8]) or 'concept, journey, channels, accessibility, owner questions, memory receipt'}.",
+            "lesson": "Experience Studio outputs improve when every section has a job, review gate, and owner-facing artifact.",
+            "tags": ["package_completeness", "owner_review"],
+            "guardrails": ["completion checklist does not mean publish readiness"],
+        },
+        {
+            "id": "finished_memory_use",
+            "label": "Finished memory use",
+            "rule": reusable[0] if reusable else f"For {record.get('templateId')}, compare against approved finished packages before writing new copy.",
+            "lesson": "Finished-work memory improves continuity without treating raw feedback as training data.",
+            "tags": ["memory", "continuity"],
+            "guardrails": ["only approved or ready_for_publish work can influence generation"],
+        },
+    ]
+
+
+def promote_experience_studio_learning_rule(draft_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    requested_rule_id = str(payload.get("candidateId") or payload.get("ruleId") or "complete_package_shape")
+    with _STORE_LOCK:
+        record = next((item for item in _read_records() if isinstance(item, dict) and str(item.get("id")) == draft_id), None)
+    if not record:
+        return {"status": "not_found", "message": f"Draft {draft_id} was not found."}
+    current_status = str(record.get("status") or "draft")
+    if current_status not in FINISHED_WORK_STATUSES:
+        return {
+            "status": "blocked",
+            "message": "Only approved or ready_for_publish drafts can promote reusable Experience Studio rules.",
+            "currentDraftStatus": current_status,
+            "requiredStatuses": sorted(FINISHED_WORK_STATUSES),
+        }
+    candidates = _promotable_rule_candidates(record)
+    candidate = next((item for item in candidates if item["id"] == requested_rule_id), candidates[0])
+    draft = record.get("draft") if isinstance(record.get("draft"), dict) else {}
+    package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
+    channel_matrix = package.get("channelMatrix") if isinstance(package.get("channelMatrix"), list) else []
+    channels = [str(item.get("channel")) for item in channel_matrix if isinstance(item, dict) and item.get("channel")]
+    now = _now_iso()
+    candidate_id = str(candidate["id"])
+    rule_hash = hashlib.sha1(f"{draft_id}:{candidate_id}".encode("utf-8")).hexdigest()[:10]
+    rule_id = f"exp_rule_{record.get('templateId')}_{candidate_id}_{rule_hash}"
+    rule = {
+        "_id": rule_id,
+        "id": rule_id,
+        "eventType": "learning_rule_promoted",
+        "approvalStatus": "approved",
+        "rule": str(payload.get("rule") or candidate["rule"]),
+        "lesson": str(payload.get("lesson") or candidate["lesson"]),
+        "sourceDraftId": draft_id,
+        "sourceDraftStatus": current_status,
+        "templateId": record.get("templateId"),
+        "scope": {
+            "templateId": record.get("templateId"),
+            "audience": draft.get("audience"),
+            "channels": channels,
+        },
+        "tags": _as_text_list(payload.get("tags")) or candidate["tags"],
+        "guardrails": _as_text_list(payload.get("guardrails")) or candidate["guardrails"],
+        "promotedBy": payload.get("actor") or "experience_reviewer",
+        "promotionNote": _text(payload.get("note"), "Promoted from approved finished Experience Studio package."),
+        "createdAt": now,
+        "updatedAt": now,
+        "learningEligible": False,
+        "learningSource": "human_promoted_finished_work_rule",
+        "learningPolicy": _memory_learning_policy(),
+        "reversible": True,
+    }
+    memory = _record_studio_memory("experience_studio_learning_rules", rule)
+    return {
+        "status": "promoted",
+        "mode": "experience_studio_learning_rule_promotion",
+        "rule": rule,
+        "candidate": candidate,
+        "availableCandidates": candidates,
+        "memoryPersistence": memory,
+    }
+
+
+def update_experience_studio_learning_rule(rule_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    next_status = str(payload.get("approvalStatus") or payload.get("status") or "demoted").strip().lower()
+    if next_status not in {"approved", "demoted", "archived"}:
+        return {"status": "invalid_status", "allowedStatuses": ["approved", "demoted", "archived"]}
+    existing = next((row for row in _latest_studio_memory("experience_studio_learning_rules", 100) if str(row.get("id") or row.get("_id")) == rule_id), None)
+    if not existing:
+        return {"status": "not_found", "message": f"Learning rule {rule_id} was not found."}
+    updated = {
+        **existing,
+        "_id": rule_id,
+        "id": rule_id,
+        "approvalStatus": next_status,
+        "updatedAt": _now_iso(),
+        "reviewedBy": payload.get("actor") or "experience_reviewer",
+        "reviewNote": _text(payload.get("note"), f"Rule moved to {next_status}."),
+        "learningEligible": False,
+        "learningSource": "human_rule_review_receipt",
+        "learningPolicy": _memory_learning_policy(),
+    }
+    memory = _record_studio_memory("experience_studio_learning_rules", updated)
+    return {"status": "updated", "mode": "experience_studio_learning_rule_review", "rule": updated, "memoryPersistence": memory}
 
 
 def list_experience_studio_handoffs(limit: int = 30) -> dict[str, Any]:
@@ -2761,6 +2952,43 @@ def _creative_synthesis_layer(template_id: str, route: list[dict[str, Any]], mes
     }
 
 
+def _apply_learning_rules_to_synthesis(synthesis: dict[str, Any], learning_context: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(synthesis, dict) or not isinstance(learning_context, dict):
+        return synthesis
+    rules = learning_context.get("rules") if isinstance(learning_context.get("rules"), list) else []
+    if not rules:
+        return synthesis
+    result = json.loads(json.dumps(synthesis, default=str))
+    rewrite = result.get("rewriteStrategy") if isinstance(result.get("rewriteStrategy"), dict) else {}
+    preserve = _as_text_list(rewrite.get("preserve"))
+    use_more = _as_text_list(rewrite.get("useMoreOf"))
+    avoid = _as_text_list(rewrite.get("avoid"))
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        tags = set(_as_text_list(rule.get("tags")))
+        text = str(rule.get("rule") or "").strip()
+        if not text:
+            continue
+        if {"package_completeness", "owner_review", "route", "review_readiness"}.intersection(tags):
+            preserve.append(text)
+        elif {"concept", "channel_consistency", "memory", "continuity"}.intersection(tags):
+            use_more.append(text)
+        guardrails = _as_text_list(rule.get("guardrails"))
+        avoid.extend(guardrails)
+    rewrite["preserve"] = list(dict.fromkeys(preserve))[:8]
+    rewrite["useMoreOf"] = list(dict.fromkeys(use_more))[:8]
+    rewrite["avoid"] = list(dict.fromkeys(avoid))[:8]
+    result["rewriteStrategy"] = rewrite
+    result["learningRuleInfluence"] = {
+        "status": "applied",
+        "ruleCount": len(rules),
+        "rules": [{"id": rule.get("id"), "rule": rule.get("rule"), "tags": rule.get("tags", [])} for rule in rules if isinstance(rule, dict)],
+        "boundary": learning_context.get("learningBoundary"),
+    }
+    return result
+
+
 def _finished_work_memory_context(template_id: str, audience: str, limit: int = 3) -> dict[str, Any]:
     records = _read_records()
     matches: list[dict[str, Any]] = []
@@ -2909,7 +3137,7 @@ def _channel_matrix(messages: list[dict[str, Any]], copy_variants: dict[str, Any
     ]
 
 
-def _section_dossiers(route: list[dict[str, Any]], template: dict[str, Any], selected_name: str, selected_promise: str, route_pattern: dict[str, Any], memory_context: dict[str, Any], quality_gaps: list[str]) -> list[dict[str, Any]]:
+def _section_dossiers(route: list[dict[str, Any]], template: dict[str, Any], selected_name: str, selected_promise: str, route_pattern: dict[str, Any], memory_context: dict[str, Any], learning_context: dict[str, Any], quality_gaps: list[str]) -> list[dict[str, Any]]:
     return [
         {
             "section": "concept",
@@ -2958,10 +3186,16 @@ def _section_dossiers(route: list[dict[str, Any]], template: dict[str, Any], sel
             "details": memory_context.get("reusablePatterns", []) if memory_context.get("status") == "ready" else ["No approved finished pattern is available yet."],
             "reviewGate": "Memory can suggest reusable patterns, but the current Venue Profile and review gates stay authoritative.",
         },
+        {
+            "section": "approved rules",
+            "purpose": "Apply human-promoted reusable rules before LLM polish.",
+            "details": learning_context.get("appliedRules", []) if learning_context.get("status") == "ready" else ["No approved promoted rules are active yet."],
+            "reviewGate": "Rules are reversible and cannot override profile facts, banned claims, route locks, or publish review.",
+        },
     ]
 
 
-def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]], template_id: str, template: dict[str, Any], audience: str, tone: str, constraints: str, creative_brief: dict[str, str], real_inputs: dict[str, Any], intelligence: dict[str, Any], quality_gaps: list[str], experience_reasoning: dict[str, Any] | None = None, creative_synthesis: dict[str, Any] | None = None, memory_context: dict[str, Any] | None = None) -> dict[str, Any]:
+def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]], template_id: str, template: dict[str, Any], audience: str, tone: str, constraints: str, creative_brief: dict[str, str], real_inputs: dict[str, Any], intelligence: dict[str, Any], quality_gaps: list[str], experience_reasoning: dict[str, Any] | None = None, creative_synthesis: dict[str, Any] | None = None, memory_context: dict[str, Any] | None = None, learning_context: dict[str, Any] | None = None) -> dict[str, Any]:
     venue = real_inputs.get("venueIdentity", {}) if isinstance(real_inputs.get("venueIdentity"), dict) else {}
     venue_name = _text(venue.get("name"), "the venue")
     route_names = [str(item.get("stop") or "") for item in route if isinstance(item, dict)]
@@ -2996,6 +3230,7 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
     staff_variant = copy_variants.get("staffCue") if isinstance(copy_variants.get("staffCue"), dict) else {}
     signage_variant = copy_variants.get("signage") if isinstance(copy_variants.get("signage"), list) else []
     finished_memory = memory_context if isinstance(memory_context, dict) else _finished_work_memory_context(template_id, audience)
+    approved_rules = learning_context if isinstance(learning_context, dict) else _learning_rule_context(template_id, audience, planning_channel_targets if (planning_channel_targets := (synthesis.get("channelTargets") if isinstance(synthesis.get("channelTargets"), list) else None)) else None)
     route_blueprint = _route_blueprint(route, creative_brief, route_pattern)
     channel_matrix = _channel_matrix(messages, copy_variants, channel_owners, channel_rules)
     owner_questions = [
@@ -3038,7 +3273,7 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
             {"beat": "Care", "detail": f"Keep sensory level {creative_brief.get('sensoryLevel')} and pace {creative_brief.get('walkingPace')} unless owner review changes it."},
             {"beat": "Close", "detail": f"End at {final_stop} with channel-owner next steps, not operational promises."},
         ],
-        "sectionDossiers": _section_dossiers(route, template, selected_name, selected_promise or f"Guests get a clear {optional_phrase}.", route_pattern, finished_memory, quality_gaps),
+        "sectionDossiers": _section_dossiers(route, template, selected_name, selected_promise or f"Guests get a clear {optional_phrase}.", route_pattern, finished_memory, approved_rules, quality_gaps),
         "channelMatrix": channel_matrix,
         "staffScript": {
             "openingLine": staff_variant.get("opening") or f"Welcome. This {str(template.get('shortLabel', 'route')).lower()} option is designed to keep the visit comfortable and flexible.",
@@ -3088,18 +3323,19 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
                 "Every route step is framed as an option, not a required instruction.",
                 "Current availability, weather exposure, crowd level, seating, and staffing stay outside the LLM's authority.",
             ],
-            "contentCompletenessChecklist": [
-                "named concept",
-                "guest promise",
-                "route storyboard",
+                "contentCompletenessChecklist": [
+                    "named concept",
+                    "guest promise",
+                    "route storyboard",
                 "app copy",
                 "signage set",
                 "pre-arrival email",
                 "staff cue",
                 "accessibility review packet",
                 "owner questions",
-                "memory influence receipt",
-            ],
+                    "memory influence receipt",
+                    "approved rule receipt",
+                ],
             "measurementPlan": [
                 {"metric": "comfort", "signal": "guest-care edits, route completion, confusion reports", "learningUse": "aggregate review context only"},
                 {"metric": "clarity", "signal": "channel-owner edits and guest app tap-through", "learningUse": "finished-work pattern after approval"},
@@ -3141,6 +3377,11 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
             **finished_memory,
             "usedForGeneration": finished_memory.get("status") == "ready",
             "authority": "retrieval_context_only",
+        },
+        "approvedRuleInfluence": {
+            **approved_rules,
+            "usedForGeneration": approved_rules.get("status") == "ready",
+            "authority": "human_promoted_rules_only",
         },
         "designReasoning": experience_reasoning or {},
         "creativeSynthesis": synthesis,
@@ -3194,6 +3435,17 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
     experience_reasoning = _experience_reasoning_layer(template_id, route_names, route, creative_brief, real_inputs, intelligence)
     planning_profile = payload.get("planningProfile") if isinstance(payload.get("planningProfile"), dict) else {}
     creative_synthesis = _creative_synthesis_layer(template_id, route, messages, audience, creative_brief, real_inputs, intelligence, experience_reasoning, planning_profile)
+    channel_targets = planning_profile.get("channelTargets") if isinstance(planning_profile.get("channelTargets"), list) else []
+    learning_context = _learning_rule_context(template_id, audience, channel_targets) if payload.get("useApprovedLearningRules", True) is not False else {
+        "status": "disabled",
+        "mode": "human_approved_learning_rules_v1",
+        "ruleCount": 0,
+        "rules": [],
+        "appliedRules": [],
+        "guardrails": [],
+        "learningBoundary": "Approved learning rules were disabled for this generation.",
+    }
+    creative_synthesis = _apply_learning_rules_to_synthesis(creative_synthesis, learning_context)
     memory_context = _finished_work_memory_context(template_id, audience) if payload.get("useExperienceMemory", True) is not False else {
         "status": "disabled",
         "mode": "finished_work_pattern_memory_v1",
@@ -3202,7 +3454,7 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
         "avoidPatterns": ["Experience memory disabled by request."],
         "learningBoundary": "Memory retrieval was disabled for this generation.",
     }
-    creative_package = _creative_package(route, messages, template_id, template, audience, tone, constraints, creative_brief, real_inputs, intelligence, quality_gaps, experience_reasoning, creative_synthesis, memory_context)
+    creative_package = _creative_package(route, messages, template_id, template, audience, tone, constraints, creative_brief, real_inputs, intelligence, quality_gaps, experience_reasoning, creative_synthesis, memory_context, learning_context)
     draft = {
         "title": template["label"],
         "audience": audience,
@@ -3219,6 +3471,7 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
         "creativeSynthesis": creative_synthesis,
         "creativePackage": creative_package,
         "finishedWorkMemory": memory_context,
+        "approvedLearningRules": learning_context,
         "review": [
             {"label": "Brand fit", "status": "clear", "detail": f"Tone is {tone}; creative review should confirm seasonal brand fit."},
             {"label": "Safety risk", "status": "review" if template_id in {"safety-signage", "rainy-day"} else "clear", "detail": "Movement, shelter, height-rule, or ride-behavior copy needs operations review before publishing."},

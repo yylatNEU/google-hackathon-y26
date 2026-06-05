@@ -256,7 +256,10 @@ def test_generation_uses_approved_finished_work_memory_without_feedback_loop(mon
     assert memory["matchedExamples"][0]["selectedConceptName"]
     assert package_memory["usedForGeneration"] is True
     assert package_memory["authority"] == "retrieval_context_only"
-    assert second["creativePackage"]["sectionDossiers"][-1]["section"] == "memory"
+    assert any(
+        dossier.get("section") == "memory"
+        for dossier in second["creativePackage"]["sectionDossiers"]
+    )
     assert second["creativePackage"]["productionDetail"]["measurementPlan"][1]["learningUse"] == "finished-work pattern after approval"
     assert second["studioCore"]["id"] == "parkpulse_experience_studio_core_v1"
 

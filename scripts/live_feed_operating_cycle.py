@@ -240,6 +240,170 @@ def _scenario_key_from_issue_kind(kind: Any) -> str | None:
     return None
 
 
+ISSUE_ACTION_EXPECTATIONS = {
+    "energy_spike": {
+        "departments": {"maintenance", "safety", "operations"},
+        "tools": {"create_work_order", "require_human_approval", "generate_compliance_note"},
+        "sources": {"operator_signal", "weather", "ride_ops"},
+        "reason": "Energy events should produce maintenance/safety/operator mitigation, not only commerce demand shaping.",
+    },
+    "sensor_anomaly": {
+        "departments": {"maintenance", "safety", "operations"},
+        "tools": {"create_work_order", "require_human_approval", "generate_compliance_note"},
+        "sources": {"ride_ops", "operator_signal", "weather"},
+        "reason": "Sensor events should keep maintenance and safety in the active decision path.",
+    },
+    "water_leak": {
+        "departments": {"maintenance", "safety", "security"},
+        "tools": {"create_work_order", "require_human_approval", "zone_control_recommendation"},
+        "sources": {"operator_signal", "guest_flow", "weather"},
+        "reason": "Facility incidents need maintenance/safety handling before commerce actions matter.",
+    },
+    "restroom_closure": {
+        "departments": {"guest_experience", "maintenance", "operations"},
+        "tools": {"draft_guest_message", "create_work_order", "recommend_route_change"},
+        "sources": {"operator_signal", "guest_flow", "ride_ops"},
+        "reason": "Guest-service closures should focus on service recovery, facilities, and guest flow.",
+    },
+    "radio_dead_zone": {
+        "departments": {"security", "maintenance", "operations"},
+        "tools": {"zone_control_recommendation", "create_work_order", "require_human_approval"},
+        "sources": {"operator_signal", "guest_flow", "ride_ops"},
+        "reason": "Communication incidents should involve security/maintenance continuity controls.",
+    },
+    "access_lane_block": {
+        "departments": {"security", "operations", "safety"},
+        "tools": {"zone_control_recommendation", "recommend_route_change", "require_human_approval"},
+        "sources": {"operator_signal", "guest_flow", "ride_ops"},
+        "reason": "Access-lane events should prioritize security, safety, and operational access control.",
+    },
+    "security_perimeter": {
+        "departments": {"security", "safety", "operations"},
+        "tools": {"zone_control_recommendation", "require_human_approval", "recommend_route_change"},
+        "sources": {"operator_signal", "guest_flow", "ride_ops"},
+        "reason": "Security perimeter events should stay inside security/safety approval paths.",
+    },
+    "ticketing_gate_surge": {
+        "departments": {"operations", "security", "guest_experience"},
+        "tools": {"recommend_route_change", "zone_control_recommendation", "draft_guest_message"},
+        "sources": {"guest_flow", "operator_signal", "ride_ops"},
+        "reason": "Gate surge events should focus on front-gate flow, communication, and security review.",
+    },
+    "parking_arrival_wave": {
+        "departments": {"operations", "security", "guest_experience"},
+        "tools": {"recommend_route_change", "zone_control_recommendation", "draft_guest_message"},
+        "sources": {"guest_flow", "operator_signal", "ride_ops"},
+        "reason": "Parking waves should drive arrival-flow and access-control tradeoffs.",
+    },
+    "parade_route_conflict": {
+        "departments": {"operations", "security", "safety"},
+        "tools": {"recommend_route_change", "zone_control_recommendation", "require_human_approval"},
+        "sources": {"guest_flow", "operator_signal", "ride_ops"},
+        "reason": "Parade conflicts should be resolved by operations/security/safety routing authority.",
+    },
+}
+
+
+def _action_rows_from_executor(executor: dict[str, Any]) -> tuple[set[str], set[str], set[str], set[str]]:
+    receipts = executor.get("receipts", []) if isinstance(executor.get("receipts"), list) else []
+    executed_departments: set[str] = set()
+    executed_tools: set[str] = set()
+    held_departments: set[str] = set()
+    held_tools: set[str] = set()
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            continue
+        department = str(receipt.get("department") or "")
+        tool = str(receipt.get("source_tool") or "")
+        result = receipt.get("result", {}) if isinstance(receipt.get("result"), dict) else {}
+        if result.get("status") == "executed_controlled":
+            if department:
+                executed_departments.add(department)
+            if tool:
+                executed_tools.add(tool)
+        elif result.get("status") == "held":
+            if department:
+                held_departments.add(department)
+            if tool:
+                held_tools.add(tool)
+    return executed_departments, executed_tools, held_departments, held_tools
+
+
+def _issue_action_alignment(
+    issue_event: dict[str, Any],
+    live_case: dict[str, Any],
+    executor: dict[str, Any],
+    proposals: dict[str, Any],
+) -> dict[str, Any]:
+    issue_kind = str(issue_event.get("kind") or "")
+    expected = ISSUE_ACTION_EXPECTATIONS.get(issue_kind)
+    evidence_rows = live_case.get("evidence", []) if isinstance(live_case.get("evidence"), list) else []
+    evidence_sources = {str(row.get("source")) for row in evidence_rows if isinstance(row, dict) and row.get("source")}
+    executed_departments, executed_tools, held_departments, held_tools = _action_rows_from_executor(executor)
+    proposal_rows = proposals.get("proposals", []) if isinstance(proposals.get("proposals"), list) else []
+    proposal_departments = {str(row.get("department")) for row in proposal_rows if isinstance(row, dict) and row.get("department")}
+    proposal_tools = {
+        str((row.get("proposal_envelope", {}) if isinstance(row.get("proposal_envelope"), dict) else {}).get("requested_tool") or row.get("requested_tool"))
+        for row in proposal_rows
+        if isinstance(row, dict)
+    }
+    if not expected:
+        return {
+            "status": "unknown_issue_expectation",
+            "issue_kind": issue_kind,
+            "lead_source": live_case.get("lead_source"),
+            "lead_signal_type": live_case.get("lead_signal_type"),
+            "reason": "No issue/action expectation is registered for this issue kind.",
+            "template_risk": "unclassified",
+        }
+    expected_departments = set(expected.get("departments", set()))
+    expected_tools = set(expected.get("tools", set()))
+    expected_sources = set(expected.get("sources", set()))
+    executed_match = bool(executed_departments & expected_departments or executed_tools & expected_tools)
+    held_match = bool(held_departments & expected_departments or held_tools & expected_tools)
+    proposal_match = bool(proposal_departments & expected_departments or proposal_tools & expected_tools)
+    source_match = bool(evidence_sources & expected_sources)
+    lead_match = str(live_case.get("lead_source") or "") in expected_sources
+    if executed_match:
+        status = "aligned_executed"
+    elif held_match and proposal_match:
+        status = "issue_aligned_but_executed_substitute_only"
+    elif proposal_match and source_match:
+        status = "partially_aligned_template_risk"
+    else:
+        status = "mismatched_template_risk"
+    return {
+        "status": status,
+        "issue_kind": issue_kind,
+        "expected_departments": sorted(expected_departments),
+        "expected_tools": sorted(expected_tools),
+        "expected_sources": sorted(expected_sources),
+        "executed_departments": sorted(executed_departments),
+        "executed_tools": sorted(executed_tools),
+        "held_departments": sorted(held_departments),
+        "held_tools": sorted(held_tools),
+        "proposal_departments": sorted(proposal_departments),
+        "proposal_tools": sorted(tool for tool in proposal_tools if tool),
+        "evidence_sources": sorted(evidence_sources),
+        "lead_source": live_case.get("lead_source"),
+        "lead_signal_type": live_case.get("lead_signal_type"),
+        "lead_match": lead_match,
+        "executed_match": executed_match,
+        "held_match": held_match,
+        "proposal_match": proposal_match,
+        "source_match": source_match,
+        "template_risk": "high" if status == "mismatched_template_risk" else "medium" if status in {"partially_aligned_template_risk", "issue_aligned_but_executed_substitute_only"} else "low",
+        "reason": expected.get("reason"),
+        "verdict": (
+            "The negotiation is mostly template-driven against the current lead feed; do not treat this as a strong issue-specific decision."
+            if status in {"mismatched_template_risk", "partially_aligned_template_risk"}
+            else "The issue-specific action family appeared only as held/review work. Executed bounded actions are safe substitutes, not direct issue resolution."
+            if status == "issue_aligned_but_executed_substitute_only"
+            else "The issue has an aligned proposal or execution path, with policy boundaries still respected."
+        ),
+    }
+
+
 DIVERSITY_EVENT_CATALOG = [
     {"kind": "ride_failure", "target_id": "dragonCoaster", "intensity": 84, "domain": "ride_ops"},
     {"kind": "demand_spike", "target_id": "mainStreet", "intensity": 82, "domain": "guest_flow"},
@@ -342,9 +506,17 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
         accepted_departments = []
     if not isinstance(held_departments, list):
         held_departments = []
+    issue_alignment = _issue_action_alignment(issue_event, live_case, executor, proposals)
+    base_status = "passed" if payload.get("status") == "complete" and closure.get("status") == "closed_loop_materialized" else "review"
+    status = (
+        "review"
+        if issue_alignment.get("status") in {"mismatched_template_risk", "partially_aligned_template_risk", "issue_aligned_but_executed_substitute_only"}
+        else base_status
+    )
     return {
         "cycle": cycle_index,
-        "status": "passed" if payload.get("status") == "complete" and closure.get("status") == "closed_loop_materialized" else "review",
+        "status": status,
+        "base_status": base_status,
         "issue": {
             "status": injected_issue.get("status"),
             "selection_mode": injected_issue.get("selection_mode"),
@@ -356,6 +528,7 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
             "visibility": issue_event.get("visibility"),
             "signal_reliability_pct": issue_event.get("signalReliabilityPct"),
         },
+        "issue_action_alignment": issue_alignment,
         "live_feed": {
             "lead_source": live_case.get("lead_source"),
             "lead_signal_type": live_case.get("lead_signal_type"),
@@ -1230,6 +1403,12 @@ def _aggregate_report(cycles: list[dict[str, Any]], actual_training: dict[str, A
     held = sum(_safe_int(summary.get("actions", {}).get("held_count")) for summary in summaries if isinstance(summary.get("actions"), dict))
     unresolved = sum(_safe_int(summary.get("actions", {}).get("unresolved_without_owner_count")) for summary in summaries if isinstance(summary.get("actions"), dict))
     active_followups = sum(_safe_int(summary.get("actions", {}).get("active_follow_up_count")) for summary in summaries if isinstance(summary.get("actions"), dict))
+    template_mismatches = sum(
+        1
+        for summary in summaries
+        if (summary.get("issue_action_alignment", {}) if isinstance(summary.get("issue_action_alignment"), dict) else {}).get("status")
+        in {"mismatched_template_risk", "partially_aligned_template_risk", "issue_aligned_but_executed_substitute_only"}
+    )
     memory_growth = {
         "outcome_ids_written": outcome_ids,
         "unique_outcome_id_count": len(set(outcome_ids)),
@@ -1246,7 +1425,7 @@ def _aggregate_report(cycles: list[dict[str, Any]], actual_training: dict[str, A
     case_bank_summary = case_bank.get("summary", {}) if isinstance(case_bank.get("summary"), dict) else {}
     quality_gate = case_bank_summary.get("quality_gate", {}) if isinstance(case_bank_summary.get("quality_gate"), dict) else {}
     sustainability_gate = case_bank_summary.get("sustainability_gate", {}) if isinstance(case_bank_summary.get("sustainability_gate"), dict) else {}
-    status = "passed" if summaries and all(summary.get("status") == "passed" for summary in summaries) and unresolved == 0 else "review"
+    status = "passed" if summaries and all(summary.get("status") == "passed" for summary in summaries) and unresolved == 0 and template_mismatches == 0 else "review"
     return {
         "created_at": _now_iso(),
         "started_at": started_at,
@@ -1260,6 +1439,7 @@ def _aggregate_report(cycles: list[dict[str, Any]], actual_training: dict[str, A
             "held_action_count": held,
             "active_follow_up_count": active_followups,
             "unresolved_without_owner_count": unresolved,
+            "issue_action_template_mismatch_count": template_mismatches,
             "training_example_count": training_examples,
             "reward_example_count": reward_examples,
             "case_bank_total_case_count": case_bank_summary.get("total_case_count"),
@@ -1400,6 +1580,7 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
         issue = cycle.get("issue", {}) if isinstance(cycle.get("issue"), dict) else {}
         live_feed = cycle.get("live_feed", {}) if isinstance(cycle.get("live_feed"), dict) else {}
         anti_script = cycle.get("anti_script_proof", {}) if isinstance(cycle.get("anti_script_proof"), dict) else {}
+        alignment = cycle.get("issue_action_alignment", {}) if isinstance(cycle.get("issue_action_alignment"), dict) else {}
         actions = cycle.get("actions", {}) if isinstance(cycle.get("actions"), dict) else {}
         memory = cycle.get("memory", {}) if isinstance(cycle.get("memory"), dict) else {}
         ml_policy = cycle.get("ml_policy", {}) if isinstance(cycle.get("ml_policy"), dict) else {}
@@ -1433,9 +1614,12 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
                 <div><strong>Generated issue</strong><span>{html.escape(str(issue.get('kind')))} at {html.escape(str(issue.get('target_id')))}</span><small>Intensity {html.escape(str(issue.get('intensity')))}, reliability {html.escape(str(issue.get('signal_reliability_pct')))}%</small></div>
                 <div><strong>Agent board</strong><span>{html.escape(str(agents.get('proposal_count')))} proposals, {html.escape(str(agents.get('negotiation_round_count')))} negotiation rounds</span><small>{html.escape(str(agents.get('memory_decision_delta_count')))} memory deltas, {html.escape(str(agents.get('ml_policy_decision_delta_count')))} ML deltas</small></div>
                 <div><strong>Actions</strong><span>{html.escape(str(actions.get('executed_count')))} executed, {html.escape(str(actions.get('held_count')))} held</span><small>{html.escape(str(actions.get('active_follow_up_count')))} active follow-ups, {html.escape(str(actions.get('unresolved_without_owner_count')))} ownerless</small></div>
-                <div><strong>Learning</strong><span>{html.escape(str(ml_policy.get('scenario_key')))} {html.escape(str(ml_policy.get('slice_decision')))}</span><small>Reward {html.escape(str(ml_policy.get('latest_average_reward')))}, delta {html.escape(str(ml_policy.get('curve_delta')))}</small></div>
+                <div><strong>Issue/action fit</strong><span>{html.escape(str(alignment.get('status') or 'not_checked'))}</span><small>Template risk {html.escape(str(alignment.get('template_risk')))}, lead {html.escape(str(alignment.get('lead_source')))} / {html.escape(str(alignment.get('lead_signal_type')))}</small></div>
               </div>
               <div class="decision">
+                <p><b>Issue/action alignment:</b> {html.escape(str(alignment.get('verdict') or 'not checked'))}</p>
+                <p><b>Expected for issue:</b> departments {html.escape(', '.join(str(x) for x in alignment.get('expected_departments', [])[:6]) or 'unknown')}; tools {html.escape(', '.join(str(x) for x in alignment.get('expected_tools', [])[:6]) or 'unknown')}.</p>
+                <p><b>Actual bounded execution:</b> departments {html.escape(', '.join(str(x) for x in alignment.get('executed_departments', [])[:8]) or 'none')}; tools {html.escape(', '.join(str(x) for x in alignment.get('executed_tools', [])[:8]) or 'none')}. Held/review departments {html.escape(', '.join(str(x) for x in alignment.get('held_departments', [])[:8]) or 'none')}.</p>
                 <p><b>Anti-script proof:</b> scripted_case={html.escape(str(anti_script.get('scripted_case')))}, uses_seed_data={html.escape(str(anti_script.get('uses_seed_data')))}, selection={html.escape(str(anti_script.get('issue_selection_mode')))}, issue_source={html.escape(str(anti_script.get('issue_source')))}, unexpected={html.escape(str(anti_script.get('unexpected')))}.</p>
                 <p><b>Feed proof:</b> {html.escape(str(anti_script.get('live_feed_event_id_count', len(feed_ids))))} persisted feed IDs: {html.escape(', '.join(str(x) for x in feed_ids[:6]) or 'missing from aggregate')}.</p>
                 <p><b>Evidence rows:</b> {html.escape(evidence_text or 'missing from aggregate')}.</p>
@@ -1522,7 +1706,7 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
       <div class="grid four">
         <div><strong>Cycles</strong><span>{html.escape(str(summary.get('passed_cycle_count')))} / {html.escape(str(summary.get('cycle_count')))} passed</span><small>Status {_badge(report.get('status'))}</small></div>
         <div><strong>Actions</strong><span>{html.escape(str(summary.get('executed_action_count')))} executed</span><small>{html.escape(str(summary.get('held_action_count')))} held, {html.escape(str(summary.get('active_follow_up_count')))} active follow-ups</small></div>
-        <div><strong>Memory growth</strong><span>{html.escape(str(memory_growth.get('unique_outcome_id_count')))} outcomes</span><small>Prior count {html.escape(str(memory_growth.get('first_prior_count')))} to {html.escape(str(memory_growth.get('last_prior_count')))}, applied {html.escape(str(memory_growth.get('total_memory_applied_count')))}</small></div>
+        <div><strong>Issue/action fit</strong><span>{html.escape(str(summary.get('issue_action_template_mismatch_count')))} review</span><small>Template mismatch count; these are not strong issue-specific decisions.</small></div>
         <div><strong>Training material</strong><span>{html.escape(str(summary.get('training_example_count')))} examples</span><small>{html.escape(str(summary.get('reward_example_count')))} reward candidates</small></div>
       </div>
     </section>

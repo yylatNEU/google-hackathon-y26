@@ -1076,6 +1076,87 @@
       justify-content: flex-end;
     }
 
+    .agent-result {
+      grid-column: 1 / -1;
+      border: 1px solid rgba(131, 227, 119, .44);
+      background: rgba(131, 227, 119, .065);
+      border-radius: 8px;
+      padding: 14px;
+      min-width: 0;
+    }
+
+    .agent-result-grid {
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .agent-result-main,
+    .agent-result-side {
+      border: 1px solid rgba(255,255,255,.1);
+      background: rgba(5, 10, 13, .72);
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .agent-result-main strong,
+    .agent-result-side strong {
+      display: block;
+      font-size: 15px;
+      line-height: 1.25;
+      margin-bottom: 8px;
+    }
+
+    .agent-result-main p,
+    .agent-result-side p,
+    .agent-result-side li {
+      color: #d8e8de;
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 740;
+    }
+
+    .agent-result-main p {
+      margin: 0;
+    }
+
+    .agent-result-side ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .result-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .result-pill {
+      border: 1px solid rgba(255,255,255,.09);
+      background: rgba(255,255,255,.035);
+      border-radius: 8px;
+      padding: 9px;
+      min-height: 72px;
+    }
+
+    .result-pill span {
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 1000;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+
+    .result-pill strong {
+      display: block;
+      color: var(--ink);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
     @keyframes liveGlow {
       0%, 100% { border-color: rgba(73, 214, 232, .62); }
       50% { border-color: rgba(131, 227, 119, .78); }
@@ -1263,7 +1344,7 @@
       .policy-grid { grid-template-columns: 1fr 1fr; }
       .exchange-body { grid-template-columns: 1fr; }
       .story-grid { grid-template-columns: repeat(2, 1fr); }
-      .passport-flow, .trace-strip, .second-run { grid-template-columns: 1fr; }
+      .passport-flow, .trace-strip, .second-run, .agent-result-grid, .result-strip { grid-template-columns: 1fr; }
     }
 
     @media (max-width: 720px) {
@@ -1353,6 +1434,18 @@
             </div>
             <div id="finalResult" class="final-result"></div>
             <div id="liveTimeline"></div>
+          </section>
+
+          <section class="agent-result">
+            <div class="section-title">
+              <div>
+                <div class="kicker">Useful result to external agent</div>
+                <h3>What the client agent receives after the handshake</h3>
+                <p class="section-note">This card is sourced from the backend `external_agent_result` artifact, not frontend copy.</p>
+              </div>
+              <span id="agentResultBadge" class="badge">waiting</span>
+            </div>
+            <div id="agentResult"></div>
           </section>
 
           <section class="passport-loop">
@@ -2133,6 +2226,63 @@
       return list.slice(0, max).map((item) => titleize(item));
     }
 
+    function externalAgentResult() {
+      return state.lastPayload?.external_agent_result || state.externalClient?.external_agent_result || null;
+    }
+
+    function renderExternalAgentResult() {
+      const result = externalAgentResult();
+      if (!result) {
+        $("agentResultBadge").textContent = "waiting";
+        $("agentResultBadge").className = "badge";
+        $("agentResult").innerHTML = `
+          <div class="agent-result-grid">
+            <article class="agent-result-main">
+              <strong>No external-agent result yet</strong>
+              <p>Run the agent demo to generate the final handoff: message to represented party, final plan, allowed actions, and approval-required actions.</p>
+            </article>
+            <article class="agent-result-side">
+              <strong>Expected artifact</strong>
+              <ul>
+                <li>external_agent_result.final_plan</li>
+                <li>message_to_represented_party</li>
+                <li>immediate_actions_allowed</li>
+                <li>approval_required_actions</li>
+              </ul>
+            </article>
+          </div>`;
+        return;
+      }
+      const plan = passportList(result.final_plan, "no final plan", 6);
+      const allowed = passportList(result.immediate_actions_allowed, "none", 6);
+      const approval = passportList(result.approval_required_actions, "none", 6);
+      const handoffs = passportList(result.handoffs, "none", 5);
+      const next = result.next_passport || {};
+      $("agentResultBadge").textContent = result.verification_status || "issued";
+      $("agentResultBadge").className = result.verification_status === "verified" ? "badge good" : "badge info";
+      $("agentResult").innerHTML = `
+        <div class="agent-result-grid">
+          <article class="agent-result-main">
+            <strong>${safe(result.recipient === "supplier operator" ? "Supplier handoff" : "Guest handoff")}</strong>
+            <p>${safe(result.message_to_represented_party || "No message generated.")}</p>
+          </article>
+          <article class="agent-result-side">
+            <strong>Action boundary</strong>
+            <ul>
+              <li>Allowed now: ${safe(allowed.join(", "))}</li>
+              <li>Needs approval: ${safe(approval.join(", "))}</li>
+              <li>Do not do: ${safe(passportList(result.do_not_do, "none", 5).join(", "))}</li>
+            </ul>
+          </article>
+        </div>
+        <div class="result-strip">
+          <div class="result-pill"><span>Final plan</span><strong>${safe(plan.join(" -> "))}</strong></div>
+          <div class="result-pill"><span>Receipt</span><strong>${safe(result.receipt_id || "not issued")} (${safe(result.verification_status || "pending")})</strong></div>
+          <div class="result-pill"><span>Handoffs</span><strong>${safe(handoffs.join(", "))}</strong></div>
+          <div class="result-pill"><span>Next Passport</span><strong>Level ${safe(next.passport_level || "-")}; ${safe(passportList(next.allowed, "no new actions", 3).join(", "))}</strong></div>
+        </div>`;
+    }
+
     function renderPassportLoop() {
       const evolution = state.lastPayload?.passport_evolution;
       const secondDemo = state.secondRunDemo;
@@ -2775,6 +2925,7 @@ await client.externalClientDemo({ scenario_mode: "${safe(state.selectedScenario)
       renderHeader();
       renderPhases();
       renderLiveExchange();
+      renderExternalAgentResult();
       renderStorySteps();
       renderOutcomeSummary();
       renderScenarioBoard();

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchParkPulseApi, getApiUrls } from "@/lib/api";
 
 type MonitorData = {
@@ -412,13 +412,21 @@ export default function MonitorPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isDeepLoading, setIsDeepLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const workspaceRequestRef = useRef(0);
+  const secondaryRequestRef = useRef(0);
+  const policyDetailRequestRef = useRef(0);
 
   const loadSecondaryEvidence = useCallback(async () => {
+    const requestId = secondaryRequestRef.current + 1;
+    secondaryRequestRef.current = requestId;
     const nextAgentOps = await readJson<AgentOpsLedger>("/api/park/agent-ops-ledger?limit=30", { timeoutMs: 5000 });
+    if (secondaryRequestRef.current !== requestId) return;
     if (nextAgentOps) setAgentOps(nextAgentOps);
   }, []);
 
   const loadWorkspace = useCallback(async (depth: "summary" | "deep" = "summary") => {
+    const requestId = workspaceRequestRef.current + 1;
+    workspaceRequestRef.current = requestId;
     setIsLoading(true);
     setError(null);
     const monitorPath = depth === "deep" ? "/api/park/agent-monitoring/deep" : "/api/park/agent-monitoring";
@@ -429,28 +437,34 @@ export default function MonitorPage() {
         readJson<PolicyDoctrine>("/api/park/policy-doctrine", { timeoutMs: 5000 }),
         readJson<MonitorEvidenceGraph>("/api/park/monitor-evidence?limit=40", { timeoutMs: 8000 }),
       ]);
-      setMonitor(nextMonitor);
-      setCases(nextCases);
-      setPolicyDoctrine(nextPolicyDoctrine);
-      setMonitorEvidence(nextMonitorEvidence);
+      if (workspaceRequestRef.current !== requestId) return;
+      if (nextMonitor) setMonitor(nextMonitor);
+      if (nextCases) setCases(nextCases);
+      if (nextPolicyDoctrine) setPolicyDoctrine(nextPolicyDoctrine);
+      if (nextMonitorEvidence) setMonitorEvidence(nextMonitorEvidence);
       if (!nextMonitor && !nextCases && !nextPolicyDoctrine && !nextMonitorEvidence) setError("Monitor evidence APIs did not return usable payloads.");
       void loadSecondaryEvidence();
     } finally {
-      setIsLoading(false);
+      if (workspaceRequestRef.current === requestId) setIsLoading(false);
     }
   }, [loadSecondaryEvidence]);
 
   const loadDeepMonitor = useCallback(async () => {
+    const requestId = workspaceRequestRef.current + 1;
+    workspaceRequestRef.current = requestId;
     setIsDeepLoading(true);
     try {
       const nextMonitor = await readJson<MonitorData>("/api/park/agent-monitoring/deep", { timeoutMs: 15000 });
+      if (workspaceRequestRef.current !== requestId) return;
       if (nextMonitor) setMonitor(nextMonitor);
     } finally {
-      setIsDeepLoading(false);
+      if (workspaceRequestRef.current === requestId) setIsDeepLoading(false);
     }
   }, []);
 
   const loadPolicyRef = useCallback(async (policyRef: string) => {
+    const requestId = policyDetailRequestRef.current + 1;
+    policyDetailRequestRef.current = requestId;
     setSelectedPolicyRef(policyRef);
     const path = `/api/park/policy-doctrine/${encodeURIComponent(policyRef)}`;
     for (const apiUrl of getApiUrls()) {
@@ -479,6 +493,7 @@ export default function MonitorPage() {
           xhr.ontimeout = () => resolve(null);
           xhr.send();
         });
+        if (policyDetailRequestRef.current !== requestId) return;
         if (!detail) continue;
         setPolicyRefDetail(detail);
         return;
