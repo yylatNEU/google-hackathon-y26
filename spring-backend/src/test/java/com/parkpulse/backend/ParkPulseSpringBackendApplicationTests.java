@@ -137,6 +137,18 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
 			.andExpect(jsonPath("$.guestFlow.rides[0].waitMins", notNullValue()))
 			.andExpect(jsonPath("$.operationsAudit.mode", equalTo("spring_state_lite")));
+
+		mockMvc.perform(get("/api/park/state"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.operatingClock.source", equalTo("java_spring_hot_path")))
+			.andExpect(jsonPath("$.operationsAudit.mode", equalTo("spring_state")));
+
+		mockMvc.perform(get("/api/park/live-summary"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.mode", equalTo("compact_live_operating_summary_spring")))
+			.andExpect(jsonPath("$.operatingSummary.highestQueue.waitMins", notNullValue()));
 	}
 
 	@Test

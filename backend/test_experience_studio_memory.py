@@ -264,6 +264,91 @@ def test_generation_uses_approved_finished_work_memory_without_feedback_loop(mon
     assert second["studioCore"]["id"] == "parkpulse_experience_studio_core_v1"
 
 
+def test_human_promoted_learning_rule_influences_future_generation(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+    from venue_experience_data import approved_synthetic_venue_export, build_venue_experience_data_from_export
+
+    venue_data = build_venue_experience_data_from_export(approved_synthetic_venue_export(), loaded_from="approved_profile.json")
+    first = experience_studio._draft_from_payload(
+        {
+            "templateId": "rainy-day",
+            "audience": "mixed family groups",
+            "tone": "calm, plain, respectful",
+            "constraints": "Use verified venue facts only.",
+            "venueExperienceDataUsed": True,
+            "realInputs": venue_data["realInputs"],
+        }
+    )
+    saved = experience_studio.save_experience_studio_draft({"templateId": "rainy-day", "draft": first, "actor": "designer"})
+    draft_id = saved["draftRecord"]["id"]
+
+    blocked = experience_studio.promote_experience_studio_learning_rule(
+        draft_id,
+        {"candidateId": "complete_package_shape", "actor": "reviewer"},
+    )
+    assert blocked["status"] == "blocked"
+
+    approved = experience_studio.update_experience_studio_draft_status(
+        draft_id,
+        {"status": "approved", "actor": "reviewer", "note": "Approved finished pattern for rule promotion."},
+    )
+    assert approved["status"] == "updated"
+
+    promoted = experience_studio.promote_experience_studio_learning_rule(
+        draft_id,
+        {"candidateId": "complete_package_shape", "actor": "reviewer", "note": "Promote package completeness rule."},
+    )
+    assert promoted["status"] == "promoted"
+    assert promoted["rule"]["approvalStatus"] == "approved"
+    assert promoted["rule"]["learningSource"] == "human_promoted_finished_work_rule"
+    assert promoted["rule"]["learningEligible"] is False
+
+    rules = experience_studio.list_experience_studio_learning_rules(limit=5)
+    assert rules["count"] >= 1
+
+    second = experience_studio._draft_from_payload(
+        {
+            "templateId": "rainy-day",
+            "audience": "mixed family groups",
+            "tone": "calm, plain, respectful",
+            "constraints": "Use verified venue facts only.",
+            "venueExperienceDataUsed": True,
+            "realInputs": venue_data["realInputs"],
+        }
+    )
+    rule_context = second["approvedLearningRules"]
+    package_rules = second["creativePackage"]["approvedRuleInfluence"]
+
+    assert rule_context["status"] == "ready"
+    assert rule_context["ruleCount"] >= 1
+    assert rule_context["learningBoundary"] == "Rules are human-promoted from finished work and can shape generation, but they cannot override Venue Profile facts, route locks, banned claims, or review gates."
+    assert package_rules["usedForGeneration"] is True
+    assert package_rules["authority"] == "human_promoted_rules_only"
+    assert second["creativeSynthesis"]["learningRuleInfluence"]["usedForGeneration"] is True
+    assert any(
+        dossier.get("section") == "approved rules"
+        for dossier in second["creativePackage"]["sectionDossiers"]
+    )
+
+    demoted = experience_studio.update_experience_studio_learning_rule(
+        promoted["rule"]["id"],
+        {"status": "demoted", "actor": "reviewer", "note": "Rule no longer needed."},
+    )
+    assert demoted["status"] == "updated"
+
+    third = experience_studio._draft_from_payload(
+        {
+            "templateId": "rainy-day",
+            "audience": "mixed family groups",
+            "tone": "calm, plain, respectful",
+            "constraints": "Use verified venue facts only.",
+            "venueExperienceDataUsed": True,
+            "realInputs": venue_data["realInputs"],
+        }
+    )
+    assert third["approvedLearningRules"]["status"] == "no_approved_rules"
+
+
 def test_llm_creative_pass_polishes_selected_synthesis_without_control_authority(monkeypatch, tmp_path):
     experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
 

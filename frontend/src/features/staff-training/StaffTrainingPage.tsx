@@ -205,6 +205,7 @@ type CertificationPacket = {
 type ProductLearningLoop = {
   status?: string;
   park_issue_ticket_count?: number;
+  dynamic_park_issue_ticket_count?: number;
   training_gap_ticket_count?: number;
   learning_signal_count?: number;
   park_issue_tickets?: ProductLearningTicket[];
@@ -387,11 +388,6 @@ export function StaffTrainingPage() {
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [activePacket, setActivePacket] = useState<CertificationPacket | null>(null);
   const [productLearning, setProductLearning] = useState<ProductLearningLoop | null>(null);
-  const [liveIssueSource, setLiveIssueSource] = useState("employee");
-  const [liveIssueType, setLiveIssueType] = useState("lost_child_report");
-  const [liveIssueSeverity, setLiveIssueSeverity] = useState("critical");
-  const [liveIssueLocation, setLiveIssueLocation] = useState("Carousel");
-  const [liveIssueSummary, setLiveIssueSummary] = useState("Guardian reports a missing child near the carousel.");
   const [manualGapScenarioId, setManualGapScenarioId] = useState("lost_child_report");
   const [manualGapType, setManualGapType] = useState("escalation_decision");
   const [manualGapSeverity, setManualGapSeverity] = useState("coaching");
@@ -477,38 +473,6 @@ export function StaffTrainingPage() {
     setReadiness(readinessPayload.readiness ?? []);
     setReceipts(receiptPayload.receipts ?? []);
     setProductLearning(productLearningPayload);
-  }
-
-  async function createLiveIssueTicket() {
-    setIsLoading(true);
-    setError("");
-    setStatus("");
-    try {
-      const response = await fetchParkPulseApi("/api/park/product-learning/issue-ticket", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-parkpulse-role": "onsite_worker" },
-        body: JSON.stringify({
-          source: liveIssueSource,
-          issueType: liveIssueType,
-          severity: liveIssueSeverity,
-          location: liveIssueLocation,
-          summary: liveIssueSummary,
-          reporterRole: liveIssueSource,
-        }),
-        timeoutMs: 8000,
-      });
-      const payload = (await response.json()) as ProductLearningTicketResult;
-      if (payload.readiness_issues?.length) {
-        setError(payload.readiness_issues.join(" "));
-      } else {
-        setStatus(`Live issue ticket created${payload.ticket?.id ? `: ${payload.ticket.id}` : "."}`);
-      }
-      await loadProductLearningLoop();
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Unable to create live issue ticket.");
-    } finally {
-      setIsLoading(false);
-    }
   }
 
   async function createManualTrainingGapTicket() {
@@ -939,9 +903,9 @@ export function StaffTrainingPage() {
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Product learning loop</div>
-                <h3 className="mt-1 text-lg font-black text-slate-100">Live tickets improve training. Training gaps improve ops guidance.</h3>
+                <h3 className="mt-1 text-lg font-black text-slate-100">Dynamic park issues improve training. Training gaps improve ops guidance.</h3>
                 <p className="mt-2 max-w-4xl text-sm font-semibold leading-relaxed text-slate-500">
-                  Park issues and staff roleplay gaps are collected as reviewed product-learning signals, not as automatic model updates or live incident actions.
+                  Live issue tickets are generated from backend operational backlog signals. Staff roleplay gaps stay simulated and reviewed.
                 </p>
               </div>
               <button
@@ -957,7 +921,7 @@ export function StaffTrainingPage() {
               <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Live issue tickets</div>
                 <div className="mt-2 text-2xl font-black text-slate-50">{productLearning?.park_issue_ticket_count ?? 0}</div>
-                <div className="mt-1 text-xs font-bold text-slate-500">Guest and employee reports with live ops authority.</div>
+                <div className="mt-1 text-xs font-bold text-slate-500">{productLearning?.dynamic_park_issue_ticket_count ?? 0} generated from dynamic park backlog.</div>
               </div>
               <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Training gap tickets</div>
@@ -971,49 +935,28 @@ export function StaffTrainingPage() {
               </div>
             </div>
 
-            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_1fr]">
               <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
-                <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Create live issue ticket</div>
-                <div className="mt-3 grid gap-2 md:grid-cols-2">
-                  <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
-                    Source
-                    <select value={liveIssueSource} onChange={(event) => setLiveIssueSource(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300">
-                      <option value="employee">Employee</option>
-                      <option value="guest">Guest</option>
-                    </select>
-                  </label>
-                  <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
-                    Issue
-                    <select value={liveIssueType} onChange={(event) => setLiveIssueType(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300">
-                      {scenarios.map((scenario) => <option key={scenario.id} value={scenario.id}>{scenario.title}</option>)}
-                    </select>
-                  </label>
-                  <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
-                    Severity
-                    <select value={liveIssueSeverity} onChange={(event) => setLiveIssueSeverity(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300">
-                      <option value="critical">Critical</option>
-                      <option value="high">High</option>
-                      <option value="medium">Medium</option>
-                      <option value="low">Low</option>
-                    </select>
-                  </label>
-                  <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
-                    Location
-                    <input value={liveIssueLocation} onChange={(event) => setLiveIssueLocation(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300" />
-                  </label>
+                <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Dynamic park live issues</div>
+                <div className="mt-3 space-y-2">
+                  {(productLearning?.park_issue_tickets ?? []).filter((ticket) => ticket.source === "dynamic_park").slice(0, 4).map((ticket) => (
+                    <div key={ticket.id} className="rounded border border-slate-800 bg-slate-950 p-2 text-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="truncate font-black text-slate-100">{label(ticket.issue_type)}</div>
+                          <div className="mt-1 text-slate-500">{ticket.summary}</div>
+                        </div>
+                        <span className="shrink-0 rounded border border-rose-300/40 bg-rose-300/10 px-2 py-1 text-[10px] font-black text-rose-100">{label(ticket.severity)}</span>
+                      </div>
+                      <div className="mt-2 text-[10px] font-black uppercase tracking-widest text-slate-500">{ticket.id}</div>
+                    </div>
+                  ))}
+                  {!(productLearning?.park_issue_tickets ?? []).some((ticket) => ticket.source === "dynamic_park") && (
+                    <div className="rounded border border-dashed border-slate-700 bg-slate-950 p-3 text-sm font-bold text-slate-500">
+                      No dynamic park backlog issue is currently above threshold.
+                    </div>
+                  )}
                 </div>
-                <label className="mt-2 grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
-                  Summary
-                  <textarea value={liveIssueSummary} onChange={(event) => setLiveIssueSummary(event.target.value)} rows={3} className="resize-y rounded border border-slate-700 bg-slate-950 px-2 py-2 text-xs font-semibold normal-case tracking-normal text-slate-100 outline-none focus:border-teal-300" />
-                </label>
-                <button
-                  type="button"
-                  onClick={() => void createLiveIssueTicket()}
-                  disabled={isLoading || !liveIssueSummary.trim()}
-                  className="mt-3 w-full rounded border border-rose-300 bg-rose-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-rose-200 disabled:opacity-50"
-                >
-                  Create live issue
-                </button>
               </div>
 
               <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
@@ -1080,7 +1023,7 @@ export function StaffTrainingPage() {
                 ))}
                 {!(productLearning?.product_learning_signals ?? []).length && (
                   <div className="rounded border border-dashed border-slate-700 bg-[#0d171b] p-4 text-sm font-bold text-slate-500 md:col-span-2 xl:col-span-3">
-                    No product-learning signals yet. Finish failed roleplays or create live issue tickets to populate this loop.
+                    No product-learning signals yet. Finish failed roleplays or wait for dynamic park backlog issues to cross threshold.
                   </div>
                 )}
               </div>

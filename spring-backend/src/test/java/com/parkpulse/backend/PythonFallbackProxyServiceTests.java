@@ -74,7 +74,7 @@ class PythonFallbackProxyServiceTests {
             .withProperty("parkpulse.python-backend-url", "http://127.0.0.1:9")
             .withProperty("parkpulse.python-backend-timeout-ms", "500");
         PythonFallbackProxyService service = new PythonFallbackProxyService(environment);
-        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/park/state");
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/park/cases");
 
         ResponseEntity<byte[]> response = service.forward(request, new byte[0]);
 
@@ -135,6 +135,20 @@ class PythonFallbackProxyServiceTests {
         assertThat(stateLiteResponse.getStatusCode().value()).isEqualTo(409);
         assertThat(new String(stateLiteResponse.getBody(), StandardCharsets.UTF_8))
             .contains("GET /api/park/state-lite");
+
+        MockHttpServletRequest stateRequest = new MockHttpServletRequest("GET", "/api/park/state");
+        ResponseEntity<byte[]> stateResponse = service.forward(stateRequest, new byte[0]);
+
+        assertThat(stateResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(stateResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/state");
+
+        MockHttpServletRequest liveSummaryRequest = new MockHttpServletRequest("GET", "/api/park/live-summary");
+        ResponseEntity<byte[]> liveSummaryResponse = service.forward(liveSummaryRequest, new byte[0]);
+
+        assertThat(liveSummaryResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(liveSummaryResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/live-summary");
 
         MockHttpServletRequest partnerRetryRequest = new MockHttpServletRequest("POST", "/api/park/delivery/partner-retries/run");
         ResponseEntity<byte[]> partnerRetryResponse = service.forward(partnerRetryRequest, "{}".getBytes(StandardCharsets.UTF_8));

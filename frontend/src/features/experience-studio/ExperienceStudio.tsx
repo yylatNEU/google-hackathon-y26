@@ -305,6 +305,16 @@ type ExperienceDraft = {
       matchedExamples?: Array<{ draftId?: string; status?: string; selectedConceptName?: string; updatedAt?: string; route?: string[] }>;
       learningBoundary?: string;
     };
+    approvedRuleInfluence?: {
+      status?: string;
+      mode?: string;
+      usedForGeneration?: boolean;
+      authority?: string;
+      ruleCount?: number;
+      appliedRules?: string[];
+      guardrails?: string[];
+      learningBoundary?: string;
+    };
     designReasoning?: ExperienceReasoning;
     creativeSynthesis?: CreativeSynthesis;
   };
@@ -760,6 +770,7 @@ export function ExperienceStudio() {
   const [isUpdatingDraft, setIsUpdatingDraft] = useState(false);
   const [isWorkflowBusy, setIsWorkflowBusy] = useState(false);
   const [isSendingHandoff, setIsSendingHandoff] = useState(false);
+  const [isPromotingRule, setIsPromotingRule] = useState(false);
   const [studioMemory, setStudioMemory] = useState<StudioMemoryPayload | null>(null);
   const [isLoadingMemory, setIsLoadingMemory] = useState(false);
   const [conversationInput, setConversationInput] = useState(
@@ -1216,6 +1227,39 @@ export function ExperienceStudio() {
       setMessage(error instanceof Error ? error.message : "Handoff failed");
     } finally {
       setIsSendingHandoff(false);
+    }
+  };
+
+  const promoteLearningRule = async () => {
+    if (!activeDraftId) {
+      setMessage("Save and approve a draft before promoting a reusable rule");
+      return;
+    }
+    if (!["approved", "ready_for_publish"].includes(workflowStatus)) {
+      setMessage("Approve the draft before promoting a reusable Studio rule");
+      return;
+    }
+    setIsPromotingRule(true);
+    setMessage(null);
+    try {
+      const response = await fetchParkPulseApi(`/api/park/experience-studio/drafts/${encodeURIComponent(activeDraftId)}/promote-rule`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidateId: "complete_package_shape",
+          actor: "experience_reviewer",
+          note: reviewNote || "Promote approved package shape as bounded Studio context.",
+        }),
+        timeoutMs: 7000,
+      });
+      const payload = await response.json() as { status?: string; message?: string; rule?: { id?: string; label?: string; rule?: string } };
+      if (payload.status !== "promoted") throw new Error(payload.message ?? "Rule promotion failed");
+      setMessage("Approved package rule promoted for future Studio drafts");
+      void refreshStudioMemory();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Rule promotion failed");
+    } finally {
+      setIsPromotingRule(false);
     }
   };
 
@@ -1963,6 +2007,22 @@ export function ExperienceStudio() {
                             ) : null}
                           </div>
                         ) : null}
+                        {creativePackage.approvedRuleInfluence ? (
+                          <div className="mt-3 rounded border border-lime-300/20 bg-lime-950/10 p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <div className="text-[10px] font-black uppercase tracking-widest text-lime-100">Approved rule influence</div>
+                                <div className="mt-1 text-xs leading-relaxed text-slate-300">{creativePackage.approvedRuleInfluence.learningBoundary}</div>
+                              </div>
+                              <div className="rounded border border-lime-300/30 bg-lime-950/20 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-lime-100">
+                                {creativePackage.approvedRuleInfluence.usedForGeneration ? `${creativePackage.approvedRuleInfluence.ruleCount ?? 0} active` : formatStatus(creativePackage.approvedRuleInfluence.status)}
+                              </div>
+                            </div>
+                            <div className="mt-2 text-[11px] leading-relaxed text-slate-300">Rules: {compactList(creativePackage.approvedRuleInfluence.appliedRules ?? [], 3)}</div>
+                            <div className="mt-1 text-[11px] leading-relaxed text-amber-100">Guardrails: {compactList(creativePackage.approvedRuleInfluence.guardrails ?? [], 3)}</div>
+                            <div className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-500">{creativePackage.approvedRuleInfluence.authority ?? "human_promoted_rules_only"}</div>
+                          </div>
+                        ) : null}
 	                      </div>
 	                    ) : null}
 	                    {creativeSynthesis ? (
@@ -2342,6 +2402,17 @@ export function ExperienceStudio() {
                     >
                       {isSendingHandoff ? "Sending handoff" : "Send Command Center handoff"}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => void promoteLearningRule()}
+                      disabled={isPromotingRule || !activeDraftId || !["approved", "ready_for_publish"].includes(workflowStatus)}
+                      className="mt-2 w-full rounded border border-lime-300 bg-lime-300 px-3 py-2 text-sm font-black text-slate-950 transition hover:bg-lime-200 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-[#0d1115] disabled:text-slate-500"
+                    >
+                      {isPromotingRule ? "Promoting rule" : "Promote approved rule"}
+                    </button>
+                    <div className="mt-2 text-[11px] leading-relaxed text-slate-500">
+                      Promotion uses approved finished work only. It creates reversible rule context for future drafts, not model training.
+                    </div>
                     {latestHandoff ? (
                       <div className="mt-3 rounded border border-violet-300/30 bg-violet-950/20 p-2">
                         <div className="text-[10px] font-black uppercase tracking-widest text-violet-200">Latest handoff</div>

@@ -112,6 +112,94 @@ public class ParkPulseMigrationController {
 
     @GetMapping(value = "/api/park/state-lite", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> stateLite() {
+        return springState("spring_state_lite");
+    }
+
+    @GetMapping(value = "/api/park/state", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> state() {
+        Map<String, Object> payload = springState("spring_state");
+        payload.put("operatingClock", Map.of(
+            "phase", Map.of("label", "Afternoon peak", "demandPressurePct", 68),
+            "source", "java_spring_hot_path"
+        ));
+        payload.put("maintenance", Map.of("openWorkOrders", 3, "criticalAssets", 1, "mode", "spring_state"));
+        payload.put("guestCare", Map.of("openCases", 6, "recoveryPressure", 28, "mode", "spring_state"));
+        payload.put("externalSystems", Map.of(
+            "pythonFallback", "optional",
+            "sqliteAuthority", "ready",
+            "springGateway", "primary"
+        ));
+        return payload;
+    }
+
+    @GetMapping(value = "/api/park/live-summary", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> liveSummary() {
+        Map<String, Object> state = springState("spring_live_summary_state");
+        Map<String, Object> guestFlow = mapValue(state.get("guestFlow"));
+        Map<String, Object> topRide = highestWaitRow(listValue(guestFlow.get("rides")));
+        Map<String, Object> topZone = highestWaitRow(listValue(guestFlow.get("zones")));
+        Map<String, Object> simTime = mapValue(state.get("simTime"));
+
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "ready");
+        payload.put("mode", "compact_live_operating_summary_spring");
+        payload.put("entrypoint", "java-spring-migration");
+        payload.put("runtime", "java_spring");
+        payload.put("dataPlane", Map.of(
+            "hotState", "java spring state projection",
+            "auditPackets", "python fallback or future spring case service",
+            "warehouse", "BigQuery export contract",
+            "retrieval", "policy and memory retrieval contract",
+            "asyncWork", "receiver dispatch contract"
+        ));
+        payload.put("simulationClock", Map.of(
+            "hour", simTime.get("hour"),
+            "minute", simTime.get("minute"),
+            "phase", "Afternoon peak",
+            "demandPressurePct", 68
+        ));
+        payload.put("operatingSummary", Map.of(
+            "caseCount", 2,
+            "domainCoverageCount", 3,
+            "productionReady", false,
+            "topPriorityCaseId", "spring_queue_pressure",
+            "topPriorityTitle", "Dragon Coaster queue pressure",
+            "highestQueue", Map.of(
+                "id", topRide.get("id"),
+                "name", topRide.get("name"),
+                "waitMins", topRide.get("waitMins"),
+                "densityPct", topZone.get("density")
+            )
+        ));
+        payload.put("activeCase", Map.of(
+            "caseId", "spring_queue_pressure",
+            "rank", 1,
+            "domain", "guest_flow",
+            "severity", "watch",
+            "score", 72,
+            "mapFocus", List.of(topRide.get("id"), topZone.get("id")),
+            "acceptance", Map.of(
+                "allowedSurface", "operator_review",
+                "blockerClasses", List.of("human_approval_required_for_dispatch"),
+                "nextOwnerAction", "Review queue split and staff positioning before dispatch."
+            ),
+            "productionEvidence", Map.of(
+                "state", "spring_state_projection",
+                "feedCount", 4,
+                "blockedStages", List.of()
+            )
+        ));
+        payload.put("caseIndexEndpoint", "/api/park/cases");
+        payload.put("caseBriefEndpoint", "/api/park/cases/{case_id}/brief");
+        payload.put("fullAuditPacketEndpoint", "/api/park/industrial-dossiers/{case_id}/packet");
+        payload.put("operatingQueue", List.of(
+            Map.of("id", "spring_queue_pressure", "title", "Dragon Coaster queue pressure", "domain", "guest_flow", "severity", "watch"),
+            Map.of("id", "spring_staff_readiness", "title", "Staff callout coverage watch", "domain", "staffing", "severity", "normal")
+        ));
+        return payload;
+    }
+
+    private Map<String, Object> springState(String auditMode) {
         Map<String, Object> guestFlow = orderedMap();
         guestFlow.put("activePolicy", "spring-hot-path");
         guestFlow.put("activeScenario", Map.of(
@@ -153,7 +241,7 @@ public class ParkPulseMigrationController {
         payload.put("alerts", List.of(Map.of("id", "spring-state-lite", "severity", "info", "message", "Spring is serving the hot state-lite route without Python fallback.")));
         payload.put("operationsAudit", Map.of(
             "ready", true,
-            "mode", "spring_state_lite",
+            "mode", auditMode,
             "findings", List.of(),
             "policy_refs", List.of("PARK-SAFE-001", "PARK-OPS-001", "PARK-CARE-001")
         ));
@@ -163,6 +251,41 @@ public class ParkPulseMigrationController {
         payload.put("source_of_truth", "spring_hot_path_sqlite_authority");
         payload.put("updated_at", Instant.now().toString());
         return payload;
+    }
+
+    private static Map<String, Object> highestWaitRow(List<Object> rows) {
+        Map<String, Object> best = orderedMap();
+        int bestWait = -1;
+        for (Object row : rows) {
+            Map<String, Object> candidate = mapValue(row);
+            int wait = intValue(candidate.get("waitMins"));
+            if (wait > bestWait) {
+                best = candidate;
+                bestWait = wait;
+            }
+        }
+        return best;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> mapValue(Object value) {
+        return value instanceof Map<?, ?> ? (Map<String, Object>) value : orderedMap();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Object> listValue(Object value) {
+        return value instanceof List<?> ? (List<Object>) value : List.of();
+    }
+
+    private static int intValue(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        try {
+            return value == null ? 0 : Integer.parseInt(String.valueOf(value));
+        } catch (NumberFormatException error) {
+            return 0;
+        }
     }
 
     @GetMapping(value = "/api/park/role-access-contracts", produces = MediaType.APPLICATION_JSON_VALUE)

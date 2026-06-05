@@ -1613,6 +1613,13 @@ def _native_live_feed_policy_check(proposal: dict[str, Any]) -> dict[str, Any]:
             "reason": "High-risk routing or ride-flow proposal needs Executive tradeoff approval.",
             "human_approval_required": False,
         }
+    if department == "operations" and tool == "create_ops_alert":
+        return {
+            "policy_check": "passed_internal_ops_alert_no_routing_execution",
+            "status": "passed",
+            "reason": "Operations alert is an internal receiver handoff only; it does not change guest routing or dispatch public instructions.",
+            "human_approval_required": False,
+        }
     if department in {"safety", "security"}:
         return {
             "policy_check": f"requires_human_approval_{department}",
@@ -1656,6 +1663,14 @@ def _native_live_feed_policy_check(proposal: dict[str, Any]) -> dict[str, Any]:
             "human_approval_required": False,
         }
     if department == "maintenance":
+        proposed_action = proposal.get("proposed_action", {}) if isinstance(proposal.get("proposed_action"), dict) else {}
+        if tool == "create_work_order" and proposed_action.get("work_order_only") is True:
+            return {
+                "policy_check": "passed_internal_maintenance_work_order_no_reopen",
+                "status": "passed",
+                "reason": "Maintenance work-order candidate is an internal receiver handoff only; reopen and safety clearance remain blocked.",
+                "human_approval_required": False,
+            }
         return {
             "policy_check": "requires_maintenance_clearance_before_reopen",
             "status": "requires_compliance",
@@ -1699,7 +1714,13 @@ def _apply_native_live_feed_policy(proposal: dict[str, Any]) -> dict[str, Any]:
     if envelope:
         envelope["policy_check"] = policy["policy_check"]
         envelope["policy_judge"] = policy
-        if policy["status"] in {"passed", "approved_with_exclusions"} and envelope.get("executor_status") == "awaiting_compliance":
+        if (
+            policy["status"] in {"passed", "approved_with_exclusions"}
+            and (
+                envelope.get("executor_status") == "awaiting_compliance"
+                or str(policy.get("policy_check") or "").startswith("passed_internal_")
+            )
+        ):
             envelope["executor_status"] = "ready_for_executor"
             proposal["executor_status"] = "ready_for_executor"
         if policy["status"] in {"requires_human_approval", "blocked"}:
@@ -1981,7 +2002,7 @@ def _live_feed_action_disposition(proposal: dict[str, Any]) -> dict[str, Any]:
     evidence_argument = _evidence_argument_from_proposal(proposal)
     grounding = proposal.get("live_feed_grounding", {}) if isinstance(proposal.get("live_feed_grounding"), dict) else {}
     event_ids = grounding.get("event_ids", []) if isinstance(grounding.get("event_ids"), list) else []
-    if department in {"food_retail", "hr_labor", "marketing"} and policy_status == "passed" and executor_status == "ready_for_executor":
+    if department in {"food_retail", "hr_labor", "marketing", "operations", "maintenance"} and policy_status == "passed" and executor_status == "ready_for_executor":
         return {
             "decision": "execute_controlled_internal",
             "next_owner": "tool_executor_agent",
@@ -2108,6 +2129,155 @@ def _live_feed_native_proposal(
         envelope["action_disposition"] = disposition
         proposal["proposal_envelope"] = envelope
     return proposal
+
+
+def _generated_issue_from_live_case(live_feed_case: dict[str, Any]) -> dict[str, Any]:
+    issue = live_feed_case.get("generated_issue", {}) if isinstance(live_feed_case.get("generated_issue"), dict) else {}
+    return {
+        "kind": str(issue.get("kind") or live_feed_case.get("issue_kind") or ""),
+        "target_id": str(issue.get("target_id") or issue.get("targetId") or live_feed_case.get("issue_target_id") or ""),
+        "intensity": issue.get("intensity"),
+        "selection_mode": issue.get("selection_mode"),
+    }
+
+
+def _issue_specific_live_feed_proposals(
+    live_feed_case: dict[str, Any],
+    evidence_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    issue = _generated_issue_from_live_case(live_feed_case)
+    kind = issue["kind"]
+    target_id = issue["target_id"] or "affected_area"
+    ops_rows = _live_feed_rows_for_sources(evidence_rows, {"ride_ops", "guest_flow", "operator_signal"})
+    maintenance_rows = _live_feed_rows_for_sources(evidence_rows, {"operator_signal", "ride_ops", "weather", "food_ops"})
+    safety_rows = _live_feed_rows_for_sources(evidence_rows, {"weather", "operator_signal", "ride_ops", "guest_flow"})
+    security_rows = _live_feed_rows_for_sources(evidence_rows, {"operator_signal", "guest_flow", "ride_ops"})
+    guest_rows = _live_feed_rows_for_sources(evidence_rows, {"guest_flow", "operator_signal", "ride_ops"})
+    proposals: list[dict[str, Any]] = []
+
+    def add(agent_id: str, recommendation: str, action: dict[str, Any], rows: list[dict[str, Any]], constraints: list[str], confidence: float, proposal_type: str = "action") -> None:
+        payload = {
+            **action,
+            "issue_kind": kind,
+            "issue_target_id": target_id,
+            "issue_specific": True,
+        }
+        proposal = _live_feed_native_proposal(agent_id, recommendation, payload, rows, constraints, confidence, proposal_type)
+        proposal["issue_specific"] = True
+        proposal["generated_issue_context"] = issue
+        proposals.append(proposal)
+
+    if kind in {"energy_spike", "sensor_anomaly", "water_leak"}:
+        add(
+            "facilities_energy_agent",
+            f"Open a bounded maintenance work-order candidate for {kind} at {target_id}; do not imply ride reopen or safety clearance",
+            {
+                "target": "maintenance",
+                "action": "create_work_order",
+                "asset": target_id,
+                "work_order_only": True,
+                "expected_outcome": "maintenance receiver gets an internal work-order candidate tied to live feed evidence",
+                "rollback": "close the candidate if sensor/operator evidence normalizes or inspection rejects the fault",
+            },
+            maintenance_rows,
+            ["Work-order handoff is internal only.", "No reopen, dispatch, or public instruction is authorized."],
+            0.86,
+            "action",
+        )
+        add(
+            "safety_policy_agent",
+            f"Hold safety-sensitive execution for {kind} until authorized review clears {target_id}",
+            {
+                "target": "safety",
+                "action": "require_human_approval",
+                "requires_human_review": True,
+                "expected_outcome": "safety owner receives the approval boundary and live-feed evidence",
+                "rollback": "remove hold only after inspection and safety lead clearance",
+            },
+            safety_rows,
+            ["Safety hold cannot be converted into Tool Executor action.", "Maintenance work order is not clearance."],
+            0.92,
+            "gate",
+        )
+    if kind in {"ticketing_gate_surge", "parking_arrival_wave", "parade_route_conflict", "access_lane_block"}:
+        add(
+            "ride_ops_agent",
+            f"Create an internal operations alert for {kind} at {target_id}; keep actual routing changes under Executive/Safety approval",
+            {
+                "target": "operations",
+                "action": "ops_alert",
+                "zone": target_id,
+                "expected_outcome": "operations receiver sees an arrival/access flow alert without executing guest routing",
+                "rollback": "close the alert if guest-flow and operator-signal feeds normalize",
+            },
+            ops_rows,
+            ["Ops alert is internal only.", "No route change or public guest message is executed."],
+            0.84,
+            "action",
+        )
+        add(
+            "security_agent",
+            f"Review security/access-control implications for {kind} at {target_id} before any zone-control action",
+            {
+                "target": "security",
+                "action": "zone_control",
+                "zone": target_id,
+                "expected_outcome": "security lead receives a zone-control recommendation with live feed evidence",
+                "rollback": "stand down if access and density signals normalize",
+            },
+            security_rows,
+            ["Security zone control requires authorized human approval.", "Ops alert cannot substitute for security approval."],
+            0.83,
+            "gate",
+        )
+    if kind in {"restroom_closure"}:
+        add(
+            "facilities_energy_agent",
+            f"Open a facilities work-order candidate for restroom closure at {target_id}",
+            {
+                "target": "maintenance",
+                "action": "create_work_order",
+                "asset": target_id,
+                "work_order_only": True,
+                "expected_outcome": "facilities receiver gets an internal service-restoration work-order candidate",
+                "rollback": "close the work-order candidate if operator signal marks the closure resolved",
+            },
+            maintenance_rows,
+            ["Work-order handoff does not send guest messaging.", "Accessibility and service recovery remain separate approvals."],
+            0.85,
+            "action",
+        )
+        add(
+            "guest_flow_agent",
+            f"Draft restroom-closure service guidance for {target_id}, but hold all public messaging for Compliance",
+            {
+                "target": "guest",
+                "action": "message",
+                "routing": "nearest_accessible_restroom_alternatives",
+                "expected_outcome": "guest-experience draft exists for review without public dispatch",
+                "rollback": "withdraw draft if facilities resolves the closure",
+            },
+            guest_rows,
+            ["Public guest messaging remains compliance-gated.", "Do not promise reopening time."],
+            0.82,
+            "tradeoff",
+        )
+    return proposals
+
+
+def _issue_specific_live_feed_conflicts(issue_proposals: list[dict[str, Any]], issue: dict[str, Any]) -> list[dict[str, Any]]:
+    if not issue_proposals:
+        return []
+    kind = str(issue.get("kind") or "issue")
+    agents = [str(row.get("agent_id")) for row in issue_proposals if row.get("agent_id")]
+    return [
+        {
+            "conflict": f"{kind} needs direct issue handling, but safety/security/public-routing authority must remain gated.",
+            "agents": agents[:5],
+            "resolution": "Execute only bounded internal ops/work-order alerts; keep route changes, safety clearance, security control, and public messaging held with owners.",
+            "status": "resolved_with_bounded_execution",
+        }
+    ]
 
 
 def _live_feed_deep_reasoning_summary(proposals: list[dict[str, Any]]) -> dict[str, int]:
@@ -2610,11 +2780,14 @@ def _build_live_feed_native_role_agent_proposals(
     finance_rows = _live_feed_rows_for_sources(evidence_rows, {"ride_ops", "food_ops", "staffing", "guest_flow"})
     marketing_rows = _live_feed_rows_for_sources(evidence_rows, {"guest_flow", "food_ops", "weather", "operator_signal"})
     security_rows = _live_feed_rows_for_sources(evidence_rows, {"guest_flow", "operator_signal", "ride_ops"})
+    generated_issue = _generated_issue_from_live_case(live_feed_case)
+    issue_specific_proposals = _issue_specific_live_feed_proposals(live_feed_case, evidence_rows)
     proposals = [
+        *issue_specific_proposals,
         _live_feed_native_proposal(
             "park_understanding_agent",
-            "Build the live-feed operating picture before any department acts",
-            {"target": "live_feed", "action": "ground_context", "lead_source": live_feed_case.get("lead_source"), "lead_signal_type": live_feed_case.get("lead_signal_type"), "expected_outcome": "shared context contains live feed event IDs, source confidence, and stale-feed issues"},
+            f"Build the live-feed operating picture for {generated_issue.get('kind') or 'current operating issue'} before any department acts",
+            {"target": "live_feed", "action": "ground_context", "lead_source": live_feed_case.get("lead_source"), "lead_signal_type": live_feed_case.get("lead_signal_type"), "generated_issue": generated_issue, "expected_outcome": "shared context contains generated issue, live feed event IDs, source confidence, and stale-feed issues"},
             context_rows,
             ["No seeded scenario facts can override current live-feed evidence."],
             0.9,
@@ -2748,6 +2921,7 @@ def _build_live_feed_native_role_agent_proposals(
     envelope_summary = _proposal_envelope_summary(proposals)
     depth_summary = _live_feed_deep_reasoning_summary(proposals)
     conflicts = [
+        *_issue_specific_live_feed_conflicts(issue_specific_proposals, generated_issue),
         {"conflict": "Operations wants demand relief, but Guest Experience and Marketing could accidentally move too much demand into a constrained zone.", "agents": ["ride_ops_agent", "guest_flow_agent", "event_creative_agent", "decision_bridge_agent"], "resolution": "Use split routing and redirect/pause offers; public messaging remains compliance-gated.", "status": "resolved"},
         {"conflict": "Finance may prefer revenue preservation, while Safety/Security hold sensitive actions for approval.", "agents": ["finance_agent", "safety_policy_agent", "security_agent", "decision_bridge_agent"], "resolution": "Executive keeps impact reporting active but holds safety/security actions until approval.", "status": "resolved"},
         {"conflict": "Labor support is useful, but staffing moves can violate role, fatigue, overtime, or break rules.", "agents": ["staffing_agent", "logic_audit_agent", "decision_bridge_agent"], "resolution": "Only recommendation-only, role-compatible staffing moves can advance to Tool Executor preview.", "status": "watch" if open_callouts >= 20 else "resolved"},
@@ -2773,6 +2947,8 @@ def _build_live_feed_native_role_agent_proposals(
         "scenario_key": scenario_key,
         "orchestration_source": "live_feed",
         "generated_from": "live_feed_case",
+        "generated_issue": generated_issue,
+        "issue_specific_proposal_count": len(issue_specific_proposals),
         "execution_model": "department_agents_read_widely_write_narrowly_policy_judge_then_tool_executor",
         "active_roles": active_roles,
         "active_departments": active_departments,
