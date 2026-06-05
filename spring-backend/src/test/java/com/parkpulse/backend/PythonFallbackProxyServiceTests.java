@@ -74,7 +74,7 @@ class PythonFallbackProxyServiceTests {
             .withProperty("parkpulse.python-backend-url", "http://127.0.0.1:9")
             .withProperty("parkpulse.python-backend-timeout-ms", "500");
         PythonFallbackProxyService service = new PythonFallbackProxyService(environment);
-        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/park/cases");
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/park/product-learning/loop");
 
         ResponseEntity<byte[]> response = service.forward(request, new byte[0]);
 
@@ -149,6 +149,41 @@ class PythonFallbackProxyServiceTests {
         assertThat(liveSummaryResponse.getStatusCode().value()).isEqualTo(409);
         assertThat(new String(liveSummaryResponse.getBody(), StandardCharsets.UTF_8))
             .contains("GET /api/park/live-summary");
+
+        MockHttpServletRequest casesRequest = new MockHttpServletRequest("GET", "/api/park/cases");
+        ResponseEntity<byte[]> casesResponse = service.forward(casesRequest, new byte[0]);
+
+        assertThat(casesResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(casesResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/cases");
+
+        MockHttpServletRequest caseBriefRequest = new MockHttpServletRequest("GET", "/api/park/cases/spring_queue_pressure/brief");
+        ResponseEntity<byte[]> caseBriefResponse = service.forward(caseBriefRequest, new byte[0]);
+
+        assertThat(caseBriefResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(caseBriefResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/cases/{case_id}/brief");
+
+        MockHttpServletRequest monitorEvidenceRequest = new MockHttpServletRequest("GET", "/api/park/monitor-evidence");
+        ResponseEntity<byte[]> monitorEvidenceResponse = service.forward(monitorEvidenceRequest, new byte[0]);
+
+        assertThat(monitorEvidenceResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(monitorEvidenceResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/monitor-evidence");
+
+        MockHttpServletRequest doctrineRequest = new MockHttpServletRequest("GET", "/api/park/policy-doctrine/PARK-OPS-001");
+        ResponseEntity<byte[]> doctrineResponse = service.forward(doctrineRequest, new byte[0]);
+
+        assertThat(doctrineResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(doctrineResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/policy-doctrine/{policy_ref}");
+
+        MockHttpServletRequest monitoringRequest = new MockHttpServletRequest("GET", "/api/park/agent-monitoring");
+        ResponseEntity<byte[]> monitoringResponse = service.forward(monitoringRequest, new byte[0]);
+
+        assertThat(monitoringResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(monitoringResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/agent-monitoring");
 
         MockHttpServletRequest partnerRetryRequest = new MockHttpServletRequest("POST", "/api/park/delivery/partner-retries/run");
         ResponseEntity<byte[]> partnerRetryResponse = service.forward(partnerRetryRequest, "{}".getBytes(StandardCharsets.UTF_8));

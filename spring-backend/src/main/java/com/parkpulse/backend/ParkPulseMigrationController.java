@@ -317,17 +317,17 @@ public class ParkPulseMigrationController {
         payload.put("runtime", "java_spring");
         payload.put("policy_ref", policyRef);
         payload.put("match_count", 1);
-        payload.put("matches", List.of(Map.of(
-            "kind", "decision_rule",
-            "policy_ref", policyRef,
-            "policy_book_id", "PARKPULSE-SPRING-OPS",
-            "title", match.get("title"),
-            "condition", match.get("condition"),
-            "allowed_action", match.get("allowed_action"),
-            "blocked_action", match.get("blocked_action"),
-            "required_evidence", List.of("state snapshot", "policy gate", "receipt id"),
-            "human_review_if", List.of("safety-sensitive action", "low-confidence trace", "guest-care escalation")
-        )));
+        Map<String, Object> rule = orderedMap();
+        rule.put("kind", "decision_rule");
+        rule.put("policy_ref", policyRef);
+        rule.put("policy_book_id", "PARKPULSE-SPRING-OPS");
+        rule.put("title", String.valueOf(match.getOrDefault("title", policyRef)));
+        rule.put("condition", String.valueOf(match.getOrDefault("condition", "Spring policy reference is registered for monitor evidence.")));
+        rule.put("allowed_action", String.valueOf(match.getOrDefault("allowed_action", "Human-reviewed operating action with linked evidence.")));
+        rule.put("blocked_action", String.valueOf(match.getOrDefault("blocked_action", "Action without linked evidence.")));
+        rule.put("required_evidence", List.of("state snapshot", "policy gate", "receipt id"));
+        rule.put("human_review_if", List.of("safety-sensitive action", "low-confidence trace", "guest-care escalation"));
+        payload.put("matches", List.of(rule));
         payload.put("related_cases", springPolicyCases());
         return payload;
     }
@@ -372,6 +372,231 @@ public class ParkPulseMigrationController {
             "customer_care_cases", List.of()
         ));
         payload.put("deep_monitoring", Map.of("status", "spring_summary", "error", ""));
+        return payload;
+    }
+
+    private List<Map<String, Object>> springCaseRows() {
+        return List.of(
+            caseRow(
+                "spring_queue_pressure",
+                "Dragon Coaster queue pressure",
+                "guest_flow",
+                "watch",
+                0.86,
+                1,
+                72,
+                "Dragon Coaster wait is materially above adjacent ride waits while Covered Plaza density is rising.",
+                "operator_review",
+                "Review split-flow and staff positioning before dispatch.",
+                "spring_packet_queue_001"
+            ),
+            caseRow(
+                "spring_staff_readiness",
+                "Staff callout coverage watch",
+                "staffing",
+                "normal",
+                0.78,
+                2,
+                61,
+                "Open callouts are still inside operating tolerance but should be watched before the next demand peak.",
+                "observe",
+                "Confirm ride ops and guest-care coverage at the next operating check.",
+                "spring_packet_staff_001"
+            )
+        );
+    }
+
+    private Map<String, Object> caseRow(
+        String id,
+        String title,
+        String domain,
+        String severity,
+        double qualityScore,
+        int rank,
+        int priorityScore,
+        String rationale,
+        String allowedSurface,
+        String nextOwnerAction,
+        String packetHash
+    ) {
+        Map<String, Object> payload = orderedMap();
+        payload.put("id", id);
+        payload.put("title", title);
+        payload.put("domain", domain);
+        payload.put("severity", severity);
+        payload.put("quality", Map.of("status", "measured", "score", qualityScore));
+        payload.put("priority", Map.of("rank", rank, "score", priorityScore, "rationale", rationale));
+        payload.put("governance", Map.of(
+            "allowedSurface", allowedSurface,
+            "blockerClasses", List.of("human_approval_required_for_dispatch"),
+            "nextOwnerAction", nextOwnerAction
+        ));
+        payload.put("productionEvidence", Map.of(
+            "state", "spring_state_projection",
+            "feedCount", 4,
+            "packetHash", packetHash
+        ));
+        return payload;
+    }
+
+    private List<Map<String, Object>> springPolicyRefs() {
+        return List.of(
+            policyRef("PARK-SAFE-001", "Safety-sensitive dispatch boundary", "Human approval is required before safety-sensitive guest, worker, equipment, medical, security, or evacuation action.", "No autonomous safety dispatch", "critical"),
+            policyRef("PARK-OPS-001", "Guest-flow operating action", "Queue balancing is allowed only with current state, staff coverage, and rollback observation.", "Split-flow or staff review after evidence check", "review"),
+            policyRef("PARK-CARE-001", "Guest-care traceability", "Guest-facing recovery requires receipt, owner, and outcome evidence.", "Guest-care review with linked receipt", "review")
+        );
+    }
+
+    private Map<String, Object> policyRef(String ref, String title, String condition, String allowedAction, String severity) {
+        Map<String, Object> payload = orderedMap();
+        payload.put("policy_ref", ref);
+        payload.put("policy_book_id", "PARKPULSE-SPRING-OPS");
+        payload.put("title", title);
+        payload.put("summary", allowedAction);
+        payload.put("severity", severity);
+        payload.put("condition", condition);
+        payload.put("allowed_action", allowedAction);
+        payload.put("blocked_action", severity.equals("critical") ? "Automated dispatch without human approval" : "Action without linked evidence");
+        return payload;
+    }
+
+    private List<Map<String, Object>> springPolicyCases() {
+        return List.of(
+            policyCase(
+                "spring_queue_pressure",
+                "Dragon Coaster queue pressure",
+                List.of("wait above adjacent rides", "covered plaza density rising"),
+                List.of("dragon-coaster wait", "covered-plaza density", "staff readiness"),
+                List.of("PARK-OPS-001", "PARK-CARE-001"),
+                List.of("split_flow_review", "staff_position_review"),
+                "Queue wait reduces without creating unsafe density in adjacent zones.",
+                "Queue or plaza density worsens after 5 minutes."
+            ),
+            policyCase(
+                "spring_staff_readiness",
+                "Staff callout coverage watch",
+                List.of("open staff callouts", "next peak approaching"),
+                List.of("checked in staff", "open callouts", "coverage ratio"),
+                List.of("PARK-SAFE-001", "PARK-OPS-001"),
+                List.of("coverage_observe", "manager_review"),
+                "Coverage remains above operating threshold.",
+                "Callouts exceed threshold or safety-sensitive post becomes uncovered."
+            )
+        );
+    }
+
+    private Map<String, Object> policyCase(
+        String id,
+        String title,
+        List<String> triggers,
+        List<String> stateSignals,
+        List<String> policyRefs,
+        List<String> recommendedPrimitives,
+        String successMetric,
+        String rollbackCondition
+    ) {
+        Map<String, Object> payload = orderedMap();
+        payload.put("id", id);
+        payload.put("title", title);
+        payload.put("triggers", triggers);
+        payload.put("state_signals", stateSignals);
+        payload.put("policy_refs", policyRefs);
+        payload.put("recommended_primitives", recommendedPrimitives);
+        payload.put("action_plan", List.of("read state", "check policy", "require human review before dispatch", "record receipt"));
+        payload.put("blocked_actions", List.of("safety-sensitive automation without approval", "dispatch without receipt"));
+        payload.put("success_metric", successMetric);
+        payload.put("rollback_condition", rollbackCondition);
+        return payload;
+    }
+
+    private List<Map<String, Object>> springMonitorEvidenceCases(String caseId) {
+        return springCaseRows().stream()
+            .filter(item -> caseId == null || caseId.isBlank() || caseId.equals(String.valueOf(item.get("id"))))
+            .map(this::springMonitorEvidenceCase)
+            .toList();
+    }
+
+    private Map<String, Object> springMonitorEvidenceCase(Map<String, Object> caseRow) {
+        String caseId = String.valueOf(caseRow.get("id"));
+        boolean queueCase = "spring_queue_pressure".equals(caseId);
+        List<String> policyRefs = queueCase ? List.of("PARK-OPS-001", "PARK-CARE-001") : List.of("PARK-SAFE-001", "PARK-OPS-001");
+        String receiptId = queueCase ? "receipt-spring-queue" : "receipt-spring-staff";
+        String traceId = queueCase ? "trace-spring-queue" : "trace-spring-staff";
+        String reviewId = queueCase ? "review-spring-queue" : "review-spring-staff";
+
+        Map<String, Object> payload = orderedMap();
+        payload.put("case_id", caseId);
+        payload.put("caseId", caseId);
+        payload.put("policy_case_id", caseId);
+        payload.put("policy_refs", policyRefs);
+        payload.put("policy_ref_rows", springPolicyRefs().stream().filter(item -> policyRefs.contains(String.valueOf(item.get("policy_ref")))).toList());
+        payload.put("receipt_ids", List.of(receiptId));
+        payload.put("trace_ids", List.of(traceId));
+        payload.put("review_session_ids", List.of(reviewId));
+        payload.put("trace_records", List.of(traceRecord(caseId, receiptId, traceId, policyRefs, queueCase)));
+        payload.put("review_sessions", List.of(reviewSession(caseId, reviewId, queueCase)));
+        payload.put("eval_dimensions", List.of(
+            Map.of("id", "safety_policy", "label", "Safety and policy", "score", queueCase ? 86 : 82, "status", "linked", "detail", "Spring policy doctrine is linked to this case."),
+            Map.of("id", "trace_completeness", "label", "Trace completeness", "score", 78, "status", "spring_projection", "detail", "Case, trace, review, and policy references are linked in Spring.")
+        ));
+        payload.put("outcome_evidence", Map.of(
+            "status", "dispatch_contract_only",
+            "dispatch_count", queueCase ? 1 : 0,
+            "receiver_actions", queueCase ? List.of("split_flow_review", "staff_position_review") : List.of("coverage_observe"),
+            "latest", Map.of("dispatchStatus", "review_required", "receiverAckCount", 0)
+        ));
+        payload.put("relationship_contract", Map.of(
+            "case_id", caseId,
+            "trace_id_source", "spring trace projection",
+            "review_session_id_source", "spring review projection",
+            "policy_ref_source", "spring policy doctrine",
+            "explicit_receipt_links", 1,
+            "explicit_review_links", 1,
+            "inferred_receipt_links", 0,
+            "inferred_review_links", 0,
+            "semantic_threshold", "Spring emits explicit case IDs for monitor evidence links."
+        ));
+        return payload;
+    }
+
+    private Map<String, Object> traceRecord(String caseId, String receiptId, String traceId, List<String> policyRefs, boolean queueCase) {
+        Map<String, Object> payload = orderedMap();
+        payload.put("receipt_id", receiptId);
+        payload.put("case_id", caseId);
+        payload.put("policy_case_id", caseId);
+        payload.put("policy_refs", policyRefs);
+        payload.put("receipt_policy_refs", policyRefs);
+        payload.put("case_policy_refs", policyRefs);
+        payload.put("policy_ref_rows", springPolicyRefs().stream().filter(item -> policyRefs.contains(String.valueOf(item.get("policy_ref")))).toList());
+        payload.put("policy_link_source", "spring explicit policy refs");
+        payload.put("trace_id", traceId);
+        payload.put("trace_url", null);
+        payload.put("signature", "spring-signature-" + caseId);
+        payload.put("relation_type", "explicit_case_id");
+        payload.put("relation_confidence", "direct");
+        payload.put("hard_match", true);
+        payload.put("relation_score", 100);
+        payload.put("case_link_source", "spring_case_projection");
+        payload.put("case_link_confidence", 1.0);
+        payload.put("eval_score", queueCase ? 86 : 78);
+        payload.put("gate", queueCase ? "review" : "clear");
+        payload.put("tool_count", 3);
+        payload.put("summary", queueCase ? "Spring linked queue-pressure case to policy and review evidence." : "Spring linked staffing readiness case to policy and review evidence.");
+        return payload;
+    }
+
+    private Map<String, Object> reviewSession(String caseId, String reviewId, boolean queueCase) {
+        Map<String, Object> payload = orderedMap();
+        payload.put("review_session_id", reviewId);
+        payload.put("case_id", caseId);
+        payload.put("status", queueCase ? "open" : "watch");
+        payload.put("priority", queueCase ? "medium" : "low");
+        payload.put("owner", "ops_team");
+        payload.put("reason", queueCase ? "Operator review is required before split-flow dispatch." : "Coverage remains inside threshold but should be checked.");
+        payload.put("relation_type", "explicit_case_id");
+        payload.put("relation_confidence", "direct");
+        payload.put("hard_match", true);
+        payload.put("relation_score", 100);
         return payload;
     }
 

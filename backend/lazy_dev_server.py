@@ -249,7 +249,8 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             elif path == "/api/park/monitor-evidence":
                 limit = self._query_int(parsed.query, "limit", 30, maximum=80)
                 case_id = self._query_value(parsed.query, "case_id") or self._query_value(parsed.query, "caseId") or None
-                payload = self._resolve_direct_payload(parkpulse_lazy_main._monitor_evidence_graph(case_id=case_id, limit=limit), timeout_seconds=15.0)
+                force_refresh = self._query_value(parsed.query, "refresh").strip().lower() in {"1", "true", "yes", "on"}
+                payload = self._resolve_direct_payload(parkpulse_lazy_main._monitor_evidence_graph_cached(case_id=case_id, limit=limit, force_refresh=force_refresh), timeout_seconds=15.0)
             elif path == "/api/park/policy-doctrine":
                 if getattr(parkpulse_lazy_main, "_fast_operational_doctrine_index", None) is None:
                     payload = {

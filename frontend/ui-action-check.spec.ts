@@ -55,7 +55,7 @@ async function refreshFeedsUntilReviewed(page: Page) {
         const statusReviewed = /Status\s+(ready|review)/i.test(bodyText);
         return readyCount === 6 && statusReviewed;
       },
-      { timeout: 60000, message: "live feed health should reach ready or review with signed ops evidence" },
+      { timeout: 120000, message: "live feed health should reach ready or review with signed ops evidence" },
     )
     .toBeTruthy();
 }

@@ -447,7 +447,8 @@ export function StaffTrainingPage() {
   }
 
   async function loadManagerWorkflow() {
-    const [assignmentResponse, readinessResponse, receiptResponse, productLearningResponse] = await Promise.all([
+    await loadProductLearningLoop();
+    const [assignmentResponse, readinessResponse, receiptResponse] = await Promise.all([
       fetchParkPulseApi("/api/park/staff-training/assignments?limit=120", {
         headers: { "x-parkpulse-role": "ops_team" },
         timeoutMs: 8000,
@@ -460,19 +461,13 @@ export function StaffTrainingPage() {
         headers: { "x-parkpulse-role": "ops_team" },
         timeoutMs: 8000,
       }),
-      fetchParkPulseApi("/api/park/product-learning/loop?limit=120", {
-        headers: { "x-parkpulse-role": "ops_team" },
-        timeoutMs: 8000,
-      }),
     ]);
     const assignmentPayload = (await assignmentResponse.json()) as { assignments?: Assignment[] };
     const readinessPayload = (await readinessResponse.json()) as { readiness?: ReadinessRow[] };
     const receiptPayload = (await receiptResponse.json()) as { receipts?: Receipt[] };
-    const productLearningPayload = (await productLearningResponse.json()) as ProductLearningLoop;
     setAssignments(assignmentPayload.assignments ?? []);
     setReadiness(readinessPayload.readiness ?? []);
     setReceipts(receiptPayload.receipts ?? []);
-    setProductLearning(productLearningPayload);
   }
 
   async function createManualTrainingGapTicket() {

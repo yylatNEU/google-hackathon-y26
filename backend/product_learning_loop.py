@@ -201,12 +201,12 @@ def generate_park_issue_tickets_from_operational_backlog(backlog: dict[str, Any]
 
 def _issue_type_from_backlog_issue(issue: dict[str, Any]) -> str:
     blob = " ".join(str(issue.get(key) or "") for key in ("id", "domain", "title", "current", "recommendedNext")).lower()
+    if any(term in blob for term in ("accessibility", "mobility", "privacy", "accommodation")):
+        return "accessibility_accommodation"
     if any(term in blob for term in ("safety", "storm", "weather", "access", "crowd", "showtime", "traffic")):
         return "weather_evacuation_confusion"
     if any(term in blob for term in ("medical", "first aid", "heat", "care")):
         return "heat_exhaustion_concern"
-    if any(term in blob for term in ("accessibility", "mobility", "privacy")):
-        return "accessibility_accommodation"
     if any(term in blob for term in ("refund", "compensation", "finance", "recovery", "food", "eta", "backlog")):
         return "refund_request"
     if any(term in blob for term in ("fairness", "complaint", "trust", "guest", "customer")):

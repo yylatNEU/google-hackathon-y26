@@ -195,6 +195,10 @@ _mongo_hot_status_cache: tuple[float, dict[str, Any]] | None = None
 _evidence_endpoint_cache: dict[str, tuple[float, float, dict[str, Any]]] = {}
 _evidence_endpoint_refreshing: set[str] = set()
 _evidence_refresh_jobs: dict[str, dict[str, Any]] = {}
+_monitor_evidence_cache: dict[str, tuple[float, float, dict[str, Any]]] = {}
+_monitor_evidence_refreshing: set[str] = set()
+_monitor_evidence_lock = threading.Lock()
+_monitor_evidence_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-monitor-evidence")
 _live_feed_health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _live_feed_weather_refresh_task: asyncio.Task | None = None
 _live_feed_weather_refresh_status: dict[str, Any] = {
@@ -7819,6 +7823,194 @@ async def _monitor_evidence_graph(case_id: str | None = None, *, limit: int = 30
     }
 
 
+def _monitor_evidence_cache_ttl_seconds() -> float:
+    return max(5.0, _float_env("PARKPULSE_MONITOR_EVIDENCE_CACHE_TTL_SECONDS", 120.0))
+
+
+def _monitor_evidence_cache_key(limit: int) -> str:
+    return f"monitor-evidence-limit-{max(1, min(limit, 80))}"
+
+
+def _monitor_evidence_snapshot_path(limit: int) -> Path:
+    configured = os.getenv("PARKPULSE_MONITOR_EVIDENCE_SNAPSHOT_PATH")
+    if configured:
+        path = Path(configured)
+    else:
+        path = Path("output") / f"{_monitor_evidence_cache_key(limit)}.json"
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+def _monitor_evidence_copy(payload: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(payload, default=str))
+
+
+def _monitor_evidence_summary(cases: list[dict[str, Any]], base_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+    summary = dict(base_summary or {})
+    trace_record_count = sum(len(_monitor_list(row.get("trace_records"))) for row in cases)
+    distinct_trace_ids = _monitor_unique(
+        [trace_id for row in cases for trace_id in _monitor_list(row.get("trace_ids"))],
+        limit=500,
+    )
+    distinct_review_session_ids = _monitor_unique(
+        [session_id for row in cases for session_id in _monitor_list(row.get("review_session_ids"))],
+        limit=500,
+    )
+    policy_ref_ids = _monitor_unique(
+        [policy_ref for row in cases for policy_ref in _monitor_list(row.get("policy_refs"))],
+        limit=500,
+    )
+    summary.update(
+        {
+            "trace_record_count": trace_record_count,
+            "distinct_trace_id_count": len(distinct_trace_ids),
+            "linked_review_session_count": len(distinct_review_session_ids),
+            "linked_policy_ref_count": len(policy_ref_ids),
+            "cases_with_trace_records": sum(1 for row in cases if _monitor_list(row.get("trace_records"))),
+            "cases_with_review_sessions": sum(1 for row in cases if _monitor_list(row.get("review_sessions"))),
+            "cases_with_policy_refs": sum(1 for row in cases if _monitor_list(row.get("policy_refs"))),
+        }
+    )
+    return summary
+
+
+def _monitor_evidence_filter_case(payload: dict[str, Any], case_id: str | None) -> dict[str, Any]:
+    graph = _monitor_evidence_copy(payload)
+    if not case_id:
+        return graph
+    cases = [row for row in _monitor_list(graph.get("cases")) if isinstance(row, dict) and str(row.get("case_id") or row.get("caseId") or "") == case_id]
+    graph["cases"] = cases
+    graph["case_count"] = len(cases)
+    graph["summary"] = _monitor_evidence_summary(cases, _monitor_dict(graph.get("summary")))
+    return graph
+
+
+def _monitor_evidence_with_cache_metadata(payload: dict[str, Any], *, key: str, expires_at: float, created_at: float, state: str) -> dict[str, Any]:
+    graph = _monitor_evidence_copy(payload)
+    now = time.monotonic()
+    graph["evidence_cache"] = {
+        "key": key,
+        "state": state,
+        "age_seconds": round(max(0.0, now - created_at), 3),
+        "fresh_for_seconds": round(max(0.0, expires_at - now), 3),
+        "refreshing": key in _monitor_evidence_refreshing,
+        "mode": "backend_snapshot_stale_while_revalidate",
+        "snapshot_path": str(_monitor_evidence_snapshot_path(int(str(key).rsplit("-", 1)[-1]) if str(key).rsplit("-", 1)[-1].isdigit() else 30)),
+    }
+    return graph
+
+
+def _read_monitor_evidence_snapshot(limit: int) -> tuple[float, float, dict[str, Any]] | None:
+    path = _monitor_evidence_snapshot_path(limit)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    graph = _monitor_dict(payload.get("graph"))
+    if not graph:
+        return None
+    created_at = _safe_float(payload.get("created_monotonic"), 0)
+    if created_at <= 0:
+        try:
+            created_at = path.stat().st_mtime
+            created_at = time.monotonic() - max(0.0, time.time() - created_at)
+        except OSError:
+            created_at = time.monotonic()
+    ttl = _monitor_evidence_cache_ttl_seconds()
+    expires_at = created_at + ttl
+    return expires_at, created_at, graph
+
+
+def _write_monitor_evidence_snapshot(limit: int, graph: dict[str, Any]) -> None:
+    path = _monitor_evidence_snapshot_path(limit)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": "ready",
+        "mode": "monitor_evidence_snapshot",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_monotonic": time.monotonic(),
+        "limit": max(1, min(limit, 80)),
+        "graph": graph,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+
+
+def _store_monitor_evidence_cache(key: str, limit: int, graph: dict[str, Any]) -> tuple[float, float, dict[str, Any]]:
+    created_at = time.monotonic()
+    expires_at = created_at + _monitor_evidence_cache_ttl_seconds()
+    clean_graph = _monitor_evidence_copy(graph)
+    with _monitor_evidence_lock:
+        _monitor_evidence_cache[key] = (expires_at, created_at, clean_graph)
+    with contextlib.suppress(Exception):
+        _write_monitor_evidence_snapshot(limit, clean_graph)
+    return expires_at, created_at, clean_graph
+
+
+def _refresh_monitor_evidence_cache(limit: int, key: str) -> None:
+    try:
+        graph = asyncio.run(_monitor_evidence_graph(case_id=None, limit=limit))
+        _store_monitor_evidence_cache(key, limit, graph)
+    except Exception as error:
+        print(f"ParkPulse monitor evidence refresh failed for {key}: {error}")
+    finally:
+        with _monitor_evidence_lock:
+            _monitor_evidence_refreshing.discard(key)
+
+
+def _trigger_monitor_evidence_refresh(limit: int, key: str) -> None:
+    with _monitor_evidence_lock:
+        if key in _monitor_evidence_refreshing:
+            return
+        _monitor_evidence_refreshing.add(key)
+    _monitor_evidence_executor.submit(_refresh_monitor_evidence_cache, limit, key)
+
+
+async def _monitor_evidence_graph_cached(case_id: str | None = None, *, limit: int = 30, force_refresh: bool = False) -> dict[str, Any]:
+    bounded_limit = max(1, min(limit, 80))
+    key = _monitor_evidence_cache_key(bounded_limit)
+    now = time.monotonic()
+    if not force_refresh:
+        with _monitor_evidence_lock:
+            cached = _monitor_evidence_cache.get(key)
+        if cached:
+            expires_at, created_at, graph = cached
+            state = "fresh" if expires_at > now else "stale"
+            if expires_at <= now:
+                _trigger_monitor_evidence_refresh(bounded_limit, key)
+            return _monitor_evidence_with_cache_metadata(
+                _monitor_evidence_filter_case(graph, case_id),
+                key=key,
+                expires_at=expires_at,
+                created_at=created_at,
+                state=state,
+            )
+
+        snapshot = _read_monitor_evidence_snapshot(bounded_limit)
+        if snapshot:
+            expires_at, created_at, graph = snapshot
+            with _monitor_evidence_lock:
+                _monitor_evidence_cache[key] = (expires_at, created_at, graph)
+            state = "snapshot_fresh" if expires_at > now else "snapshot_stale"
+            if expires_at <= now:
+                _trigger_monitor_evidence_refresh(bounded_limit, key)
+            return _monitor_evidence_with_cache_metadata(
+                _monitor_evidence_filter_case(graph, case_id),
+                key=key,
+                expires_at=expires_at,
+                created_at=created_at,
+                state=state,
+            )
+
+    graph = await _monitor_evidence_graph(case_id=None, limit=bounded_limit)
+    expires_at, created_at, stored_graph = _store_monitor_evidence_cache(key, bounded_limit, graph)
+    return _monitor_evidence_with_cache_metadata(
+        _monitor_evidence_filter_case(stored_graph, case_id),
+        key=key,
+        expires_at=expires_at,
+        created_at=created_at,
+        state="rebuilt" if force_refresh else "cold_rebuilt",
+    )
+
+
 async def _advance_fast_park_from_wall_clock() -> int:
     global _last_fast_park_step_at
     now = time.monotonic()
@@ -13130,7 +13322,15 @@ async def app(scope, receive, send):
             try:
                 from agent_ops_ledger import build_operational_backlog
 
-                state = await _fast_park_state_lite()
+                cached_state = _hot_endpoint_cache.get("park_state_lite")
+                if cached_state:
+                    state = cached_state[1]
+                else:
+                    state = await asyncio.wait_for(
+                        _fast_park_state_lite(),
+                        timeout=max(0.5, _float_env("PARKPULSE_PRODUCT_LEARNING_STATE_TIMEOUT_SECONDS", 1.5)),
+                    )
+                    _hot_endpoint_cache["park_state_lite"] = (time.monotonic() + _hot_endpoint_ttls()["park_state"], state)
                 operational_backlog = await asyncio.wait_for(
                     asyncio.to_thread(build_operational_backlog, state),
                     timeout=max(0.5, _float_env("PARKPULSE_PRODUCT_LEARNING_BACKLOG_TIMEOUT_SECONDS", 2.5)),
@@ -17451,11 +17651,12 @@ async def app(scope, receive, send):
         query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
         limit_raw = (query.get("limit") or ["30"])[0]
         case_id = (query.get("case_id") or query.get("caseId") or [""])[0].strip() or None
+        force_refresh = str((query.get("refresh") or [""])[0]).strip().lower() in {"1", "true", "yes", "on"}
         try:
             limit = int(limit_raw)
         except ValueError:
             limit = 30
-        await _send_json(send, 200, await _monitor_evidence_graph(case_id=case_id, limit=limit))
+        await _send_json(send, 200, await _monitor_evidence_graph_cached(case_id=case_id, limit=limit, force_refresh=force_refresh))
         return
 
     if method == "GET" and path.startswith("/api/park/cases/") and path.endswith("/brief"):

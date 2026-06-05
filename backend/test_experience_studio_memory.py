@@ -182,6 +182,12 @@ def test_conversation_plan_creates_generator_ready_brief_without_learning_loop(m
     assert package["channelMatrix"]
     assert package["productionDetail"]["contentCompletenessChecklist"]
     assert package["memoryInfluence"]["authority"] == "retrieval_context_only"
+    assert package["sectionCreativeDetails"]["conceptBoard"]["workingTitle"]
+    assert package["sectionCreativeDetails"]["routeStoryCards"]
+    assert package["memoryApplication"]["status"] in {"active", "not_active"}
+    assert package["venueDataGapAnalysis"]["missingForProduction"]
+    assert package["studioQualityEval"]["score"] > 0
+    assert package["studioQualityEval"]["qaChecklist"]
     route_copy = [stop["guestCopy"] for stop in generated["draft"]["route"]]
     assert any("Start dry" in copy for copy in route_copy)
     assert any("short reset" in copy or "quiet middle beat" in copy for copy in route_copy)
@@ -256,6 +262,8 @@ def test_generation_uses_approved_finished_work_memory_without_feedback_loop(mon
     assert memory["matchedExamples"][0]["selectedConceptName"]
     assert package_memory["usedForGeneration"] is True
     assert package_memory["authority"] == "retrieval_context_only"
+    assert second["creativePackage"]["memoryApplication"]["usedForGeneration"] is True
+    assert second["creativePackage"]["memoryApplication"]["visibleChanges"]
     assert any(
         dossier.get("section") == "memory"
         for dossier in second["creativePackage"]["sectionDossiers"]
@@ -325,6 +333,7 @@ def test_human_promoted_learning_rule_influences_future_generation(monkeypatch, 
     assert package_rules["usedForGeneration"] is True
     assert package_rules["authority"] == "human_promoted_rules_only"
     assert second["creativeSynthesis"]["learningRuleInfluence"]["usedForGeneration"] is True
+    assert "approvedRulesApplied" in second["creativePackage"]["memoryApplication"]
     assert any(
         dossier.get("section") == "approved rules"
         for dossier in second["creativePackage"]["sectionDossiers"]

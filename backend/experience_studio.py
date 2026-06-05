@@ -1823,6 +1823,17 @@ def _source_integrity(route: list[dict[str, Any]], real_inputs: dict[str, Any], 
     readiness = intelligence.get("readiness") if isinstance(intelligence.get("readiness"), dict) else {}
     venue = real_inputs.get("venueIdentity", {}) if isinstance(real_inputs.get("venueIdentity"), dict) else {}
     profile_type = str(venue.get("profileType") or "")
+    production_missing = _as_text_list(readiness.get("missingForRealVenueReady"))
+    if profile_type == "synthetic_approved":
+        production_missing.extend(
+            [
+                "real venue source feed instead of approved synthetic profile",
+                "live attraction closure/current-options feed",
+                "current indoor, sheltered, and blocked-path status",
+                "approved physical signage placement inventory",
+                "channel-owner approved CRM/app/staff language templates",
+            ]
+        )
     return {
         "usesSeedData": False,
         "usesSimulatedParkState": False,
@@ -1836,6 +1847,8 @@ def _source_integrity(route: list[dict[str, Any]], real_inputs: dict[str, Any], 
         "profileIntelligenceStatus": readiness.get("status") or "unknown",
         "profileIntelligenceQualityGaps": quality_gaps,
         "realVenueReady": bool(readiness.get("realVenueReady") and profile_type != "synthetic_approved"),
+        "productionRealVenueReady": bool(readiness.get("realVenueReady") and profile_type != "synthetic_approved" and not production_missing),
+        "missingProductionRealVenueInputs": list(dict.fromkeys(production_missing + quality_gaps)),
         "missingRealInputs": missing_inputs,
         "readyForHandoff": not missing_inputs and not _has_unresolved_placeholders({"route": route}),
     }
@@ -3218,6 +3231,234 @@ def _section_dossiers(route: list[dict[str, Any]], template: dict[str, Any], sel
     ]
 
 
+def _section_creative_details(
+    route: list[dict[str, Any]],
+    channel_matrix: list[dict[str, Any]],
+    selected_name: str,
+    selected_promise: str,
+    creative_brief: dict[str, str],
+    channel_owners: dict[str, Any],
+    route_pattern: dict[str, Any],
+    copy_variants: dict[str, Any],
+) -> dict[str, Any]:
+    arc = route_pattern.get("recommendedArc", []) if isinstance(route_pattern.get("recommendedArc"), list) else []
+    route_cards = []
+    for index, item in enumerate(route):
+        if not isinstance(item, dict):
+            continue
+        stop = str(item.get("stop") or f"stop {index + 1}")
+        beat = str(arc[index]) if index < len(arc) else _story_stage(creative_brief, index)
+        route_cards.append(
+            {
+                "order": index + 1,
+                "stop": stop,
+                "beat": beat,
+                "guestFacingMoment": item.get("guestCopy"),
+                "designerIntent": item.get("purpose"),
+                "staffCue": item.get("staffNote"),
+                "transitionLine": "Look for the next marker when your group is ready." if index < len(route) - 1 else "This is the close; choose the next current option in the app.",
+                "choiceArchitecture": "start, pause, skip, or exit" if 0 < index < len(route) - 1 else "opt in" if index == 0 else "regroup and decide",
+                "proofBeforePublish": [
+                    "current path and crowd condition",
+                    "step-free route and seating confirmation",
+                    "channel owner approval",
+                ],
+            }
+        )
+    signage = copy_variants.get("signage") if isinstance(copy_variants.get("signage"), list) else []
+    return {
+        "conceptBoard": {
+            "workingTitle": selected_name,
+            "promise": selected_promise,
+            "storyArc": creative_brief.get("storyArc"),
+            "sensoryIntent": creative_brief.get("sensoryLevel"),
+            "pace": creative_brief.get("walkingPace"),
+            "creativeDirection": creative_brief.get("creativeDirection"),
+            "reviewUse": "Use this as the creative-review frame before editing route or channel artifacts.",
+        },
+        "routeStoryCards": route_cards,
+        "channelArtifactBriefs": [
+            {
+                "channel": item.get("channel"),
+                "owner": item.get("owner"),
+                "jobToBeDone": item.get("objective"),
+                "draftArtifact": item.get("primaryCopy"),
+                "headline": item.get("headline"),
+                "microcopy": item.get("microcopy"),
+                "reviewQuestion": item.get("reviewQuestion"),
+                "productionRisk": "May imply live operational conditions unless current-options language and owner review stay attached.",
+            }
+            for item in channel_matrix
+            if isinstance(item, dict)
+        ],
+        "signageProductionCards": [
+            {
+                "placement": item.get("placement"),
+                "headline": item.get("headline"),
+                "body": item.get("body"),
+                "format": "short physical marker",
+                "readabilityCheck": "One action, one reassurance, no availability promise.",
+            }
+            for item in signage
+            if isinstance(item, dict)
+        ],
+        "emailModules": {
+            "subjectJob": "Name the route and set comfort expectations without promising weather, seating, or availability.",
+            "bodyJob": "Tell guests where to start, how to opt out, and where to check current options.",
+            "crmOwner": channel_owners.get("email") or channel_owners.get("pre_arrival_email") or "CRM",
+        },
+        "staffRehearsalNotes": [
+            "Use the same route name across spoken and written artifacts.",
+            "Offer the route as optional; avoid commands that sound like crowd control.",
+            "Escalate safety, accessibility, weather, staffing, or availability questions to the approved live source.",
+        ],
+    }
+
+
+def _memory_application_detail(memory_context: dict[str, Any], learning_context: dict[str, Any], synthesis: dict[str, Any]) -> dict[str, Any]:
+    rewrite = synthesis.get("rewriteStrategy") if isinstance(synthesis.get("rewriteStrategy"), dict) else {}
+    matched = memory_context.get("matchedExamples") if isinstance(memory_context.get("matchedExamples"), list) else []
+    applied_rules = learning_context.get("appliedRules") if isinstance(learning_context.get("appliedRules"), list) else []
+    if memory_context.get("status") != "ready" and learning_context.get("status") != "ready":
+        return {
+            "status": "not_active",
+            "usedForGeneration": False,
+            "visibleChanges": ["No approved finished-work memory or promoted rules were active for this generation."],
+            "preservedPatterns": [],
+            "avoidedPatterns": ["Do not infer preferences from unapproved work."],
+            "matchedDrafts": [],
+            "reviewBoundary": "Memory remains audit/retrieval context only; it does not train the model or publish content.",
+        }
+    visible_changes = []
+    if memory_context.get("status") == "ready":
+        visible_changes.extend(
+            [
+                "Kept the output as a complete package rather than a single copy artifact.",
+                "Preserved named route/concept continuity across app, email, signage, and staff cue.",
+                "Kept review gates and owner questions visible in the final package.",
+            ]
+        )
+    if applied_rules:
+        visible_changes.append("Inserted human-promoted package rules into the synthesis preserve/avoid strategy.")
+    return {
+        "status": "active",
+        "usedForGeneration": True,
+        "visibleChanges": visible_changes,
+        "preservedPatterns": _as_text_list(memory_context.get("reusablePatterns")) + _as_text_list(rewrite.get("preserve"))[:4],
+        "avoidedPatterns": _as_text_list(memory_context.get("avoidPatterns")) + _as_text_list(rewrite.get("avoid"))[:4],
+        "matchedDrafts": [
+            {
+                "draftId": item.get("draftId"),
+                "status": item.get("status"),
+                "selectedConceptName": item.get("selectedConceptName"),
+                "route": item.get("route", []),
+            }
+            for item in matched[:3]
+            if isinstance(item, dict)
+        ],
+        "approvedRulesApplied": applied_rules,
+        "reviewBoundary": "Memory can influence continuity and completeness, but Venue Profile facts, route locks, banned claims, and review gates remain authoritative.",
+    }
+
+
+def _venue_data_gap_analysis(real_inputs: dict[str, Any], intelligence: dict[str, Any], route: list[dict[str, Any]], quality_gaps: list[str]) -> dict[str, Any]:
+    venue = real_inputs.get("venueIdentity", {}) if isinstance(real_inputs.get("venueIdentity"), dict) else {}
+    readiness = intelligence.get("readiness") if isinstance(intelligence.get("readiness"), dict) else {}
+    coverage = intelligence.get("coverage") if isinstance(intelligence.get("coverage"), dict) else {}
+    profile_type = str(venue.get("profileType") or "unknown")
+    missing_for_real = _as_text_list(readiness.get("missingForRealVenueReady"))
+    production_missing = list(missing_for_real)
+    if profile_type == "synthetic_approved":
+        production_missing.extend(
+            [
+                "real venue source feed instead of approved synthetic profile",
+                "live attraction closure and current-options feed",
+                "current indoor, sheltered, and blocked-path status",
+                "approved physical signage placement inventory",
+                "channel-owner approved CRM/app/staff language templates",
+            ]
+        )
+    if not real_inputs.get("channelOwners"):
+        production_missing.append("named channel owners for guest_app, signage, email, and staff_cue")
+    if not coverage.get("certifiedPaths"):
+        production_missing.append("certified path records for selected route segments")
+    route_checks = [
+        {
+            "stop": item.get("stop"),
+            "hasAccessibilityNote": bool(item.get("accessibilityNote")),
+            "hasProfileFact": bool(item.get("profileIntelligenceNote")),
+            "stillNeeds": [
+                "current crowd/sensory condition",
+                "current step-free route confirmation",
+                "owner signoff before publishing",
+            ],
+        }
+        for item in route
+        if isinstance(item, dict)
+    ]
+    return {
+        "status": "real_venue_ready" if readiness.get("realVenueReady") and profile_type != "synthetic_approved" and not production_missing else "creative_ready_review_required",
+        "profileType": profile_type,
+        "creativeReady": bool(intelligence and not quality_gaps),
+        "productionRealVenueReady": bool(readiness.get("realVenueReady") and profile_type != "synthetic_approved" and not production_missing),
+        "missingForProduction": list(dict.fromkeys(production_missing + quality_gaps)),
+        "coverage": coverage,
+        "routeChecks": route_checks,
+        "nextProfileImports": [
+            "venue-owned live status feed",
+            "accessibility/path certification export",
+            "signage inventory and placement approvals",
+            "channel owner templates and banned-claim updates",
+        ],
+    }
+
+
+def _studio_quality_eval(
+    route: list[dict[str, Any]],
+    channel_matrix: list[dict[str, Any]],
+    section_dossiers: list[dict[str, Any]],
+    package: dict[str, Any],
+    memory_application: dict[str, Any],
+    venue_gap_analysis: dict[str, Any],
+    quality_gaps: list[str],
+) -> dict[str, Any]:
+    scores = {
+        "specificity": 90 if route and all(item.get("guestCopy") and item.get("staffNote") for item in route if isinstance(item, dict)) else 55,
+        "venueGrounding": 92 if route and all(item.get("source") for item in route if isinstance(item, dict)) else 65,
+        "sectionCompleteness": min(100, 50 + len(section_dossiers) * 7 + len(channel_matrix) * 3),
+        "creativeQuality": 88 if (package.get("executiveConcept") or {}).get("name") and (package.get("creativeSynthesis") or {}).get("concepts") else 70,
+        "reviewReadiness": 72 if quality_gaps else 88,
+        "memoryUse": 90 if memory_application.get("usedForGeneration") else 60,
+        "publishRisk": 55 if venue_gap_analysis.get("missingForProduction") else 85,
+    }
+    total = round(sum(scores.values()) / len(scores), 1)
+    findings = []
+    if venue_gap_analysis.get("missingForProduction"):
+        findings.append("Production-real venue launch still needs live/profile imports before publish.")
+    if not memory_application.get("usedForGeneration"):
+        findings.append("No approved memory or promoted rules influenced this generation yet.")
+    if scores["sectionCompleteness"] >= 85:
+        findings.append("Package includes concept, journey, channels, staff, accessibility, memory, and review sections.")
+    return {
+        "status": "strong_review_draft" if total >= 80 else "needs_review_work",
+        "score": total,
+        "scores": scores,
+        "findings": findings,
+        "qaChecklist": [
+            {"check": "specific copy in each stop", "status": "pass" if scores["specificity"] >= 80 else "review"},
+            {"check": "venue facts attached", "status": "pass" if scores["venueGrounding"] >= 80 else "review"},
+            {"check": "complete artifacts", "status": "pass" if scores["sectionCompleteness"] >= 80 else "review"},
+            {"check": "memory/rule influence visible", "status": "pass" if scores["memoryUse"] >= 80 else "review"},
+            {"check": "production-real venue ready", "status": "pass" if not venue_gap_analysis.get("missingForProduction") else "blocked"},
+        ],
+        "recommendedNextActions": [
+            "Send section details to channel owners for edits.",
+            "Resolve production data gaps before publish or live deployment.",
+            "Promote only reviewer-approved rules from finished work.",
+        ],
+    }
+
+
 def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]], template_id: str, template: dict[str, Any], audience: str, tone: str, constraints: str, creative_brief: dict[str, str], real_inputs: dict[str, Any], intelligence: dict[str, Any], quality_gaps: list[str], experience_reasoning: dict[str, Any] | None = None, creative_synthesis: dict[str, Any] | None = None, memory_context: dict[str, Any] | None = None, learning_context: dict[str, Any] | None = None) -> dict[str, Any]:
     venue = real_inputs.get("venueIdentity", {}) if isinstance(real_inputs.get("venueIdentity"), dict) else {}
     venue_name = _text(venue.get("name"), "the venue")
@@ -3257,6 +3498,10 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
     approved_rules = learning_context if isinstance(learning_context, dict) else _learning_rule_context(template_id, audience, synthesis_channels)
     route_blueprint = _route_blueprint(route, creative_brief, route_pattern)
     channel_matrix = _channel_matrix(messages, copy_variants, channel_owners, channel_rules)
+    section_dossiers = _section_dossiers(route, template, selected_name, selected_promise or f"Guests get a clear {optional_phrase}.", route_pattern, finished_memory, approved_rules, quality_gaps)
+    section_creative_details = _section_creative_details(route, channel_matrix, selected_name, selected_promise or f"Guests get a clear {optional_phrase}.", creative_brief, channel_owners, route_pattern, copy_variants)
+    memory_application = _memory_application_detail(finished_memory, approved_rules, synthesis)
+    venue_gap_analysis = _venue_data_gap_analysis(real_inputs, intelligence, route, quality_gaps)
     owner_questions = [
         {"owner": channel_owners.get("guest_app") or "Digital product", "question": "Can the app surface this as an optional journey without implying live attraction availability?"},
         {"owner": channel_owners.get("signage") or "Park experience", "question": "Which physical signs or map markers can be approved for the first and final route cues?"},
@@ -3265,7 +3510,7 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
     ]
     if quality_gaps:
         owner_questions.append({"owner": "Venue Profile owner", "question": f"Can the profile replace these derived assumptions before launch: {quality_gaps[0]}?"})
-    return {
+    package = {
         "version": "experience_studio_package_v2",
         "executiveConcept": {
             "name": selected_name,
@@ -3297,7 +3542,8 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
             {"beat": "Care", "detail": f"Keep sensory level {creative_brief.get('sensoryLevel')} and pace {creative_brief.get('walkingPace')} unless owner review changes it."},
             {"beat": "Close", "detail": f"End at {final_stop} with channel-owner next steps, not operational promises."},
         ],
-        "sectionDossiers": _section_dossiers(route, template, selected_name, selected_promise or f"Guests get a clear {optional_phrase}.", route_pattern, finished_memory, approved_rules, quality_gaps),
+        "sectionDossiers": section_dossiers,
+        "sectionCreativeDetails": section_creative_details,
         "channelMatrix": channel_matrix,
         "staffScript": {
             "openingLine": staff_variant.get("opening") or f"Welcome. This {str(template.get('shortLabel', 'route')).lower()} option is designed to keep the visit comfortable and flexible.",
@@ -3402,14 +3648,18 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
             "usedForGeneration": finished_memory.get("status") == "ready",
             "authority": "retrieval_context_only",
         },
+        "memoryApplication": memory_application,
         "approvedRuleInfluence": {
             **approved_rules,
             "usedForGeneration": approved_rules.get("status") == "ready",
             "authority": "human_promoted_rules_only",
         },
+        "venueDataGapAnalysis": venue_gap_analysis,
         "designReasoning": experience_reasoning or {},
         "creativeSynthesis": synthesis,
     }
+    package["studioQualityEval"] = _studio_quality_eval(route, channel_matrix, section_dossiers, package, memory_application, venue_gap_analysis, quality_gaps)
+    return package
 
 
 def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = None) -> dict[str, Any]:

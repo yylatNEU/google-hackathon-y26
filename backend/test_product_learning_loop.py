@@ -119,6 +119,114 @@ def test_dynamic_operational_backlog_generates_live_issue_tickets(monkeypatch, t
     assert any(signal["source"] == "park_issue_ticket" for signal in status["product_learning_signals"])
 
 
+def test_dynamic_live_ticket_generation_backtest_matrix(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    backlog = {
+        "issues": [
+            {
+                "id": "fast-lane-fairness-risk",
+                "domain": "Guest Recovery",
+                "title": "Fast lane fairness complaints rising",
+                "severity": "warning",
+                "status": "unresolved",
+                "current": "complaint risk 76%",
+                "recommendedNext": "Move a guest services lead to the fast lane merge.",
+                "evidence": ["complaintRiskPct=76"],
+            },
+            {
+                "id": "food-court-a-backlog",
+                "domain": "Food",
+                "title": "Food pickup backlog driving refund pressure",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "mobile backlog 180 orders / ETA 32m",
+                "recommendedNext": "Open mobile-order recovery desk.",
+                "evidence": ["mobileOrderBacklog=180", "pickupEtaMinutes=32"],
+            },
+            {
+                "id": "mobility-accommodation-gap",
+                "domain": "Accessibility",
+                "title": "Mobility accommodation queue needs privacy-aware support",
+                "severity": "high",
+                "status": "unresolved",
+                "current": "accessibility party wait 28m",
+                "recommendedNext": "Send Accessibility lead with quiet routing options.",
+                "evidence": ["mobilityWaitMinutes=28"],
+            },
+            {
+                "id": "first-aid-heat-watch",
+                "domain": "First Aid",
+                "title": "Heat concern reports increasing near west plaza",
+                "severity": "critical",
+                "status": "unresolved",
+                "current": "heat index 104F",
+                "recommendedNext": "Pre-stage first aid and water at west plaza.",
+                "evidence": ["heatIndexF=104"],
+            },
+        ]
+    }
+
+    status = loop.product_learning_loop_status(operational_backlog=backlog)
+    tickets = {ticket["dynamic_park_issue_id"]: ticket for ticket in status["park_issue_tickets"]}
+
+    assert status["park_issue_ticket_count"] == 4
+    assert status["dynamic_park_issue_ticket_count"] == 4
+    assert tickets["fast-lane-fairness-risk"]["issue_type"] == "angry_parent"
+    assert tickets["fast-lane-fairness-risk"]["severity"] == "high"
+    assert tickets["food-court-a-backlog"]["issue_type"] == "refund_request"
+    assert tickets["food-court-a-backlog"]["requires_human_ack"] is False
+    assert tickets["mobility-accommodation-gap"]["issue_type"] == "accessibility_accommodation"
+    assert tickets["mobility-accommodation-gap"]["assigned_team"] == "accessibility"
+    assert tickets["first-aid-heat-watch"]["issue_type"] == "heat_exhaustion_concern"
+    assert tickets["first-aid-heat-watch"]["requires_human_ack"] is True
+    assert all(ticket["source"] == "dynamic_park" for ticket in tickets.values())
+    assert all(ticket["live_ops_authority"] is True for ticket in tickets.values())
+
+
+def test_product_learning_api_backtests_dynamic_park_live_ticket_generation(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    main._hot_endpoint_cache.pop("park_state_lite", None)
+
+    async def fake_state_lite():
+        return {"operatingClock": {"accessFairness": {"complaintRiskPct": 81}}}
+
+    def fake_backlog(state):
+        assert state["operatingClock"]["accessFairness"]["complaintRiskPct"] == 81
+        return {
+            "issues": [
+                {
+                    "id": "fast-lane-fairness-risk",
+                    "domain": "Guest Recovery",
+                    "title": "Fast lane fairness complaints rising",
+                    "severity": "warning",
+                    "status": "unresolved",
+                    "current": "complaint risk 81%",
+                    "recommendedNext": "Move a guest services lead to the fast lane merge.",
+                    "evidence": ["complaintRiskPct=81"],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(main, "_fast_park_state_lite", fake_state_lite)
+    import agent_ops_ledger
+
+    monkeypatch.setattr(agent_ops_ledger, "build_operational_backlog", fake_backlog)
+    ops_token = sign_role_session("test-ops", "ops_team", main._role_auth_secret())
+
+    loop_status, payload = asyncio.run(_call_app("GET", "/api/park/product-learning/loop?limit=20", token=ops_token))
+
+    assert loop_status == 200
+    assert payload["dynamic_park_issue_ticket_count"] == 1
+    assert payload["park_issue_ticket_count"] == 1
+    ticket = payload["park_issue_tickets"][0]
+    assert ticket["event"] == "park_issue_ticket_generated"
+    assert ticket["source"] == "dynamic_park"
+    assert ticket["issue_type"] == "angry_parent"
+    assert ticket["severity"] == "high"
+    assert ticket["derived_from"] == "operational_backlog"
+    assert payload["loop_contract"]["training_gaps_create_live_issues"] is False
+
+
 def test_passed_roleplay_does_not_create_training_gap_ticket(monkeypatch, tmp_path):
     reset_loop(monkeypatch, tmp_path)
     session = roleplay.start_staff_training_session("lost_child_report", "Pass QA")

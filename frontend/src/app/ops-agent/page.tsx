@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { fetchParkPulseApi, longRunningRequestTimeoutMs } from "@/lib/api";
+import { fetchParkPulseApi } from "@/lib/api";
 import { buildOperatingLoopViewModel } from "@/lib/operatingLoop";
 import { useParkPulseState } from "@/hooks/useParkPulseState";
 
@@ -86,6 +86,21 @@ type CopilotReceipt = {
   impact_replay?: Record<string, unknown> | null;
   reasoning_evaluation?: { overall?: number; verdict?: string };
   run_telemetry?: Record<string, unknown> | null;
+  semantic_memory_context?: {
+    status?: string;
+    model_api_key_configured?: boolean;
+    reason?: string;
+  };
+  latency_diagnostics?: {
+    mode?: string;
+    status?: string;
+    total_ms?: number;
+    stages?: Array<{ stage?: string; total_ms?: number; delta_ms?: number }>;
+    wrapper?: {
+      total_ms?: number;
+      stages?: Array<{ stage?: string; total_ms?: number }>;
+    };
+  };
 };
 
 type ToolRow = {
@@ -109,6 +124,14 @@ const agentModes: Array<{ id: AgentMode; label: string }> = [
   { id: "react", label: "React" },
   { id: "proact", label: "Proact" },
 ];
+
+const copilotCacheTtlMs = 45_000;
+const copilotRequestTimeoutMs = 9000;
+const copilotCacheStorageKey = "parkpulse.opsAgent.copilotCache.v1";
+const copilotMemoryCache = new Map<string, { expiresAt: number; receipt: CopilotReceipt }>();
+const copilotInflight = new Map<string, Promise<CopilotReceipt>>();
+
+type CacheStatus = "idle" | "hit" | "miss" | "refresh" | "error";
 
 function humanize(value: unknown, empty = "--") {
   return String(value ?? empty).replaceAll("_", " ");
@@ -140,6 +163,92 @@ function requestMessage(input: string, turnMode: TurnMode) {
   return "What is the biggest park risk right now?";
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function copilotCacheKey(payload: Record<string, unknown>) {
+  return stableJson({
+    message: payload.message,
+    messages: payload.messages,
+    mode: payload.mode,
+    turn_mode: payload.turn_mode,
+    allow_action: payload.allow_action,
+    last_mode: (payload.selected_map_context as { last_copilot?: CopilotReceipt } | undefined)?.last_copilot?.mode,
+    last_action: (payload.selected_map_context as { last_copilot?: CopilotReceipt } | undefined)?.last_copilot?.recommended_action?.label,
+  });
+}
+
+function readCopilotCache(key: string) {
+  const now = Date.now();
+  const memory = copilotMemoryCache.get(key);
+  if (memory && memory.expiresAt > now) return memory.receipt;
+  if (memory) copilotMemoryCache.delete(key);
+  try {
+    const raw = globalThis.sessionStorage?.getItem(copilotCacheStorageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, { expiresAt?: number; receipt?: CopilotReceipt }>;
+    const entry = parsed[key];
+    if (!entry?.receipt || Number(entry.expiresAt ?? 0) <= now) return null;
+    copilotMemoryCache.set(key, { expiresAt: Number(entry.expiresAt), receipt: entry.receipt });
+    return entry.receipt;
+  } catch {
+    return null;
+  }
+}
+
+function writeCopilotCache(key: string, receipt: CopilotReceipt) {
+  const expiresAt = Date.now() + copilotCacheTtlMs;
+  copilotMemoryCache.set(key, { expiresAt, receipt });
+  try {
+    const raw = globalThis.sessionStorage?.getItem(copilotCacheStorageKey);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, { expiresAt?: number; receipt?: CopilotReceipt }>) : {};
+    const compactEntries = Object.fromEntries(
+      Object.entries({ ...parsed, [key]: { expiresAt, receipt } })
+        .filter(([, entry]) => Number(entry.expiresAt ?? 0) > Date.now())
+        .slice(-12),
+    );
+    globalThis.sessionStorage?.setItem(copilotCacheStorageKey, JSON.stringify(compactEntries));
+  } catch {
+    // Session cache is an optimization only.
+  }
+}
+
+async function fetchCopilotReceipt(payload: Record<string, unknown>, cacheKey: string, cacheable: boolean) {
+  if (cacheable) {
+    const cached = readCopilotCache(cacheKey);
+    if (cached) return { receipt: cached, cacheStatus: "hit" as CacheStatus };
+    const inflight = copilotInflight.get(cacheKey);
+    if (inflight) return { receipt: await inflight, cacheStatus: "refresh" as CacheStatus };
+  }
+
+  const requestPromise = (async () => {
+    const response = await fetchParkPulseApi("/api/park/copilot-chat", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
+      body: JSON.stringify(payload),
+      timeoutMs: copilotRequestTimeoutMs,
+    });
+    const receipt = (await response.json()) as CopilotReceipt;
+    if (cacheable && receipt.status === "complete") writeCopilotCache(cacheKey, receipt);
+    return receipt;
+  })();
+
+  if (cacheable) copilotInflight.set(cacheKey, requestPromise);
+  try {
+    return { receipt: await requestPromise, cacheStatus: cacheable ? ("miss" as CacheStatus) : ("refresh" as CacheStatus) };
+  } finally {
+    if (cacheable) copilotInflight.delete(cacheKey);
+  }
+}
+
 export default function OpsAgentPage() {
   const { parkState, isConnected, connectionError, refreshParkState } = useParkPulseState();
   const [input, setInput] = useState("What is the biggest park risk right now?");
@@ -148,6 +257,7 @@ export default function OpsAgentPage() {
   const [latestReceipt, setLatestReceipt] = useState<CopilotReceipt | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cacheStatus, setCacheStatus] = useState<CacheStatus>("idle");
 
   const loop = useMemo(
     () =>
@@ -170,27 +280,28 @@ export default function OpsAgentPage() {
     setInput("");
     setIsRunning(true);
     setError(null);
+    setCacheStatus("refresh");
     try {
-      const response = await fetchParkPulseApi("/api/park/copilot-chat", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
-        body: JSON.stringify({
-          message,
-          messages: nextMessages,
-          mode: agentMode,
-          turn_mode: turnMode,
-          allow_action: turnMode === "apply",
-          selected_map_context: latestReceipt ? { last_copilot: latestReceipt } : {},
-        }),
-        timeoutMs: longRunningRequestTimeoutMs,
-      });
-      const receipt = (await response.json()) as CopilotReceipt;
+      const payload = {
+        message,
+        messages: nextMessages,
+        mode: agentMode,
+        turn_mode: turnMode,
+        allow_action: turnMode === "apply",
+        selected_map_context: latestReceipt ? { last_copilot: latestReceipt } : {},
+      };
+      const cacheable = turnMode !== "apply";
+      const { receipt, cacheStatus: nextCacheStatus } = await fetchCopilotReceipt(payload, copilotCacheKey(payload), cacheable);
       const answer = answerFromReceipt(receipt);
+      setCacheStatus(nextCacheStatus);
       setLatestReceipt(receipt);
       setMessages([...nextMessages, { role: "assistant", content: answer }]);
-      void refreshParkState();
+      if (receipt.turn_contract?.state_mutation) {
+        globalThis.setTimeout(() => void refreshParkState(), 300);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to reach the ops agent.");
+      setCacheStatus("error");
       setMessages(nextMessages);
     } finally {
       setIsRunning(false);
@@ -345,6 +456,7 @@ export default function OpsAgentPage() {
                     setMessages([]);
                     setLatestReceipt(null);
                     setError(null);
+                    setCacheStatus("idle");
                     setInput("What is the biggest park risk right now?");
                   }}
                   disabled={isRunning}
@@ -388,8 +500,8 @@ export default function OpsAgentPage() {
                   {[
                     ["Gate", latestReceipt?.recommended_action?.gate ?? latestReceipt?.object_action_plan?.overall_gate],
                     ["Dispatch", latestReceipt?.turn_contract?.dispatch_count ?? latestReceipt?.recommended_action?.dispatch_count],
-                    ["Case", latestReceipt?.recommended_action?.matched_case_id],
-                    ["Eval", latestReceipt?.reasoning_evaluation?.overall],
+                    ["Latency", latestReceipt?.latency_diagnostics?.total_ms ? `${Math.round(latestReceipt.latency_diagnostics.total_ms)}ms` : undefined],
+                    ["Cache", cacheStatus],
                   ].map(([label, value]) => (
                     <div key={label} className="rounded border border-slate-950/40 bg-slate-950/35 px-3 py-2 text-center">
                       <div className="text-[10px] font-black uppercase opacity-60">{label}</div>

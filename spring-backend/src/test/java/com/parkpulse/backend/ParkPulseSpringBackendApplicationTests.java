@@ -152,6 +152,39 @@ class ParkPulseSpringBackendApplicationTests {
 	}
 
 	@Test
+	void monitorWorkspaceRoutesRunNativelyInSpring() throws Exception {
+		mockMvc.perform(get("/api/park/cases"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.rows[0].id", equalTo("spring_queue_pressure")));
+
+		mockMvc.perform(get("/api/park/cases/spring_queue_pressure/brief"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.mode", equalTo("case_operating_brief_spring")));
+
+		mockMvc.perform(get("/api/park/monitor-evidence?case_id=spring_queue_pressure"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.cases[0].trace_records[0].relation_type", equalTo("explicit_case_id")));
+
+		mockMvc.perform(get("/api/park/policy-doctrine"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.policy_refs[0].policy_book_id", equalTo("PARKPULSE-SPRING-OPS")));
+
+		mockMvc.perform(get("/api/park/policy-doctrine/PARK-OPS-001"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.matches[0].policy_ref", equalTo("PARK-OPS-001")));
+
+		mockMvc.perform(get("/api/park/agent-monitoring"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.summary.policy_book_count", equalTo(1)));
+	}
+
+	@Test
 	void reliabilityDiagnosticsAndAuthorizationAuditRunNativelyInSpring() throws Exception {
 		mockMvc.perform(get("/api/park/reliability").header("authorization", "Bearer " + signedRoleToken("customer")))
 			.andExpect(status().isForbidden());

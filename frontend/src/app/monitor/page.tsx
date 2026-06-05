@@ -249,6 +249,15 @@ type MonitorEvidenceGraph = {
   };
   cases?: MonitorEvidenceCase[];
   source_status?: Record<string, string | undefined>;
+  evidence_cache?: {
+    key?: string;
+    state?: string;
+    age_seconds?: number;
+    fresh_for_seconds?: number;
+    refreshing?: boolean;
+    mode?: string;
+    snapshot_path?: string;
+  };
 };
 
 type PolicyDoctrine = {
@@ -718,6 +727,8 @@ export default function MonitorPage() {
   const reviewAccessBlocked = reviewLedger?.status === "blocked" || Boolean(reviewLedger?.readiness_issues?.length);
   const openReviewCount = reviewLedger?.summary?.open_count ?? reviewRows.filter((item) => item?.status !== "closed").length;
   const reviewSummaryValue = reviewAccessBlocked ? "auth gated" : String(monitorEvidence?.summary?.linked_review_session_count ?? monitorEvidence?.summary?.review_session_count ?? (openReviewCount || visibleGovernanceReviews.length || 0));
+  const cacheState = monitorEvidence?.evidence_cache?.state ?? "not loaded";
+  const sourceStatus = monitorEvidence?.source_status ?? {};
 
   return (
     <main className="min-h-screen bg-slate-950 px-4 py-5 font-sans text-slate-200 lg:px-8">
@@ -769,6 +780,21 @@ export default function MonitorPage() {
             <div key={label} className="rounded border border-slate-800 bg-slate-900 px-3 py-2">
               <div className="text-[9px] font-black uppercase tracking-widest text-slate-500">{label}</div>
               <div className="mt-1 truncate text-sm font-black text-cyan-100">{value}</div>
+            </div>
+          ))}
+        </section>
+
+        <section className="grid gap-2 rounded-lg border border-slate-800 bg-slate-900 p-3 lg:grid-cols-5">
+          {[
+            ["Backend graph", fmt(cacheState)],
+            ["Age", typeof monitorEvidence?.evidence_cache?.age_seconds === "number" ? `${Math.round(monitorEvidence.evidence_cache.age_seconds)}s` : "--"],
+            ["Cases source", fmt(sourceStatus.case_index)],
+            ["Trace source", fmt(sourceStatus.agent_ops_ledger)],
+            ["Policy source", fmt(sourceStatus.policy_doctrine)],
+          ].map(([label, value]) => (
+            <div key={label} className="rounded border border-slate-800 bg-slate-950 px-3 py-2">
+              <div className="text-[9px] font-black uppercase tracking-widest text-slate-500">{label}</div>
+              <div className="mt-1 truncate text-xs font-black text-slate-100">{value}</div>
             </div>
           ))}
         </section>

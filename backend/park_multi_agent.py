@@ -1606,18 +1606,18 @@ def _native_live_feed_policy_check(proposal: dict[str, Any]) -> dict[str, Any]:
             "reason": boundary.get("reason") or "Agent tool boundary blocked proposal.",
             "human_approval_required": True,
         }
-    if department == "operations" and risk == "high":
-        return {
-            "policy_check": "requires_executive_approval_ops_reroute",
-            "status": "requires_executive",
-            "reason": "High-risk routing or ride-flow proposal needs Executive tradeoff approval.",
-            "human_approval_required": False,
-        }
     if department == "operations" and tool == "create_ops_alert":
         return {
             "policy_check": "passed_internal_ops_alert_no_routing_execution",
             "status": "passed",
             "reason": "Operations alert is an internal receiver handoff only; it does not change guest routing or dispatch public instructions.",
+            "human_approval_required": False,
+        }
+    if department == "operations" and risk == "high":
+        return {
+            "policy_check": "requires_executive_approval_ops_reroute",
+            "status": "requires_executive",
+            "reason": "High-risk routing or ride-flow proposal needs Executive tradeoff approval.",
             "human_approval_required": False,
         }
     if department in {"safety", "security"}:

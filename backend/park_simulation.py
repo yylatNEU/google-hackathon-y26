@@ -134,7 +134,7 @@ class ParkSimulation:
             self.tick_index = 0
             self.last_random_incident_tick = -999
             self.episode_fitness = []
-            state = self._state()
+            state = self._state(include_industrial=False)
             self._record_replay_event(
                 "run_started",
                 f"Seeded replay started for {selected_scenario}",
@@ -159,7 +159,7 @@ class ParkSimulation:
 
     async def execute_action(self, target: str, action: str) -> dict[str, Any]:
         async with self.lock:
-            before = self._state()
+            before = self._state(include_industrial=False)
             created_at = _utc_now()
             requested_target = target
             requested_action = action
@@ -197,7 +197,7 @@ class ParkSimulation:
                     "scenario_switch",
                     f"Scenario switched to {action}",
                     before,
-                    self._state(),
+                    self._state(include_industrial=False),
                     {"target": target, "action": action, "status": result["status"]},
                     created_at,
                 )
@@ -210,7 +210,7 @@ class ParkSimulation:
                     "operator_action_noop",
                     f"No registered action for {requested_target}/{requested_action}",
                     before,
-                    self._state(),
+                    self._state(include_industrial=False),
                     {"target": requested_target, "action": requested_action, "status": result["status"]},
                     created_at,
                 )
@@ -256,7 +256,7 @@ class ParkSimulation:
                 "operator_action",
                 f"{target}/{action}",
                 before,
-                self._state(),
+                self._state(include_industrial=False),
                 {
                     "target": target,
                     "action": action,
@@ -271,7 +271,7 @@ class ParkSimulation:
 
     async def apply_delivery_outcomes(self, dispatches: list[dict[str, Any]], reason: str = "closed_loop_outcome") -> dict[str, Any]:
         async with self.lock:
-            before = self._state()
+            before = self._state(include_industrial=False)
             created_at = _utc_now()
             def has_observed_response(item: dict[str, Any]) -> bool:
                 response = item.get("response", {}) if isinstance(item.get("response"), dict) else {}
@@ -292,7 +292,7 @@ class ParkSimulation:
                     "outcome_noop",
                     "No observed dispatch response",
                     before,
-                    self._state(),
+                    self._state(include_industrial=False),
                     {"reason": reason, "dispatch_count": len(dispatches), "status": result["status"]},
                     created_at,
                 )
@@ -698,7 +698,7 @@ class ParkSimulation:
                 "outcome_applied",
                 "Closed-loop dispatch outcome applied",
                 before,
-                self._state(),
+                self._state(include_industrial=False),
                 {
                     "reason": reason,
                     "channels": channels,
@@ -714,7 +714,7 @@ class ParkSimulation:
 
     async def inject_event(self, kind: str, target_id: str, intensity: int = 75) -> dict[str, Any]:
         async with self.lock:
-            before = self._state()
+            before = self._state(include_industrial=False)
             intensity = max(10, min(100, int(intensity or 75)))
             created_at = _utc_now()
             event = {
@@ -752,7 +752,7 @@ class ParkSimulation:
                 "injected_event",
                 str(kind).replace("_", " "),
                 before,
-                self._state(),
+                self._state(include_industrial=False),
                 {"kind": kind, "targetId": target_id, "intensity": intensity, "status": result["status"]},
                 created_at,
             )
@@ -760,7 +760,7 @@ class ParkSimulation:
 
     async def inject_synthetic_incident(self, plan: dict[str, Any]) -> dict[str, Any]:
         async with self.lock:
-            before = self._state()
+            before = self._state(include_industrial=False)
             kind = str(plan.get("kind") or "demand_spike")
             target_id = str(plan.get("target_id") or plan.get("targetId") or "coasterPlaza")
             intensity = max(10, min(100, int(plan.get("intensity") or 75)))
@@ -821,7 +821,7 @@ class ParkSimulation:
                 "synthetic_incident",
                 str(kind).replace("_", " "),
                 before,
-                self._state(),
+                self._state(include_industrial=False),
                 {"kind": kind, "targetId": target_id, "intensity": intensity, "status": result["status"], "syntheticExampleId": plan.get("synthetic_example_id")},
                 created_at,
             )
@@ -842,7 +842,7 @@ class ParkSimulation:
         return self._inject_random_unexpected_event_locked(source)
 
     def _inject_random_unexpected_event_locked(self, source: str) -> dict[str, Any]:
-        before = self._state()
+        before = self._state(include_industrial=False)
         event_spec = _random_unexpected_event(self.scenario_key, before)
         kind = str(event_spec["kind"])
         target_id = str(event_spec["target_id"])
@@ -906,7 +906,7 @@ class ParkSimulation:
             "unexpected_event",
             str(kind).replace("_", " "),
             before,
-            self._state(),
+            self._state(include_industrial=False),
             {
                 "kind": kind,
                 "targetId": target_id,
@@ -921,7 +921,7 @@ class ParkSimulation:
 
     async def reset_demo(self) -> dict[str, Any]:
         async with self.lock:
-            before = self._state()
+            before = self._state(include_industrial=False)
             created_at = _utc_now()
             self.scenario_key = "ride_down"
             self.active_policy = "normal"
@@ -944,7 +944,7 @@ class ParkSimulation:
                 "reset",
                 "Interactive park stress lab reset",
                 before,
-                self._state(),
+                self._state(include_industrial=False),
                 {"status": result["status"]},
                 created_at,
             )
@@ -1098,7 +1098,7 @@ class ParkSimulation:
     async def simulate_action(self, action_plan: dict[str, Any], horizon_minutes: int = 30) -> dict[str, Any]:
         async with self.lock:
             return simulate_action_plan(
-                self._state(),
+                self._state(include_industrial=False),
                 action_plan,
                 horizon_minutes=horizon_minutes,
                 seed=f"{self.replay_seed}:{self.replay_run_id}:simulate",
@@ -1106,7 +1106,7 @@ class ParkSimulation:
 
     async def apply_action_plan(self, action_plan: dict[str, Any], minutes: int = 8) -> dict[str, Any]:
         async with self.lock:
-            before = self._state()
+            before = self._state(include_industrial=False)
             after = transition_state(
                 before,
                 action_plan,
@@ -1127,7 +1127,7 @@ class ParkSimulation:
 
     async def run_causal_impact_demo(self, horizon_minutes: int = 20, execute: bool = True) -> dict[str, Any]:
         async with self.lock:
-            before = self._state()
+            before = self._state(include_industrial=False)
             safe_horizon = max(5, min(45, int(horizon_minutes or 20)))
             created_at = _utc_now()
             candidates = _causal_action_candidates(self.scenario_key)
@@ -1250,14 +1250,14 @@ class ParkSimulation:
                     },
                     created_at,
                 )
-                receipt["state"] = deepcopy(self._state())
+                receipt["state"] = deepcopy(self._state(include_industrial=False))
             else:
                 receipt["state"] = deepcopy(before)
             return receipt
 
     async def run_action_impact_replay(self, action_plan: dict[str, Any], horizon_minutes: int = 15, execute: bool = True) -> dict[str, Any]:
         async with self.lock:
-            before = self._state()
+            before = self._state(include_industrial=False)
             safe_horizon = max(5, min(30, int(horizon_minutes or 15)))
             created_at = _utc_now()
             safe_action = {
@@ -1348,14 +1348,14 @@ class ParkSimulation:
                     },
                     created_at,
                 )
-                receipt["state"] = deepcopy(self._state())
+                receipt["state"] = deepcopy(self._state(include_industrial=False))
             else:
                 receipt["state"] = deepcopy(before)
             return receipt
 
     async def run_action_branch_comparison(self, horizon_minutes: int = 20, execute: bool = False, case_context: dict[str, Any] | None = None) -> dict[str, Any]:
         async with self.lock:
-            before = self._state()
+            before = self._state(include_industrial=False)
             safe_horizon = max(5, min(45, int(horizon_minutes or 20)))
             created_at = _utc_now()
             case_focus = _branch_case_focus(case_context)
@@ -1442,7 +1442,7 @@ class ParkSimulation:
                     {"status": "success", "selected_branch": receipt["selected_branch"], "rejected_branch": receipt["rejected_branch"]},
                     created_at,
                 )
-                receipt["state"] = deepcopy(self._state())
+                receipt["state"] = deepcopy(self._state(include_industrial=False))
             else:
                 receipt["state"] = deepcopy(before)
             return receipt

@@ -2649,15 +2649,23 @@
       box.scrollTo({ top: Math.max(0, active.offsetTop - box.offsetTop - 10), behavior: "smooth" });
     }
 
+    function livePlaybackStopIndex(steps) {
+      const hasSecondRun = Boolean(state.secondRunDemo?.comparison || state.lastPayload?.comparison);
+      if (hasSecondRun) return Math.max(0, steps.length - 1);
+      const receiptIndex = steps.findIndex((step) => String(step.phase || "").toLowerCase() === "receipt");
+      return receiptIndex >= 0 ? receiptIndex : Math.max(0, steps.length - 1);
+    }
+
     function startLivePlayback() {
       window.clearInterval(liveTimer);
       const steps = buildLiveSteps();
+      const stopIndex = livePlaybackStopIndex(steps);
       state.liveStep = 0;
       renderLiveExchange();
       liveTimer = window.setInterval(() => {
         state.liveStep += 1;
-        if (state.liveStep >= steps.length - 1) {
-          state.liveStep = steps.length - 1;
+        if (state.liveStep >= stopIndex) {
+          state.liveStep = stopIndex;
           window.clearInterval(liveTimer);
         }
         renderLiveExchange();

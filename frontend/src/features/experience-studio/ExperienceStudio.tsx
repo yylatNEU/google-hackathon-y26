@@ -263,6 +263,33 @@ type ExperienceDraft = {
     }>;
     experienceBeats?: Array<{ beat?: string; detail?: string }>;
     sectionDossiers?: Array<{ section?: string; purpose?: string; details?: string[]; reviewGate?: string }>;
+    sectionCreativeDetails?: {
+      conceptBoard?: Record<string, unknown>;
+      routeStoryCards?: Array<{
+        order?: number;
+        stop?: string;
+        beat?: string;
+        guestFacingMoment?: string;
+        designerIntent?: string;
+        staffCue?: string;
+        transitionLine?: string;
+        choiceArchitecture?: string;
+        proofBeforePublish?: string[];
+      }>;
+      channelArtifactBriefs?: Array<{
+        channel?: string;
+        owner?: string;
+        jobToBeDone?: string;
+        draftArtifact?: unknown;
+        headline?: string;
+        microcopy?: string;
+        reviewQuestion?: string;
+        productionRisk?: string;
+      }>;
+      signageProductionCards?: Array<{ placement?: string; headline?: string; body?: string; format?: string; readabilityCheck?: string }>;
+      emailModules?: Record<string, unknown>;
+      staffRehearsalNotes?: string[];
+    };
     channelMatrix?: Array<{ channel?: string; owner?: string; objective?: string; headline?: string; microcopy?: string; primaryCopy?: unknown; rules?: string[]; reviewQuestion?: string }>;
     staffScript?: Record<string, string>;
     staffRunOfShow?: Array<{ phase?: string; who?: string; detail?: string; reviewGate?: string }>;
@@ -305,6 +332,16 @@ type ExperienceDraft = {
       matchedExamples?: Array<{ draftId?: string; status?: string; selectedConceptName?: string; updatedAt?: string; route?: string[] }>;
       learningBoundary?: string;
     };
+    memoryApplication?: {
+      status?: string;
+      usedForGeneration?: boolean;
+      visibleChanges?: string[];
+      preservedPatterns?: string[];
+      avoidedPatterns?: string[];
+      approvedRulesApplied?: string[];
+      reviewBoundary?: string;
+      matchedDrafts?: Array<{ draftId?: string; status?: string; selectedConceptName?: string; route?: string[] }>;
+    };
     approvedRuleInfluence?: {
       status?: string;
       mode?: string;
@@ -314,6 +351,23 @@ type ExperienceDraft = {
       appliedRules?: string[];
       guardrails?: string[];
       learningBoundary?: string;
+    };
+    venueDataGapAnalysis?: {
+      status?: string;
+      profileType?: string;
+      creativeReady?: boolean;
+      productionRealVenueReady?: boolean;
+      missingForProduction?: string[];
+      nextProfileImports?: string[];
+      routeChecks?: Array<{ stop?: string; hasAccessibilityNote?: boolean; hasProfileFact?: boolean; stillNeeds?: string[] }>;
+    };
+    studioQualityEval?: {
+      status?: string;
+      score?: number;
+      scores?: Record<string, number>;
+      findings?: string[];
+      qaChecklist?: Array<{ check?: string; status?: string }>;
+      recommendedNextActions?: string[];
     };
     designReasoning?: ExperienceReasoning;
     creativeSynthesis?: CreativeSynthesis;
@@ -356,6 +410,8 @@ type ExperienceDraft = {
     usesApprovedSyntheticProfile?: boolean;
     profileType?: string;
     realVenueReady?: boolean;
+    productionRealVenueReady?: boolean;
+    missingProductionRealVenueInputs?: string[];
   };
 };
 
@@ -1800,6 +1856,25 @@ export function ExperienceStudio() {
                             <div className="mt-2 text-xs leading-relaxed text-slate-300">{creativePackage.executiveConcept?.guestPromise ?? "not set"}</div>
                             <div className="mt-2 text-[11px] leading-relaxed text-slate-500">{creativePackage.executiveConcept?.whyNow}</div>
                           </div>
+                          {creativePackage.studioQualityEval ? (
+                            <div className="rounded border border-cyan-300/20 bg-cyan-950/10 p-3">
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div>
+                                  <div className="text-[10px] font-black uppercase tracking-widest text-cyan-100">Studio QA eval</div>
+                                  <div className="mt-1 text-xs leading-relaxed text-slate-300">{formatStatus(creativePackage.studioQualityEval.status)}</div>
+                                </div>
+                                <div className="rounded border border-cyan-300/30 bg-cyan-950/20 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-cyan-100">
+                                  {creativePackage.studioQualityEval.score ?? "n/a"}
+                                </div>
+                              </div>
+                              <div className="mt-2 grid gap-1 text-[11px] leading-relaxed text-slate-300">
+                                {Object.entries(creativePackage.studioQualityEval.scores ?? {}).slice(0, 4).map(([label, value]) => (
+                                  <div key={label}>{formatStatus(label)}: {value}</div>
+                                ))}
+                              </div>
+                              <div className="mt-2 text-[11px] leading-relaxed text-amber-100">{compactList(creativePackage.studioQualityEval.findings ?? [], 2)}</div>
+                            </div>
+                          ) : (
                           <div className="rounded border border-slate-800 bg-[#151914] p-3">
                             <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Staff script</div>
                             <div className="mt-2 grid gap-2">
@@ -1811,7 +1886,21 @@ export function ExperienceStudio() {
                               ))}
                             </div>
                           </div>
+                          )}
                         </div>
+                        {creativePackage.studioQualityEval ? (
+                          <div className="mt-3 rounded border border-slate-800 bg-[#151914] p-3">
+                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Staff script</div>
+                            <div className="mt-2 grid gap-2 md:grid-cols-2">
+                              {Object.entries(creativePackage.staffScript ?? {}).slice(0, 4).map(([label, value]) => (
+                                <div key={label} className="rounded border border-slate-800 bg-[#0d1115] p-2">
+                                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{formatStatus(label)}</div>
+                                  <div className="mt-1 text-[11px] leading-relaxed text-slate-300">{value}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
                         <div className="mt-3 grid gap-3 xl:grid-cols-3">
                           <div className="rounded border border-slate-800 bg-[#151914] p-3">
                             <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Experience beats</div>
@@ -1861,6 +1950,32 @@ export function ExperienceStudio() {
                                 </div>
                               ))}
                             </div>
+                          </div>
+                        ) : null}
+                        {creativePackage.sectionCreativeDetails ? (
+                          <div className="mt-3 rounded border border-slate-800 bg-[#151914] p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Section-level authoring</div>
+                                <div className="mt-1 text-xs leading-relaxed text-slate-300">
+                                  {String(creativePackage.sectionCreativeDetails.conceptBoard?.workingTitle ?? creativePackage.executiveConcept?.name ?? "Concept board")}
+                                </div>
+                              </div>
+                              <div className="rounded border border-slate-700 bg-[#0d1115] px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                                {(creativePackage.sectionCreativeDetails.routeStoryCards ?? []).length} cards
+                              </div>
+                            </div>
+                            <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                              {(creativePackage.sectionCreativeDetails.routeStoryCards ?? []).slice(0, 4).map((card) => (
+                                <div key={`${card.order}-${card.stop}`} className="rounded border border-slate-800 bg-[#0d1115] p-2">
+                                  <div className="text-xs font-black text-slate-100">{card.order}. {card.stop}</div>
+                                  <div className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-500">{card.beat}</div>
+                                  <div className="mt-2 text-[11px] leading-relaxed text-slate-300">{card.guestFacingMoment}</div>
+                                  <div className="mt-1 text-[11px] leading-relaxed text-slate-500">Choice: {card.choiceArchitecture}</div>
+                                </div>
+                              ))}
+                            </div>
+                            <div className="mt-2 text-[11px] leading-relaxed text-slate-300">Staff rehearsal: {compactList(creativePackage.sectionCreativeDetails.staffRehearsalNotes ?? [], 3)}</div>
                           </div>
                         ) : null}
                         {creativePackage.routeBlueprint?.length ? (
@@ -1981,6 +2096,21 @@ export function ExperienceStudio() {
 	                            </div>
 	                          </div>
 	                        ) : null}
+                        {creativePackage.venueDataGapAnalysis ? (
+                          <div className="mt-3 rounded border border-amber-300/20 bg-amber-950/10 p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <div className="text-[10px] font-black uppercase tracking-widest text-amber-100">Venue data gap analysis</div>
+                                <div className="mt-1 text-xs leading-relaxed text-slate-300">{formatStatus(creativePackage.venueDataGapAnalysis.status)}</div>
+                              </div>
+                              <div className="rounded border border-amber-300/30 bg-amber-950/20 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-amber-100">
+                                {creativePackage.venueDataGapAnalysis.productionRealVenueReady ? "real venue ready" : "production gaps"}
+                              </div>
+                            </div>
+                            <div className="mt-2 text-[11px] leading-relaxed text-slate-300">Missing: {compactList(creativePackage.venueDataGapAnalysis.missingForProduction ?? [], 4)}</div>
+                            <div className="mt-1 text-[11px] leading-relaxed text-slate-500">Next imports: {compactList(creativePackage.venueDataGapAnalysis.nextProfileImports ?? [], 4)}</div>
+                          </div>
+                        ) : null}
                         {creativePackage.memoryInfluence ? (
                           <div className="mt-3 rounded border border-emerald-400/20 bg-emerald-950/10 p-3">
                             <div className="flex flex-wrap items-start justify-between gap-2">
@@ -2005,6 +2135,22 @@ export function ExperienceStudio() {
                                 ))}
                               </div>
                             ) : null}
+                          </div>
+                        ) : null}
+                        {creativePackage.memoryApplication ? (
+                          <div className="mt-3 rounded border border-emerald-400/20 bg-[#151914] p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <div className="text-[10px] font-black uppercase tracking-widest text-emerald-100">Memory application</div>
+                                <div className="mt-1 text-xs leading-relaxed text-slate-300">{creativePackage.memoryApplication.reviewBoundary}</div>
+                              </div>
+                              <div className="rounded border border-emerald-400/30 bg-emerald-950/20 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-emerald-100">
+                                {creativePackage.memoryApplication.usedForGeneration ? "visible" : formatStatus(creativePackage.memoryApplication.status)}
+                              </div>
+                            </div>
+                            <div className="mt-2 text-[11px] leading-relaxed text-slate-300">Changed: {compactList(creativePackage.memoryApplication.visibleChanges ?? [], 3)}</div>
+                            <div className="mt-1 text-[11px] leading-relaxed text-slate-500">Preserved: {compactList(creativePackage.memoryApplication.preservedPatterns ?? [], 3)}</div>
+                            <div className="mt-1 text-[11px] leading-relaxed text-amber-100">Avoided: {compactList(creativePackage.memoryApplication.avoidedPatterns ?? [], 3)}</div>
                           </div>
                         ) : null}
                         {creativePackage.approvedRuleInfluence ? (
