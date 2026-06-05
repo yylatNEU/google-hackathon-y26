@@ -12679,6 +12679,11 @@ async def app(scope, receive, send):
                 validate_raw = request_payload.get("validateTables")
             if validate_raw is None:
                 validate_raw = (query.get("validateTables") or query.get("validate_tables") or [None])[0]
+            deep_readiness_raw = request_payload.get("deepReadiness")
+            if deep_readiness_raw is None:
+                deep_readiness_raw = request_payload.get("deep_readiness")
+            if deep_readiness_raw is None:
+                deep_readiness_raw = (query.get("deepReadiness") or query.get("deep_readiness") or [None])[0]
             controlled_eval_override = request_payload.get("controlledEval") if isinstance(request_payload.get("controlledEval"), dict) else request_payload.get("controlled_eval") if isinstance(request_payload.get("controlled_eval"), dict) else None
             timeout_seconds = _float_env("PARKPULSE_GCP_TRAINING_DRY_RUN_TIMEOUT_SECONDS", 12.0)
             min_rows = int(min_rows_raw) if min_rows_raw else 3
@@ -12689,6 +12694,7 @@ async def app(scope, receive, send):
                     "validate_tables": _truthy(None if validate_raw is None else str(validate_raw), False),
                     "live_feed_preflight": live_feed_preflight,
                     "controlled_eval": controlled_eval_override,
+                    "fast_readiness": not _truthy(None if deep_readiness_raw is None else str(deep_readiness_raw), False),
                 }
                 try:
                     return await asyncio.to_thread(
@@ -12697,9 +12703,11 @@ async def app(scope, receive, send):
                         **dry_run_kwargs,
                     )
                 except TypeError as type_error:
-                    if "controlled_eval" not in str(type_error) and "unexpected keyword" not in str(type_error):
+                    if "unexpected keyword" not in str(type_error) and "controlled_eval" not in str(type_error) and "fast_readiness" not in str(type_error):
                         raise
-                    dry_run_kwargs.pop("controlled_eval", None)
+                    for key in ("controlled_eval", "fast_readiness"):
+                        if key in str(type_error):
+                            dry_run_kwargs.pop(key, None)
                     return await asyncio.to_thread(
                         gcp_training_dry_run_readiness,
                         min_rows,

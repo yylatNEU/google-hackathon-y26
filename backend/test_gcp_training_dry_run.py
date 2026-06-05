@@ -68,6 +68,7 @@ def test_gcp_training_dry_run_does_not_refresh_live_feeds_by_default(monkeypatch
         }
 
     def fake_dry_run_readiness(min_rows=3, **kwargs):
+        seen["fast_readiness"] = kwargs.get("fast_readiness")
         return {
             "status": "ready",
             "mode": "gcp_training_dry_run_readiness",
@@ -87,4 +88,29 @@ def test_gcp_training_dry_run_does_not_refresh_live_feeds_by_default(monkeypatch
     assert status == 200
     assert payload["status"] == "ready"
     assert seen["default_refresh"] is False
+    assert seen["fast_readiness"] is True
     assert payload["live_feed_preflight"]["refresh_status"] == "not_requested"
+
+
+def test_fast_gcp_training_dry_run_skips_slow_eval_and_training_reads(monkeypatch):
+    import park_actual_training
+
+    def fail_eval_lookup(*args, **kwargs):
+        raise AssertionError("fast dry-run should not read latest controlled eval")
+
+    def fail_training_readiness(*args, **kwargs):
+        raise AssertionError("fast dry-run should not run deep training readiness")
+
+    monkeypatch.setattr(park_actual_training, "_scoped_bqml_eval_gate", fail_eval_lookup)
+    monkeypatch.setattr(park_actual_training, "actual_training_status", fail_training_readiness)
+
+    payload = park_actual_training.gcp_training_dry_run_readiness(
+        fast_readiness=True,
+        live_feed_preflight={"status": "no_due_feeds", "readiness_issues": []},
+    )
+
+    assert payload["status"] == "blocked"
+    assert payload["controlled_eval_gate"]["status"] == "not_checked"
+    assert payload["actual_training"]["status"] == "not_checked"
+    assert payload["gcp_training_started"] is False
+    assert payload["model_promotion_started"] is False
