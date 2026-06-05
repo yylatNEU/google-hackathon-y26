@@ -7602,16 +7602,25 @@ def _store_run_receipt(
     kind: str,
     upgrade_status: str | None = None,
     receipt_id: str | None = None,
+    agent_ops_inline: bool = True,
 ) -> dict[str, Any]:
     payload = _attach_dispatch_reliability(payload, message=message, mode=mode)
     telemetry = payload.setdefault("run_telemetry", {})
     if isinstance(telemetry, dict):
-        try:
-            from agent_ops_ledger import retrieve_agent_ops_context
+        if agent_ops_inline:
+            try:
+                from agent_ops_ledger import retrieve_agent_ops_context
 
-            ledger_context = retrieve_agent_ops_context(f"{message} {mode} {kind}", limit=3)
-        except Exception as error:
-            ledger_context = {"status": "unavailable", "count": 0, "items": [], "reason": str(error)[:240]}
+                ledger_context = retrieve_agent_ops_context(f"{message} {mode} {kind}", limit=3)
+            except Exception as error:
+                ledger_context = {"status": "unavailable", "count": 0, "items": [], "reason": str(error)[:240]}
+        else:
+            ledger_context = {
+                "status": "deferred",
+                "count": 0,
+                "items": [],
+                "reason": "Agent role hot path skips ops-ledger retrieval before responding.",
+            }
         telemetry.setdefault("state_snapshot", {"status": "summarized", "source": kind, "capturedAt": _now_iso()})
         telemetry.setdefault("governance", payload.get("policy_gate") or payload.get("lifecycle", {}).get("policy_gate") or {"allowed": True, "gate_status": "recorded", "findings": []})
         memory = telemetry.setdefault(
@@ -7655,12 +7664,18 @@ def _store_run_receipt(
         for stale_id in list(_run_receipts):
             if stale_id not in _run_receipt_order:
                 _run_receipts.pop(stale_id, None)
-    try:
-        from agent_ops_ledger import record_agent_ops_run
+    if agent_ops_inline:
+        try:
+            from agent_ops_ledger import record_agent_ops_run
 
-        payload["agent_ops_ledger"] = record_agent_ops_run(payload, message=message, mode=mode, kind=kind)
-    except Exception as error:
-        payload["agent_ops_ledger"] = {"status": "unavailable", "reason": str(error)[:240]}
+            payload["agent_ops_ledger"] = record_agent_ops_run(payload, message=message, mode=mode, kind=kind)
+        except Exception as error:
+            payload["agent_ops_ledger"] = {"status": "unavailable", "reason": str(error)[:240]}
+    else:
+        payload["agent_ops_ledger"] = {
+            "status": "deferred",
+            "reason": "Agent role hot path preserves the receipt in memory and defers ops-ledger persistence.",
+        }
     return payload
 
 
@@ -8987,6 +9002,48 @@ async def _proact_role_payload(message: str, mode: str, route: dict[str, Any]) -
     return payload
 
 
+async def _customer_role_hot_path_payload(message: str, mode: str, route: dict[str, Any]) -> dict[str, Any]:
+    state = await _fast_park_state()
+    agent_builder = _customer_support_agent_builder_contract("recommendation")
+    payload = _customer_support_fallback_response(
+        {"question": message, "mode": "recommendation"},
+        state,
+        "Agent role customer hot path uses bounded public guidance without waiting on the model provider.",
+        agent_builder,
+    )
+    payload["status"] = "complete"
+    payload["mode"] = "bounded_customer_role_hot_path"
+    trace = _role_tool_trace(route, selected_role="customer", scenario_key="customer_public")
+    payload.update(
+        {
+            "selected_role": "customer",
+            "skill": route.get("skill"),
+            "role_route": route,
+            "role_run": {
+                "role": "customer",
+                "dispatch_allowed": False,
+                "dispatch_count": 0,
+                "policy_gates": route.get("policy_gates", []),
+                "receipt_artifacts": route.get("expected_receipt", []),
+            },
+            "digital_twin_tools": trace,
+            "run_telemetry": {
+                "scenario_key": "customer_public",
+                "delivery": {"summary": {"total": 0}, "dispatches": [], "response": {}},
+                "digital_twin_tools": trace,
+                "governance": {
+                    "allowed": True,
+                    "gate_status": "customer_read_only",
+                    "findings": ["Customer role can answer with public guidance but cannot dispatch operator, worker, or equipment actions."],
+                },
+                "eval": {"scorecard": {"overall": 88, "policy_gate_status": "customer_read_only", "needs_human_approval": False}},
+            },
+            "role_receipt": {"role": "customer", "skill": route.get("skill"), "scenario_key": "customer_public", "dispatch_ids": [], "read_only": True},
+        }
+    )
+    return _attach_role_work_contract(payload, message=message, route=route, role="customer", scenario_key="customer_public")
+
+
 async def _qa_role_payload(message: str, mode: str, route: dict[str, Any]) -> dict[str, Any]:
     from prod_reliability_qa_agent import run_production_reliability_qa
 
@@ -9058,28 +9115,24 @@ async def _agent_role_run_payload(message: str, mode: str = "auto") -> dict[str,
     if selected == "proact":
         return await _proact_role_payload(message, mode, route)
     if selected == "customer":
-        payload = await _customer_support_agent_payload({"question": message, "mode": "recommendation"})
-        trace = _role_tool_trace(route, selected_role="customer", scenario_key="customer_public")
-        payload.update(
-            {
-                "selected_role": "customer",
-                "skill": route.get("skill"),
-                "role_route": route,
-                "role_run": {
-                    "role": "customer",
-                    "dispatch_allowed": False,
-                    "dispatch_count": 0,
-                    "policy_gates": route.get("policy_gates", []),
-                    "receipt_artifacts": route.get("expected_receipt", []),
-                },
-                "digital_twin_tools": trace,
-                "run_telemetry": {"delivery": {"summary": {"total": 0}, "dispatches": []}, "digital_twin_tools": trace},
-                "role_receipt": {"role": "customer", "skill": route.get("skill"), "scenario_key": "customer_public", "dispatch_ids": [], "read_only": True},
-            }
-        )
-        payload = _attach_role_work_contract(payload, message=message, route=route, role="customer", scenario_key="customer_public")
-        return payload
+        return await _customer_role_hot_path_payload(message, mode, route)
     return _scan_role_payload(message, mode, route)
+
+
+async def _record_agent_role_trace_sample_bounded(payload: dict[str, Any], *, message: str, mode: str, source: str) -> dict[str, Any]:
+    timeout_seconds = max(0.05, float(os.getenv("PARKPULSE_AGENT_ROLE_TRACE_SAMPLE_TIMEOUT_SECONDS", "0.35")))
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(record_agent_role_trace_sample, payload, message=message, mode=mode, source=source),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "status": "deferred",
+            "readiness_issues": [f"Trace sample persistence exceeded {timeout_seconds:g}s and was skipped on the hot response path."],
+        }
+    except Exception as error:
+        return {"status": "error", "readiness_issues": [str(error)[:240]]}
 
 
 def _parse_gemini_json_text(text: str) -> dict[str, Any]:
@@ -15805,12 +15858,15 @@ async def app(scope, receive, send):
         message = str(payload.get("message") or payload.get("command") or "Scan the park for operating signals.").strip()
         mode = str(payload.get("mode") or "auto")
         result = await _agent_role_run_payload(message, mode)
-        try:
-            sample_receipt = record_agent_role_trace_sample(result, message=message, mode=mode, source="main.agent_role_run")
-            result["role_trace_sample"] = {"status": sample_receipt.get("status"), "path": sample_receipt.get("path"), "id": (sample_receipt.get("sample") or {}).get("id")}
-        except Exception as error:
-            result["role_trace_sample"] = {"status": "error", "readiness_issues": [str(error)[:240]]}
-        await _send_json(send, 200, _store_run_receipt(result, message=message, mode=mode, kind="agent_role_run"))
+        sample_receipt = await _record_agent_role_trace_sample_bounded(result, message=message, mode=mode, source="main.agent_role_run")
+        result["role_trace_sample"] = {
+            "status": sample_receipt.get("status"),
+            "path": sample_receipt.get("path"),
+            "id": (sample_receipt.get("sample") or {}).get("id") if isinstance(sample_receipt.get("sample"), dict) else None,
+            **({"readiness_issues": sample_receipt.get("readiness_issues")} if sample_receipt.get("readiness_issues") else {}),
+        }
+        inline_ledger = _truthy(os.getenv("PARKPULSE_AGENT_ROLE_RUN_INLINE_LEDGER"), False)
+        await _send_json(send, 200, _store_run_receipt(result, message=message, mode=mode, kind="agent_role_run", agent_ops_inline=inline_ledger))
         return
 
     if method == "POST" and path == "/api/park/agent-role-refine":
