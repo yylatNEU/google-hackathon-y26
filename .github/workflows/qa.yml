@@ -7,6 +7,55 @@ on:
       - main
 
 jobs:
+  release-qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      MONGODB_DISABLE_DRIVER_IMPORT: "1"
+      PARKPULSE_AGENT_ROLE_TRACE_SAMPLE_LOG_PATH: /tmp/parkpulse-ci/agent_role_trace_samples.jsonl
+      PARKPULSE_FRONTEND_RUNTIME_DIR: /tmp/parkpulse_frontend_runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Release QA gate
+        run: make qa-release
+
+      - name: Upload QA reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-release-report
+          path: output/qa
+          if-no-files-found: ignore
+
   backend-and-agent-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 20
