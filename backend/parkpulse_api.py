@@ -575,6 +575,7 @@ class LiveFeedAgentRunRequest(BaseModel):
     min_ready_feeds: int = Field(default=4, ge=1, le=6)
     require_persisted_events: bool = Field(default=True)
     scenario_key_hint: str | None = Field(default=None)
+    generated_issue: dict[str, Any] | None = Field(default=None)
 
 
 class EvalScenarioSweepRequest(BaseModel):
@@ -9334,7 +9335,7 @@ def _controlled_live_feed_tool_executor_run(payload: dict[str, Any], *, execute:
                 "exit_condition": "Attach concrete policy approval before retry.",
                 "fallback": "Keep action in trace only.",
             }
-        controlled_executor_departments = {"food_retail", "hr_labor", "marketing"}
+        controlled_executor_departments = {"food_retail", "hr_labor", "marketing", "operations", "maintenance"}
         approved_for_controlled_executor = (
             policy_status in {"passed", "approved_with_exclusions"}
             and executor_status in {"ready_for_executor", "executor_only"}
@@ -9587,6 +9588,8 @@ def _controlled_live_feed_receiver_delivery_proof(payload: dict[str, Any]) -> di
     live_case = payload.get("live_feed_case", {}) if isinstance(payload.get("live_feed_case"), dict) else {}
     receipts = executor.get("receipts", []) if isinstance(executor.get("receipts"), list) else []
     receiver_by_department = {
+        "operations": "ops_console",
+        "maintenance": "maintenance_console",
         "food_retail": "food_ops_console",
         "hr_labor": "labor_scheduler_console",
         "marketing": "marketing_ops_console",
@@ -11951,6 +11954,14 @@ async def park_live_feed_agent_run(request: LiveFeedAgentRunRequest):
     if request.scenario_key_hint:
         live_case["scenario_key"] = request.scenario_key_hint
         live_case["scenario_key_source"] = "request_hint"
+    if request.generated_issue:
+        live_case["generated_issue"] = request.generated_issue
+        issue_kind = request.generated_issue.get("kind") or request.generated_issue.get("issue_kind")
+        target_id = request.generated_issue.get("target_id") or request.generated_issue.get("targetId")
+        if issue_kind:
+            live_case["issue_kind"] = issue_kind
+        if target_id:
+            live_case["issue_target_id"] = target_id
     memory_priors = _live_feed_memory_priors_from_dashboard(live_case)
     ml_policy_evidence = _live_feed_ml_policy_evidence(live_case)
     live_case["memory_priors"] = memory_priors

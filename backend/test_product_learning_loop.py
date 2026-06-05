@@ -89,6 +89,36 @@ def test_failed_roleplay_finish_creates_training_gap_not_live_issue(monkeypatch,
     assert status["product_learning_signals"][0]["requires_review"] is True
 
 
+def test_dynamic_operational_backlog_generates_live_issue_tickets(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    backlog = {
+        "issues": [
+            {
+                "id": "safety-access-readiness",
+                "domain": "Safety",
+                "title": "Safety and access readiness needs active supervision",
+                "severity": "critical",
+                "status": "unresolved",
+                "current": "storm 90% / path congestion 84%",
+                "recommendedNext": "Pre-stage safety leads and keep access routes clear.",
+                "evidence": ["stormRisk=90", "maxPathCongestion=84"],
+            }
+        ]
+    }
+
+    status = loop.product_learning_loop_status(operational_backlog=backlog)
+
+    assert status["park_issue_ticket_count"] == 1
+    assert status["dynamic_park_issue_ticket_count"] == 1
+    ticket = status["park_issue_tickets"][0]
+    assert ticket["source"] == "dynamic_park"
+    assert ticket["event"] == "park_issue_ticket_generated"
+    assert ticket["live_ops_authority"] is True
+    assert ticket["requires_human_ack"] is True
+    assert ticket["issue_type"] == "weather_evacuation_confusion"
+    assert any(signal["source"] == "park_issue_ticket" for signal in status["product_learning_signals"])
+
+
 def test_passed_roleplay_does_not_create_training_gap_ticket(monkeypatch, tmp_path):
     reset_loop(monkeypatch, tmp_path)
     session = roleplay.start_staff_training_session("lost_child_report", "Pass QA")
@@ -144,6 +174,10 @@ def test_product_learning_api_routes_and_role_gates(monkeypatch, tmp_path):
 
     loop_status, payload = asyncio.run(_call_app("GET", "/api/park/product-learning/loop", token=ops_token))
     assert loop_status == 200
-    assert payload["park_issue_ticket_count"] == 1
+    assert payload["park_issue_ticket_count"] >= 1
+    assert any(
+        ticket.get("issue_type") == "heat_exhaustion_concern"
+        for ticket in payload["park_issue_tickets"]
+    )
     assert payload["training_gap_ticket_count"] == 1
     assert payload["learning_signal_count"] >= 1

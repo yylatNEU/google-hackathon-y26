@@ -184,7 +184,7 @@ EXPERIENCE_STUDIO_RETENTION_POLICY = {
     "drafts": {"collection": "experience_studio_drafts", "retentionDays": 365, "purpose": "Preserve saved creative packages and source-integrity state."},
     "feedback": {"collection": "experience_studio_feedback", "retentionDays": 365, "purpose": "Preserve review decisions as audit receipts only."},
     "revisionEvents": {"collection": "experience_studio_revision_events", "retentionDays": 365, "purpose": "Preserve content updates, workflow transitions, and handoff receipts."},
-    "learningRules": {"collection": "experience_studio_learning_rules", "retentionDays": None, "purpose": "Reserved for explicitly approved future rules; disabled for the current no-feedback-loop contract."},
+    "learningRules": {"collection": "experience_studio_learning_rules", "retentionDays": None, "purpose": "Human-promoted reusable Studio rules from approved finished work; reversible and never automatic training."},
 }
 
 
@@ -265,9 +265,15 @@ def _active_learning_rules(template_id: str, audience: str, channel_targets: lis
     channel_set = {str(item) for item in (channel_targets or []) if str(item).strip()}
     rows = _latest_studio_memory("experience_studio_learning_rules", max(limit * 3, 20))
     active: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             continue
+        row_id = str(row.get("id") or row.get("_id") or "")
+        if row_id and row_id in seen_ids:
+            continue
+        if row_id:
+            seen_ids.add(row_id)
         if str(row.get("approvalStatus") or "") != "approved":
             continue
         scope = row.get("scope") if isinstance(row.get("scope"), dict) else {}
@@ -340,11 +346,13 @@ def _memory_learning_policy() -> dict[str, Any]:
     return {
         "primaryMemory": "mongodb",
         "analyticsMirror": "gcp_bigquery_later",
-        "rule": "Experience Studio does not run an automatic feedback loop. Generated copy, saved drafts, and reviews are audit receipts. Only approved or ready-for-publish finished-work patterns may be reused as bounded creative context.",
+        "rule": "Experience Studio does not run an automatic feedback loop. Generated copy, saved drafts, and reviews are audit receipts. Only approved or ready-for-publish finished-work patterns and explicitly promoted human-approved rules may be reused as bounded creative context.",
         "presetCoreId": STUDIO_CORE_PRESET["id"],
         "generatedTextLearningEligible": False,
         "humanFeedbackLearningEligible": False,
         "finishedWorkPatternMemoryEligible": True,
+        "approvedRulePromotionEligible": True,
+        "approvedRuleAuthority": "human_promoted_rules_only",
         "finishedWorkAllowedStatuses": sorted(FINISHED_WORK_STATUSES),
     }
 
@@ -454,6 +462,8 @@ def experience_studio_readiness() -> dict[str, Any]:
         },
         "contracts": {
             "noFeedbackLoop": _memory_learning_policy()["humanFeedbackLearningEligible"] is False,
+            "approvedRulePromotion": True,
+            "approvedRuleAuthority": "human_promoted_rules_only",
             "llmControlAuthority": False,
             "notOperations": True,
             "publishingRequiresReview": True,
@@ -2165,6 +2175,7 @@ def _llm_creative_prompt(payload: dict[str, Any], state_context: dict[str, Any],
     creative_synthesis = deterministic_draft.get("creativeSynthesis") if isinstance(deterministic_draft.get("creativeSynthesis"), dict) else {}
     selected_concept = creative_synthesis.get("selectedConcept") if isinstance(creative_synthesis.get("selectedConcept"), dict) else {}
     finished_memory = deterministic_draft.get("finishedWorkMemory") if isinstance(deterministic_draft.get("finishedWorkMemory"), dict) else {}
+    approved_rules = deterministic_draft.get("approvedLearningRules") if isinstance(deterministic_draft.get("approvedLearningRules"), dict) else {}
     return {
         "task": "Improve a ParkPulse Experience Studio draft as a creative writing pass after verified route and concept selection.",
         "return_only_json": True,
@@ -2213,6 +2224,14 @@ def _llm_creative_prompt(payload: dict[str, Any], state_context: dict[str, Any],
             "reusablePatterns": finished_memory.get("reusablePatterns", []),
             "avoidPatterns": finished_memory.get("avoidPatterns", []),
             "learningBoundary": finished_memory.get("learningBoundary"),
+        },
+        "approved_learning_rules": {
+            "status": approved_rules.get("status"),
+            "mode": approved_rules.get("mode"),
+            "appliedRules": approved_rules.get("appliedRules", []),
+            "guardrails": approved_rules.get("guardrails", []),
+            "learningBoundary": approved_rules.get("learningBoundary"),
+            "authority": "human_promoted_rules_only",
         },
         "messages": deterministic_draft.get("messages", []),
         "state_context_source": state_context.get("source"),
@@ -2409,12 +2428,14 @@ def _merge_llm_creative_pass(base_draft: dict[str, Any], generated: dict[str, An
     quality_gaps = [str(item) for item in intelligence.get("qualityGaps", []) if str(item).strip()] if isinstance(intelligence.get("qualityGaps"), list) else []
     creative_brief = merged.get("creativeBrief") if isinstance(merged.get("creativeBrief"), dict) else {}
     template = TEMPLATES.get(template_id, TEMPLATES["halloween-route"])
+    audience = _text(merged.get("audience"), "mixed guest groups")
+    learning_context = merged.get("approvedLearningRules") if isinstance(merged.get("approvedLearningRules"), dict) else _learning_rule_context(template_id, audience)
     merged["creativePackage"] = _creative_package(
         base_route,
         base_messages,
         template_id,
         template,
-        _text(merged.get("audience"), "mixed guest groups"),
+        audience,
         _text(creative_brief.get("tone"), "clear, themed, guest-safe"),
         constraints,
         creative_brief,
@@ -2424,6 +2445,7 @@ def _merge_llm_creative_pass(base_draft: dict[str, Any], generated: dict[str, An
         merged.get("experienceReasoning") if isinstance(merged.get("experienceReasoning"), dict) else {},
         merged.get("creativeSynthesis") if isinstance(merged.get("creativeSynthesis"), dict) else {},
         merged.get("finishedWorkMemory") if isinstance(merged.get("finishedWorkMemory"), dict) else _finished_work_memory_context(template_id, _text(merged.get("audience"), "mixed guest groups")),
+        learning_context,
     )
     merged["sourceIntegrity"] = _source_integrity(base_route, real_inputs, context, intelligence, quality_gaps)
     merged["studioReview"] = _studio_review(template_id, merged, constraints, real_inputs)
@@ -3230,7 +3252,8 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
     staff_variant = copy_variants.get("staffCue") if isinstance(copy_variants.get("staffCue"), dict) else {}
     signage_variant = copy_variants.get("signage") if isinstance(copy_variants.get("signage"), list) else []
     finished_memory = memory_context if isinstance(memory_context, dict) else _finished_work_memory_context(template_id, audience)
-    approved_rules = learning_context if isinstance(learning_context, dict) else _learning_rule_context(template_id, audience, planning_channel_targets if (planning_channel_targets := (synthesis.get("channelTargets") if isinstance(synthesis.get("channelTargets"), list) else None)) else None)
+    synthesis_channels = _as_text_list(selected_synthesis.get("channelFocus"))
+    approved_rules = learning_context if isinstance(learning_context, dict) else _learning_rule_context(template_id, audience, synthesis_channels)
     route_blueprint = _route_blueprint(route, creative_brief, route_pattern)
     channel_matrix = _channel_matrix(messages, copy_variants, channel_owners, channel_rules)
     owner_questions = [

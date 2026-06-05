@@ -419,7 +419,7 @@ export default function MonitorPage() {
   const loadSecondaryEvidence = useCallback(async () => {
     const requestId = secondaryRequestRef.current + 1;
     secondaryRequestRef.current = requestId;
-    const nextAgentOps = await readJson<AgentOpsLedger>("/api/park/agent-ops-ledger?limit=30", { timeoutMs: 5000 });
+    const nextAgentOps = await readJson<AgentOpsLedger>("/api/park/agent-ops-ledger?limit=30", { timeoutMs: 15000 });
     if (secondaryRequestRef.current !== requestId) return;
     if (nextAgentOps) setAgentOps(nextAgentOps);
   }, []);
@@ -432,10 +432,10 @@ export default function MonitorPage() {
     const monitorPath = depth === "deep" ? "/api/park/agent-monitoring/deep" : "/api/park/agent-monitoring";
     try {
       const [nextMonitor, nextCases, nextPolicyDoctrine, nextMonitorEvidence] = await Promise.all([
-        readJson<MonitorData>(monitorPath, { timeoutMs: depth === "deep" ? 15000 : 8000 }),
-        readJson<CaseIndex>("/api/park/cases", { timeoutMs: 8000 }),
-        readJson<PolicyDoctrine>("/api/park/policy-doctrine", { timeoutMs: 5000 }),
-        readJson<MonitorEvidenceGraph>("/api/park/monitor-evidence?limit=40", { timeoutMs: 8000 }),
+        readJson<MonitorData>(monitorPath, { timeoutMs: depth === "deep" ? 20000 : 15000 }),
+        readJson<CaseIndex>("/api/park/cases", { timeoutMs: 15000 }),
+        readJson<PolicyDoctrine>("/api/park/policy-doctrine", { timeoutMs: 15000 }),
+        readJson<MonitorEvidenceGraph>("/api/park/monitor-evidence?limit=40", { timeoutMs: 20000 }),
       ]);
       if (workspaceRequestRef.current !== requestId) return;
       if (nextMonitor) setMonitor(nextMonitor);

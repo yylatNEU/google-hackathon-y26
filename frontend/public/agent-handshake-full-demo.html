@@ -2141,10 +2141,61 @@
         $("metricReceipt").textContent = "-";
         return;
       }
-      $("receiptBox").textContent = pretty({
+      const result = externalAgentResult();
+      const accepted = state.receipt.accepted_plan || {};
+      const committedPlan = Array.isArray(accepted.plan) && accepted.plan.length
+        ? accepted.plan
+        : Array.isArray(result?.final_plan) && result.final_plan.length
+          ? result.final_plan
+          : Array.isArray(state.session?.proposal?.plan) ? state.session.proposal.plan : [];
+      const policyGates = state.receipt.policy_gates_triggered || state.session?.policy_decisions || [];
+      const allowedActions = Array.from(new Set(policyGates
+        .filter((item) => item.status === "allowed" || item.allowed === true)
+        .map((item) => item.action)
+        .filter(Boolean)));
+      const approvalRequired = Array.from(new Set([
+        ...(Array.isArray(result?.approval_required_actions) ? result.approval_required_actions : []),
+        ...policyGates
+          .filter((item) => item.status === "requires_user_approval" || item.allowed === false)
+          .map((item) => item.action)
+          .filter(Boolean)
+      ]));
+      const handoffs = Array.from(new Set((state.receipt.internal_handoffs || state.session?.internal_handoffs || [])
+        .map((item) => item.internal_agent || item.internal_agent_id || item.agent)
+        .filter(Boolean)));
+      const finalReceipt = {
         receipt_id: state.receipt.receipt_id,
         verification: state.verification?.status,
+        final_result_for_external_agent: result ? {
+          artifact_type: result.artifact_type,
+          recipient: result.recipient,
+          represented_subject: result.represented_subject,
+          message_to_represented_party: result.message_to_represented_party,
+          final_plan: result.final_plan || committedPlan,
+          immediate_actions_allowed: result.immediate_actions_allowed || allowedActions,
+          approval_required_actions: result.approval_required_actions || approvalRequired,
+          do_not_do: result.do_not_do || []
+        } : {
+          final_plan: committedPlan,
+          note: "External-agent result artifact has not been attached to this run yet."
+        },
+        accepted_plan: {
+          proposal_id: accepted.proposal_id || state.session?.proposal?.proposal_id,
+          commitment_id: accepted.commitment_id || state.session?.commitment?.commitment_id,
+          plan: committedPlan,
+          confidence: accepted.confidence ?? state.session?.proposal?.confidence
+        },
+        monitoring_outcome: state.receipt.monitoring_outcome || state.session?.monitoring || null,
+        policy_result: {
+          allowed_actions: allowedActions,
+          approval_required_actions: approvalRequired
+        },
+        internal_handoffs: handoffs,
+        next_passport: result?.next_passport || state.lastPayload?.passport_evolution?.next_passport || null,
         signature: state.receipt.signature
+      };
+      $("receiptBox").textContent = pretty({
+        final_receipt: finalReceipt
       });
       $("receiptBadge").textContent = state.verification?.status || "issued";
       $("receiptBadge").className = state.verification?.status === "verified" ? "badge good" : "badge warn";

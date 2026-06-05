@@ -13,6 +13,7 @@ from env_bootstrap import load_backend_env
 
 load_backend_env()
 
+import main as parkpulse_lazy_main
 from main import app
 from park_role_access import authorize_role_action, identity_provider_readiness, normalize_role, verify_external_role_identity, verify_role_session
 
@@ -70,6 +71,8 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
         if self._run_experience_studio_fast_path(parsed.path, body):
             return
         if self._run_agent_handshake_fast_path(parsed.path, body):
+            return
+        if self._run_monitor_fast_path(parsed):
             return
         messages = [
             {
@@ -204,6 +207,94 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return False
 
+    def _resolve_direct_payload(self, value: Any, timeout_seconds: float = 10.0) -> Any:
+        if asyncio.iscoroutine(value):
+            return asyncio.run(asyncio.wait_for(value, timeout=timeout_seconds))
+        return value
+
+    def _query_value(self, query: str, key: str, default: str = "") -> str:
+        values = dict(parse_qsl(query, keep_blank_values=True))
+        return values.get(key, default)
+
+    def _query_int(self, query: str, key: str, default: int, *, minimum: int = 1, maximum: int = 500) -> int:
+        try:
+            value = int(self._query_value(query, key, str(default)))
+        except ValueError:
+            value = default
+        return max(minimum, min(maximum, value))
+
+    def _run_monitor_fast_path(self, parsed) -> bool:
+        path = parsed.path
+        monitor_paths = {
+            "/api/park/cases",
+            "/api/park/monitor-evidence",
+            "/api/park/policy-doctrine",
+            "/api/park/agent-monitoring",
+            "/api/park/agent-monitoring/deep",
+            "/api/park/agent-ops-ledger",
+            "/api/park/review-training-ledger",
+        }
+        handles_path = path in monitor_paths or path.startswith("/api/park/policy-doctrine/")
+        if not handles_path:
+            return False
+        if self.command == "OPTIONS":
+            self._send_direct_options()
+            return True
+        if self.command != "GET":
+            return False
+
+        try:
+            if path == "/api/park/cases":
+                payload = self._resolve_direct_payload(parkpulse_lazy_main._fast_case_index())
+            elif path == "/api/park/monitor-evidence":
+                limit = self._query_int(parsed.query, "limit", 30, maximum=80)
+                case_id = self._query_value(parsed.query, "case_id") or self._query_value(parsed.query, "caseId") or None
+                payload = self._resolve_direct_payload(parkpulse_lazy_main._monitor_evidence_graph(case_id=case_id, limit=limit), timeout_seconds=15.0)
+            elif path == "/api/park/policy-doctrine":
+                if getattr(parkpulse_lazy_main, "_fast_operational_doctrine_index", None) is None:
+                    payload = {
+                        "status": "unavailable",
+                        "mode": "policy_doctrine_index",
+                        "policy_book_count": 0,
+                        "action_case_count": 0,
+                        "action_primitive_count": 0,
+                        "action_cases": [],
+                        "policy_refs": [],
+                        "readiness_issues": ["Operational doctrine index is unavailable."],
+                    }
+                else:
+                    payload = {"status": "ready", "mode": "policy_doctrine_index", **parkpulse_lazy_main._fast_operational_doctrine_index()}
+            elif path.startswith("/api/park/policy-doctrine/"):
+                payload = parkpulse_lazy_main._policy_ref_detail(unquote(path.rsplit("/", 1)[-1]))
+            elif path == "/api/park/agent-monitoring":
+                payload = self._resolve_direct_payload(parkpulse_lazy_main._fast_agent_monitoring())
+            elif path == "/api/park/agent-monitoring/deep":
+                try:
+                    payload = self._resolve_direct_payload(parkpulse_lazy_main._deep_agent_monitoring(), timeout_seconds=15.0)
+                except Exception as error:
+                    payload = self._resolve_direct_payload(parkpulse_lazy_main._fast_agent_monitoring())
+                    payload["status"] = "deep_monitoring_unavailable"
+                    payload["deep_monitoring"] = {
+                        "status": "unavailable",
+                        "error": str(error)[:300],
+                        "full_runtime": parkpulse_lazy_main._full_runtime_status(),
+                    }
+            elif path == "/api/park/agent-ops-ledger":
+                from agent_ops_ledger import read_agent_ops_ledger
+
+                limit = self._query_int(parsed.query, "limit", 50, maximum=80)
+                search = self._query_value(parsed.query, "q").strip() or None
+                payload = read_agent_ops_ledger(limit=limit, query=search)
+            else:
+                from live_feedback_loop import review_training_ledger
+
+                limit = self._query_int(parsed.query, "limit", 120, maximum=500)
+                payload = review_training_ledger(limit=limit)
+            self._send_direct_json(200, payload if isinstance(payload, dict) else {"status": "ready", "payload": payload})
+        except Exception as error:
+            self._send_direct_json(200, {"status": "unavailable", "mode": "monitor_fast_path", "readiness_issues": [str(error)[:300]]})
+        return True
+
     def _json_body(self, body: bytes) -> dict[str, Any]:
         try:
             payload = json.loads(body.decode("utf-8") or "{}")
@@ -228,7 +319,15 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
 
     def _run_experience_studio_fast_path(self, path: str, body: bytes) -> bool:
         try:
-            if path in {"/api/park/venue-profile", "/api/park/experience-studio/conversation-plan", "/api/park/experience-studio/draft", "/api/park/experience-studio/drafts", "/api/park/experience-studio/memory", "/api/park/experience-studio/readiness"} and self.command == "OPTIONS":
+            if path in {
+                "/api/park/venue-profile",
+                "/api/park/experience-studio/conversation-plan",
+                "/api/park/experience-studio/draft",
+                "/api/park/experience-studio/drafts",
+                "/api/park/experience-studio/memory",
+                "/api/park/experience-studio/readiness",
+                "/api/park/experience-studio/learning-rules",
+            } and self.command == "OPTIONS":
                 self._send_direct_options()
                 return True
             if self.command == "GET" and path == "/api/park/venue-profile":
@@ -252,10 +351,35 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                     limit = 20
                 self._send_direct_json(200, list_experience_studio_memory(limit=limit))
                 return True
+            if self.command == "GET" and path == "/api/park/experience-studio/learning-rules":
+                from experience_studio import list_experience_studio_learning_rules
+
+                parsed = urlsplit(self.path)
+                query = dict(parse_qsl(parsed.query, keep_blank_values=False))
+                try:
+                    limit = int(query.get("limit", "30"))
+                except ValueError:
+                    limit = 30
+                self._send_direct_json(200, list_experience_studio_learning_rules(limit=limit))
+                return True
             if self.command == "GET" and path == "/api/park/experience-studio/readiness":
                 from experience_studio import experience_studio_readiness
 
                 self._send_direct_json(200, experience_studio_readiness())
+                return True
+            if self.command == "POST" and path.startswith("/api/park/experience-studio/drafts/") and path.endswith("/promote-rule"):
+                from experience_studio import promote_experience_studio_learning_rule
+
+                draft_id = unquote(path.removeprefix("/api/park/experience-studio/drafts/").removesuffix("/promote-rule").strip("/"))
+                result = promote_experience_studio_learning_rule(draft_id, self._json_body(body))
+                self._send_direct_json(200 if result.get("status") == "promoted" else 404 if result.get("status") == "not_found" else 400, result)
+                return True
+            if self.command == "POST" and path.startswith("/api/park/experience-studio/learning-rules/") and path.endswith("/status"):
+                from experience_studio import update_experience_studio_learning_rule
+
+                rule_id = unquote(path.removeprefix("/api/park/experience-studio/learning-rules/").removesuffix("/status").strip("/"))
+                result = update_experience_studio_learning_rule(rule_id, self._json_body(body))
+                self._send_direct_json(200 if result.get("status") == "updated" else 404 if result.get("status") == "not_found" else 400, result)
                 return True
             if self.command == "POST" and path == "/api/park/experience-studio/conversation-plan":
                 from experience_studio import build_experience_studio_conversation_plan

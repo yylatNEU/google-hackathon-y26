@@ -273,7 +273,7 @@ ISSUE_ACTION_EXPECTATIONS = {
     },
     "access_lane_block": {
         "departments": {"security", "operations", "safety"},
-        "tools": {"zone_control_recommendation", "recommend_route_change", "require_human_approval"},
+        "tools": {"create_ops_alert", "zone_control_recommendation", "recommend_route_change", "require_human_approval"},
         "sources": {"operator_signal", "guest_flow", "ride_ops"},
         "reason": "Access-lane events should prioritize security, safety, and operational access control.",
     },
@@ -285,19 +285,19 @@ ISSUE_ACTION_EXPECTATIONS = {
     },
     "ticketing_gate_surge": {
         "departments": {"operations", "security", "guest_experience"},
-        "tools": {"recommend_route_change", "zone_control_recommendation", "draft_guest_message"},
+        "tools": {"create_ops_alert", "recommend_route_change", "zone_control_recommendation", "draft_guest_message"},
         "sources": {"guest_flow", "operator_signal", "ride_ops"},
         "reason": "Gate surge events should focus on front-gate flow, communication, and security review.",
     },
     "parking_arrival_wave": {
         "departments": {"operations", "security", "guest_experience"},
-        "tools": {"recommend_route_change", "zone_control_recommendation", "draft_guest_message"},
+        "tools": {"create_ops_alert", "recommend_route_change", "zone_control_recommendation", "draft_guest_message"},
         "sources": {"guest_flow", "operator_signal", "ride_ops"},
         "reason": "Parking waves should drive arrival-flow and access-control tradeoffs.",
     },
     "parade_route_conflict": {
         "departments": {"operations", "security", "safety"},
-        "tools": {"recommend_route_change", "zone_control_recommendation", "require_human_approval"},
+        "tools": {"create_ops_alert", "recommend_route_change", "zone_control_recommendation", "require_human_approval"},
         "sources": {"guest_flow", "operator_signal", "ride_ops"},
         "reason": "Parade conflicts should be resolved by operations/security/safety routing authority.",
     },
@@ -808,6 +808,15 @@ async def _run_cycle(
                 min_ready_feeds=4,
                 require_persisted_events=True,
                 scenario_key_hint=scenario_key_hint,
+                generated_issue={
+                    "kind": issue_event.get("kind"),
+                    "target_id": issue_event.get("targetId") or issue_event.get("target_id"),
+                    "intensity": issue_event.get("intensity"),
+                    "source": issue_event.get("source"),
+                    "selection_mode": injected_issue.get("selection_mode"),
+                    "unexpected": issue_event.get("unexpected"),
+                    "signal_reliability_pct": issue_event.get("signalReliabilityPct"),
+                },
             )
         ),
         timeout=agent_timeout_seconds,

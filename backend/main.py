@@ -62,7 +62,7 @@ from agent_handshake import (
 )
 from accessibility_journey import build_accessibility_journey, build_accessibility_scope
 from customer_park_knowledge import build_customer_public_data_feed, customer_venue_export_template, validate_customer_venue_export
-from experience_studio import build_experience_studio_conversation_plan, build_experience_studio_payload, create_experience_studio_handoff, experience_studio_readiness, get_experience_studio_draft, list_experience_studio_drafts, list_experience_studio_handoffs, list_experience_studio_memory, save_experience_studio_draft, studio_layer_contract, update_experience_studio_draft_content, update_experience_studio_draft_status, update_experience_studio_handoff_status
+from experience_studio import build_experience_studio_conversation_plan, build_experience_studio_payload, create_experience_studio_handoff, experience_studio_readiness, get_experience_studio_draft, list_experience_studio_drafts, list_experience_studio_handoffs, list_experience_studio_learning_rules, list_experience_studio_memory, promote_experience_studio_learning_rule, save_experience_studio_draft, studio_layer_contract, update_experience_studio_draft_content, update_experience_studio_draft_status, update_experience_studio_handoff_status, update_experience_studio_learning_rule
 from venue_experience_data import activate_synthetic_venue_export, build_venue_experience_data, import_venue_experience_export, validate_venue_experience_export
 from venue_profile import activate_synthetic_venue_profile, approved_synthetic_venue_profile_export, build_venue_profile, import_venue_profile_export, preview_venue_profile_import, validate_venue_profile_export
 from park_ops_mcp import (
@@ -438,7 +438,10 @@ def _api_capability_registry() -> dict[str, Any]:
                     "/api/park/experience-studio/drafts",
                     "/api/park/experience-studio/drafts/{id}",
                     "/api/park/experience-studio/drafts/{id}/handoff",
+                    "/api/park/experience-studio/drafts/{id}/promote-rule",
                     "/api/park/experience-studio/drafts/{id}/status",
+                    "/api/park/experience-studio/learning-rules",
+                    "/api/park/experience-studio/learning-rules/{id}/status",
                 ],
                 "timeout_tier": "fast_hybrid_seconds",
             },
@@ -8253,8 +8256,10 @@ def _lightweight_copilot_recommendation(message: str, route: dict[str, Any], sta
     top_ride = (state_summary.get("top_rides") or [{}])[0]
     top_zone = (state_summary.get("crowded_zones") or [{}])[0]
     top_path = (state_summary.get("constrained_paths") or [{}])[0]
-    ride_name = top_ride.get("name") or "the highest-wait ride"
-    zone_name = top_zone.get("name") or "the busiest zone"
+    reported_coaster = "the reported coaster queue" if "coaster" in message.lower() else "the reported queue"
+    reported_parade = "the parade pinch point" if "parade" in message.lower() else "the busiest reported area"
+    ride_name = top_ride.get("name") or reported_coaster
+    zone_name = top_zone.get("name") or reported_parade
     path_label = (
         f"{top_path.get('from')} to {top_path.get('to')}"
         if top_path.get("from") or top_path.get("to")
@@ -8414,19 +8419,35 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
     mode = str(request_payload.get("mode") or "auto")
     requested_turn_mode = str(request_payload.get("turn_mode") or request_payload.get("turnMode") or "auto").lower()
     state_timeout = max(0.25, _float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_STATE_TIMEOUT_SECONDS", 1.5))
-    try:
-        state = await asyncio.wait_for(
-            _cached_hot_endpoint("park_state_lite", _hot_endpoint_ttls()["park_state"], _fast_park_state_lite),
-            timeout=state_timeout,
-        )
-        mark("state")
-    except Exception as error:
+    cached_state = _hot_endpoint_cache.get("park_state_lite")
+    if cached_state and cached_state[0] > time.monotonic():
+        state = cached_state[1]
+        mark("state_cache")
+    elif _truthy_env("PARKPULSE_COPILOT_LIGHTWEIGHT_STATE_CACHE_ONLY", True):
         state = {
             "status": "degraded",
-            "operationsAudit": {"ready": False, "readiness_issues": [str(error)[:240]]},
+            "mode": "lightweight_state_cache_miss",
+            "operationsAudit": {
+                "ready": False,
+                "readiness_issues": ["Fast state cache was cold; live state refresh is deferred off the copilot hot path."],
+            },
             "guestFlow": {"rides": [], "zones": [], "paths": []},
         }
-        mark("state_fallback")
+        mark("state_cache_miss")
+    else:
+        try:
+            state = await asyncio.wait_for(
+                _cached_hot_endpoint("park_state_lite", _hot_endpoint_ttls()["park_state"], _fast_park_state_lite),
+                timeout=state_timeout,
+            )
+            mark("state")
+        except Exception as error:
+            state = {
+                "status": "degraded",
+                "operationsAudit": {"ready": False, "readiness_issues": [str(error)[:240]]},
+                "guestFlow": {"rides": [], "zones": [], "paths": []},
+            }
+            mark("state_fallback")
     route = route_agent_role(message, mode)
     mark("route")
     state_summary = _lightweight_copilot_state_summary(state if isinstance(state, dict) else {})
@@ -13105,7 +13126,18 @@ async def app(scope, receive, send):
             limit_raw = (query.get("limit") or [None])[0]
             if not await _authorize_or_send(send, scope, "read_product_learning", "product_learning_loop", None, default_role="ops_team"):
                 return
-            await _send_json(send, 200, product_learning_loop_status(limit=int(limit_raw) if limit_raw else 500))
+            operational_backlog = None
+            try:
+                from agent_ops_ledger import build_operational_backlog
+
+                state = await _fast_park_state_lite()
+                operational_backlog = await asyncio.wait_for(
+                    asyncio.to_thread(build_operational_backlog, state),
+                    timeout=max(0.5, _float_env("PARKPULSE_PRODUCT_LEARNING_BACKLOG_TIMEOUT_SECONDS", 2.5)),
+                )
+            except Exception:
+                operational_backlog = None
+            await _send_json(send, 200, product_learning_loop_status(limit=int(limit_raw) if limit_raw else 500, operational_backlog=operational_backlog))
         except Exception as error:
             await _send_json(send, 200, {"status": "error", "mode": "product_learning_loop", "readiness_issues": [str(error)[:240]]})
         return
@@ -17169,6 +17201,17 @@ async def app(scope, receive, send):
         await _send_json(send, 200, await asyncio.to_thread(list_experience_studio_memory, limit=limit))
         return
 
+    if method == "GET" and path == "/api/park/experience-studio/learning-rules":
+        if not await _authorize_experience_studio_or_send(send, scope, "read_experience_studio", "experience_studio_learning_rules", None):
+            return
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        try:
+            limit = int((query.get("limit") or ["30"])[0] or 30)
+        except (TypeError, ValueError):
+            limit = 30
+        await _send_json(send, 200, await asyncio.to_thread(list_experience_studio_learning_rules, limit=limit))
+        return
+
     if method == "GET" and path == "/api/park/experience-studio/venue-data":
         await _send_json(send, 200, build_venue_experience_data())
         return
@@ -17233,6 +17276,24 @@ async def app(scope, receive, send):
             return
         result = create_experience_studio_handoff(draft_id, payload)
         await _send_json(send, 200 if result.get("status") == "created" else 404 if result.get("status") == "not_found" else 400, result)
+        return
+
+    if method == "POST" and path.startswith("/api/park/experience-studio/drafts/") and path.endswith("/promote-rule"):
+        draft_id = unquote(path.removeprefix("/api/park/experience-studio/drafts/").removesuffix("/promote-rule").strip("/"))
+        payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "review_experience_studio", "experience_studio_learning_rule_promote", payload):
+            return
+        result = promote_experience_studio_learning_rule(draft_id, payload)
+        await _send_json(send, 200 if result.get("status") == "promoted" else 404 if result.get("status") == "not_found" else 400, result)
+        return
+
+    if method == "POST" and path.startswith("/api/park/experience-studio/learning-rules/") and path.endswith("/status"):
+        rule_id = unquote(path.removeprefix("/api/park/experience-studio/learning-rules/").removesuffix("/status").strip("/"))
+        payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "review_experience_studio", "experience_studio_learning_rule_review", payload):
+            return
+        result = update_experience_studio_learning_rule(rule_id, payload)
+        await _send_json(send, 200 if result.get("status") == "updated" else 404 if result.get("status") == "not_found" else 400, result)
         return
 
     if method == "POST" and path.startswith("/api/park/experience-studio/drafts/") and not path.endswith("/status") and not path.endswith("/handoff"):

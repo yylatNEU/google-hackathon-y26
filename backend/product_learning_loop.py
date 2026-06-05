@@ -45,6 +45,17 @@ TEAM_BY_ISSUE = {
 
 HIGH_RISK_ISSUES = {"lost_child_report", "heat_exhaustion_concern", "safety_rule_refusal", "weather_evacuation_confusion"}
 
+BACKLOG_ISSUE_MAP = {
+    "food-court-a-backlog": "refund_request",
+    "fast-lane-fairness-risk": "angry_parent",
+    "showtime-traffic-wave": "weather_evacuation_confusion",
+    "guest-recovery-pressure": "angry_parent",
+    "safety-access-readiness": "weather_evacuation_confusion",
+    "finance-exposure-watch": "refund_request",
+    "planning-horizon-risk": "weather_evacuation_confusion",
+    "customer-experience-trust-risk": "angry_parent",
+}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -145,6 +156,87 @@ def create_park_issue_ticket(
     return {"status": "created", "mode": "park_issue_ticket", "ticket": ticket, "feeds_training_model": "via_product_learning_signal_only"}
 
 
+def generate_park_issue_tickets_from_operational_backlog(backlog: dict[str, Any] | None, *, limit: int = 12) -> list[dict[str, Any]]:
+    """Project dynamic park backlog issues into live issue tickets without UI/manual creation."""
+    issues = backlog.get("issues", []) if isinstance(backlog, dict) and isinstance(backlog.get("issues"), list) else []
+    tickets: list[dict[str, Any]] = []
+    for issue in issues[: max(1, min(50, int(limit or 12)))]:
+        if not isinstance(issue, dict):
+            continue
+        issue_id = str(issue.get("id") or issue.get("title") or "")
+        issue_type = BACKLOG_ISSUE_MAP.get(issue_id) or _issue_type_from_backlog_issue(issue)
+        severity = _severity_from_backlog_issue(issue)
+        ticket = {
+            "event": "park_issue_ticket_generated",
+            "id": _stable_id(
+                "park-issue",
+                {
+                    "source": "dynamic_park",
+                    "issue_id": issue_id,
+                    "issue_type": issue_type,
+                    "current": issue.get("current"),
+                    "severity": severity,
+                },
+            ),
+            "source": "dynamic_park",
+            "issue_type": issue_type,
+            "severity": severity,
+            "location": str(issue.get("domain") or issue.get("executiveDomain") or "")[:120] or None,
+            "reporter_role": "dynamic_park_backend",
+            "summary": _backlog_issue_summary(issue),
+            "required_action": str(issue.get("recommendedNext") or _default_required_action(issue_type))[:500],
+            "assigned_team": TEAM_BY_ISSUE.get(issue_type) or "ops_lead",
+            "status": str(issue.get("status") or "unresolved")[:80],
+            "live_ops_authority": True,
+            "requires_human_ack": severity in {"high", "critical"} or issue_type in HIGH_RISK_ISSUES,
+            "created_at": _now_iso(),
+            "derived_from": "operational_backlog",
+            "dynamic_park_issue_id": issue_id or None,
+            "evidence": issue.get("evidence") if isinstance(issue.get("evidence"), list) else [],
+            "boundary": "Generated from dynamic park operational backlog; high-risk actions still require human acknowledgement before live dispatch.",
+        }
+        tickets.append(ticket)
+    return tickets
+
+
+def _issue_type_from_backlog_issue(issue: dict[str, Any]) -> str:
+    blob = " ".join(str(issue.get(key) or "") for key in ("id", "domain", "title", "current", "recommendedNext")).lower()
+    if any(term in blob for term in ("safety", "storm", "weather", "access", "crowd", "showtime", "traffic")):
+        return "weather_evacuation_confusion"
+    if any(term in blob for term in ("medical", "first aid", "heat", "care")):
+        return "heat_exhaustion_concern"
+    if any(term in blob for term in ("accessibility", "mobility", "privacy")):
+        return "accessibility_accommodation"
+    if any(term in blob for term in ("refund", "compensation", "finance", "recovery", "food", "eta", "backlog")):
+        return "refund_request"
+    if any(term in blob for term in ("fairness", "complaint", "trust", "guest", "customer")):
+        return "angry_parent"
+    return "ride_closure_complaint"
+
+
+def _severity_from_backlog_issue(issue: dict[str, Any]) -> str:
+    raw = str(issue.get("severity") or "").lower()
+    if raw == "critical":
+        return "critical"
+    if raw in {"warning", "high"}:
+        return "high"
+    if raw in {"low", "medium"}:
+        return raw
+    return "medium"
+
+
+def _backlog_issue_summary(issue: dict[str, Any]) -> str:
+    title = str(issue.get("title") or "Dynamic park issue")
+    current = str(issue.get("current") or "").strip()
+    impact = str(issue.get("businessImpact") or "").strip()
+    parts = [title]
+    if current:
+        parts.append(current)
+    if impact:
+        parts.append(impact)
+    return " / ".join(parts)[:1000]
+
+
 def _default_required_action(issue_type: str) -> str:
     return {
         "lost_child_report": "Route to Security/Ops and keep guardian at a meeting point.",
@@ -226,7 +318,7 @@ def _employee_excerpt(session: dict[str, Any]) -> str:
 
 
 def _derive_product_learning_signals(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    park_tickets = [row for row in events if row.get("event") == "park_issue_ticket_created"]
+    park_tickets = [row for row in events if row.get("event") in {"park_issue_ticket_created", "park_issue_ticket_generated"}]
     training_gaps = [row for row in events if row.get("event") == "training_gap_ticket_created"]
     signals: list[dict[str, Any]] = []
     for issue_type in sorted({str(row.get("issue_type") or "") for row in park_tickets if row.get("issue_type")}):
@@ -259,15 +351,18 @@ def _signal(source: str, scenario: str, pattern: str, count: int, change_type: s
     }
 
 
-def product_learning_loop_status(limit: int = 500) -> dict[str, Any]:
+def product_learning_loop_status(limit: int = 500, operational_backlog: dict[str, Any] | None = None) -> dict[str, Any]:
     events = _read_events(limit)
-    park_tickets = [row for row in events if row.get("event") == "park_issue_ticket_created"]
+    dynamic_tickets = generate_park_issue_tickets_from_operational_backlog(operational_backlog) if isinstance(operational_backlog, dict) else []
+    signal_events = [*events, *dynamic_tickets]
+    park_tickets = [row for row in signal_events if row.get("event") in {"park_issue_ticket_created", "park_issue_ticket_generated"}]
     training_gaps = [row for row in events if row.get("event") == "training_gap_ticket_created"]
-    signals = _derive_product_learning_signals(events)
+    signals = _derive_product_learning_signals(signal_events)
     return {
         "status": "ready",
         "mode": "product_learning_loop",
         "park_issue_ticket_count": len(park_tickets),
+        "dynamic_park_issue_ticket_count": len(dynamic_tickets),
         "training_gap_ticket_count": len(training_gaps),
         "learning_signal_count": len(signals),
         "park_issue_tickets": park_tickets[-80:],
