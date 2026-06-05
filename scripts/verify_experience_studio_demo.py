@@ -91,6 +91,30 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
         {"status": "approved", "actor": "demo_verifier", "note": "Approved for demo handoff verification."},
         timeout=45,
     )
+    promoted_rule = _request(
+        base_url,
+        "POST",
+        f"/api/park/experience-studio/drafts/{urllib.parse.quote(draft_id)}/promote-rule",
+        {
+            "candidateId": "complete_package_shape",
+            "actor": "demo_verifier",
+            "note": "Promote approved package shape for future Experience Studio context.",
+        },
+        timeout=45,
+    )
+    generated_after_rule = _request(
+        base_url,
+        "POST",
+        "/api/park/experience-studio/draft",
+        {
+            **plan_payload,
+            "useVenueExperienceData": True,
+            "useLlm": False,
+            "useApprovedLearningRules": True,
+        },
+    )
+    post_rule_draft = generated_after_rule.get("draft") if isinstance(generated_after_rule.get("draft"), dict) else {}
+    post_rule_package = post_rule_draft.get("creativePackage") if isinstance(post_rule_draft.get("creativePackage"), dict) else {}
     handoff = _request(
         base_url,
         "POST",
@@ -131,8 +155,10 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "conversationPlanId": conversation_plan.get("id"),
             "conversationPlanMemoryId": (conversation_plan.get("memoryPersistence") or {}).get("memoryId"),
             "generationMemoryId": (generated.get("memoryPersistence") or {}).get("memoryId"),
+            "postRuleGenerationMemoryId": (generated_after_rule.get("memoryPersistence") or {}).get("memoryId"),
             "draftId": draft_id,
             "handoffId": handoff_id or None,
+            "promotedRuleId": (promoted_rule.get("rule") or {}).get("id"),
         },
         "contracts": {
             "conversationTemplateId": (conversation_plan.get("parsedBrief") or {}).get("templateId"),
@@ -144,6 +170,9 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "llmMergeStatus": (draft.get("llmCreativePass") or {}).get("status"),
             "llmSynthesisAcceptedFields": (draft.get("llmCreativePass") or {}).get("synthesisAcceptedFields"),
             "noFeedbackLoop": after.get("learningPolicy", {}).get("humanFeedbackLearningEligible") is False,
+            "approvedRulePromotionEligible": after.get("learningPolicy", {}).get("approvedRulePromotionEligible") is True,
+            "promotedRuleStatus": promoted_rule.get("status"),
+            "postRuleGenerationUsesApprovedRules": (post_rule_package.get("approvedRuleInfluence") or {}).get("usedForGeneration") is True,
             "mongoConnected": connection.get("connected") is True and connection.get("primary") == "mongodb",
         },
         "statuses": {
@@ -152,6 +181,8 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "save": saved.get("status"),
             "update": updated.get("status"),
             "approve": approved.get("status"),
+            "promoteRule": promoted_rule.get("status"),
+            "postRuleGenerate": generated_after_rule.get("status"),
             "handoff": handoff.get("status"),
             "handoffReview": handoff_review.get("status") if handoff_review else "skipped",
         },
@@ -181,6 +212,18 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "profileIntelligence": draft.get("profileIntelligence", {}),
             "handoff": handoff.get("handoff", {}),
         },
+        "approvedRuleLifecycle": {
+            "promotion": promoted_rule,
+            "postPromotionGeneration": {
+                "status": generated_after_rule.get("status"),
+                "mode": generated_after_rule.get("mode"),
+                "approvedLearningRules": post_rule_draft.get("approvedLearningRules", {}),
+                "approvedRuleInfluence": post_rule_package.get("approvedRuleInfluence", {}),
+                "creativeSynthesisRuleInfluence": (post_rule_draft.get("creativeSynthesis") or {}).get("learningRuleInfluence", {}),
+                "selectedConceptName": (post_rule_draft.get("creativeSynthesis") or {}).get("selectedConceptName"),
+                "packageChecklist": ((post_rule_package.get("productionDetail") or {}).get("contentCompletenessChecklist") or []),
+            },
+        },
     }
 
 
@@ -196,8 +239,10 @@ def _render_html(report: dict[str, Any]) -> str:
         ("Conversation plan ID", report.get("created", {}).get("conversationPlanId")),
         ("Conversation template", report.get("contracts", {}).get("conversationTemplateId")),
         ("Generation memory ID", report.get("created", {}).get("generationMemoryId")),
+        ("Post-rule generation memory ID", report.get("created", {}).get("postRuleGenerationMemoryId")),
         ("Draft ID", report.get("created", {}).get("draftId")),
         ("Handoff ID", report.get("created", {}).get("handoffId")),
+        ("Promoted rule ID", report.get("created", {}).get("promotedRuleId")),
     ]
     summary_rows = "".join(f"<tr><td>{escape(str(label))}</td><td>{escape(str(value))}</td></tr>" for label, value in rows)
     return f"""<!doctype html>
@@ -299,6 +344,8 @@ def _render_html(report: dict[str, Any]) -> str:
 <script>
   const report = JSON.parse(document.getElementById("reportData").textContent);
   const result = report.finalGeneratedResult || {{}};
+  const ruleLifecycle = report.approvedRuleLifecycle || {{}};
+  const postRule = ruleLifecycle.postPromotionGeneration || {{}};
   const plan = report.conversationPlan || {{}};
   const plannerIntel = plan.plannerIntelligence || {{}};
   const pkg = result.creativePackage || {{}};
@@ -314,7 +361,8 @@ def _render_html(report: dict[str, Any]) -> str:
     metric("Route stops", (result.route || []).length, result.title),
     metric("Channel artifacts", (result.messages || []).length, "App, signage, email, staff cue"),
     metric("Ready", result.sourceIntegrity?.readyForHandoff ? "yes" : "review", "Source-integrity gate"),
-    metric("Profile intel", profileReady.status || result.sourceIntegrity?.profileIntelligenceStatus || "unknown", result.sourceIntegrity?.realVenueReady ? "Real-venue-ready" : "Creative-ready, review gated")
+    metric("Profile intel", profileReady.status || result.sourceIntegrity?.profileIntelligenceStatus || "unknown", result.sourceIntegrity?.realVenueReady ? "Real-venue-ready" : "Creative-ready, review gated"),
+    metric("Approved rules", postRule.approvedRuleInfluence?.usedForGeneration ? "active" : "inactive", `${{postRule.approvedRuleInfluence?.ruleCount || 0}} rule context`)
   ].join("");
   document.getElementById("planner").innerHTML = `
     <div class="grid4">
@@ -356,6 +404,16 @@ def _render_html(report: dict[str, Any]) -> str:
     <div class="grid2">
       <div class="card"><h3>Production detail</h3><div class="label">Guest choice model</div>${{list(pkg.productionDetail?.guestChoiceModel || [])}}<div class="label">Checklist</div>${{list(pkg.productionDetail?.contentCompletenessChecklist || [])}}<div class="label">Measurement</div>${{list((pkg.productionDetail?.measurementPlan || []).map((item) => `${{item.metric}}: ${{item.signal}} / ${{item.learningUse}}`))}}</div>
       <div class="card"><h3>Finished-work memory</h3><div class="label">Status</div><div class="value">${{esc(pkg.memoryInfluence?.status || "unknown")}}</div><div class="label">Used</div><div class="value">${{esc(pkg.memoryInfluence?.usedForGeneration ? "yes" : "no")}}</div><div class="label">Reusable patterns</div>${{list(pkg.memoryInfluence?.reusablePatterns || [])}}<div class="label">Matched examples</div>${{list((pkg.memoryInfluence?.matchedExamples || []).map((item) => `${{item.status}} / ${{item.selectedConceptName}} / ${{item.draftId}}`))}}</div>
+    </div>
+    <div class="card"><h3>Approved-rule effect on next generation</h3>
+      <div class="grid3">
+        <div><div class="label">Promotion</div><div class="value">${{esc(ruleLifecycle.promotion?.status || "unknown")}}</div></div>
+        <div><div class="label">Used for next generation</div><div class="value">${{esc(postRule.approvedRuleInfluence?.usedForGeneration ? "yes" : "no")}}</div></div>
+        <div><div class="label">Authority</div><div class="value">${{esc(postRule.approvedRuleInfluence?.authority || "human_promoted_rules_only")}}</div></div>
+      </div>
+      <div class="label">Applied rules</div>${{list(postRule.approvedLearningRules?.appliedRules || [])}}
+      <div class="label">Guardrails</div>${{list(postRule.approvedLearningRules?.guardrails || [])}}
+      <div class="label">Post-rule checklist</div>${{list(postRule.packageChecklist || [])}}
     </div>
     <div class="card"><h3>Venue pattern</h3><div class="grid3">
       <div><div class="label">Pattern</div><div class="value">${{esc(pkg.venuePattern?.id || "n/a")}}</div></div>
@@ -433,6 +491,7 @@ def _render_html(report: dict[str, Any]) -> str:
   document.getElementById("memory").innerHTML = `
     <div class="grid2"><div class="card"><h3>Collection deltas</h3><pre>${{esc(jsonText(report.deltas || {{}}))}}</pre></div>
     <div class="card"><h3>Lifecycle statuses</h3><pre>${{esc(jsonText(report.statuses || {{}}))}}</pre></div></div>
+    <div class="card"><h3>Approved-rule lifecycle</h3><pre>${{esc(jsonText(ruleLifecycle || {{}}))}}</pre></div>
     <div class="card"><h3>Memory connection</h3><pre>${{esc(jsonText(report.memoryConnection || {{}}))}}</pre></div>`;
   document.getElementById("raw").textContent = jsonText(report);
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {{

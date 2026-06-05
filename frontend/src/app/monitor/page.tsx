@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchParkPulseApi, getApiUrls } from "@/lib/api";
+import { getApiUrls } from "@/lib/api";
 
 type MonitorData = {
   monitoring_id?: string;
@@ -387,13 +387,47 @@ function StatusPill({ value }: { value?: string }) {
   return <span className={`rounded border px-2 py-1 text-[10px] font-black uppercase tracking-normal ${toneClass(value)}`}>{fmt(value)}</span>;
 }
 
+function monitorHeaderEntries(headers?: HeadersInit): Array<[string, string]> {
+  if (!headers) return [];
+  if (typeof Headers !== "undefined" && headers instanceof Headers) return Array.from(headers.entries());
+  if (Array.isArray(headers)) return headers.map(([key, value]) => [key, value]);
+  return Object.entries(headers).map(([key, value]) => [key, String(value)]);
+}
+
+function readJsonFromUrl<T>(url: string, init?: ApiRequestInit): Promise<T | null> {
+  if (typeof XMLHttpRequest === "undefined") return Promise.resolve(null);
+  const timeoutMs = init?.timeoutMs ?? 20000;
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(init?.method ?? "GET", url, true);
+    xhr.timeout = timeoutMs;
+    for (const [key, value] of monitorHeaderEntries(init?.headers)) {
+      xhr.setRequestHeader(key, value);
+    }
+    xhr.onload = () => {
+      const contentType = (xhr.getResponseHeader("content-type") ?? "").toLowerCase();
+      if (xhr.status < 200 || xhr.status >= 300 || contentType.includes("text/html")) {
+        resolve(null);
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText || "null") as T);
+      } catch {
+        resolve(null);
+      }
+    };
+    xhr.onerror = () => resolve(null);
+    xhr.ontimeout = () => resolve(null);
+    xhr.send((init?.body as XMLHttpRequestBodyInit | null | undefined) ?? null);
+  });
+}
+
 async function readJson<T>(path: string, init?: ApiRequestInit): Promise<T | null> {
-  try {
-    const response = await fetchParkPulseApi(path, init);
-    return (await response.json()) as T;
-  } catch {
-    return null;
+  for (const apiUrl of getApiUrls()) {
+    const payload = await readJsonFromUrl<T>(`${apiUrl}${path}`, init);
+    if (payload) return payload;
   }
+  return null;
 }
 
 export default function MonitorPage() {

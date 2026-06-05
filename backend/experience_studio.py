@@ -3004,6 +3004,7 @@ def _apply_learning_rules_to_synthesis(synthesis: dict[str, Any], learning_conte
     result["rewriteStrategy"] = rewrite
     result["learningRuleInfluence"] = {
         "status": "applied",
+        "usedForGeneration": True,
         "ruleCount": len(rules),
         "rules": [{"id": rule.get("id"), "rule": rule.get("rule"), "tags": rule.get("tags", [])} for rule in rules if isinstance(rule, dict)],
         "boundary": learning_context.get("learningBoundary"),

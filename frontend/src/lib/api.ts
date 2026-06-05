@@ -1,4 +1,4 @@
-const localApiUrls = ["http://127.0.0.1:8010", "http://127.0.0.1:8000", "http://127.0.0.1:8017"];
+const localApiUrls = ["http://127.0.0.1:8000", "http://127.0.0.1:8010", "http://127.0.0.1:8017"];
 const defaultRequestTimeoutMs = 12000;
 const transientTransportAttempts = 2;
 const roleSessionTokenStorageKey = "parkpulse.roleSessionToken";
@@ -180,7 +180,11 @@ function requestWithXhr(url: string, init?: RequestInit, timeoutMs = defaultRequ
 }
 
 function request(url: string, init?: RequestInit, timeoutMs = defaultRequestTimeoutMs) {
-  if (url.includes("/api/park/staff-training") || url.includes("/api/park/auth/dev-session")) {
+  if (
+    url.includes("/api/park/staff-training") ||
+    url.includes("/api/park/product-learning") ||
+    url.includes("/api/park/auth/dev-session")
+  ) {
     return requestWithXhr(url, init, timeoutMs);
   }
   if (typeof globalThis.fetch === "function" && typeof globalThis.AbortController === "function") {
@@ -239,13 +243,16 @@ export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestIni
   for (const apiUrl of getApiUrls()) {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
+        const localParkBackend =
+          /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(apiUrl) &&
+          (path.startsWith("/api/park/staff-training") || path.startsWith("/api/park/product-learning"));
         const headerEntries = headersToEntries(requestInit.headers);
         const requestedRole = headerValue(headerEntries, "x-parkpulse-role");
         const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
         const hasRoleToken = Boolean(headerValue(headerEntries, "x-parkpulse-role-token"));
         const storedRoleToken = !hasAuthorization && !hasRoleToken && path !== "/api/park/auth/dev-session" ? getParkPulseRoleSessionToken() : "";
         const token =
-          requestedRole && !hasAuthorization && !hasRoleToken && !storedRoleToken && path !== "/api/park/auth/dev-session"
+          requestedRole && !localParkBackend && !hasAuthorization && !hasRoleToken && !storedRoleToken && path !== "/api/park/auth/dev-session"
             ? await getOptionalSignedRoleToken(apiUrl, requestedRole, timeoutMs)
             : undefined;
         const roleToken = storedRoleToken || token || "";

@@ -7,8 +7,10 @@ import java.util.List;
 import java.util.Map;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -196,6 +198,180 @@ public class ParkPulseMigrationController {
             Map.of("id", "spring_queue_pressure", "title", "Dragon Coaster queue pressure", "domain", "guest_flow", "severity", "watch"),
             Map.of("id", "spring_staff_readiness", "title", "Staff callout coverage watch", "domain", "staffing", "severity", "normal")
         ));
+        return payload;
+    }
+
+    @GetMapping(value = "/api/park/cases", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> cases() {
+        List<Map<String, Object>> rows = springCaseRows();
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "ready");
+        payload.put("mode", "compact_case_index_spring");
+        payload.put("standard", "ParkPulse Spring operating case index");
+        payload.put("runtime", "java_spring");
+        payload.put("simulationClock", Map.of("hour", 14, "minute", 15, "phase", "Afternoon peak", "demandPressurePct", 68));
+        payload.put("summary", Map.of(
+            "caseCount", rows.size(),
+            "domainCoverageCount", 3,
+            "productionReady", false
+        ));
+        payload.put("rows", rows);
+        payload.put("storagePlan", Map.of(
+            "hotIndex", "java spring case projection",
+            "auditPacketObject", "spring evidence summary plus future warehouse packet",
+            "warehouseTables", List.of("case_ledgers", "case_events", "case_evaluations"),
+            "retrievalIndex", "policy and evidence chunks"
+        ));
+        return payload;
+    }
+
+    @GetMapping(value = "/api/park/cases/{caseId}/brief", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> caseBrief(@PathVariable String caseId) {
+        Map<String, Object> row = springCaseRows().stream()
+            .filter(item -> caseId.equals(String.valueOf(item.get("id"))))
+            .findFirst()
+            .orElseGet(() -> springCaseRows().get(0));
+        Map<String, Object> governance = mapValue(row.get("governance"));
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "ready");
+        payload.put("mode", "case_operating_brief_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("caseHeader", Map.of(
+            "id", row.get("id"),
+            "sourceConflictId", "spring_case_projection",
+            "title", row.get("title"),
+            "domain", row.get("domain"),
+            "severity", row.get("severity"),
+            "mapFocus", List.of("dragon-coaster", "covered-plaza")
+        ));
+        payload.put("operatingThesis", mapValue(row.get("priority")).get("rationale"));
+        payload.put("physicalMechanism", "Guest flow, queue pressure, staff coverage, and receiver dispatch are connected into one auditable loop.");
+        payload.put("recommendedAction", governance.get("nextOwnerAction"));
+        payload.put("policyReasoning", Map.of(
+            "applies", List.of("PARK-SAFE-001", "PARK-OPS-001", "PARK-CARE-001"),
+            "decision", governance.get("allowedSurface"),
+            "blockedActions", governance.get("blockerClasses")
+        ));
+        payload.put("governance", Map.of("acceptance", governance));
+        payload.put("branchComparison", List.of());
+        payload.put("closedLoopVerification", Map.of(
+            "observationWindows", List.of("5 minutes", "15 minutes"),
+            "projectedVsObservedChecks", List.of("queue wait", "receiver acknowledgement", "guest-care cases")
+        ));
+        return payload;
+    }
+
+    @GetMapping(value = "/api/park/monitor-evidence", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> monitorEvidence(@RequestParam(name = "case_id", required = false) String caseId) {
+        List<Map<String, Object>> graphCases = springMonitorEvidenceCases(caseId);
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "ready");
+        payload.put("mode", "monitor_evidence_graph_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("case_count", graphCases.size());
+        payload.put("summary", Map.of(
+            "receipt_count", 2,
+            "trace_record_count", graphCases.stream().mapToInt(item -> listValue(item.get("trace_records")).size()).sum(),
+            "distinct_trace_id_count", 2,
+            "review_session_count", 2,
+            "linked_review_session_count", 2,
+            "policy_ref_count", springPolicyRefs().size(),
+            "cases_with_trace_records", graphCases.size(),
+            "cases_with_review_sessions", graphCases.size(),
+            "cases_with_policy_refs", graphCases.size()
+        ));
+        payload.put("cases", graphCases);
+        payload.put("source_status", Map.of(
+            "case_index", "ready",
+            "agent_ops_ledger", "spring_projection",
+            "review_ledger", "spring_projection",
+            "policy_doctrine", "ready"
+        ));
+        return payload;
+    }
+
+    @GetMapping(value = "/api/park/policy-doctrine", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> policyDoctrine() {
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "ready");
+        payload.put("mode", "policy_doctrine_index_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("policy_book_count", 1);
+        payload.put("action_case_count", springPolicyCases().size());
+        payload.put("action_primitive_count", 4);
+        payload.put("policy_refs", springPolicyRefs());
+        payload.put("action_cases", springPolicyCases());
+        payload.put("absolute_prohibitions", List.of("No automated dispatch for medical, security, evacuation, accessibility, or staff-certification actions without human approval."));
+        return payload;
+    }
+
+    @GetMapping(value = "/api/park/policy-doctrine/{policyRef}", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> policyDoctrineDetail(@PathVariable String policyRef) {
+        Map<String, Object> match = springPolicyRefs().stream()
+            .filter(item -> policyRef.equals(String.valueOf(item.get("policy_ref"))))
+            .findFirst()
+            .orElse(Map.of("policy_ref", policyRef, "title", policyRef));
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", "found");
+        payload.put("mode", "policy_ref_detail_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("policy_ref", policyRef);
+        payload.put("match_count", 1);
+        payload.put("matches", List.of(Map.of(
+            "kind", "decision_rule",
+            "policy_ref", policyRef,
+            "policy_book_id", "PARKPULSE-SPRING-OPS",
+            "title", match.get("title"),
+            "condition", match.get("condition"),
+            "allowed_action", match.get("allowed_action"),
+            "blocked_action", match.get("blocked_action"),
+            "required_evidence", List.of("state snapshot", "policy gate", "receipt id"),
+            "human_review_if", List.of("safety-sensitive action", "low-confidence trace", "guest-care escalation")
+        )));
+        payload.put("related_cases", springPolicyCases());
+        return payload;
+    }
+
+    @GetMapping(value = {"/api/park/agent-monitoring", "/api/park/agent-monitoring/deep"}, produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> agentMonitoring() {
+        Map<String, Object> payload = orderedMap();
+        payload.put("monitoring_id", "PP-MON-SPRING-" + Instant.now().toEpochMilli());
+        payload.put("created_at", Instant.now().toString());
+        payload.put("domain", "amusement_park_operations");
+        payload.put("entrypoint", "java-spring-migration");
+        payload.put("mode", "spring_monitoring_summary");
+        payload.put("status", "ready");
+        payload.put("overall_status", "review");
+        payload.put("runtime", "java_spring");
+        payload.put("summary", Map.of(
+            "action_count", 2,
+            "clear_count", 1,
+            "review_count", 1,
+            "blocked_count", 0,
+            "open_signal_count", 2,
+            "ride_count", 2,
+            "queue_count", 2,
+            "policy_book_count", 1,
+            "overall_eval_score", 84,
+            "needs_human_approval", true
+        ));
+        payload.put("policy_index", Map.of(
+            "policy_book_id", "PARKPULSE-SPRING-OPS",
+            "version", "2026-06-05",
+            "active_policy_books", List.of("PARKPULSE-SPRING-OPS"),
+            "absolute_prohibitions", List.of("No automated safety-sensitive dispatch without human approval.")
+        ));
+        payload.put("policy_integrity", Map.of("status", "ready", "issues", List.of(), "policy_ref_count", springPolicyRefs().size()));
+        payload.put("supervised_actions", List.of(
+            Map.of("action_id", "spring_queue_split_review", "title", "Review Dragon Coaster split-flow plan", "owner", "ops_team", "policy_status", "review", "park_action", Map.of("target", "dragon-coaster", "action", "split_flow")),
+            Map.of("action_id", "spring_staff_watch", "title", "Confirm staff callout coverage", "owner", "ops_team", "policy_status", "clear", "park_action", Map.of("target", "staffing", "action", "observe"))
+        ));
+        payload.put("runtime_governance", Map.of(
+            "decision_ledger", List.of(Map.of("id", "decision-spring-queue", "title", "Queue split requires operator review", "gateStatus", "review", "policyFindings", List.of("PARK-OPS-001"))),
+            "remediation_tasks", List.of(Map.of("id", "task-spring-trace", "status", "open", "severity", "medium", "owner", "ops_team", "title", "Attach live trace receipt when dispatch executes", "requiredAction", "Keep case linked to receipt id", "policyFindings", List.of("PARK-CARE-001"))),
+            "customer_care_cases", List.of()
+        ));
+        payload.put("deep_monitoring", Map.of("status", "spring_summary", "error", ""));
         return payload;
     }
 
