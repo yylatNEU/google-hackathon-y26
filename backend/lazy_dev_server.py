@@ -6,7 +6,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from env_bootstrap import load_backend_env
 
@@ -208,6 +208,17 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                 from experience_studio import list_experience_studio_drafts
 
                 self._send_direct_json(200, list_experience_studio_drafts())
+                return True
+            if self.command == "GET" and path == "/api/park/experience-studio/memory":
+                from experience_studio import list_experience_studio_memory
+
+                parsed = urlsplit(self.path)
+                query = dict(parse_qsl(parsed.query, keep_blank_values=False))
+                try:
+                    limit = int(query.get("limit", "20"))
+                except ValueError:
+                    limit = 20
+                self._send_direct_json(200, list_experience_studio_memory(limit=limit))
                 return True
             if self.command == "POST" and path == "/api/park/experience-studio/draft":
                 from experience_studio import build_experience_studio_payload

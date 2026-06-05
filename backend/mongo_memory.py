@@ -8,6 +8,7 @@ import threading
 import time
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
@@ -171,6 +172,14 @@ EXECUTIVE_EXPERIENCE_COLLECTIONS = {
     "executive_competitor_review_themes",
     "executive_staff_training_outcomes",
     "executive_brief_artifacts",
+}
+
+EXPERIENCE_STUDIO_MEMORY_COLLECTIONS = {
+    "experience_studio_generation_runs",
+    "experience_studio_drafts",
+    "experience_studio_feedback",
+    "experience_studio_revision_events",
+    "experience_studio_learning_rules",
 }
 
 PLAYBOOK_SEEDS = [
@@ -4486,13 +4495,52 @@ class OperationalMemory:
         if collection is not None:
             rows = list(collection.find({}, projection).sort("createdAt", DESCENDING).limit(limit))
             return [_public_doc(row) for row in rows]
+        if collection_name in EXPERIENCE_STUDIO_MEMORY_COLLECTIONS:
+            return [_public_doc(row) for row in self._latest_experience_studio_fallback(collection_name, limit)]
         return [_public_doc(row) for row in deepcopy(self._fallback.get(collection_name, [])[:limit])]
 
     def collection_count(self, collection_name: str) -> int:
         collection = self._collection(collection_name)
         if collection is not None:
             return int(collection.count_documents({}))
+        if collection_name in EXPERIENCE_STUDIO_MEMORY_COLLECTIONS:
+            return len(self._read_experience_studio_fallback().get(collection_name, []))
         return len(self._fallback.get(collection_name, []))
+
+    def _experience_studio_fallback_path(self) -> Path:
+        return Path(os.getenv("PARKPULSE_EXPERIENCE_STUDIO_MEMORY_FALLBACK_PATH", "/tmp/parkpulse/experience_studio_memory_fallback.json"))
+
+    def _read_experience_studio_fallback(self) -> dict[str, list[dict[str, Any]]]:
+        path = self._experience_studio_fallback_path()
+        if not path.exists():
+            return {name: [] for name in EXPERIENCE_STUDIO_MEMORY_COLLECTIONS}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8") or "{}")
+        except (OSError, json.JSONDecodeError):
+            return {name: [] for name in EXPERIENCE_STUDIO_MEMORY_COLLECTIONS}
+        if not isinstance(raw, dict):
+            return {name: [] for name in EXPERIENCE_STUDIO_MEMORY_COLLECTIONS}
+        result: dict[str, list[dict[str, Any]]] = {}
+        for name in EXPERIENCE_STUDIO_MEMORY_COLLECTIONS:
+            rows = raw.get(name, [])
+            result[name] = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        return result
+
+    def _write_experience_studio_fallback(self, collections: dict[str, list[dict[str, Any]]]) -> None:
+        path = self._experience_studio_fallback_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(f"{path.suffix}.tmp")
+        payload = {
+            name: collections.get(name, [])[:250]
+            for name in EXPERIENCE_STUDIO_MEMORY_COLLECTIONS
+        }
+        temp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        temp.replace(path)
+
+    def _latest_experience_studio_fallback(self, collection_name: str, limit: int) -> list[dict[str, Any]]:
+        rows = self._read_experience_studio_fallback().get(collection_name, [])
+        rows = sorted(rows, key=lambda row: str(row.get("updatedAt") or row.get("createdAt") or ""), reverse=True)
+        return deepcopy(rows[: max(1, min(limit, 100))])
 
     def record_experience_studio_memory_event(self, collection_name: str, event: dict[str, Any]) -> dict[str, Any]:
         self._invalidate_dashboard_cache()
@@ -4529,6 +4577,12 @@ class OperationalMemory:
             bucket[:] = [row for row in bucket if row.get("_id") != document_id]
             bucket.insert(0, payload)
             bucket[:] = bucket[:100]
+            collections = self._read_experience_studio_fallback()
+            stored = collections.setdefault(collection_name, [])
+            stored[:] = [row for row in stored if row.get("_id") != document_id]
+            stored.insert(0, payload)
+            stored[:] = stored[:250]
+            self._write_experience_studio_fallback(collections)
         return {
             "status": "stored",
             "mode": self.mode,
@@ -5067,10 +5121,11 @@ def retrieve_operational_context(
     limit: int = 3,
     agent_role: str | None = None,
     cache_policy: str = "normal",
+    persist_trace: bool = True,
 ) -> dict[str, Any]:
     return _safe_memory_call(
         "mongo.context.retrieve",
-        lambda: _memory.retrieve_context(query, state, limit, agent_role, cache_policy),
+        lambda: _memory.retrieve_context(query, state, limit, agent_role, cache_policy, persist_trace),
         lambda error: {
             "status": _memory.status(),
             "query": query,
@@ -5389,6 +5444,14 @@ def get_memory_collection_count(collection_name: str) -> int:
         "mongo.collection_count",
         lambda: _memory.collection_count(collection_name),
         lambda error: 0,
+    )
+
+
+def get_memory_connection_status() -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.status",
+        lambda: _memory.status(),
+        lambda error: {"mode": _memory.mode, "connected": False, "error": str(error)[:300]},
     )
 
 

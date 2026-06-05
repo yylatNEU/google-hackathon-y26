@@ -9,6 +9,7 @@ import ExperienceStudioPage from "./app/experience-studio/page";
 import VenueProfilePage from "./app/venue-profile/page";
 import AccessibilityJourneyPage from "./app/accessibility-journey/page";
 import AgentHandshakePage from "./app/agent-handshake/page";
+import OpsAgentPage from "./app/ops-agent/page";
 import LabsPage from "./features/labs/LabsPage";
 import "./app/globals.css";
 
@@ -32,6 +33,8 @@ const Page = window.location.pathname.startsWith("/monitor")
     ? AccessibilityJourneyPage
   : window.location.pathname.startsWith("/agent-handshake")
     ? AgentHandshakePage
+  : window.location.pathname.startsWith("/ops-agent")
+    ? OpsAgentPage
   : window.location.pathname.startsWith("/executive")
     ? ExecutivePage
   : window.location.pathname.startsWith("/labs")

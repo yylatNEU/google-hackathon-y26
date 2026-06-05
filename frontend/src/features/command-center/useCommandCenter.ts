@@ -11,6 +11,14 @@ type RunPayload = RunTelemetry & {
   operator_response?: RunTelemetry["operator_response"];
 };
 
+function commandCenterIssue(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : fallback;
+  if (/ParkPulse API did not respond|within the request budget|Checked http/i.test(message)) {
+    return "Command Center deferred this live panel while the API finishes a slower refresh. Retry from the panel or run the full loop.";
+  }
+  return message;
+}
+
 export type DispatchView = {
   id: string;
   channel: string;
@@ -483,9 +491,9 @@ export function useCommandCenter() {
       const response = await fetchParkPulseApi("/api/park/review-label-pipeline?limit=40", { timeoutMs: 12000 });
       setReviewLabelPipeline((await response.json()) as ReviewLabelPipeline);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Review label pipeline failed.";
+      const message = commandCenterIssue(error, "Review label pipeline failed.");
       setReviewLabelPipeline({
-        status: "error",
+        status: "deferred",
         mode: "review_label_pipeline",
         candidates: [],
         decided: [],
@@ -537,9 +545,9 @@ export function useCommandCenter() {
       void refreshActualTraining();
       void refreshOperatingLoopResilience();
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to refresh stale live feeds.";
-      setErrorMessage(message);
-      setLiveFeedRefreshSupervisor({ status: "error", mode: "live_feed_refresh_supervisor", readiness_issues: [message] });
+      const message = commandCenterIssue(error, "Unable to refresh stale live feeds.");
+      setStatusMessage(message);
+      setLiveFeedRefreshSupervisor({ status: "deferred", mode: "live_feed_refresh_supervisor", readiness_issues: [message] });
     } finally {
       setIsRefreshingStaleFeeds(false);
     }

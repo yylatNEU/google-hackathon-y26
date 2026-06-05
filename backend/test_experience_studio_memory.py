@@ -7,6 +7,7 @@ def _fresh_modules(monkeypatch, tmp_path):
     monkeypatch.delenv("MONGODB_URI", raising=False)
     monkeypatch.delenv("MONGODB_DIRECT_URI", raising=False)
     monkeypatch.setenv("PARKPULSE_EXPERIENCE_STUDIO_STORE_PATH", str(tmp_path / "experience_studio_drafts.json"))
+    monkeypatch.setenv("PARKPULSE_EXPERIENCE_STUDIO_MEMORY_FALLBACK_PATH", str(tmp_path / "experience_studio_memory_fallback.json"))
     import mongo_memory
     import experience_studio
 

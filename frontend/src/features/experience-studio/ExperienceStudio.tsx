@@ -279,6 +279,13 @@ type StudioMemoryPayload = {
   status?: string;
   mode?: string;
   memoryLayer?: string;
+  memoryConnection?: {
+    connected?: boolean;
+    mode?: string;
+    database?: string;
+    primary?: string;
+    fallbackPath?: string | null;
+  };
   learningPolicy?: {
     primaryMemory?: string;
     analyticsMirror?: string;
@@ -1706,6 +1713,19 @@ export function ExperienceStudio() {
               </div>
               <div className={`mt-3 w-fit rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${studioMemory?.status === "ready" ? "border-emerald-400/40 bg-emerald-950/25 text-emerald-100" : "border-amber-400/40 bg-amber-950/25 text-amber-100"}`}>
                 {studioMemory?.memoryLayer ?? "not loaded"}
+              </div>
+              <div className="mt-3 grid gap-2 text-xs">
+                {[
+                  ["Primary", studioMemory?.memoryConnection?.primary ?? "not connected"],
+                  ["Connected", studioMemory?.memoryConnection?.connected ? "yes" : "no"],
+                  ["Mode", studioMemory?.memoryConnection?.mode ?? "unknown"],
+                  ["Database", studioMemory?.memoryConnection?.database ?? "not connected"],
+                ].map(([label, value]) => (
+                  <div key={label} className="grid grid-cols-[6rem_1fr] gap-2 rounded border border-slate-800 bg-[#0d1115] px-3 py-2">
+                    <span className="font-black uppercase tracking-widest text-slate-500">{label}</span>
+                    <span className="font-bold text-slate-200">{value}</span>
+                  </div>
+                ))}
               </div>
               <div className="mt-3 grid grid-cols-2 gap-2">
                 {studioMemoryCollectionMeta.map((item) => (

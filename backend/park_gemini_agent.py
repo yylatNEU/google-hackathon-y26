@@ -943,6 +943,19 @@ async def build_park_gemini_plan(
             _attach_performance(plan, started_at, provider_timeout, "success")
             span.set_attribute("parkpulse.gemini.response_latency_ms", plan["response_latency_ms"])
             return plan
+        except (asyncio.TimeoutError, asyncio.CancelledError) as error:
+            message = f"Gemini provider timed out after {provider_timeout:g}s"
+            errors = [message]
+            span.set_attribute("parkpulse.gemini.runtime", "deterministic_fallback")
+            span.set_attribute("parkpulse.gemini.error", message[:500])
+            plan = _attach_performance(
+                _fallback_plan(park_state, "deterministic_fallback_after_gemini_error", errors),
+                started_at,
+                provider_timeout,
+                "timeout",
+            )
+            span.set_attribute("parkpulse.gemini.response_latency_ms", plan["response_latency_ms"])
+            return plan
         except Exception as error:
             message = (
                 f"Gemini provider timed out after {provider_timeout:g}s"
@@ -1037,6 +1050,18 @@ async def build_park_gemini_reaction_plan(
             span.set_attribute("parkpulse.answer_accuracy.score", plan.get("answer_accuracy", {}).get("score", 0))
             span.set_attribute("parkpulse.answer_accuracy.status", plan.get("answer_accuracy", {}).get("status", "unknown"))
             span.set_attribute("parkpulse.selected_action", f"{plan['selected_action']['target']}/{plan['selected_action']['action']}")
+            return plan
+        except (asyncio.TimeoutError, asyncio.CancelledError) as error:
+            message = f"Gemini reaction provider timed out after {provider_timeout:g}s"
+            span.set_attribute("parkpulse.gemini.runtime", "deterministic_fallback")
+            span.set_attribute("parkpulse.gemini.error", message[:500])
+            plan = _attach_performance(
+                _fallback_plan(park_state, "deterministic_fallback_after_gemini_error", [message]),
+                started_at,
+                provider_timeout,
+                "timeout",
+            )
+            plan["workflow"] = "react_first_operator_command"
             return plan
         except Exception as error:
             message = (

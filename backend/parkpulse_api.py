@@ -242,6 +242,7 @@ from synthetic_park_runner import (
 from park_ontology_store import read_ontology_events, read_persistent_ontology, reconcile_ontology_with_live_state, record_ontology_turn
 from park_optimizer import optimize_park_response, revise_plan_after_response
 from park_outcome_loop import build_closed_loop_outcome, build_reactive_outcome
+from park_proactive_agent import _fallback_brief as build_proactive_fallback_brief
 from park_proactive_agent import build_proactive_eval, build_proactive_insights, build_proactive_operator_brief
 from venue_profile import build_venue_profile
 from park_review import build_review_snapshot
@@ -329,7 +330,7 @@ _COPILOT_INCIDENT_TERMS = (
 
 
 def _track_background_task(coro) -> asyncio.Task[Any]:
-    task = asyncio.create_task(coro)
+    task = coro if isinstance(coro, asyncio.Task) else asyncio.create_task(coro)
     try:
         _background_tasks.add(task)
     except TypeError:
@@ -1638,6 +1639,24 @@ def _build_agent_bigquery_priors(scenario_key: str, dashboard: dict[str, Any]) -
         if "allow_live_query" not in str(error):
             raise
         return build_bigquery_agent_priors(scenario_key, dashboard)
+
+
+def _compact_operational_memory_dashboard(query: str, state: dict[str, Any], *, agent_role: str) -> dict[str, Any]:
+    context = _retrieve_operational_context(
+        query,
+        state,
+        agent_role=agent_role,
+        cache_policy="fresh_retrieval",
+        persist_trace=False,
+    )
+    return {
+        "status": context.get("status") or init_operational_memory(),
+        "current_state": context.get("current_state") or state,
+        "retrieved": context.get("retrieved", {}),
+        "latest_learnings": get_latest_memory_documents("agent_learnings", 5),
+        "latest_outcomes": get_latest_memory_documents("outcome_events", 5),
+        "dashboard_mode": "compact_latency_safe",
+    }
 
 
 def _collaboration_context(
@@ -7516,14 +7535,15 @@ async def _build_proactive_run_payload(emit_trace=None):
     with tracer.start_as_current_span("api.park_proactive_run") as span:
         state = await park_simulation.get_state()
         await sync_park_state_safe(state)
-        memory_dashboard = get_operational_memory_dashboard("proactive eventops take rate response learning")
-        bigquery_priors = _build_agent_bigquery_priors("proactive_eventops", memory_dashboard)
-        context = _retrieve_operational_context(
-            "proactive halloween event readiness congestion staffing equipment food comfort queue pre-stage "
-            + " ".join(bigquery_priors.get("agent_context", [])),
+        memory_dashboard = _compact_operational_memory_dashboard(
+            "proactive eventops take rate response learning",
             state,
             agent_role="proact_agent",
         )
+        bigquery_priors = _build_agent_bigquery_priors("proactive_eventops", memory_dashboard)
+        context = dict(memory_dashboard)
+        context["query"] = "proactive halloween event readiness congestion staffing equipment food comfort queue pre-stage " + " ".join(bigquery_priors.get("agent_context", []))
+        context["agent_role"] = "proact_agent"
         context = _collaboration_context(context, "proactive_eventops", memory_dashboard, bigquery_priors)
         proactive = build_proactive_insights(state)
         proactive_eval = build_proactive_eval(proactive)
@@ -7545,7 +7565,18 @@ async def _build_proactive_run_payload(emit_trace=None):
                 "eval_score": proactive_eval.get("overall"),
             },
         )
-        brief = await build_proactive_operator_brief(state, proactive, context)
+        brief_timeout = max(0.5, _float_env("PARKPULSE_PROACTIVE_BRIEF_TIMEOUT_SECONDS", 3.0))
+        try:
+            brief = await asyncio.wait_for(
+                build_proactive_operator_brief(state, proactive, context),
+                timeout=brief_timeout,
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            brief = build_proactive_fallback_brief(
+                proactive,
+                "deterministic_fallback_after_outer_brief_timeout",
+                [f"Proactive operator brief exceeded {brief_timeout:g}s hot-path budget."],
+            )
         scenario_key = state.get("guestFlow", {}).get("activeScenario", {}).get("key", "ride_down")
         digital_twin_trace = build_digital_twin_tool_trace(
             state,
@@ -14947,7 +14978,38 @@ async def park_agent_role_run(request: OperatorCommandRequest):
         return payload
 
     if selected_role == "proact":
-        payload = await _build_proactive_run_payload()
+        proact_timeout = max(1.0, _float_env("PARKPULSE_PROACTIVE_ROLE_TIMEOUT_SECONDS", 25.0))
+        def _proact_timeout_payload(reason: str) -> dict[str, Any]:
+            return {
+                "status": "complete",
+                "mode": "proact_role_timeout_fallback",
+                "selected_role": "proact",
+                "operator_response": {
+                    "headline": "Proact Agent returned bounded local guidance.",
+                    "summary": f"Full proactive closed-loop replay {reason}, so ParkPulse kept the hot path on a local policy-gated receipt.",
+                    "next_step": "Review the weak signal, keep monitoring crowd movement, and rerun full proactive replay off the hot path.",
+                },
+                "brief": {
+                    "runtime": "deterministic_role_timeout_fallback",
+                    "errors": [f"Full proactive closed-loop replay {reason}."],
+                },
+                "delivery": {"summary": {"total": 0}, "dispatches": []},
+                "run_telemetry": {
+                    "delivery": {"summary": {"total": 0}, "dispatches": []},
+                    "digital_twin_tools": tool_trace,
+                    "timeout_seconds": proact_timeout,
+                },
+            }
+        if _truthy(os.getenv("PARKPULSE_PROACTIVE_ROLE_HOT_PATH_ONLY"), False):
+            payload = _proact_timeout_payload("was deferred by PARKPULSE_PROACTIVE_ROLE_HOT_PATH_ONLY")
+        else:
+            proact_task = asyncio.create_task(_build_proactive_run_payload())
+            done, _pending = await asyncio.wait({proact_task}, timeout=proact_timeout)
+            if proact_task in done:
+                payload = proact_task.result()
+            else:
+                _track_background_task(proact_task)
+                payload = _proact_timeout_payload(f"exceeded {proact_timeout:g}s")
         payload["selected_role"] = "proact"
         payload["skill"] = route.get("skill")
         payload["role_route"] = route

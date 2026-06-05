@@ -7320,9 +7320,12 @@ async def _fast_agent_monitoring() -> dict[str, Any]:
 
 async def _deep_agent_monitoring() -> dict[str, Any]:
     load_timeout = _float_env("PARKPULSE_DEEP_MONITORING_LOAD_TIMEOUT_SECONDS", 20.0)
-    run_timeout = _float_env("PARKPULSE_DEEP_MONITORING_TIMEOUT_SECONDS", 30.0)
+    run_timeout = _float_env("PARKPULSE_DEEP_MONITORING_TIMEOUT_SECONDS", 8.0)
     module = await _get_full_module(timeout=load_timeout)
-    payload = await asyncio.wait_for(module.build_park_agent_monitoring_response(), timeout=run_timeout)
+    payload = await asyncio.wait_for(
+        asyncio.to_thread(lambda: asyncio.run(module.build_park_agent_monitoring_response())),
+        timeout=run_timeout,
+    )
     if isinstance(payload, dict):
         payload.setdefault("entrypoint", "full-runtime")
         payload.setdefault("mode", "deep_monitoring")
@@ -11902,6 +11905,26 @@ async def app(scope, receive, send):
         await _send_json(send, 200, _role_product_surfaces_payload())
         return
 
+    if method == "GET" and path == "/api/park/policy-doctrine":
+        if _fast_operational_doctrine_index is None:
+            await _send_json(
+                send,
+                200,
+                {
+                    "status": "unavailable",
+                    "mode": "policy_doctrine_index",
+                    "policy_book_count": 0,
+                    "action_case_count": 0,
+                    "action_primitive_count": 0,
+                    "action_cases": [],
+                    "policy_refs": [],
+                    "readiness_issues": ["Operational doctrine index is unavailable."],
+                },
+            )
+        else:
+            await _send_json(send, 200, {"status": "ready", "mode": "policy_doctrine_index", **_fast_operational_doctrine_index()})
+        return
+
     if method == "GET" and path == "/api/park/deep-memory-graph":
         query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
         limit_raw = (query.get("limit") or [None])[0]
@@ -16141,7 +16164,7 @@ async def app(scope, receive, send):
                 "error": str(error)[:300],
                 "full_runtime": _full_runtime_status(),
             }
-            await _send_json(send, 503, fallback)
+            await _send_json(send, 200, fallback)
         return
 
     if method == "GET" and path == "/api/park/agent-role-skills":

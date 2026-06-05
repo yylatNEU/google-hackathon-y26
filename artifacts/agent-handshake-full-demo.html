@@ -67,6 +67,20 @@
       border-color: var(--amber);
     }
 
+    .button-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+
     button:disabled {
       opacity: .55;
       cursor: not-allowed;
@@ -698,9 +712,78 @@
 
     .live-demo {
       display: grid;
-      grid-template-columns: minmax(0, 1.28fr) 340px;
+      grid-template-columns: minmax(280px, .82fr) minmax(0, 1.18fr);
       gap: 14px;
       align-items: stretch;
+    }
+
+    .post-panel,
+    .handshake-panel {
+      border: 1px solid var(--line);
+      background: #090f13;
+      border-radius: 8px;
+      padding: 16px;
+      min-width: 0;
+    }
+
+    .post-panel {
+      border-color: rgba(255, 107, 122, .3);
+    }
+
+    .handshake-panel {
+      border-color: rgba(73, 214, 232, .45);
+      background: rgba(73, 214, 232, .045);
+    }
+
+    .compare-copy {
+      margin: 8px 0 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+      font-weight: 750;
+    }
+
+    .flow-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .flow-row {
+      display: grid;
+      grid-template-columns: 30px 1fr;
+      gap: 9px;
+      align-items: start;
+      padding: 10px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 8px;
+      background: rgba(255,255,255,.025);
+    }
+
+    .flow-row span {
+      width: 30px;
+      height: 30px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: rgba(255,255,255,.08);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 1000;
+    }
+
+    .flow-row strong {
+      display: block;
+      font-size: 13px;
+      line-height: 1.25;
+    }
+
+    .flow-row p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+      font-weight: 720;
     }
 
     .live-conversation,
@@ -715,10 +798,7 @@
     .live-conversation {
       display: grid;
       gap: 10px;
-      min-height: 430px;
-      max-height: 630px;
-      overflow: auto;
-      scroll-behavior: smooth;
+      min-height: 246px;
       align-content: start;
     }
 
@@ -727,8 +807,8 @@
       border-radius: 8px;
       padding: 12px;
       background: rgba(255,255,255,.025);
-      opacity: .42;
-      transform: translateY(3px);
+      opacity: 1;
+      transform: none;
       transition: opacity .24s ease, transform .24s ease, border-color .24s ease, background .24s ease;
     }
 
@@ -742,6 +822,81 @@
       background: rgba(73, 214, 232, .08);
       box-shadow: 0 0 0 1px rgba(73, 214, 232, .18) inset, 0 14px 42px rgba(73, 214, 232, .08);
       animation: liveGlow 1.45s ease-in-out infinite;
+    }
+
+    .script-card {
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 8px;
+      padding: 12px;
+      background: rgba(255,255,255,.025);
+      margin-top: 10px;
+    }
+
+    .script-card strong {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 5px;
+    }
+
+    .script-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.42;
+      font-weight: 720;
+    }
+
+    .conversation-frame {
+      display: grid;
+      gap: 10px;
+    }
+
+    .slide-counter {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 1000;
+      text-transform: uppercase;
+    }
+
+    .chat-line {
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: 8px;
+      padding: 12px;
+      background: rgba(255,255,255,.025);
+    }
+
+    .chat-line.client {
+      margin-right: 42px;
+      border-color: rgba(255, 209, 102, .4);
+      background: rgba(255, 209, 102, .07);
+    }
+
+    .chat-line.park {
+      margin-left: 42px;
+      border-color: rgba(73, 214, 232, .4);
+      background: rgba(73, 214, 232, .07);
+    }
+
+    .chat-line.narrator {
+      border-color: rgba(131, 227, 119, .36);
+      background: rgba(131, 227, 119, .07);
+    }
+
+    .speaker {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--ink);
+      font-size: 11px;
+      font-weight: 1000;
+      text-transform: uppercase;
+    }
+
+    .chat-line p {
+      margin: 0;
+      color: #d4e2e7;
+      font-size: 14px;
+      line-height: 1.48;
+      font-weight: 760;
     }
 
     @keyframes liveGlow {
@@ -818,6 +973,46 @@
       align-content: start;
     }
 
+    .advanced-evidence {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(10, 15, 18, .72);
+      overflow: hidden;
+    }
+
+    .advanced-evidence > summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-weight: 1000;
+    }
+
+    .advanced-evidence > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .advanced-evidence > summary::after {
+      content: "Open";
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 8px;
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+
+    .advanced-evidence[open] > summary::after {
+      content: "Close";
+    }
+
+    .advanced-inner {
+      padding: 0 16px 16px;
+    }
+
     .timeline-step {
       display: grid;
       grid-template-columns: 28px 1fr;
@@ -890,6 +1085,7 @@
       .actions { justify-content: flex-start; }
       .metrics, .form-grid, .policy-grid, .story-grid, .outcome-grid { grid-template-columns: 1fr; }
       .live-bubbles { grid-template-columns: 1fr; }
+      .chat-line.client, .chat-line.park { margin-left: 0; margin-right: 0; }
       .node { position: relative; left: auto !important; right: auto !important; top: auto !important; bottom: auto !important; width: auto; margin: 10px; }
       .core { position: relative; left: auto; top: auto; transform: none; width: auto; margin: 10px; }
       .pulse, .stage svg { display: none; }
@@ -910,6 +1106,8 @@
         </div>
         <div class="actions">
           <input id="apiUrl" class="api-box" aria-label="API URL" />
+          <span id="apiHealth" class="badge warn">checking api</span>
+          <a id="servedLink" class="button-link" href="http://127.0.0.1:3003/agent-handshake-full-demo.html?api=http://127.0.0.1:8001">Open localhost page</a>
           <button id="runExternal" class="primary">Run agent demo</button>
           <button id="runCustom">Edit and run</button>
           <button id="runSupply" class="green">Supply-chain case</button>
@@ -922,8 +1120,8 @@
       <section class="card pad live-spotlight">
         <div class="section-title">
           <div>
-            <div class="kicker">Live agent exchange</div>
-            <h2>One run, shown as a negotiation</h2>
+            <div class="kicker">Conversational presentation</div>
+            <h2>Handshake demo as a dialogue</h2>
             <div class="demo-context">
               <span class="badge info">default: guest experience</span>
               <span class="badge">extension: supply chain</span>
@@ -933,18 +1131,45 @@
           <span id="liveBadge" class="badge info">ready</span>
         </div>
         <div class="live-demo">
-          <div id="liveConversation" class="live-conversation"></div>
-          <aside class="live-side">
-            <div>
-              <div class="kicker">Progression</div>
-              <h3 id="liveHeadline">Run the agent demo</h3>
-              <p class="section-note" id="liveSubhead">The protocol evidence stays below; this panel shows what the agents actually decided.</p>
+          <section class="post-panel">
+            <div class="kicker">Opening contrast</div>
+            <h3>Why this is not just a POST</h3>
+            <p class="compare-copy">A POST says, “Here is data, give me an answer.” A handshake says, “I represent someone, here is my authority, negotiate within it, and prove what happened.”</p>
+            <div class="script-card">
+              <strong>POST version</strong>
+              <p>“John has two kids and a peanut allergy. Give him a plan.” Result: one route, no authority model, no counteroffer, no signed receipt.</p>
             </div>
+            <div class="script-card">
+              <strong>Handshake version</strong>
+              <p>“I represent John. I can share preferences. I cannot pay, share health data, or accept refunds. ParkPulse, negotiate a better plan and respect those boundaries.”</p>
+            </div>
+            <div class="flow-list">
+              <div class="flow-row"><span>1</span><div><strong>Authority first</strong><p>The agent proves who it represents before planning.</p></div></div>
+              <div class="flow-row"><span>2</span><div><strong>Negotiation second</strong><p>ParkPulse proposes, the agent counters, ParkPulse revises.</p></div></div>
+              <div class="flow-row"><span>3</span><div><strong>Receipt last</strong><p>Unsafe actions are blocked and the outcome is signed.</p></div></div>
+            </div>
+          </section>
+
+          <section class="handshake-panel">
+            <div class="section-title">
+              <div>
+                <div class="kicker">Main dialogue</div>
+                <h3 id="liveHeadline">Delegated negotiation session</h3>
+                <p class="section-note" id="liveSubhead">Run the demo and this becomes the live conversation between John’s agent and ParkPulse.</p>
+              </div>
+            </div>
+            <div id="liveConversation" class="live-conversation"></div>
             <div id="liveTimeline"></div>
-          </aside>
+          </section>
         </div>
       </section>
 
+      <details class="advanced-evidence">
+        <summary>
+          <span>Protocol evidence, controls, and raw traces</span>
+          <span class="badge">supporting proof</span>
+        </summary>
+        <div class="advanced-inner grid">
       <section class="grid main-grid">
         <div class="card stage" aria-label="Agent network visualization">
           <svg viewBox="0 0 900 548" preserveAspectRatio="none" aria-hidden="true">
@@ -1162,6 +1387,8 @@
           <pre id="rawPayload" class="json-box">Waiting for a run.</pre>
         </section>
       </section>
+        </div>
+      </details>
       <div class="footer-space"></div>
     </main>
   </div>
@@ -1243,6 +1470,7 @@
       protocolDocs: null,
       lastPayload: null,
       liveStep: 0,
+      apiOnline: false,
       error: null
     };
     let liveTimer = null;
@@ -1259,14 +1487,38 @@
 
     async function api(path, body) {
       const url = `${state.api.replace(/\/$/, "")}${path}`;
-      const response = await fetch(url, {
-        method: body === undefined ? "GET" : "POST",
-        headers: body === undefined ? undefined : { "content-type": "application/json" },
-        body: body === undefined ? undefined : JSON.stringify(body)
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.detail || payload.reason || `HTTP ${response.status}`);
-      return payload;
+      try {
+        const response = await fetch(url, {
+          method: body === undefined ? "GET" : "POST",
+          headers: body === undefined ? undefined : { "content-type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body)
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || payload.reason || `HTTP ${response.status}`);
+        return payload;
+      } catch (error) {
+        throw new Error(`API call failed at ${url}. Make sure the backend is running on ${state.api}. ${error.message || error}`);
+      }
+    }
+
+    async function checkApiHealth() {
+      const health = $("apiHealth");
+      const servedLink = $("servedLink");
+      servedLink.href = `http://127.0.0.1:3003/agent-handshake-full-demo.html?api=${encodeURIComponent(state.api)}`;
+      servedLink.style.display = location.protocol === "file:" ? "inline-flex" : "none";
+      health.textContent = "checking api";
+      health.className = "badge warn";
+      try {
+        const response = await fetch(`${state.api.replace(/\/$/, "")}/api/park/agent-handshake/docs`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.apiOnline = true;
+        health.textContent = location.protocol === "file:" ? "file + api online" : "api online";
+        health.className = "badge good";
+      } catch {
+        state.apiOnline = false;
+        health.textContent = location.protocol === "file:" ? "file mode: api offline" : "api offline";
+        health.className = "badge bad";
+      }
     }
 
     function configureScenario(key) {
@@ -1332,6 +1584,7 @@
       state.liveStep = 0;
       $("rawPayload").textContent = pretty(state.lastPayload);
       clearRunning("error");
+      checkApiHealth();
       renderLiveExchange();
     }
 
@@ -1647,27 +1900,28 @@
       $("liveSubhead").textContent = hasSession
         ? `${steps.length} protocol moments from the actual run.`
         : "The protocol evidence stays below; this panel shows what the agents actually decided.";
-      $("liveConversation").innerHTML = steps.map((step, index) => {
-        const visible = index <= maxIndex;
-        const cls = `live-turn${visible ? " visible" : ""}${index === maxIndex ? " active" : ""}`;
-        return `<article class="${cls}">
+      const step = steps[maxIndex];
+      $("liveConversation").innerHTML = step ? `<article class="live-turn visible active conversation-frame">
           <div class="live-turn-head">
-            <strong>${safe(step.title)}</strong>
-            <span class="badge ${visible ? "info" : ""}">${safe(step.phase)}</span>
-          </div>
-          <div class="live-bubbles">
-            <div class="live-bubble client">
-              <strong>External agent</strong>
-              <p>${safe(step.client)}</p>
+            <div>
+              <div class="slide-counter">Slide ${maxIndex + 1} of ${steps.length}</div>
+              <strong>${safe(step.title)}</strong>
             </div>
-            <div class="live-bubble park">
-              <strong>ParkPulse agent</strong>
-              <p>${safe(step.park)}</p>
-            </div>
+            <span class="badge info">${safe(step.phase)}</span>
           </div>
-          <div class="live-outcome"><p>${safe(step.outcome)}</p></div>
-        </article>`;
-      }).join("");
+          <div class="chat-line client">
+            <span class="speaker">John's agent</span>
+            <p>${safe(step.client)}</p>
+          </div>
+          <div class="chat-line park">
+            <span class="speaker">ParkPulse agent</span>
+            <p>${safe(step.park)}</p>
+          </div>
+          <div class="chat-line narrator">
+            <span class="speaker">Narrator</span>
+            <p>${safe(step.outcome)}</p>
+          </div>
+        </article>` : "";
       $("liveTimeline").innerHTML = steps.map((step, index) => {
         const cls = index < maxIndex ? "timeline-step done" : index === maxIndex ? "timeline-step active" : "timeline-step";
         return `<div class="${cls}">
@@ -2023,6 +2277,7 @@ await client.externalClientDemo({ scenario_mode: "${safe(state.selectedScenario)
       $("apiUrl").addEventListener("change", () => {
         state.api = $("apiUrl").value.trim() || "http://127.0.0.1:8001";
         localStorage.setItem("parkpulse_demo_api", state.api);
+        checkApiHealth();
         renderAll();
       });
       $("scenario").innerHTML = Object.entries(scenarios).map(([key, scenario]) => `<option value="${key}">${scenario.name}</option>`).join("");
@@ -2043,6 +2298,7 @@ await client.externalClientDemo({ scenario_mode: "${safe(state.selectedScenario)
     bind();
     configureScenario("visit_planning");
     renderAll();
+    checkApiHealth();
   </script>
 </body>
 </html>

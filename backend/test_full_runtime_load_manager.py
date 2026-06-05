@@ -133,6 +133,31 @@ def test_agent_monitoring_deep_uses_explicit_full_runtime(monkeypatch):
     assert called
 
 
+def test_agent_monitoring_deep_failure_returns_renderable_fallback(monkeypatch):
+    _reset_full_runtime_state(monkeypatch)
+
+    async def fail_deep_monitoring():
+        raise TimeoutError("deep monitor timed out")
+
+    async def fake_fast_monitoring():
+        return {
+            "entrypoint": "lazy-main",
+            "mode": "stale_while_revalidate_fast_monitoring",
+            "overall_status": "review",
+        }
+
+    monkeypatch.setattr(main, "_deep_agent_monitoring", fail_deep_monitoring)
+    monkeypatch.setattr(main, "_fast_agent_monitoring", fake_fast_monitoring)
+
+    status, payload = asyncio.run(_call_lazy_app("/api/park/agent-monitoring/deep"))
+
+    assert status == 200
+    assert payload["entrypoint"] == "lazy-main"
+    assert payload["status"] == "deep_monitoring_unavailable"
+    assert payload["deep_monitoring"]["status"] == "unavailable"
+    assert "deep monitor timed out" in payload["deep_monitoring"]["error"]
+
+
 def test_live_agents_smoke_latest_stays_on_lazy_fast_path(monkeypatch, tmp_path):
     _reset_full_runtime_state(monkeypatch)
     report_path = tmp_path / "live-all-agents-smoke.json"

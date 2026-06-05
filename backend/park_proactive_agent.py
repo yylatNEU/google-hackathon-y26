@@ -448,6 +448,10 @@ async def build_proactive_operator_brief(
             span.set_attribute("parkpulse.proactive.brief_runtime", brief["runtime"])
             span.set_attribute("parkpulse.proactive.should_revise_event_plan", bool(brief.get("should_revise_event_plan")))
             return brief
+        except (asyncio.TimeoutError, asyncio.CancelledError) as error:
+            message = f"Gemini provider timed out after {provider_timeout:g}s"
+            span.set_attribute("parkpulse.proactive.error", message[:500])
+            return _fallback_brief(proactive, "deterministic_fallback_after_gemini_error", [message])
         except Exception as error:
             message = f"Gemini provider timed out after {provider_timeout:g}s" if isinstance(error, asyncio.TimeoutError) else str(error)
             span.set_attribute("parkpulse.proactive.error", message[:500])

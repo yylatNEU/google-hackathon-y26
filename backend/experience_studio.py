@@ -234,6 +234,24 @@ def _studio_memory_count(collection: str) -> int:
         return 0
 
 
+def _studio_memory_connection() -> dict[str, Any]:
+    try:
+        from mongo_memory import get_memory_connection_status
+
+        status = get_memory_connection_status()
+    except Exception as error:
+        status = {"mode": "unavailable", "connected": False, "error": str(error)[:240]}
+    connected = bool(status.get("connected"))
+    return {
+        "connected": connected,
+        "mode": status.get("mode") or "unknown",
+        "database": status.get("database"),
+        "primary": "mongodb" if connected else "file_fallback",
+        "fallbackPath": None if connected else os.getenv("PARKPULSE_EXPERIENCE_STUDIO_MEMORY_FALLBACK_PATH", "/tmp/parkpulse/experience_studio_memory_fallback.json"),
+        "connectivity": status.get("connectivity", {}),
+    }
+
+
 def _memory_learning_policy() -> dict[str, Any]:
     return {
         "primaryMemory": "mongodb",
@@ -279,6 +297,7 @@ def _generation_memory_event(payload: dict[str, Any], draft: dict[str, Any], llm
 
 def list_experience_studio_memory(limit: int = 20) -> dict[str, Any]:
     safe_limit = max(1, min(limit, 100))
+    memory_connection = _studio_memory_connection()
     collections = {
         collection: _latest_studio_memory(collection, safe_limit)
         for collection in EXPERIENCE_STUDIO_MEMORY_COLLECTIONS
@@ -293,7 +312,8 @@ def list_experience_studio_memory(limit: int = 20) -> dict[str, Any]:
     return {
         "status": "ready",
         "mode": "experience_studio_memory",
-        "memoryLayer": "mongodb_primary_with_local_fallback",
+        "memoryLayer": "mongodb_primary_with_file_fallback",
+        "memoryConnection": memory_connection,
         "learningPolicy": _memory_learning_policy(),
         "collections": collections,
         "latestReceipts": receipts[:safe_limit],
