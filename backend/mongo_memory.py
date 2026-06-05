@@ -259,6 +259,74 @@ PLAYBOOK_SEEDS = [
             "Do not replace security protocols with agent judgment.",
         ],
     },
+    {
+        "_id": "pb_zone_c_promo_redirect",
+        "title": "Promo Redirect Away From Crowded Zones",
+        "incidentType": "food_spike",
+        "tags": ["marketing", "crowd", "food", "promotion", "zone_control"],
+        "summary": "Move demand-shaping offers away from constrained zones when operations or safety marks crowd density as high.",
+        "steps": [
+            "Read crowd density and food queue pressure before launching an offer.",
+            "Pause offers that pull guests toward zones already above comfort threshold.",
+            "Redirect the offer to a nearby zone with spare kitchen and walkway capacity.",
+            "Attach rollback when take-rate or crowd density moves against plan.",
+        ],
+        "guardrails": [
+            "Marketing cannot change crowd routing directly.",
+            "Do not increase traffic to a safety-watch zone.",
+        ],
+    },
+    {
+        "_id": "pb_labor_fatigue_break_gate",
+        "title": "Labor Fatigue And Break Protection Gate",
+        "incidentType": "staff_shortage",
+        "tags": ["labor", "fatigue", "breaks", "overtime", "union_rules"],
+        "summary": "Use lower-risk service reductions and certified redeployment before overtime or delayed breaks.",
+        "steps": [
+            "Check skill matrix before recommending a staffing move.",
+            "Protect safety-critical breaks and fatigue limits.",
+            "Reduce discretionary service load before extending shifts.",
+            "Escalate overtime or break exceptions to Compliance and Executive review.",
+        ],
+        "guardrails": [
+            "Do not delay protected breaks without approval.",
+            "Do not use unqualified staff for safety-critical roles.",
+        ],
+    },
+    {
+        "_id": "pb_reopen_decision_gate",
+        "title": "Ride Reopen Decision Gate",
+        "incidentType": "ride_down",
+        "tags": ["maintenance", "safety", "reopen", "inspection", "approval"],
+        "summary": "A ride reopen recommendation needs maintenance evidence, safety clearance, and guest-flow impact before action.",
+        "steps": [
+            "Confirm inspection status and repair signoff.",
+            "Compare queue relief against residual safety risk.",
+            "Require human approval for high-risk reopening decisions.",
+            "Stage guest messaging only after approval is recorded.",
+        ],
+        "guardrails": [
+            "Do not reopen from revenue pressure alone.",
+            "Do not send reopening messages before clearance.",
+        ],
+    },
+    {
+        "_id": "pb_guest_recovery_after_disruption",
+        "title": "Guest Recovery After Operational Disruption",
+        "incidentType": "guest_recovery",
+        "tags": ["guest_experience", "recovery", "refund", "message", "compliance"],
+        "summary": "Match guest recovery offers to measured impact while keeping high-risk public messaging under approval.",
+        "steps": [
+            "Segment affected guests by observed wait, cancellation, or service failure.",
+            "Draft factual messages without promising unverified resolution.",
+            "Use Finance impact and Compliance checks before compensation at scale.",
+            "Record take-rate and sentiment movement as outcome evidence.",
+        ],
+        "guardrails": [
+            "Do not expose private guest details.",
+            "Do not issue broad compensation without financial and policy review.",
+        ],
+    },
 ]
 
 INCIDENT_SEEDS = [
@@ -313,6 +381,74 @@ INCIDENT_SEEDS = [
         },
         "lesson": "Protect worker breaks and reduce lower-priority service load before extending safety-critical operators.",
         "tags": ["staffing", "breaks", "policy"],
+    },
+    {
+        "_id": "inc_zone_b_promo_rejected",
+        "incidentType": "food_spike",
+        "summary": "A food-court discount was rejected because Zone B crowd density and kitchen load were already above threshold.",
+        "actionsTaken": [
+            "blocked indoor food-court discount",
+            "redirected promotion to Zone C",
+            "kept crowd routing under Ops control",
+        ],
+        "outcome": {
+            "guestComplaintsIncreased": False,
+            "crowdDensityReduced": True,
+            "revenueProtected": True,
+        },
+        "lesson": "Marketing offers should be redirected, not launched, when Safety and Ops show the target zone is constrained.",
+        "tags": ["marketing", "crowd", "food_spike", "zone_control"],
+    },
+    {
+        "_id": "inc_reopen_blocked_until_clearance",
+        "incidentType": "ride_down",
+        "summary": "A high-revenue ride reopen was held until maintenance inspection cleared the restraint sensor fault.",
+        "actionsTaken": [
+            "kept ride closed",
+            "split guests across three alternatives",
+            "drafted but held reopening message",
+        ],
+        "outcome": {
+            "policyViolation": False,
+            "guestComplaintsIncreased": False,
+            "revenueProtected": False,
+        },
+        "lesson": "Safety and maintenance clearance outrank revenue recovery when reopen evidence is incomplete.",
+        "tags": ["ride_down", "maintenance", "safety", "reopen"],
+    },
+    {
+        "_id": "inc_guest_recovery_finance_gate",
+        "incidentType": "guest_recovery",
+        "summary": "A broad recovery offer was narrowed after Finance showed the affected segment was smaller than first estimated.",
+        "actionsTaken": [
+            "drafted apology message",
+            "limited recovery offer to verified affected guests",
+            "tracked take-rate and sentiment",
+        ],
+        "outcome": {
+            "guestComplaintsIncreased": False,
+            "refundCostReduced": True,
+            "privacyViolation": False,
+        },
+        "lesson": "Guest recovery should use verified impact scope, not total zone attendance, before compensation is issued.",
+        "tags": ["guest_recovery", "finance", "privacy", "message"],
+    },
+    {
+        "_id": "inc_fatigue_redeployment_guarded",
+        "incidentType": "staff_shortage",
+        "summary": "A staffing move was approved only after Labor confirmed certification and protected break windows.",
+        "actionsTaken": [
+            "reassigned certified floaters",
+            "paused a low-demand game station",
+            "sent break reminders",
+        ],
+        "outcome": {
+            "waitTimeReduced": True,
+            "staffStressIncreased": False,
+            "policyViolation": False,
+        },
+        "lesson": "Certified redeployment plus service reduction is preferable to overtime when fatigue risk is rising.",
+        "tags": ["staffing", "labor", "fatigue", "skill_matrix"],
     },
 ]
 
@@ -1127,6 +1263,70 @@ class OperationalMemory:
         self._create_index(self.db.experience_studio_learning_rules, [("updatedAt", DESCENDING), ("approvalStatus", ASCENDING)])
         self._create_index(self.db.experience_studio_learning_rules, [("lesson", TEXT), ("rule", TEXT), ("tags", TEXT), ("templateId", TEXT)])
 
+    def ensure_vector_search_indexes(self) -> dict[str, Any]:
+        if not self.connected or self.db is None:
+            return {"status": "skipped", "reason": "MongoDB is not connected.", "mode": self.mode, "collections": {}}
+        try:
+            from pymongo.operations import SearchIndexModel
+        except Exception as error:
+            return {
+                "status": "skipped",
+                "reason": f"PyMongo search index API unavailable: {str(error)[:200]}",
+                "mode": self.mode,
+                "collections": {},
+            }
+
+        specs = {
+            "playbooks": self.vector_index,
+            "incidents": self.incident_vector_index,
+            "agent_learnings": self.learning_vector_index,
+        }
+        results: dict[str, Any] = {}
+        for collection_name, index_name in specs.items():
+            collection = self._collection(collection_name)
+            if collection is None:
+                results[collection_name] = {"status": "skipped", "reason": "collection_unavailable", "index": index_name}
+                continue
+            try:
+                existing = {row.get("name"): row for row in collection.list_search_indexes()}
+                if index_name in existing:
+                    index = existing[index_name]
+                    results[collection_name] = {
+                        "status": "exists",
+                        "index": index_name,
+                        "indexStatus": index.get("status"),
+                        "queryable": bool(index.get("queryable")),
+                    }
+                    continue
+                model = SearchIndexModel(
+                    definition={
+                        "fields": [
+                            {"type": "vector", "path": "embedding", "numDimensions": 64, "similarity": "cosine"},
+                            {"type": "filter", "path": "incidentType"},
+                            {"type": "filter", "path": "scenarioKey"},
+                        ]
+                    },
+                    name=index_name,
+                    type="vectorSearch",
+                )
+                created = collection.create_search_index(model=model)
+                results[collection_name] = {"status": "created", "index": index_name, "result": str(created)}
+            except Exception as error:
+                error_text = str(error)
+                limited = "maximum number of FTS indexes" in error_text
+                results[collection_name] = {
+                    "status": "limited" if limited else "error",
+                    "index": index_name,
+                    "reason": "atlas_fts_index_limit" if limited else error_text[:300],
+                }
+        severe_errors = [row for row in results.values() if row.get("status") == "error"]
+        created = [row for row in results.values() if row.get("status") == "created"]
+        return {
+            "status": "error" if severe_errors else "created" if created else "ready",
+            "mode": self.mode,
+            "collections": results,
+        }
+
     def seed_defaults(self) -> None:
         self._invalidate_dashboard_cache()
         now = _utc_now()
@@ -1326,6 +1526,7 @@ class OperationalMemory:
         limit: int = 3,
         agent_role: str | None = None,
         cache_policy: str = "normal",
+        persist_trace: bool = True,
     ) -> dict[str, Any]:
         retrieval_started = time.monotonic()
         search_text = _query_text(query, state)
@@ -1362,35 +1563,36 @@ class OperationalMemory:
             incidents = retrieved_payload.get("incidents", [])[:limit]
             learnings = retrieved_payload.get("learnings", [])[:limit]
             playbook_method = "role_context_cache" if freshness_gate.get("trustLevel") == "fresh" else "role_context_cache_stale_usable"
-            if freshness_gate.get("trustLevel") == "stale_usable":
+            if persist_trace and freshness_gate.get("trustLevel") == "stale_usable":
                 self._schedule_role_cache_refresh(scenario_key, role, search_text)
         else:
             playbooks, playbook_method = self._retrieve_playbooks(search_text, limit)
             incidents = self._retrieve_incidents(search_text, limit)
             learnings = self._retrieve_learnings(search_text, limit)
-        self._record_cache_event(
-            freshness_gate["eventType"],
-            scenario_key,
-            role,
-            {
-                "query": search_text[:220],
-                "method": playbook_method,
-                "hit": freshness_gate["allowed"],
-                "limit": limit,
-                "reason": freshness_gate["reason"],
-                "cachePolicy": cache_policy,
-                "trustLevel": freshness_gate.get("trustLevel"),
-                "cacheTrustPenalty": freshness_gate.get("cacheTrustPenalty"),
-                "mustRevalidate": freshness_gate.get("mustRevalidate"),
-                "semanticDrift": freshness_gate.get("semanticDrift"),
-                "freshUntil": freshness_gate.get("freshUntil"),
-                "usableUntil": freshness_gate.get("usableUntil"),
-                "refreshState": freshness_gate.get("refreshState"),
-                "latencyMs": round((time.monotonic() - retrieval_started) * 1000, 2),
-            },
-        )
-        self._refresh_agent_performance_scorecards(scenario_key, [role])
-        self._record_working_memory(role, scenario_key, search_text, role_cache, playbook_method)
+        if persist_trace:
+            self._record_cache_event(
+                freshness_gate["eventType"],
+                scenario_key,
+                role,
+                {
+                    "query": search_text[:220],
+                    "method": playbook_method,
+                    "hit": freshness_gate["allowed"],
+                    "limit": limit,
+                    "reason": freshness_gate["reason"],
+                    "cachePolicy": cache_policy,
+                    "trustLevel": freshness_gate.get("trustLevel"),
+                    "cacheTrustPenalty": freshness_gate.get("cacheTrustPenalty"),
+                    "mustRevalidate": freshness_gate.get("mustRevalidate"),
+                    "semanticDrift": freshness_gate.get("semanticDrift"),
+                    "freshUntil": freshness_gate.get("freshUntil"),
+                    "usableUntil": freshness_gate.get("usableUntil"),
+                    "refreshState": freshness_gate.get("refreshState"),
+                    "latencyMs": round((time.monotonic() - retrieval_started) * 1000, 2),
+                },
+            )
+            self._refresh_agent_performance_scorecards(scenario_key, [role])
+            self._record_working_memory(role, scenario_key, search_text, role_cache, playbook_method)
         return {
             "status": self.status(),
             "query": search_text,
@@ -1453,23 +1655,25 @@ class OperationalMemory:
                     )
                 )
                 rows = [row for row in rows if not _is_rollback_watch_document(row)]
-                return [_public_doc(row) for row in rows[:limit]], "mongodb_vector_search"
+                if rows:
+                    return [_public_doc(row) for row in rows[:limit]], "mongodb_vector_search"
+                self.errors.append("Vector search returned no playbooks; text search fallback used.")
             except Exception as error:
                 self.errors.append(f"Vector search fallback used: {error}")
-                try:
-                    rows = list(
-                        collection.find(
-                            {"$text": {"$search": search_text}},
-                            {**projection, "score": {"$meta": "textScore"}},
-                        )
-                        .sort([("score", {"$meta": "textScore"})])
-                        .limit(limit)
+            try:
+                rows = list(
+                    collection.find(
+                        {"$text": {"$search": search_text}},
+                        {**projection, "score": {"$meta": "textScore"}},
                     )
-                    if rows:
-                        rows = [row for row in rows if not _is_rollback_watch_document(row)]
-                        return [_public_doc(row) for row in rows[:limit]], "mongodb_text_search"
-                except Exception as text_error:
-                    self.errors.append(f"Text search fallback used: {text_error}")
+                    .sort([("score", {"$meta": "textScore"})])
+                    .limit(limit)
+                )
+                if rows:
+                    rows = [row for row in rows if not _is_rollback_watch_document(row)]
+                    return [_public_doc(row) for row in rows[:limit]], "mongodb_text_search"
+            except Exception as text_error:
+                self.errors.append(f"Text search fallback used: {text_error}")
 
         rows = sorted(
             [deepcopy(row) for row in self._fallback["playbooks"] if not _is_rollback_watch_document(row)],
@@ -4006,7 +4210,7 @@ class OperationalMemory:
         }
         context = dashboard_part(
             "context",
-            lambda: self.retrieve_context(query, current_state, limit=3, cache_policy="fresh_retrieval"),
+            lambda: self.retrieve_context(query, current_state, limit=3, cache_policy="fresh_retrieval", persist_trace=False),
             context_default,
         )
         scenario_key = _scenario_key_from_text(query, _scenario_key_from_state(context.get("current_state") or {}))
@@ -5226,6 +5430,15 @@ def backfill_memory_embeddings(collection_names: list[str] | None = None, limit:
         "mongo.memory_ops.backfill_embeddings",
         lambda: _memory.backfill_embeddings(collection_names, limit),
         lambda error: {"status": "skipped", "mode": _memory.mode, "error": str(error)[:300], "collections": {}},
+    )
+
+
+def ensure_memory_vector_indexes() -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.memory_ops.ensure_vector_indexes",
+        lambda: _memory.ensure_vector_search_indexes(),
+        lambda error: {"status": "skipped", "mode": _memory.mode, "error": str(error)[:300], "collections": {}},
+        retry_operation_on_fallback=False,
     )
 
 

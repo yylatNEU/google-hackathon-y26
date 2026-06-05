@@ -35,8 +35,10 @@ def main() -> int:
     initial_status = mongo_memory.init_operational_memory(force=True)
     connected = bool(initial_status.get("connected"))
     repair = {"status": "skipped", "reason": "MongoDB is not connected; no persistent writes were attempted."}
+    vector_indexes = {"status": "skipped", "reason": "MongoDB is not connected; no index repair was attempted."}
     if connected:
         mongo_memory._memory.seed_defaults()
+        vector_indexes = mongo_memory.ensure_memory_vector_indexes()
         repair = mongo_memory.backfill_memory_embeddings(["playbooks", "incidents", "agent_learnings"], 250)
     report = memory_ops_agent.build_memory_ops_report()
     payload = {
@@ -44,6 +46,7 @@ def main() -> int:
         "publicEgressIp": egress_ip,
         "atlasNetworkAccessCidr": f"{egress_ip}/32" if egress_ip else None,
         "initialStatus": initial_status,
+        "vectorIndexes": vector_indexes,
         "repair": repair,
         "memoryOps": {
             "overallStatus": report.get("overall_status"),
