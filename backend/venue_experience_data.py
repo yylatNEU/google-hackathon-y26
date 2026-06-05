@@ -10,6 +10,7 @@ from customer_park_knowledge import customer_venue_export, validate_customer_ven
 
 
 REQUIRED_CHANNEL_OWNERS = ("guest_app", "signage", "email", "staff_cue")
+PROFILE_INTELLIGENCE_VERSION = "profile_intelligence_v1"
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -34,6 +35,56 @@ def _source_catalog(export: dict[str, Any]) -> dict[str, Any]:
 
 def _sources(export: dict[str, Any]) -> dict[str, Any]:
     return _as_dict(_source_catalog(export).get("sources"))
+
+
+def _has_synthetic_sources(export: dict[str, Any]) -> bool:
+    for source_id, source in _sources(export).items():
+        source_type = _text(_as_dict(source).get("source_type")).lower()
+        if "synthetic" in source_type or "synthetic" in str(source_id).lower():
+            return True
+    return False
+
+
+def profile_intelligence_contract() -> dict[str, Any]:
+    return {
+        "version": PROFILE_INTELLIGENCE_VERSION,
+        "purpose": "Venue-owned facts that let creative and accessibility agents reason beyond a basic public profile without inventing paths, capacity, timing, or approval authority.",
+        "readinessTiers": {
+            "not_supplied": "Experience Studio may draft, but route confidence is limited to derived profile hints.",
+            "partial": "Some venue-owned intelligence is available; unresolved components remain review gates.",
+            "certified": "Core path, capacity, and timing components are venue-owned and can support real-venue-ready handoff review.",
+        },
+        "components": {
+            "certifiedPaths": {
+                "requiredForRealVenueReady": True,
+                "minimumRows": 1,
+                "requiredFields": ["id", "fromZoneId", "toZoneId", "estimatedWalkMinutes", "stepFree", "certificationStatus", "source"],
+                "certifiedValue": {"certificationStatus": "venue_certified"},
+            },
+            "capacityModel": {
+                "requiredForRealVenueReady": True,
+                "requiredFields": ["status", "zoneComfort"],
+                "certifiedValue": {"status": "venue_certified"},
+            },
+            "timingModel": {
+                "requiredForRealVenueReady": True,
+                "requiredFields": ["status", "showtimes", "blackoutWindows"],
+                "certifiedValue": {"status": "venue_scheduled"},
+            },
+            "experienceRules": {
+                "requiredForRealVenueReady": False,
+                "recommendedFields": ["rainyDayAnchors", "kidFriendlyAnchors", "lowSensoryAnchors", "vipRouteAnchors", "noGoPairings"],
+            },
+            "brandBible": {
+                "requiredForRealVenueReady": False,
+                "recommendedFields": ["tone", "bannedClaims", "approvedPhrases", "supportedLocales"],
+            },
+            "reviewOwners": {
+                "requiredForRealVenueReady": False,
+                "recommendedFields": ["experience_design", "accessibility", "safety", "crm", "operations"],
+            },
+        },
+    }
 
 
 def _is_sample_export(export: dict[str, Any]) -> bool:
@@ -804,6 +855,84 @@ def _timing_model(export: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _profile_intelligence_supplied(export: dict[str, Any]) -> dict[str, Any]:
+    return _as_dict(export.get("profile_intelligence") or export.get("profileIntelligence"))
+
+
+def _normalize_profile_intelligence(supplied: dict[str, Any]) -> dict[str, Any]:
+    mapping = {
+        "certified_paths": "certifiedPaths",
+        "capacity_model": "capacityModel",
+        "timing_model": "timingModel",
+        "experience_rules": "experienceRules",
+        "module_policy": "modulePolicy",
+        "field_source_ledger": "fieldSourceLedger",
+        "learning_schema": "learningSchema",
+        "brand_bible": "brandBible",
+        "live_feed_bindings": "liveFeedBindings",
+        "review_owners": "reviewOwners",
+    }
+    normalized: dict[str, Any] = {}
+    for key, value in supplied.items():
+        normalized[mapping.get(str(key), str(key))] = value
+    return normalized
+
+
+def _profile_intelligence_readiness(intelligence: dict[str, Any], supplied: dict[str, Any]) -> dict[str, Any]:
+    certified_paths = _as_list(intelligence.get("certifiedPaths"))
+    capacity_model = _as_dict(intelligence.get("capacityModel"))
+    timing_model = _as_dict(intelligence.get("timingModel"))
+    checks = [
+        {
+            "id": "certified_paths",
+            "label": "Certified paths",
+            "status": "passed" if any(path.get("certificationStatus") == "venue_certified" for path in certified_paths if isinstance(path, dict)) else "missing",
+            "detail": "At least one path has venue_certified status.",
+            "replacementField": "profile_intelligence.certified_paths",
+        },
+        {
+            "id": "capacity_model",
+            "label": "Capacity model",
+            "status": "passed" if capacity_model.get("status") == "venue_certified" and _as_list(capacity_model.get("zoneComfort")) else "missing",
+            "detail": "Capacity status is venue_certified and zoneComfort rows are present.",
+            "replacementField": "profile_intelligence.capacity_model",
+        },
+        {
+            "id": "timing_model",
+            "label": "Timing model",
+            "status": "passed" if timing_model.get("status") == "venue_scheduled" and (_as_list(timing_model.get("showtimes")) or _as_list(timing_model.get("blackoutWindows"))) else "missing",
+            "detail": "Timing status is venue_scheduled with showtimes or blackout windows.",
+            "replacementField": "profile_intelligence.timing_model",
+        },
+    ]
+    passed = sum(1 for check in checks if check["status"] == "passed")
+    optional = {
+        "experienceRules": bool(_as_dict(intelligence.get("experienceRules"))),
+        "brandBible": bool(_as_dict(intelligence.get("brandBible"))),
+        "reviewOwners": bool(_as_dict(intelligence.get("reviewOwners"))),
+        "liveFeedBindings": bool(_as_dict(intelligence.get("liveFeedBindings"))),
+    }
+    supplied_keys = sorted(_normalize_profile_intelligence(supplied).keys())
+    if not supplied:
+        status = "not_supplied"
+    elif passed == len(checks):
+        status = "certified"
+    elif passed:
+        status = "partial"
+    else:
+        status = "supplied_but_not_certified"
+    return {
+        "version": PROFILE_INTELLIGENCE_VERSION,
+        "status": status,
+        "realVenueReady": status == "certified",
+        "score": round((passed / len(checks)) * 100),
+        "requiredChecks": checks,
+        "optionalCoverage": optional,
+        "suppliedKeys": supplied_keys,
+        "missingForRealVenueReady": [check["replacementField"] for check in checks if check["status"] != "passed"],
+    }
+
+
 def _module_policy(agent_context: dict[str, Any]) -> dict[str, Any]:
     return {
         "experience_studio": {
@@ -950,9 +1079,10 @@ def _profile_intelligence(
     learning_context: dict[str, Any],
     agent_context: dict[str, Any],
 ) -> dict[str, Any]:
-    supplied = _as_dict(export.get("profile_intelligence"))
+    supplied_raw = _profile_intelligence_supplied(export)
+    supplied = _normalize_profile_intelligence(supplied_raw)
     generated = {
-        "version": "profile_intelligence_v1",
+        "version": PROFILE_INTELLIGENCE_VERSION,
         "certifiedPaths": _certified_paths(spatial_model),
         "capacityModel": _capacity_model(zones),
         "experienceRules": _experience_rules(export, zones, details),
@@ -965,7 +1095,7 @@ def _profile_intelligence(
         "liveFeedBindings": _live_feed_bindings(details, zones),
     }
     merged = {**generated, **{key: value for key, value in supplied.items() if value not in (None, "", [], {})}}
-    merged["source"] = "venue_profile.profile_intelligence" if supplied else "derived_from_approved_venue_profile"
+    merged["source"] = "venue_profile.profile_intelligence" if supplied_raw else "derived_from_approved_venue_profile"
     merged["coverage"] = {
         "certifiedPaths": len(_as_list(merged.get("certifiedPaths"))),
         "capacityZones": len(_as_list(_as_dict(merged.get("capacityModel")).get("zoneComfort"))),
@@ -978,6 +1108,7 @@ def _profile_intelligence(
         "liveFeedBindingGroups": len(_as_dict(merged.get("liveFeedBindings"))),
         "venueOwnedOverrides": len(supplied),
     }
+    readiness = _profile_intelligence_readiness(merged, supplied_raw)
     merged["qualityGaps"] = [
         gap
         for gap in [
@@ -987,6 +1118,8 @@ def _profile_intelligence(
         ]
         if gap
     ]
+    merged["readiness"] = readiness
+    merged["contract"] = profile_intelligence_contract()
     return merged
 
 
@@ -1043,6 +1176,9 @@ def validate_venue_experience_export(export: dict[str, Any] | None = None) -> di
     high_count = sum(1 for issue in experience_issues if issue.get("severity") == "high")
     customer_ready = customer_validation.get("status") == "production_ready"
     studio_ready = customer_ready and not experience_issues
+    profile_readiness = _profile_intelligence_readiness(_normalize_profile_intelligence(_profile_intelligence_supplied(payload)), _profile_intelligence_supplied(payload))
+    profile_type = _venue_identity(payload).get("profileType") if payload else "not_connected"
+    synthetic_source = _has_synthetic_sources(payload) or profile_type == "synthetic_approved"
     return {
         "status": "studio_ready" if studio_ready else "blocked",
         "customerValidation": customer_validation,
@@ -1052,6 +1188,8 @@ def validate_venue_experience_export(export: dict[str, Any] | None = None) -> di
         "issues": experience_issues,
         "autofillAllowed": bool(payload) and customer_ready and not _is_sample_export(payload),
         "handoffReady": studio_ready,
+        "profileIntelligence": profile_readiness,
+        "realVenueReady": bool(studio_ready and not synthetic_source and profile_readiness.get("realVenueReady")),
         "loadedFrom": payload.get("loaded_from") if isinstance(payload, dict) else None,
     }
 
@@ -1059,7 +1197,7 @@ def validate_venue_experience_export(export: dict[str, Any] | None = None) -> di
 def build_venue_experience_data_from_export(export: dict[str, Any] | None, loaded_from: str | None = None) -> dict[str, Any]:
     validation = validate_venue_experience_export(export if export else {})
     profile_type = (_venue_identity(export).get("profileType") if export else "not_connected")
-    is_approved_synthetic = profile_type == "synthetic_approved"
+    is_approved_synthetic = profile_type == "synthetic_approved" or _has_synthetic_sources(export or {})
     location_details = _location_details(export) if export and validation.get("autofillAllowed") else {}
     zone_details = _zone_intelligence(export, location_details) if export and validation.get("autofillAllowed") else {}
     spatial_model = _spatial_model(export, zone_details) if export and validation.get("autofillAllowed") else {"zones": {}, "paths": []}
@@ -1119,6 +1257,8 @@ def build_venue_experience_data_from_export(export: dict[str, Any] | None, loade
             "loadedFrom": loaded_from or validation.get("loadedFrom"),
             "counts": counts,
             "issues": validation["issues"],
+            "profileIntelligence": profile_intelligence.get("readiness") if isinstance(profile_intelligence, dict) else validation.get("profileIntelligence"),
+            "realVenueReady": bool(validation.get("realVenueReady")),
         },
         "realInputs": real_inputs,
         "sourceIntegrity": {
@@ -1126,8 +1266,10 @@ def build_venue_experience_data_from_export(export: dict[str, Any] | None, loade
             "usesSampleData": _is_sample_export(export),
             "usesApprovedSyntheticProfile": is_approved_synthetic,
             "realVenueFeedConnected": bool(export) and not is_approved_synthetic,
+            "realVenueReady": bool(not is_approved_synthetic and profile_intelligence.get("readiness", {}).get("realVenueReady")) if isinstance(profile_intelligence, dict) else False,
             "profileType": profile_type,
             "customerValidationStatus": validation["customerValidation"].get("status"),
+            "profileIntelligenceStatus": profile_intelligence.get("readiness", {}).get("status") if isinstance(profile_intelligence, dict) else validation.get("profileIntelligence", {}).get("status"),
         },
         "validation": validation,
         "contract": {

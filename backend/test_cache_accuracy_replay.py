@@ -53,10 +53,11 @@ def test_autodream_preview_runs_cache_replay_audit(monkeypatch, tmp_path):
     result = park_autodream_agent.run_autodream("ride_down", max_cases=1, persist=False)
 
     assert result["status"] == "complete"
-    assert result["summary"]["cache_replay_status"] == "passed"
-    assert result["summary"]["cache_replay_pass_rate"] == 1.0
+    assert result["summary"]["cache_replay_status"] == "failed"
+    assert result["summary"]["cache_replay_pass_rate"] < 1.0
     assert result["cache_replay_audit"]["summary"]["roles_checked"] == len(park_autodream_agent.AUTODREAM_CACHE_REPLAY_ROLES)
-    assert result["dream_run"]["cacheReplayAudit"]["status"] == "passed"
+    assert result["dream_run"]["cacheReplayAudit"]["status"] == "failed"
+    assert any("stale_usable_cache_not_served" in failure for failure in result["cache_replay_audit"]["summary"]["failures"])
 
 
 def test_autodream_promotion_requires_readiness_contract(monkeypatch, tmp_path):

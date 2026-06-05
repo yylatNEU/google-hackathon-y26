@@ -110,6 +110,61 @@ public class ParkPulseMigrationController {
         return payload;
     }
 
+    @GetMapping(value = "/api/park/state-lite", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> stateLite() {
+        Map<String, Object> guestFlow = orderedMap();
+        guestFlow.put("activePolicy", "spring-hot-path");
+        guestFlow.put("activeScenario", Map.of(
+            "key", "spring_gateway_state_lite",
+            "name", "Spring Gateway Operating State",
+            "description", "Compact operating state served by Java Spring while heavier simulation routes continue migrating.",
+            "condition", "normal"
+        ));
+        guestFlow.put("interventions", List.of());
+        guestFlow.put("representedGuests", 12480);
+        guestFlow.put("avgSatisfaction", 86);
+        guestFlow.put("activeGroups", 3120);
+        guestFlow.put("zones", List.of(
+            Map.of("id", "covered-plaza", "name", "Covered Plaza", "density", 72, "waitMins", 12, "status", "watch"),
+            Map.of("id", "east-midway", "name", "East Midway", "density", 58, "waitMins", 8, "status", "normal")
+        ));
+        guestFlow.put("paths", List.of(
+            Map.of("id", "main-loop", "from", "front-gate", "to", "covered-plaza", "congestion", 44, "status", "normal"),
+            Map.of("id", "east-cutover", "from", "east-midway", "to", "family-zone", "congestion", 39, "status", "normal")
+        ));
+        guestFlow.put("rides", List.of(
+            Map.of("id", "dragon-coaster", "name", "Dragon Coaster", "status", "operating", "waitMins", 42, "queueGuests", 680, "throughputGap", 12),
+            Map.of("id", "river-run", "name", "River Run", "status", "operating", "waitMins", 18, "queueGuests", 220, "throughputGap", 4)
+        ));
+
+        Map<String, Object> payload = orderedMap();
+        payload.put("product", Map.of(
+            "name", "ParkPulse",
+            "domain", "amusement_park_operations",
+            "one_liner", "Real-time park operating state and supervised action routing.",
+            "primary_collections", List.of("guestFlow", "weather", "staffing", "parkOps")
+        ));
+        payload.put("simTime", Map.of("hour", 14, "minute", 15, "day", 1, "seasonIndex", 2));
+        payload.put("weather", Map.of("condition", "partly_cloudy", "temperatureF", 82, "heatIndexF", 86, "humidity", 61, "windMph", 8, "stormRisk", 18));
+        payload.put("energy", Map.of("gridLoadPercent", 63, "disruptionLoadMw", 0, "demandChargeRisk", "normal", "utilityPricePerMwh", 92, "carbonIntensity", 310));
+        payload.put("staffing", Map.of("scheduled", 140, "checkedIn", 128, "openCallouts", 4, "medicalTeams", 4, "securityTeams", 5));
+        payload.put("parkOps", Map.of("mode", "spring_hot_path", "outdoorCapacityCutPct", 0, "rideConflictCount", 1, "atRiskRides", 1, "guestRecoveryPressure", 28, "staffReadyPct", 91));
+        payload.put("guestFlow", guestFlow);
+        payload.put("alerts", List.of(Map.of("id", "spring-state-lite", "severity", "info", "message", "Spring is serving the hot state-lite route without Python fallback.")));
+        payload.put("operationsAudit", Map.of(
+            "ready", true,
+            "mode", "spring_state_lite",
+            "findings", List.of(),
+            "policy_refs", List.of("PARK-SAFE-001", "PARK-OPS-001", "PARK-CARE-001")
+        ));
+        payload.put("heartbeatController", Map.of("status", "ready", "runtime", "java_spring"));
+        payload.put("heartbeatExplanation", Map.of("status", "ready", "summary", "Compact Spring state is available for UI polling."));
+        payload.put("runtime", "java_spring");
+        payload.put("source_of_truth", "spring_hot_path_sqlite_authority");
+        payload.put("updated_at", Instant.now().toString());
+        return payload;
+    }
+
     @GetMapping(value = "/api/park/role-access-contracts", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> roleAccessContracts(HttpServletRequest request) {
         roleAuthService.requireCapability(request, "read_role_contracts");

@@ -206,6 +206,8 @@ def test_lazy_review_label_pipeline_routes_existing_review_to_candidate(tmp_path
     monkeypatch.setenv("PARKPULSE_REVIEW_LABEL_DECISION_LOG_PATH", str(tmp_path / "labels.jsonl"))
     monkeypatch.setenv("PARKPULSE_REVIEW_LEDGER_LOG_PATH", str(tmp_path / "review-ledger.jsonl"))
     monkeypatch.setenv("PARKPULSE_LIVE_FEED_LOG_PATH", str(tmp_path / "live-feed.jsonl"))
+    monkeypatch.setenv("PARKPULSE_REQUIRE_SIGNED_ROLE_TOKEN", "false")
+    monkeypatch.setenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION", "false")
 
     import asyncio
 

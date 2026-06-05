@@ -4,7 +4,7 @@ PERF_CONCURRENCY ?= 50
 PERF_TARGET_P95_MS ?= 250
 TEST_PYTHON ?= /tmp/parkpulse_backend_venv/bin/python
 
-.PHONY: qa qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate loop-resilience loop-resilience-monitor live-agents-smoke live-feed-agent-smoke live-feed-training-closure live-feed-agent-report live-feed-learning-loop-validation test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-judge-smoke gcp-judge-smoke-strict gcp-deploy-private gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private gcp-verify-agent-roles gcp-schedule-loop-resilience
+.PHONY: qa qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate loop-resilience loop-resilience-monitor live-agents-smoke live-feed-agent-smoke live-feed-training-closure live-feed-agent-report live-feed-learning-loop-validation experience-studio-dev experience-studio-demo-verify test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-judge-smoke gcp-judge-smoke-strict gcp-deploy-private gcp-deploy-private-diagnostics gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private gcp-verify-agent-roles gcp-preflight-mongo-model gcp-schedule-loop-resilience
 
 qa:
 	python3 scripts/qa_agent.py
@@ -45,6 +45,12 @@ live-feed-agent-report:
 live-feed-learning-loop-validation:
 	PYTHONPATH=backend:. python3 scripts/live_feed_learning_loop_validation.py
 
+experience-studio-dev:
+	scripts/dev_experience_studio.sh
+
+experience-studio-demo-verify:
+	python3 scripts/verify_experience_studio_demo.py --base-url $(PERF_BASE_URL) --html-output output/qa/experience-studio-demo-verification.html
+
 test-unit:
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=backend $(TEST_PYTHON) -m pytest backend/test_policy_engine.py backend/test_policy_loader.py -q
 
@@ -78,6 +84,9 @@ gcp-judge-smoke-strict:
 gcp-deploy-private:
 	scripts/deploy_private_cloud_run.sh
 
+gcp-deploy-private-diagnostics:
+	scripts/deploy_private_cloud_run_diagnostics.sh
+
 gcp-dev-private:
 	scripts/dev_private_gcp.sh
 
@@ -92,6 +101,9 @@ gcp-validate-private:
 
 gcp-verify-agent-roles:
 	scripts/verify_private_cloud_run_agent_roles.sh
+
+gcp-preflight-mongo-model:
+	python3 scripts/preflight_mongodb_model_api.py
 
 gcp-schedule-loop-resilience:
 	scripts/schedule_operating_loop_resilience.sh

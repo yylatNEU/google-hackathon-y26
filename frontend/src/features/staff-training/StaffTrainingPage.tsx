@@ -71,6 +71,31 @@ type Debrief = {
   recommended_retry?: string | null;
 };
 
+type ProductLearningTicket = {
+  id?: string;
+  source?: string;
+  issue_type?: string;
+  scenario_id?: string;
+  gap_type?: string;
+  severity?: string;
+  location?: string | null;
+  summary?: string;
+  status?: string;
+  live_ops_authority?: boolean;
+  requires_human_ack?: boolean;
+  boundary?: string;
+};
+
+type ProductLearningTicketResult = {
+  status?: string;
+  mode?: string;
+  ticket?: ProductLearningTicket;
+  reason?: string;
+  feeds_training_model?: string;
+  feeds_ops_model?: string;
+  readiness_issues?: string[];
+};
+
 type TrainingSession = {
   id?: string;
   assignment_id?: string;
@@ -87,6 +112,7 @@ type TrainingSession = {
   guest_simulator?: GuestSimulator;
   mastery_tracker?: MasteryTracker;
   debrief?: Debrief;
+  training_gap_ticket?: ProductLearningTicketResult | null;
 };
 
 type TurnScore = {
@@ -174,6 +200,33 @@ type CertificationPacket = {
     manager_review_can_hold_or_require_retry?: boolean;
   };
   boundary?: string;
+};
+
+type ProductLearningLoop = {
+  status?: string;
+  park_issue_ticket_count?: number;
+  training_gap_ticket_count?: number;
+  learning_signal_count?: number;
+  park_issue_tickets?: ProductLearningTicket[];
+  training_gap_tickets?: ProductLearningTicket[];
+  product_learning_signals?: Array<{
+    id?: string;
+    source?: string;
+    pattern?: string;
+    affected_scenarios?: string[];
+    evidence_count?: number;
+    recommendation?: string;
+    proposed_change_type?: string;
+    status?: string;
+    requires_review?: boolean;
+  }>;
+  loop_contract?: {
+    live_tickets_improve_training?: string;
+    training_gaps_help_ops?: string;
+    training_gaps_create_live_issues?: boolean;
+    llm_guest_controls_score?: boolean;
+    simulated_data_feeds_reward_model?: boolean;
+  };
 };
 
 const dimensionLabels: Record<string, string> = {
@@ -333,6 +386,16 @@ export function StaffTrainingPage() {
   const [readiness, setReadiness] = useState<ReadinessRow[]>([]);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [activePacket, setActivePacket] = useState<CertificationPacket | null>(null);
+  const [productLearning, setProductLearning] = useState<ProductLearningLoop | null>(null);
+  const [liveIssueSource, setLiveIssueSource] = useState("employee");
+  const [liveIssueType, setLiveIssueType] = useState("lost_child_report");
+  const [liveIssueSeverity, setLiveIssueSeverity] = useState("critical");
+  const [liveIssueLocation, setLiveIssueLocation] = useState("Carousel");
+  const [liveIssueSummary, setLiveIssueSummary] = useState("Guardian reports a missing child near the carousel.");
+  const [manualGapScenarioId, setManualGapScenarioId] = useState("lost_child_report");
+  const [manualGapType, setManualGapType] = useState("escalation_decision");
+  const [manualGapSeverity, setManualGapSeverity] = useState("coaching");
+  const [manualGapEvidence, setManualGapEvidence] = useState("Manager observed repeated misses in the roleplay debrief.");
   const [newAssignmentName, setNewAssignmentName] = useState("New seasonal hire");
   const [newAssignmentRole, setNewAssignmentRole] = useState("guest_services");
   const [activeAssignmentId, setActiveAssignmentId] = useState("");
@@ -379,8 +442,16 @@ export function StaffTrainingPage() {
     setAnalytics((await response.json()) as Analytics);
   }
 
+  async function loadProductLearningLoop() {
+    const response = await fetchParkPulseApi("/api/park/product-learning/loop?limit=120", {
+      headers: { "x-parkpulse-role": "ops_team" },
+      timeoutMs: 8000,
+    });
+    setProductLearning((await response.json()) as ProductLearningLoop);
+  }
+
   async function loadManagerWorkflow() {
-    const [assignmentResponse, readinessResponse, receiptResponse] = await Promise.all([
+    const [assignmentResponse, readinessResponse, receiptResponse, productLearningResponse] = await Promise.all([
       fetchParkPulseApi("/api/park/staff-training/assignments?limit=120", {
         headers: { "x-parkpulse-role": "ops_team" },
         timeoutMs: 8000,
@@ -393,13 +464,84 @@ export function StaffTrainingPage() {
         headers: { "x-parkpulse-role": "ops_team" },
         timeoutMs: 8000,
       }),
+      fetchParkPulseApi("/api/park/product-learning/loop?limit=120", {
+        headers: { "x-parkpulse-role": "ops_team" },
+        timeoutMs: 8000,
+      }),
     ]);
     const assignmentPayload = (await assignmentResponse.json()) as { assignments?: Assignment[] };
     const readinessPayload = (await readinessResponse.json()) as { readiness?: ReadinessRow[] };
     const receiptPayload = (await receiptResponse.json()) as { receipts?: Receipt[] };
+    const productLearningPayload = (await productLearningResponse.json()) as ProductLearningLoop;
     setAssignments(assignmentPayload.assignments ?? []);
     setReadiness(readinessPayload.readiness ?? []);
     setReceipts(receiptPayload.receipts ?? []);
+    setProductLearning(productLearningPayload);
+  }
+
+  async function createLiveIssueTicket() {
+    setIsLoading(true);
+    setError("");
+    setStatus("");
+    try {
+      const response = await fetchParkPulseApi("/api/park/product-learning/issue-ticket", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-parkpulse-role": "onsite_worker" },
+        body: JSON.stringify({
+          source: liveIssueSource,
+          issueType: liveIssueType,
+          severity: liveIssueSeverity,
+          location: liveIssueLocation,
+          summary: liveIssueSummary,
+          reporterRole: liveIssueSource,
+        }),
+        timeoutMs: 8000,
+      });
+      const payload = (await response.json()) as ProductLearningTicketResult;
+      if (payload.readiness_issues?.length) {
+        setError(payload.readiness_issues.join(" "));
+      } else {
+        setStatus(`Live issue ticket created${payload.ticket?.id ? `: ${payload.ticket.id}` : "."}`);
+      }
+      await loadProductLearningLoop();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Unable to create live issue ticket.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function createManualTrainingGapTicket() {
+    setIsLoading(true);
+    setError("");
+    setStatus("");
+    try {
+      const response = await fetchParkPulseApi("/api/park/product-learning/training-gap-ticket", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
+        body: JSON.stringify({
+          scenarioId: manualGapScenarioId,
+          gapType: manualGapType,
+          severity: manualGapSeverity,
+          evidence: {
+            summary: manualGapEvidence,
+            source: "manager_manual_entry",
+          },
+        }),
+        timeoutMs: 8000,
+      });
+      const payload = (await response.json()) as ProductLearningTicketResult;
+      if (payload.readiness_issues?.length) {
+        setError(payload.readiness_issues.join(" "));
+      } else {
+        setStatus(`Training gap ticket created${payload.ticket?.id ? `: ${payload.ticket.id}` : "."}`);
+      }
+      await loadProductLearningLoop();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Unable to create training gap ticket.");
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -790,6 +932,79 @@ export function StaffTrainingPage() {
                 </div>
               ))}
               {!receipts.length && <div className="rounded border border-slate-800 bg-slate-950 p-3 text-sm font-bold text-slate-500">No manager receipts yet.</div>}
+            </div>
+          </div>
+
+          <div className="rounded border border-teal-300/30 bg-slate-950 p-4 xl:col-span-3">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Product learning loop</div>
+                <h3 className="mt-1 text-lg font-black text-slate-100">Live tickets improve training. Training gaps improve ops guidance.</h3>
+                <p className="mt-2 max-w-4xl text-sm font-semibold leading-relaxed text-slate-500">
+                  Park issues and staff roleplay gaps are collected as reviewed product-learning signals, not as automatic model updates or live incident actions.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadProductLearningLoop()}
+                className="rounded border border-slate-700 bg-[#0d171b] px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-200 transition hover:border-teal-300"
+              >
+                Refresh loop
+              </button>
+            </div>
+
+            <div className="mt-4 grid gap-2 md:grid-cols-3">
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Live issue tickets</div>
+                <div className="mt-2 text-2xl font-black text-slate-50">{productLearning?.park_issue_ticket_count ?? 0}</div>
+                <div className="mt-1 text-xs font-bold text-slate-500">Guest and employee reports with live ops authority.</div>
+              </div>
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Training gap tickets</div>
+                <div className="mt-2 text-2xl font-black text-slate-50">{productLearning?.training_gap_ticket_count ?? 0}</div>
+                <div className="mt-1 text-xs font-bold text-slate-500">Roleplay evidence with no live ops authority.</div>
+              </div>
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Learning signals</div>
+                <div className="mt-2 text-2xl font-black text-slate-50">{productLearning?.learning_signal_count ?? 0}</div>
+                <div className="mt-1 text-xs font-bold text-slate-500">Reviewed candidates for prompts, scenarios, policy cards, and ops checklists.</div>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_340px]">
+              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                {(productLearning?.product_learning_signals ?? []).slice(0, 6).map((signal) => (
+                  <div key={signal.id ?? `${signal.source}-${signal.pattern}`} className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-black text-slate-100">{signal.pattern ?? "Learning signal"}</div>
+                        <div className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-500">{label(signal.source)} / {label(signal.proposed_change_type)}</div>
+                      </div>
+                      {signal.requires_review && <span className="shrink-0 rounded border border-amber-300/50 bg-amber-300/10 px-2 py-1 text-[10px] font-black text-amber-100">Review</span>}
+                    </div>
+                    <div className="mt-3 text-xs font-semibold leading-relaxed text-slate-400">{signal.recommendation ?? "No recommendation recorded."}</div>
+                    <div className="mt-3 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                      <span>{signal.evidence_count ?? 0} evidence</span>
+                      <span>{label(signal.status)}</span>
+                    </div>
+                  </div>
+                ))}
+                {!(productLearning?.product_learning_signals ?? []).length && (
+                  <div className="rounded border border-dashed border-slate-700 bg-[#0d171b] p-4 text-sm font-bold text-slate-500 md:col-span-2 xl:col-span-3">
+                    No product-learning signals yet. Finish failed roleplays or create live issue tickets to populate this loop.
+                  </div>
+                )}
+              </div>
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Loop contract</div>
+                <div className="mt-3 space-y-2 text-xs font-semibold leading-relaxed text-slate-400">
+                  <div>Live tickets to training: {productLearning?.loop_contract?.live_tickets_improve_training ?? "reviewed signal only"}</div>
+                  <div>Training gaps to ops: {productLearning?.loop_contract?.training_gaps_help_ops ?? "reviewed guidance only"}</div>
+                  <div>Training gaps create live issues: {productLearning?.loop_contract?.training_gaps_create_live_issues ? "yes" : "no"}</div>
+                  <div>LLM guest controls score: {productLearning?.loop_contract?.llm_guest_controls_score ? "yes" : "no"}</div>
+                  <div>Simulated data feeds reward model: {productLearning?.loop_contract?.simulated_data_feeds_reward_model ? "yes" : "no"}</div>
+                </div>
+              </div>
             </div>
           </div>
 

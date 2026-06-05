@@ -334,7 +334,22 @@ def autodream_status(limit: int = 8) -> dict[str, Any]:
     safe_limit = max(1, min(25, int(limit or 8)))
     dream_runs = get_latest_memory_documents("dream_runs", safe_limit)
     dream_learnings = get_latest_memory_documents("dream_learnings", safe_limit * 2)
-    readiness_rows = [get_autodream_promotion_readiness(item["_id"]) for item in dream_learnings if item.get("_id")]
+    readiness_rows = []
+    for item in dream_learnings:
+        if not item.get("_id"):
+            continue
+        readiness = get_autodream_promotion_readiness(item["_id"])
+        stored_readiness = item.get("promotionReadiness", {}) if isinstance(item.get("promotionReadiness"), dict) else {}
+        rollback_active = bool((readiness.get("rollback_watch", {}) if isinstance(readiness.get("rollback_watch"), dict) else {}).get("active"))
+        if stored_readiness.get("promotion_ready") and not readiness.get("regression_risk") and not rollback_active:
+            readiness = {
+                **readiness,
+                **stored_readiness,
+                "status": "ready",
+                "promotion_ready": True,
+                "blockers": [],
+            }
+        readiness_rows.append(readiness)
     rollback_watch = get_rollback_watch_documents(limit=safe_limit * 3)
     readiness_by_id = {row.get("dream_learning_id"): row for row in readiness_rows}
     dream_learnings = [

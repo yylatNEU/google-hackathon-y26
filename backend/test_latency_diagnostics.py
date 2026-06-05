@@ -181,3 +181,61 @@ def test_latency_gate_strict_blocks_warnings_and_import_profile_parser():
     strict_gate = latency_diagnostics.latency_acceptance_gate(diagnostics, fail_on_warning=True)
     assert strict_gate["status"] == "blocked"
     assert any(item.startswith("probe:mongo:degraded") for item in strict_gate["warnings"])
+
+
+def test_latency_probe_import_and_persist_edge_cases(monkeypatch):
+    latency_diagnostics._PROBE_CACHE.clear()
+    latency_diagnostics._PROBE_FUTURES.clear()
+    latency_diagnostics._PROBE_FAILURES.clear()
+    latency_diagnostics._PROBE_CIRCUIT_OPENED_AT.clear()
+
+    failed = latency_diagnostics._run_probe("broken", lambda: (_ for _ in ()).throw(RuntimeError("probe failed")))
+    assert failed["status"] == "failed"
+    assert latency_diagnostics._probe_circuit_state("broken") == "closed"
+
+    failed_again = latency_diagnostics._run_probe("broken", lambda: (_ for _ in ()).throw(RuntimeError("probe failed again")))
+    assert failed_again["status"] == "failed"
+    assert latency_diagnostics._probe_circuit_state("broken") == "open"
+    assert latency_diagnostics.trigger_latency_probes(probe_names=["broken", "unknown"])["skipped"]["broken"] == "unknown_probe"
+
+    monkeypatch.setattr(latency_diagnostics, "_PROBES", {"broken": lambda: {"status": "ok"}})
+    assert latency_diagnostics.trigger_latency_probes(probe_names=["missing"])["skipped"]["missing"] == "unknown_probe"
+    assert latency_diagnostics.trigger_latency_probes(probe_names=["broken"])["skipped"]["broken"] == "circuit_open"
+
+    latency_diagnostics._PROBE_CIRCUIT_OPENED_AT["broken"] = 0
+    half_open = latency_diagnostics.trigger_latency_probes(force=True, probe_names=["broken"])
+    assert half_open["started"] == ["broken"]
+    latency_diagnostics._PROBE_FUTURES["broken"].result(timeout=2)
+    assert latency_diagnostics.latency_probe_snapshot()["probes"]["broken"]["status"] == "ok"
+
+    class TimeoutRun:
+        stderr = "import time: 1 | 2 | slow"
+
+    def timeout_run(*_args, **_kwargs):
+        import subprocess
+
+        raise subprocess.TimeoutExpired("python", 1, stderr=TimeoutRun.stderr)
+
+    monkeypatch.setattr(latency_diagnostics.subprocess, "run", timeout_run)
+    timed_out = latency_diagnostics._run_import_profile("slow_module")
+    assert timed_out["status"] == "timeout"
+
+    monkeypatch.setattr(latency_diagnostics.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("spawn failed")))
+    assert latency_diagnostics._run_import_profile("bad_module")["status"] == "failed"
+
+    monkeypatch.setattr(latency_diagnostics, "_IMPORT_PROFILE_FUTURE", None)
+    monkeypatch.setattr(latency_diagnostics, "_IMPORT_PROFILE_CACHE", {"status": "ok", "finished_epoch": latency_diagnostics.time.time()})
+    assert latency_diagnostics.trigger_import_profile(force=False)["skipped"] == "fresh"
+
+    latency_diagnostics._PERSIST_FUTURE = None
+    result = latency_diagnostics.schedule_latency_diagnostics_persist(
+        {"status": "attention"},
+        lambda _payload: (_ for _ in ()).throw(RuntimeError("persist failed")),
+    )
+    assert result["status"] == "queued"
+    assert latency_diagnostics._PERSIST_FUTURE.result(timeout=2)["status"] == "failed"
+
+    latency_diagnostics._PERSIST_FUTURE = type("RunningFuture", (), {"done": lambda self: False})()
+    skipped = latency_diagnostics.schedule_latency_diagnostics_persist({"status": "ok"}, lambda payload: "unused")
+    assert skipped["reason"] == "persist_in_flight"
+    latency_diagnostics._PERSIST_FUTURE = None

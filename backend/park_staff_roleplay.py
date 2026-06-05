@@ -909,12 +909,19 @@ def finish_staff_training_session(session_id: str) -> dict[str, Any]:
     session["updated_at"] = _now_iso()
     debrief = _debrief(session)
     session["debrief"] = debrief
+    try:
+        from product_learning_loop import record_training_gap_from_staff_session
+
+        session["training_gap_ticket"] = record_training_gap_from_staff_session(session)
+    except Exception as error:
+        session["training_gap_ticket"] = {"status": "error", "readiness_issues": [str(error)[:240]], "live_ops_authority": False}
     _write_jsonl({"event": "session_finished", "debrief": debrief, **_session_event_snapshot(session)})
     return {
         "status": "complete",
         "mode": "staff_roleplay_finish",
         "session": _session_response(session),
         "debrief": debrief,
+        "training_gap_ticket": session.get("training_gap_ticket"),
     }
 
 
@@ -1774,7 +1781,7 @@ def _generate_llm_guest_reply(
     fallback_reply: str,
 ) -> dict[str, Any]:
     props = None
-    timeout_seconds = float(os.getenv("PARKPULSE_STAFF_TRAINING_LLM_TIMEOUT_SECONDS", "12"))
+    timeout_seconds = float(os.getenv("PARKPULSE_STAFF_TRAINING_LLM_TIMEOUT_SECONDS", "4"))
     try:
         from gemini_provider import get_gemini_agent_properties, get_gemini_model
 
@@ -1972,6 +1979,7 @@ def _session_event_snapshot(session: dict[str, Any]) -> dict[str, Any]:
         "scorecard": session.get("scorecard"),
         "critical_miss": session.get("critical_miss"),
         "mastery_tracker": session.get("mastery_tracker"),
+        "training_gap_ticket": session.get("training_gap_ticket"),
         "completed_objectives": session.get("completed_objectives", []),
         "missing_objectives": session.get("missing_objectives", []),
         "created_at": _now_iso(),
@@ -1998,6 +2006,7 @@ def _session_response(session: dict[str, Any]) -> dict[str, Any]:
         "completed_objectives": session.get("completed_objectives", []),
         "missing_objectives": session.get("missing_objectives", []),
         "debrief": session.get("debrief"),
+        "training_gap_ticket": session.get("training_gap_ticket"),
         "guest_simulator": session.get("guest_simulator"),
         "boundary": session.get("boundary"),
         "uses_generated_data": True,

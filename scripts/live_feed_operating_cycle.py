@@ -46,6 +46,183 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _short_text(value: Any, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _compact_negotiation_rounds(proposals: dict[str, Any]) -> list[dict[str, Any]]:
+    rounds = proposals.get("negotiation_rounds", []) if isinstance(proposals.get("negotiation_rounds"), list) else []
+    compact: list[dict[str, Any]] = []
+    for raw in rounds:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or raw.get("round") or "round")
+        row: dict[str, Any] = {
+            "round": raw.get("round"),
+            "name": name,
+        }
+        if isinstance(raw.get("claims"), list):
+            claims = [item for item in raw["claims"] if isinstance(item, dict)]
+            row.update(
+                {
+                    "kind": "positions",
+                    "headline": f"{len(claims)} departments stated local wants and requested tools.",
+                    "examples": [
+                        {
+                            "agent": item.get("agent"),
+                            "department": item.get("department"),
+                            "tool": item.get("tool"),
+                            "disposition": item.get("disposition"),
+                            "text": _short_text(item.get("wants")),
+                        }
+                        for item in claims[:4]
+                    ],
+                }
+            )
+        elif isinstance(raw.get("challenges"), list):
+            challenges = [item for item in raw["challenges"] if isinstance(item, dict)]
+            row.update(
+                {
+                    "kind": "challenge",
+                    "headline": f"{len(challenges)} cross-department conflicts challenged unsafe or overloaded actions.",
+                    "examples": [
+                        {
+                            "agents": item.get("challengers"),
+                            "conflict": _short_text(item.get("conflict")),
+                            "concession": _short_text(item.get("concession")),
+                        }
+                        for item in challenges[:3]
+                    ],
+                }
+            )
+        elif isinstance(raw.get("decisions"), list):
+            decisions = [item for item in raw["decisions"] if isinstance(item, dict)]
+            blocked = sum(1 for item in decisions if str(item.get("policy_status") or "").startswith("requires"))
+            passed = sum(1 for item in decisions if str(item.get("policy_status") or "") in {"passed", "approved_with_exclusions", "trace_only"})
+            row.update(
+                {
+                    "kind": "judge",
+                    "headline": f"Policy and eval judge reviewed {len(decisions)} proposals: {passed} passed/trace, {blocked} require approval.",
+                    "examples": [
+                        {
+                            "agent": item.get("agent"),
+                            "department": item.get("department"),
+                            "policy_status": item.get("policy_status"),
+                            "next_owner": item.get("next_owner"),
+                            "exit_condition": _short_text(item.get("exit_condition")),
+                        }
+                        for item in decisions[:4]
+                    ],
+                }
+            )
+        elif name == "memory_prior_challenge":
+            accepted = raw.get("accepted", []) if isinstance(raw.get("accepted"), list) else []
+            weak_context = raw.get("weak_context", []) if isinstance(raw.get("weak_context"), list) else []
+            row.update(
+                {
+                    "kind": "memory",
+                    "decision": raw.get("decision"),
+                    "headline": f"Memory accepted {len(accepted)} low-risk deltas and kept {len(weak_context)} as context only.",
+                    "resolution": _short_text(raw.get("resolution")),
+                    "semantic_companion_tools": raw.get("semantic_companion_tools", []),
+                    "examples": [
+                        {
+                            "agent": item.get("agent"),
+                            "department": item.get("department"),
+                            "tool": item.get("requested_tool"),
+                            "status": item.get("status"),
+                            "effect": _short_text((item.get("decision_delta", {}) if isinstance(item.get("decision_delta"), dict) else {}).get("effect")),
+                            "after": _short_text((item.get("decision_delta", {}) if isinstance(item.get("decision_delta"), dict) else {}).get("after")),
+                        }
+                        for item in accepted[:4]
+                        if isinstance(item, dict)
+                    ],
+                }
+            )
+        elif name == "actual_training_slice_challenge":
+            warnings = raw.get("warnings", []) if isinstance(raw.get("warnings"), list) else []
+            accepted_low_risk = raw.get("accepted_low_risk", []) if isinstance(raw.get("accepted_low_risk"), list) else []
+            row.update(
+                {
+                    "kind": "ml_policy",
+                    "decision": raw.get("decision"),
+                    "scenario_key": raw.get("scenario_key"),
+                    "slice_decision": raw.get("slice_decision"),
+                    "headline": f"ML policy evidence reviewed slice {raw.get('scenario_key')}: {len(accepted_low_risk)} low-risk accepts, {len(warnings)} warnings.",
+                    "resolution": _short_text(raw.get("resolution")),
+                    "examples": [
+                        {
+                            "agent": item.get("agent"),
+                            "department": item.get("department"),
+                            "tool": item.get("requested_tool"),
+                            "status": item.get("status"),
+                            "effect": _short_text((item.get("decision_delta", {}) if isinstance(item.get("decision_delta"), dict) else {}).get("effect")),
+                        }
+                        for item in warnings[:4]
+                        if isinstance(item, dict)
+                    ],
+                }
+            )
+        elif name == "held_action_substitute_negotiation":
+            substitutes = raw.get("substitutes", []) if isinstance(raw.get("substitutes"), list) else []
+            row.update(
+                {
+                    "kind": "substitute",
+                    "decision": raw.get("decision"),
+                    "headline": f"{len(substitutes)} held actions received safe substitute paths or owner follow-up.",
+                    "resolution": _short_text(raw.get("resolution")),
+                    "examples": [
+                        {
+                            "held": f"{item.get('held_department')}::{item.get('held_tool')}",
+                            "substitute": f"{item.get('substitute_department')}::{item.get('substitute_tool')}",
+                            "reason": _short_text(item.get("tradeoff_reason")),
+                            "boundary": _short_text(item.get("execution_boundary")),
+                        }
+                        for item in substitutes[:5]
+                        if isinstance(item, dict)
+                    ],
+                }
+            )
+        elif name == "executive_tradeoff_resolution":
+            selected = raw.get("selected", []) if isinstance(raw.get("selected"), list) else []
+            rejected = raw.get("rejected_or_held", []) if isinstance(raw.get("rejected_or_held"), list) else []
+            row.update(
+                {
+                    "kind": "executive",
+                    "headline": f"Executive selected {len(selected)} bounded actions and held {len(rejected)} sensitive/review actions.",
+                    "examples": [
+                        {
+                            "department": item.get("department"),
+                            "tool": item.get("requested_tool"),
+                            "decision": item.get("decision"),
+                            "policy_status": item.get("policy_status"),
+                            "rationale": _short_text(item.get("rationale"), 260),
+                        }
+                        for item in selected[:4]
+                        if isinstance(item, dict)
+                    ],
+                    "held_examples": [
+                        {
+                            "department": item.get("department"),
+                            "tool": item.get("requested_tool"),
+                            "decision": item.get("decision"),
+                            "policy_status": item.get("policy_status"),
+                            "rationale": _short_text(item.get("rationale"), 240),
+                        }
+                        for item in rejected[:4]
+                        if isinstance(item, dict)
+                    ],
+                }
+            )
+        else:
+            row.update({"kind": "other", "headline": _short_text(raw.get("resolution") or raw.get("decision") or name)})
+        compact.append(row)
+    return compact
+
+
 def _scenario_key_from_issue_kind(kind: Any) -> str | None:
     text = str(kind or "").lower()
     if any(term in text for term in ("food", "inventory", "mobile_order", "payment", "demand_spike")):
@@ -134,6 +311,31 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
     tradeoff = proposals.get("executive_tradeoff", {}) if isinstance(proposals.get("executive_tradeoff"), dict) else {}
     closure_summary = closure.get("summary", {}) if isinstance(closure.get("summary"), dict) else {}
     issue_event = injected_issue.get("event", {}) if isinstance(injected_issue.get("event"), dict) else {}
+    live_feed_evidence = live_case.get("evidence", []) if isinstance(live_case.get("evidence"), list) else []
+    live_feed_event_ids = [
+        str(row.get("event_id"))
+        for row in live_feed_evidence
+        if isinstance(row, dict) and row.get("event_id")
+    ]
+    if not live_feed_event_ids:
+        live_feed_event_ids = [
+            str(row)
+            for row in live_case.get("live_feed_event_ids", [])
+            if row
+        ] if isinstance(live_case.get("live_feed_event_ids"), list) else []
+    evidence_summary = [
+        {
+            "event_id": row.get("event_id"),
+            "source": row.get("source"),
+            "signal_type": row.get("signal_type"),
+            "confidence": row.get("confidence"),
+            "age_seconds": row.get("age_seconds"),
+            "summary": row.get("summary"),
+        }
+        for row in live_feed_evidence
+        if isinstance(row, dict)
+    ][:8]
+    diversity_plan = injected_issue.get("diversity_plan", {}) if isinstance(injected_issue.get("diversity_plan"), dict) else {}
     accepted_departments = tradeoff.get("approved_departments", [])
     held_departments = tradeoff.get("held_departments", [])
     if not isinstance(accepted_departments, list):
@@ -159,13 +361,30 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
             "lead_signal_type": live_case.get("lead_signal_type"),
             "persisted_event_count": live_case.get("persisted_event_count"),
             "ready_feed_count": live_case.get("ready_feed_count"),
-            "event_ids": live_case.get("live_feed_event_ids", []),
+            "event_ids": live_feed_event_ids,
+            "evidence": evidence_summary,
             "loaded_sources": sorted(load_results.keys()),
             "load_error_count": sum(1 for row in load_results.values() if isinstance(row, dict) and row.get("status") == "error"),
+        },
+        "anti_script_proof": {
+            "scripted_case": live_case.get("scripted_case", payload.get("scripted_case")),
+            "uses_seed_data": live_case.get("uses_seed_data", payload.get("uses_seed_data")),
+            "issue_selection_mode": injected_issue.get("selection_mode"),
+            "issue_source": issue_event.get("source"),
+            "unexpected": issue_event.get("unexpected"),
+            "signal_reliability_pct": issue_event.get("signalReliabilityPct"),
+            "diversity_prior_kind_count": diversity_plan.get("prior_kind_count"),
+            "diversity_prior_target_count": diversity_plan.get("prior_target_count"),
+            "diversity_prior_domain_count": diversity_plan.get("prior_domain_count"),
+            "live_feed_event_id_count": len(live_feed_event_ids),
+            "live_feed_event_ids": live_feed_event_ids[:8],
+            "evidence_sources": sorted({str(row.get("source")) for row in live_feed_evidence if isinstance(row, dict) and row.get("source")}),
+            "why_not_scripted": "The issue plan selects an underrepresented operating stress from the historical case bank, injects it into the current simulation state, refreshes live feeds, then agents cite persisted feed evidence IDs from the refreshed state.",
         },
         "agents": {
             "proposal_count": len(rows),
             "negotiation_round_count": len(proposals.get("negotiation_rounds", []) if isinstance(proposals.get("negotiation_rounds"), list) else []),
+            "negotiation_rounds": _compact_negotiation_rounds(proposals),
             "tradeoff_matrix_count": len(proposals.get("tradeoff_matrix", []) if isinstance(proposals.get("tradeoff_matrix"), list) else []),
             "memory_decision_delta_count": len(proposals.get("memory_decision_deltas", []) if isinstance(proposals.get("memory_decision_deltas"), list) else []),
             "ml_policy_decision_delta_count": len(proposals.get("ml_policy_decision_deltas", []) if isinstance(proposals.get("ml_policy_decision_deltas"), list) else []),
@@ -1104,6 +1323,66 @@ def _badge(value: Any) -> str:
     return f'<span class="badge {cls}">{text}</span>'
 
 
+def _render_round_value(value: Any) -> str:
+    if isinstance(value, list):
+        return ", ".join(html.escape(str(item)) for item in value[:4])
+    return html.escape(str(value))
+
+
+def _blank_round_value(value: Any) -> bool:
+    return value is None or value == "" or value == []
+
+
+def _render_negotiation_rounds(rounds: list[dict[str, Any]]) -> str:
+    if not rounds:
+        return "<p>No negotiation transcript was included in the aggregate report.</p>"
+    cards: list[str] = []
+    for row in rounds:
+        if not isinstance(row, dict):
+            continue
+        examples = row.get("examples", []) if isinstance(row.get("examples"), list) else []
+        example_items: list[str] = []
+        for example in examples[:5]:
+            if not isinstance(example, dict):
+                continue
+            fields = []
+            for key, value in example.items():
+                if _blank_round_value(value):
+                    continue
+                fields.append(f"<b>{html.escape(str(key).replace('_', ' '))}:</b> {_render_round_value(value)}")
+            if fields:
+                example_items.append(f"<li>{'; '.join(fields)}</li>")
+        held_examples = row.get("held_examples", []) if isinstance(row.get("held_examples"), list) else []
+        held_items: list[str] = []
+        for example in held_examples[:4]:
+            if not isinstance(example, dict):
+                continue
+            fields = []
+            for key, value in example.items():
+                if _blank_round_value(value):
+                    continue
+                fields.append(f"<b>{html.escape(str(key).replace('_', ' '))}:</b> {_render_round_value(value)}")
+            if fields:
+                held_items.append(f"<li>{'; '.join(fields)}</li>")
+        meta = []
+        for key in ("decision", "scenario_key", "slice_decision", "resolution", "semantic_companion_tools"):
+            value = row.get(key)
+            if not _blank_round_value(value):
+                meta.append(f"<p><b>{html.escape(key.replace('_', ' ').title())}:</b> {_render_round_value(value)}</p>")
+        cards.append(
+            f"""
+            <div class="round">
+              <div class="round-head"><b>Round {html.escape(str(row.get('round')))} · {html.escape(str(row.get('name')))}</b><span class="badge muted">{html.escape(str(row.get('kind')))}</span></div>
+              <p>{html.escape(str(row.get('headline') or 'Negotiation round recorded.'))}</p>
+              {''.join(meta)}
+              <ul>{''.join(example_items) or '<li>No examples captured for this round.</li>'}</ul>
+              {f'<p><b>Held examples:</b></p><ul>{"".join(held_items)}</ul>' if held_items else ''}
+            </div>
+            """
+        )
+    return "\n".join(cards)
+
+
 def _render_html(report: dict[str, Any], path: Path) -> None:
     summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
     cycles = report.get("cycles", []) if isinstance(report.get("cycles"), list) else []
@@ -1119,10 +1398,13 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
     cycle_cards = []
     for cycle in cycles:
         issue = cycle.get("issue", {}) if isinstance(cycle.get("issue"), dict) else {}
+        live_feed = cycle.get("live_feed", {}) if isinstance(cycle.get("live_feed"), dict) else {}
+        anti_script = cycle.get("anti_script_proof", {}) if isinstance(cycle.get("anti_script_proof"), dict) else {}
         actions = cycle.get("actions", {}) if isinstance(cycle.get("actions"), dict) else {}
         memory = cycle.get("memory", {}) if isinstance(cycle.get("memory"), dict) else {}
         ml_policy = cycle.get("ml_policy", {}) if isinstance(cycle.get("ml_policy"), dict) else {}
         agents = cycle.get("agents", {}) if isinstance(cycle.get("agents"), dict) else {}
+        negotiation_rounds = agents.get("negotiation_rounds", []) if isinstance(agents.get("negotiation_rounds"), list) else []
         measurement = cycle.get("measurement", {}) if isinstance(cycle.get("measurement"), dict) else {}
         reward_layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
         controlled_effect_projection = (
@@ -1131,6 +1413,15 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
             else {}
         )
         training = cycle.get("training_closure", {}) if isinstance(cycle.get("training_closure"), dict) else {}
+        feed_ids = anti_script.get("live_feed_event_ids") if isinstance(anti_script.get("live_feed_event_ids"), list) else live_feed.get("event_ids", [])
+        if not isinstance(feed_ids, list):
+            feed_ids = []
+        evidence_rows = live_feed.get("evidence", []) if isinstance(live_feed.get("evidence"), list) else []
+        evidence_text = "; ".join(
+            f"{row.get('source')}/{row.get('signal_type')} {row.get('event_id')} conf {row.get('confidence')}"
+            for row in evidence_rows[:4]
+            if isinstance(row, dict)
+        )
         cycle_cards.append(
             f"""
             <section class="cycle">
@@ -1145,12 +1436,19 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
                 <div><strong>Learning</strong><span>{html.escape(str(ml_policy.get('scenario_key')))} {html.escape(str(ml_policy.get('slice_decision')))}</span><small>Reward {html.escape(str(ml_policy.get('latest_average_reward')))}, delta {html.escape(str(ml_policy.get('curve_delta')))}</small></div>
               </div>
               <div class="decision">
-                <p><b>Why this was not scripted:</b> the event came from the current park simulation state, then live feeds were reloaded and agents grounded decisions in persisted feed event IDs.</p>
+                <p><b>Anti-script proof:</b> scripted_case={html.escape(str(anti_script.get('scripted_case')))}, uses_seed_data={html.escape(str(anti_script.get('uses_seed_data')))}, selection={html.escape(str(anti_script.get('issue_selection_mode')))}, issue_source={html.escape(str(anti_script.get('issue_source')))}, unexpected={html.escape(str(anti_script.get('unexpected')))}.</p>
+                <p><b>Feed proof:</b> {html.escape(str(anti_script.get('live_feed_event_id_count', len(feed_ids))))} persisted feed IDs: {html.escape(', '.join(str(x) for x in feed_ids[:6]) or 'missing from aggregate')}.</p>
+                <p><b>Evidence rows:</b> {html.escape(evidence_text or 'missing from aggregate')}.</p>
+                <p><b>Why this was not scripted:</b> {html.escape(str(anti_script.get('why_not_scripted') or 'the event came from the current park simulation state, then live feeds were reloaded and agents grounded decisions in persisted feed event IDs.'))}</p>
                 <p><b>Memory use:</b> prior status {html.escape(str(memory.get('prior_status')))}, prior count {html.escape(str(memory.get('prior_count')))}, applied {html.escape(str(memory.get('applied_count')))}. Accepted departments: {html.escape(', '.join(str(x) for x in memory.get('accepted_departments', [])[:8]) or 'none')}.</p>
                 <p><b>ML policy evidence:</b> scenario {html.escape(str(ml_policy.get('scenario_key')))}, status {html.escape(str(ml_policy.get('status')))}, slice decision {html.escape(str(ml_policy.get('slice_decision')))}. Accepted low-risk guidance {html.escape(str(ml_policy.get('accepted_low_risk_count')))}, context-only {html.escape(str(ml_policy.get('context_only_count')))}, warnings {html.escape(str(ml_policy.get('warning_count')))}.</p>
                 <p><b>Measured outcome:</b> {html.escape(str(measurement.get('status')))} with attribution confidence {html.escape(str(measurement.get('attribution_confidence')))} and operational reward {html.escape(str(reward_layers.get('operational_reward', measurement.get('reward_value'))))}. Promotion eligible: {html.escape(str(measurement.get('promotion_eligible')))}.</p>
                 <p><b>Reward layers:</b> trace {html.escape(str(reward_layers.get('trace_reward')))}, policy {html.escape(str(reward_layers.get('policy_reward')))}, execution {html.escape(str(reward_layers.get('execution_reward')))}, operational {html.escape(str(reward_layers.get('operational_reward')))}, learning {html.escape(str(reward_layers.get('learning_reward')))}.</p>
                 <p><b>Controlled effect:</b> {html.escape(str(controlled_effect_projection.get('status') or 'not_applied'))}; {html.escape(str(controlled_effect_projection.get('projection_count') or 0))} projected feed rows from acknowledged low-risk receiver actions.</p>
+              </div>
+              <div class="negotiation">
+                <h3>Negotiation rounds</h3>
+                {_render_negotiation_rounds(negotiation_rounds)}
               </div>
             </section>
             """
@@ -1201,6 +1499,12 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
     .cycle {{ border-top: 1px solid var(--line); padding: 22px 0 6px; }}
     .cycle-head {{ display: flex; justify-content: space-between; align-items: center; gap: 16px; }}
     .decision {{ margin-top: 14px; display: grid; gap: 8px; color: #293847; }}
+    .negotiation {{ margin-top: 16px; display: grid; gap: 12px; }}
+    .negotiation h3 {{ margin: 0; font-size: 16px; }}
+    .round {{ border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fff; display: grid; gap: 8px; }}
+    .round-head {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; }}
+    .round p {{ margin: 0; }}
+    .round ul {{ margin: 0; }}
     .truth {{ border: 1px solid var(--line); border-radius: 8px; padding: 16px; background: #fbfcfd; }}
     ul {{ margin: 10px 0 0; padding-left: 20px; color: #293847; }}
     li {{ margin: 6px 0; }}

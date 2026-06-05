@@ -176,9 +176,17 @@ def run_command(
 
 
 def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    for _ in range(50):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as ipv4:
+            ipv4.bind(("127.0.0.1", 0))
+            port = int(ipv4.getsockname()[1])
+            try:
+                with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as ipv6:
+                    ipv6.bind(("::1", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("Unable to find a free local QA port")
 
 
 def wait_for_http(url: str, timeout_seconds: float = 30.0) -> bool:

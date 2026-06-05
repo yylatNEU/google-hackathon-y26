@@ -1524,9 +1524,30 @@ class FakeCollection:
         self.find_error = find_error
         self.writes = []
         self.indexes = []
+        self.search_indexes = []
 
     def create_index(self, spec, *args, **kwargs):
         self.indexes.append((spec, args, kwargs))
+
+    def list_search_indexes(self):
+        return list(self.search_indexes)
+
+    def create_search_index(self, model=None):
+        document = getattr(model, "document", {}) if model is not None else {}
+        name = document.get("name") or "search_index"
+        self.search_indexes.append(
+            {
+                "name": name,
+                "status": "READY",
+                "queryable": True,
+                "type": document.get("type", "vectorSearch"),
+                "definition": document.get("definition", {}),
+            }
+        )
+        return name
+
+    def drop_search_index(self, name):
+        self.search_indexes = [row for row in self.search_indexes if row.get("name") != name]
 
     def update_one(self, *args, **kwargs):
         self.writes.append(("update_one", args, kwargs))
@@ -1625,7 +1646,7 @@ def test_operational_memory_connected_branches_and_wrappers(monkeypatch):
     state = sample_state()
     assert memory.upsert_park_state(state)["mode"] == "mongodb"
     context = memory.retrieve_context("ride_down", state, limit=1)
-    assert context["retrieved"]["method"] == "mongodb_vector_search"
+    assert context["retrieved"]["method"].startswith("mongodb_vector_search")
 
     memory.db.playbooks.aggregate_error = True
     assert memory._retrieve_playbooks("ride", 1)[1] == "mongodb_text_search"
@@ -1642,6 +1663,31 @@ def test_operational_memory_connected_branches_and_wrappers(monkeypatch):
     memory.db.agent_learnings.find_error = False
     memory.db.agent_learnings.aggregate_error = False
     assert memory.latest_park_state()["_id"] == "live"
+
+    memory.db.agent_learnings.search_indexes = [{"name": "old_agent_specific_vector", "status": "READY", "queryable": True, "type": "vectorSearch"}]
+    vector_indexes = memory.ensure_vector_search_indexes()
+    assert vector_indexes["collections"]["agent_learnings"]["index"] == "agent_learnings_vector"
+    assert vector_indexes["collections"]["agent_learnings"]["status"] == "created"
+    assert "department" in vector_indexes["collections"]["agent_learnings"]["filters"]
+    assert all(row["name"] != "old_agent_specific_vector" for row in memory.db.agent_learnings.search_indexes)
+
+    memory.db.playbooks.search_indexes = [
+        {
+            "name": "playbook_vector_index",
+            "status": "READY",
+            "queryable": True,
+            "type": "vectorSearch",
+            "latestDefinition": {"fields": [{"type": "vector", "path": "embedding", "numDimensions": 64}]},
+        }
+    ]
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "true")
+    monkeypatch.setenv("MONGODB_MODEL_EMBEDDING_DIMENSIONS", "256")
+    vector_indexes = memory.ensure_vector_search_indexes()
+    playbook_index = vector_indexes["collections"]["playbooks"]
+    assert playbook_index["status"] == "recreated"
+    assert playbook_index["vectorPath"] == "modelEmbedding"
+    assert playbook_index["numDimensions"] == 256
+    assert playbook_index["previousVectorPath"] == "embedding"
 
     decision = memory.record_agent_decision(
         {"recommended_action": "x", "selected_action": {"target": "ride", "action": "reroute"}},
@@ -1670,6 +1716,11 @@ def test_operational_memory_connected_branches_and_wrappers(monkeypatch):
     repair = mongo_memory.backfill_memory_embeddings(["playbooks", "incidents", "agent_learnings"], 10)
     assert repair["status"] == "repaired"
     assert repair["collections"]["playbooks"]["updated"] >= 1
+    learning_row = memory.db.agent_learnings.rows[0]
+    assert learning_row["agent_id"]
+    assert learning_row["department"] == "operations"
+    assert learning_row["learning_type"]
+    assert learning_row["scope"] == "ride_ops"
 
 
 def test_mongo_memory_remaining_branch_paths(monkeypatch):
@@ -1856,7 +1907,7 @@ def test_memory_ops_agent_reports_depth_and_embedding_coverage(monkeypatch):
     assert report["agent_id"] == "memory_ops_agent"
     assert report["implemented"] is True
     assert report["summary"]["mongo_connected"] is True
-    assert report["retrieval_depth"]["retrieval_method"] == "mongodb_vector_search"
+    assert report["retrieval_depth"]["retrieval_method"].startswith("mongodb_vector_search")
     assert any(item["collection"] == "playbooks" for item in report["embedding_coverage"])
     assert report["future_mcp_fit"]
     assert repair["mode"] == "operator_triggered_repair"

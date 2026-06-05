@@ -123,7 +123,7 @@ def test_signed_role_can_be_required_for_mutations(monkeypatch):
     monkeypatch.setenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION", "true")
     status, blocked = run(call_app("POST", "/api/park/operator-command", {"message": "dispatch crowd staff", "execute": True}, headers={"x-parkpulse-role": "ops_team"}))
 
-    assert status == 403
+    assert status == 401
     assert blocked["authorization"]["role"] == "ops_team"
     assert blocked["authorization"]["identity"]["authenticated"] is False
     assert "Signed ParkPulse role session is required" in blocked["authorization"]["reason"]
@@ -171,7 +171,7 @@ def test_role_access_audit_records_session_and_mutation_decisions(monkeypatch, t
     assert allowed["role_authorization"]["identity"]["auth_method"] == "signed_role_session"
 
     status, blocked = run(call_app("POST", "/api/park/operator-command", {"message": "dispatch crowd staff", "execute": True}, headers={"x-parkpulse-role": "ops_team"}))
-    assert status == 403
+    assert status == 401
     assert blocked["authorization"]["identity"]["authenticated"] is False
 
     status, audit = run(call_app("GET", "/api/park/auth/audit"))

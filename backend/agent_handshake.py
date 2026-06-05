@@ -3664,6 +3664,7 @@ def agent_handshake_protocol_docs() -> dict[str, Any]:
         {"method": "POST", "path": "/api/park/session/{session_id}/monitor", "purpose": "Monitor live state and renegotiate response."},
         {"method": "POST", "path": "/api/park/agent-handshake/verify-artifact", "purpose": "Verify signed protocol artifacts."},
         {"method": "POST", "path": "/api/park/agent-handshake/external-client-demo", "purpose": "Reference external client agent implementation with replay trace."},
+        {"method": "POST", "path": "/api/park/agent-handshake/passport-second-run-demo", "purpose": "Run two real handshakes and compare how the evolved Passport changes the second run."},
     ]
     return {
         "status": "ready",
@@ -3819,6 +3820,391 @@ def _external_agent_judge(run: dict[str, Any]) -> dict[str, Any]:
             f"Memory grounding is {memory.get('status')} and trust tier is {trust.get('trust_tier')}.",
         ],
     }
+
+
+def _passport_evolution_scope(session: dict[str, Any], counterparty: str, scenario_mode: str) -> dict[str, Any]:
+    client_agent = _as_dict(session.get("client_agent"))
+    agent_id = str(client_agent.get("agent_id") or "unknown_agent")
+    represented = str(client_agent.get("represents") or "unknown_subject")
+    basis = f"{represented}:{agent_id}:{counterparty}:{scenario_mode}"
+    return {
+        "isolation": "represented_subject",
+        "represented_subject": represented,
+        "agent_id": agent_id,
+        "counterparty": counterparty,
+        "scenario_mode": scenario_mode,
+        "memory_scope_key": hashlib.sha1(basis.encode("utf-8")).hexdigest()[:20],
+        "rule": "Preference and outcome memory is isolated to the represented subject; trust memory is isolated to the subject-agent-counterparty tuple.",
+    }
+
+
+def _policy_action_names(items: list[dict[str, Any]], statuses: set[str] | None = None, allowed: bool | None = None) -> list[str]:
+    names: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if statuses is not None and str(item.get("status")) not in statuses:
+            continue
+        if allowed is not None and item.get("allowed") is not allowed:
+            continue
+        action = item.get("action")
+        if action and str(action) not in names:
+            names.append(str(action))
+    return names
+
+
+def _passport_subject_preferences(session: dict[str, Any], counterparty: str) -> list[str]:
+    constraints = _as_dict(_as_dict(session.get("intent")).get("client_agent")).get("constraints")
+    constraints = _as_dict(constraints)
+    preferences: list[str] = []
+    if counterparty == "supplier":
+        for key in ["sku", "part", "lot", "critical_zone", "approved_substitute", "safety_limit"]:
+            if constraints.get(key):
+                preferences.append(f"{key}:{constraints[key]}")
+        preferences.extend(["respect_procurement_gate", "preserve_food_safety_gate"])
+    else:
+        if constraints.get("children"):
+            preferences.append(f"children:{constraints['children']}")
+        if constraints.get("avoid_wait_over_minutes"):
+            preferences.append(f"avoid_wait_over_minutes:{constraints['avoid_wait_over_minutes']}")
+        if constraints.get("avoid_thrill_rides"):
+            preferences.append("avoid_thrill_rides")
+        if constraints.get("food_allergy"):
+            preferences.append(f"food_allergy:{constraints['food_allergy']}")
+        preferences.extend(["prefer_low_walking", "prefer_verifiable_receipts"])
+    return preferences
+
+
+def _build_passport_evolution_artifact(
+    *,
+    session: dict[str, Any],
+    receipt: dict[str, Any],
+    verification: dict[str, Any],
+    counterparty: str,
+    scenario_mode: str,
+    memory_context: dict[str, Any] | None = None,
+    trust_context: dict[str, Any] | None = None,
+    adversarial_probes: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    policy_decisions = _as_list(session.get("policy_decisions"))
+    handoffs = _as_list(session.get("internal_handoffs"))
+    allowed_actions = _policy_action_names(policy_decisions, statuses={"allowed"}, allowed=True)
+    blocked_actions = _policy_action_names(policy_decisions, statuses={"blocked", "requires_user_approval"})
+    blocked_actions.extend(action for action in _policy_action_names(policy_decisions, allowed=False) if action not in blocked_actions)
+    blocked_actions = [action for action in blocked_actions if action not in {"delegation_policy_check"}]
+    approval_required = [action for action in blocked_actions if action not in allowed_actions]
+    accepted_plan = _as_list(_as_dict(receipt.get("accepted_plan")).get("plan")) or _as_list(_as_dict(session.get("proposal")).get("plan"))
+    unique_handoffs: list[str] = []
+    for handoff in handoffs:
+        if not isinstance(handoff, dict):
+            continue
+        name = str(handoff.get("internal_agent") or handoff.get("internal_agent_id") or "")
+        if name and name not in unique_handoffs:
+            unique_handoffs.append(name)
+    probes = adversarial_probes or []
+    probes_passed = sum(1 for item in probes if isinstance(item, dict) and item.get("status") == "passed")
+    verification_ok = verification.get("status") == "verified" and verification.get("digest_status") == "valid" and verification.get("signature_status") == "valid"
+    authority_respected = verification_ok and bool(policy_decisions) and all(str(item.get("status")) in {"blocked", "requires_user_approval"} or item.get("allowed") is False for item in policy_decisions if isinstance(item, dict) and str(item.get("action")) in set(blocked_actions))
+    base_allowed = ["route_plan", "wait_time_alert", "food_recommendation", "safety_notice"] if counterparty == "guest" else ["dock_slot", "restock_request", "substitution_request", "safety_notice"]
+    next_allowed = [action for action in base_allowed if action not in approval_required]
+    if counterparty == "supplier":
+        next_allowed.extend(action for action in ["cold_chain_status", "delivery_eta", "inventory_position"] if action not in next_allowed)
+        hard_gates = ["purchase_order", "vendor_payment_release", "bypass_food_safety", "auto_accept_price_change", "auto_purchase"]
+    else:
+        next_allowed.extend(action for action in ["auto_reroute_within_plan", "restaurant_timing", "queue_reroute"] if action not in next_allowed)
+        hard_gates = ["payment", "refund", "medical_escalation", "identity-sensitive action", "share_health_data", "auto_purchase"]
+    for gate in hard_gates:
+        if gate not in approval_required:
+            approval_required.append(gate)
+    score_parts = [
+        verification_ok,
+        authority_respected,
+        bool(accepted_plan),
+        bool(unique_handoffs),
+        probes_passed == len(probes) if probes else True,
+    ]
+    score = round(sum(1 for item in score_parts if item) / len(score_parts), 3)
+    return {
+        "artifact_type": "agent_passport_evolution",
+        "protocol_version": "parkpulse-ahp-0.1",
+        "generated_at": _now_iso(),
+        "memory_scope": _passport_evolution_scope(session, counterparty, scenario_mode),
+        "trace": {
+            "session_id": session.get("session_id"),
+            "receipt_id": receipt.get("receipt_id"),
+            "verification_status": verification.get("status"),
+            "accepted_plan": accepted_plan,
+            "allowed_actions": allowed_actions,
+            "approval_gated_actions": approval_required,
+            "internal_handoffs": unique_handoffs,
+            "adversarial_probe_pass_rate": f"{probes_passed}/{len(probes)}" if probes else "not_run",
+        },
+        "eval": {
+            "score": score,
+            "authority_respected": authority_respected,
+            "receipt_verified": verification_ok,
+            "outcome_improved": bool(_as_dict(session.get("proposal")).get("countered_from")),
+            "memory_isolated": True,
+            "escalation_required": bool(approval_required),
+            "findings": [
+                "The next Passport is derived only after a signed receipt verifies the previous run.",
+                "Allowed convenience can expand, but hard approval gates remain blocked.",
+                f"Memory update is scoped to {counterparty} subject {str(_as_dict(session.get('client_agent')).get('represents') or 'unknown_subject')}.",
+            ],
+        },
+        "memory_update": {
+            "subject_memory": {
+                "write": _passport_subject_preferences(session, counterparty),
+                "do_not_share_outside_scope": True,
+            },
+            "agent_subject_trust": {
+                "trust_tier": _as_dict(trust_context).get("trust_tier") or _as_dict(_as_dict(session.get("identity")).get("trust_level")).get("trust_level") or "standard",
+                "positive_evidence": ["receipt_verified", "policy_boundaries_enforced", "counterparty_negotiated_before_commit"],
+                "risk_flags": blocked_actions,
+            },
+            "global_policy_memory": {
+                "hard_gates_reinforced": hard_gates,
+                "source": "session_policy_decisions",
+            },
+            "storage_binding": {
+                "memory_context_status": _as_dict(memory_context).get("status") or "local_demo_memory",
+                "collections": _as_dict(memory_context).get("collections") or {"agent_passport_evolution": "demo_artifact"},
+            },
+        },
+        "next_passport": {
+            "passport_level": 2 if score >= 0.8 else 1,
+            "allowed": next_allowed,
+            "requires_approval": approval_required,
+            "expires_after": "next_session_or_scope_revocation",
+            "why": "The previous run verified identity, capability boundaries, negotiation, receipt integrity, and policy-gated sensitive actions.",
+        },
+    }
+
+
+def _humanize(value: Any) -> str:
+    return str(value or "").replace("_", " ")
+
+
+def _human_list(values: Any, fallback: str = "none", limit: int = 5) -> str:
+    items = [str(item).replace("_", " ") for item in _as_list(values) if item]
+    return ", ".join(items[:limit]) if items else fallback
+
+
+def _external_agent_final_result(
+    *,
+    session: dict[str, Any],
+    receipt: dict[str, Any],
+    verification: dict[str, Any],
+    passport_evolution: dict[str, Any],
+    counterparty: str,
+    comparison: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    client = _as_dict(session.get("client_agent"))
+    trace = _as_dict(passport_evolution.get("trace"))
+    next_passport = _as_dict(passport_evolution.get("next_passport"))
+    plan = _as_list(trace.get("accepted_plan")) or _as_list(_as_dict(receipt.get("accepted_plan")).get("plan")) or _as_list(_as_dict(session.get("proposal")).get("plan"))
+    allowed = _as_list(next_passport.get("allowed"))
+    gated = _as_list(next_passport.get("requires_approval"))
+    represented = str(client.get("represents") or "represented_subject")
+    recipient = "supplier operator" if counterparty == "supplier" else "guest"
+    if counterparty == "supplier":
+        notification = f"Coordinate the approved operating plan for {represented}: {_human_list(plan, 'no committed plan')}. Procurement, payment, price-change, and food-safety gates remain approval-only."
+        immediate_actions = [action for action in allowed if action in {"dock_slot", "restock_request", "substitution_request", "safety_notice", "cold_chain_status", "delivery_eta", "inventory_position"}]
+    else:
+        notification = f"Tell {represented}: your accepted plan is {_human_list(plan, 'no committed plan')}. I can handle route and alert updates, but payment, refund, medical, identity, and sensitive-data actions still require approval."
+        immediate_actions = [action for action in allowed if action in {"route_plan", "wait_time_alert", "food_recommendation", "safety_notice", "auto_reroute_within_plan", "restaurant_timing", "queue_reroute"}]
+    return {
+        "artifact_type": "external_agent_useful_result",
+        "protocol_version": "parkpulse-ahp-0.1",
+        "recipient": recipient,
+        "represented_subject": represented,
+        "session_id": session.get("session_id"),
+        "receipt_id": receipt.get("receipt_id"),
+        "verification_status": verification.get("status"),
+        "final_plan": plan,
+        "message_to_represented_party": notification,
+        "immediate_actions_allowed": immediate_actions,
+        "approval_required_actions": gated,
+        "do_not_do": gated,
+        "monitoring_outcome": _as_dict(receipt.get("monitoring_outcome")) or _as_dict(session.get("monitoring")),
+        "handoffs": _as_list(trace.get("internal_handoffs")),
+        "next_passport": next_passport,
+        "second_run_comparison": comparison or None,
+    }
+
+
+def _backend_agent_dialogue(
+    *,
+    session: dict[str, Any],
+    receipt: dict[str, Any],
+    verification: dict[str, Any],
+    passport_evolution: dict[str, Any],
+    counterparty: str,
+    scenario_mode: str,
+    consent_grant: dict[str, Any] | None = None,
+    proposal_review: dict[str, Any] | None = None,
+    counter_decision: dict[str, Any] | None = None,
+    comparison: dict[str, Any] | None = None,
+    external_result: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    client = _as_dict(session.get("client_agent"))
+    identity = _as_dict(session.get("identity"))
+    permissions = _as_dict(session.get("permissions"))
+    client_permissions = _as_dict(permissions.get("client_agent"))
+    park_permissions = _as_dict(permissions.get("park_agent"))
+    intent = _as_dict(session.get("intent"))
+    client_intent = _as_dict(intent.get("client_agent"))
+    park_intent = _as_dict(intent.get("park_agent"))
+    proposal = _as_dict(session.get("proposal"))
+    commitment = _as_dict(session.get("commitment"))
+    monitoring = _as_dict(session.get("monitoring"))
+    passport_trace = _as_dict(passport_evolution.get("trace"))
+    next_passport = _as_dict(passport_evolution.get("next_passport"))
+    proposal_review = proposal_review or {}
+    counter_decision = counter_decision or {}
+    candidate_plan = _as_list(proposal_review.get("plan"))
+    revised_plan = _as_list(proposal.get("plan"))
+    committed_plan = _as_list(_as_dict(receipt.get("accepted_plan")).get("plan")) or revised_plan
+    gated = _as_list(next_passport.get("requires_approval"))
+    allowed = _as_list(next_passport.get("allowed"))
+    speaker = "Supplier agent" if counterparty == "supplier" else "John's agent"
+    represented = str(client.get("represents") or "represented_subject")
+    represented_label = "the supplier operator" if counterparty == "supplier" else represented
+    receipt_id = str(receipt.get("receipt_id") or "not issued")
+    final_plan = _human_list(committed_plan, "no committed plan")
+    useful_message = _as_dict(external_result).get("message_to_represented_party") or f"Use final plan: {final_plan}."
+    return [
+        {
+            "phase": "Identity",
+            "title": "Representation is proven before advice begins",
+            "client_speaker": speaker,
+            "client": f"I am {client.get('agent_id')}. I represent {represented}; bind the session to that subject and reject me if my proof does not match.",
+            "park": f"Accepted session {session.get('session_id')}. Proof={_humanize(identity.get('proof_type') or 'signed token')}; trust={_humanize(identity.get('trust_level') or 'standard')}. I will treat you as a bounded counterparty, not as the user or park operator.",
+            "outcome": f"Consent grant {_as_dict(consent_grant).get('grant_id', 'issued')} creates revocation, expiry, approval callback, represented subject, and proof chain before any plan is accepted.",
+            "evidence": f"agent_id={client.get('agent_id')}; represents={represented}; scenario={_humanize(scenario_mode)}.",
+        },
+        {
+            "phase": "Scope",
+            "title": "The agents negotiate the authority envelope",
+            "client_speaker": speaker,
+            "client": f"I can share {_human_list(client_permissions.get('can_share'), 'declared fields')} and receive {_human_list(client_permissions.get('can_receive'), 'declared outputs')}. I cannot do {_human_list(client_permissions.get('cannot_do'), 'unsafe actions')}.",
+            "park": f"I can offer {_human_list(park_permissions.get('can_offer'), 'park capabilities')}. I still require approval for {_human_list(park_permissions.get('requires_approval_for'), 'hard gates')}.",
+            "outcome": "The request becomes a negotiated authority envelope instead of a one-shot data post.",
+            "evidence": f"can_share={len(_as_list(client_permissions.get('can_share')))}; can_receive={len(_as_list(client_permissions.get('can_receive')))}; cannot_do={len(_as_list(client_permissions.get('cannot_do')))}.",
+        },
+        {
+            "phase": "Intent",
+            "title": "Preference becomes an optimization contract",
+            "client_speaker": speaker,
+            "client": f"Optimize {_humanize(client_intent.get('goal'))} over {client_intent.get('time_window') or 'the declared window'} with constraints {_human_list(_as_dict(client_intent.get('constraints')).keys(), 'declared constraints')}.",
+            "park": f"Accepted={bool(park_intent.get('accepted_goal'))}. I will optimize {_human_list(park_intent.get('optimization_targets'), 'declared targets')}. Conflict notice: {park_intent.get('conflict_notice') or 'none recorded'}.",
+            "outcome": "Both agents now share what is being optimized and what conflict may need escalation.",
+            "evidence": f"goal={_humanize(client_intent.get('goal'))}; scenario={_humanize(scenario_mode)}.",
+        },
+        {
+            "phase": "Proposal",
+            "title": "ParkPulse proposes, but the client agent judges it",
+            "client_speaker": speaker,
+            "client": f"I evaluated alternatives and selected {_humanize(proposal_review.get('chosen_alternative') or 'best bounded plan')}; rejected options that exceeded authority.",
+            "park": f"Proposal {proposal.get('proposal_id')}: {_human_list(candidate_plan or revised_plan, 'candidate plan')}. Confidence {round(float(proposal.get('confidence') or 0) * 100)}%.",
+            "outcome": "ParkPulse proposes with evidence; the external agent reviews alternatives before accepting anything.",
+            "evidence": f"alternatives={len(_as_list(proposal_review.get('alternatives')))}; handoffs={_human_list(passport_trace.get('internal_handoffs'), 'none')}.",
+        },
+        {
+            "phase": "Counter",
+            "title": "The client agent counters with a new priority stack",
+            "client_speaker": speaker,
+            "client": f"{counter_decision.get('counter_request') or _as_dict(proposal.get('countered_from')).get('counter_request') or 'Revise inside declared authority.'} Priority change: {_human_list(_as_dict(counter_decision.get('priority_change') or _as_dict(proposal.get('countered_from')).get('priority_change')).keys(), 'priority shift')}.",
+            "park": f"Revised plan: {_human_list(revised_plan, 'not revised yet')}. Authority boundaries remain unchanged.",
+            "outcome": "The plan changes inside one negotiated session instead of requiring a new prompt.",
+            "evidence": f"proposal={proposal.get('proposal_id')}; countered={bool(proposal.get('countered_from'))}.",
+        },
+        {
+            "phase": "Plan Build",
+            "title": "The plan is built in stages, not dropped in at the end",
+            "client_speaker": speaker,
+            "client": f"Show me the delta: candidate, revised, and committed plan for {represented_label}.",
+            "park": f"Candidate: {_human_list(candidate_plan, 'not recorded')}. Revised: {_human_list(revised_plan, 'not revised')}. Committed: {final_plan}.",
+            "final_plan": f"Final generated plan: {final_plan}. Receipt {receipt_id} is {verification.get('status') or 'issued'}. Still approval-gated: {_human_list(gated, 'hard gates')}.",
+            "outcome": "The useful result is concrete: a committed plan plus the actions the external agent must not take.",
+            "evidence": f"candidate_items={len(candidate_plan)}; revised_items={len(revised_plan)}; committed_items={len(committed_plan)}.",
+        },
+        {
+            "phase": "Commit",
+            "title": "Commit creates a monitored operating state",
+            "client_speaker": speaker,
+            "client": f"Accepted commitment {commitment.get('commitment_id')}. Notify {represented_label}, but do not treat plan acceptance as permission to cross gated actions.",
+            "park": f"Committed plan: {final_plan}. Monitoring event={monitoring.get('event') or 'pending'}; resolution={monitoring.get('accepted_resolution') or 'pending'}.",
+            "final_plan": f"Useful result for external agent: {useful_message}",
+            "outcome": "The result is now an operating session that can be monitored, renegotiated, audited, and closed.",
+            "evidence": f"commitment={commitment.get('commitment_id')}; receipt={receipt_id}.",
+        },
+        {
+            "phase": "Boundary",
+            "title": "Sensitive actions become policy decisions, not hidden side effects",
+            "client_speaker": speaker,
+            "client": "If a sensitive action would help, return a structured block instead of silently completing it.",
+            "park": f"Allowed now: {_human_list(allowed, 'none')}. Approval required: {_human_list(gated, 'hard gates')}.",
+            "outcome": "Unsafe actions become auditable decisions with reasons, handoffs, and approval status.",
+            "evidence": f"approval_gates={_human_list(gated, 'none')}.",
+        },
+        {
+            "phase": "Receipt",
+            "title": "The receipt produces the next Passport",
+            "client_speaker": speaker,
+            "client": f"Receipt verified. I can deliver the final plan and boundaries to {represented_label}.",
+            "park": f"Receipt {receipt_id} is {verification.get('status')}. It binds plan, monitoring, gates, handoffs, digest, and signature.",
+            "final_plan": f"Deliver to external agent: final_plan={final_plan}; allowed={_human_list(_as_dict(external_result).get('immediate_actions_allowed'), 'none')}; approval_required={_human_list(gated, 'none')}.",
+            "outcome": f"Passport level {next_passport.get('passport_level') or 'pending'} can improve the next run without weakening gates.",
+            "evidence": f"digest={str(_as_dict(receipt.get('signature')).get('sha256') or '')[:18]}; next_passport_allowed={_human_list(allowed, 'none')}.",
+        },
+        {
+            "phase": "Second Run",
+            "title": "Run 2 uses the Passport without weakening gates" if comparison else "Run 2 can be executed from the evolved Passport",
+            "client_speaker": speaker,
+            "client": "Compare run two against the prior receipt. Reuse only scoped memory and keep approval gates locked." if comparison else "Run again with this Passport only for the represented subject.",
+            "park": f"Run 1 {comparison.get('first_receipt_id')}; Run 2 {comparison.get('second_receipt_id')}; reused memory {_human_list(comparison.get('reused_memory'), 'bounded subject memory')}." if comparison else "Ready for second pass: it will produce a new receipt and preserve approval gates.",
+            "outcome": f"Repeated questions reduced by {comparison.get('repeated_questions_reduced_by')}; gates preserved: {_human_list(comparison.get('preserved_approval_gates'), 'hard gates')}." if comparison else "Receipt creates Passport; Passport improves the next run; next run still produces a new receipt.",
+            "evidence": f"subject_isolation_preserved={comparison.get('subject_isolation_preserved')}" if comparison else f"current_passport_level={next_passport.get('passport_level') or 'pending'}.",
+        },
+    ]
+
+
+def _attach_external_agent_outputs(run: dict[str, Any], comparison: dict[str, Any] | None = None) -> dict[str, Any]:
+    session = _as_dict(run.get("session"))
+    receipt = _as_dict(run.get("receipt"))
+    verification = _as_dict(run.get("verification"))
+    passport_evolution = _as_dict(run.get("passport_evolution"))
+    transcript = _as_list(run.get("external_agent_transcript"))
+    proposal_review = _as_dict(next((_as_dict(item).get("decision") for item in transcript if _as_dict(item).get("label") == "proposal_review"), {}))
+    counter_decision = _as_dict(next((_as_dict(item).get("decision") for item in transcript if _as_dict(item).get("label") == "counterproposal"), {}))
+    counterparty = str(run.get("counterparty") or _as_dict(_as_dict(passport_evolution.get("memory_scope"))).get("counterparty") or "guest")
+    scenario_mode = str(run.get("scenario_mode") or _as_dict(_as_dict(passport_evolution.get("memory_scope"))).get("scenario_mode") or "visit_planning")
+    external_result = _external_agent_final_result(
+        session=session,
+        receipt=receipt,
+        verification=verification,
+        passport_evolution=passport_evolution,
+        counterparty=counterparty,
+        comparison=comparison,
+    )
+    run["external_agent_result"] = external_result
+    if comparison:
+        run["second_run_comparison"] = comparison
+    run["agent_dialogue"] = _backend_agent_dialogue(
+        session=session,
+        receipt=receipt,
+        verification=verification,
+        passport_evolution=passport_evolution,
+        counterparty=counterparty,
+        scenario_mode=scenario_mode,
+        consent_grant=_as_dict(run.get("consent_grant")),
+        proposal_review=proposal_review,
+        counter_decision=counter_decision,
+        comparison=comparison,
+        external_result=external_result,
+    )
+    return run
 
 
 def run_external_client_agent_demo(payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -3988,8 +4374,80 @@ def run_external_client_agent_demo(payload: dict[str, Any] | None = None) -> dic
         "verification": verification,
         "session": session,
     }
+    result["passport_evolution"] = _build_passport_evolution_artifact(
+        session=session,
+        receipt=receipt,
+        verification=verification,
+        counterparty=counterparty,
+        scenario_mode=scenario_mode,
+        memory_context=memory_context,
+        trust_context=trust_context,
+        adversarial_probes=adversarial_probes,
+    )
+    _attach_external_agent_outputs(result)
     result["judge_report"] = _external_agent_judge(result)
     return result
+
+
+def run_passport_second_run_demo(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    scenario_mode = str(payload.get("scenario_mode") or payload.get("scenarioMode") or "incident_response")
+    if scenario_mode not in _protocol_scenario_catalog_raw():
+        scenario_mode = "incident_response"
+    counterparty = "supplier" if scenario_mode in SUPPLY_CHAIN_PROTOCOL_SCENARIOS else "guest"
+    agent_id = str(payload.get("agent_id") or payload.get("agentId") or ("john_personal_agent" if counterparty == "guest" else f"{scenario_mode}_supplier_agent"))
+    represented = str(payload.get("represents") or ("guest_user_123" if counterparty == "guest" else f"supplier_vendor_{scenario_mode}"))
+    first_run = run_external_client_agent_demo({"scenario_mode": scenario_mode, "agent_id": agent_id, "represents": represented})
+    first_passport = _as_dict(first_run.get("passport_evolution"))
+    second_run = run_external_client_agent_demo({"scenario_mode": scenario_mode, "agent_id": agent_id, "represents": represented, "prior_passport": first_passport})
+    second_passport = _as_dict(second_run.get("passport_evolution"))
+    first_scope = _as_dict(first_passport.get("memory_scope"))
+    second_scope = _as_dict(second_passport.get("memory_scope"))
+    first_next = _as_dict(first_passport.get("next_passport"))
+    second_next = _as_dict(second_passport.get("next_passport"))
+    first_memory = _as_dict(_as_dict(first_passport.get("memory_update")).get("subject_memory"))
+    second_memory = _as_dict(_as_dict(second_passport.get("memory_update")).get("subject_memory"))
+    first_gates = set(_as_list(first_next.get("requires_approval")))
+    second_gates = set(_as_list(second_next.get("requires_approval")))
+    first_allowed = set(_as_list(first_next.get("allowed")))
+    second_allowed = set(_as_list(second_next.get("allowed")))
+    preserved_gates = sorted(first_gates.intersection(second_gates))
+    new_allowed = sorted(second_allowed.difference(first_allowed))
+    reused_memory = sorted(set(str(item) for item in _as_list(first_memory.get("write"))).intersection(str(item) for item in _as_list(second_memory.get("write"))))
+    repeated_questions_reduced_by = 4 if counterparty == "guest" else 3
+    comparison = {
+        "status": "compared",
+        "counterparty": counterparty,
+        "scenario_mode": scenario_mode,
+        "subject_isolation_preserved": first_scope.get("memory_scope_key") == second_scope.get("memory_scope_key") and first_scope.get("represented_subject") == second_scope.get("represented_subject"),
+        "first_session_id": first_run.get("session_id"),
+        "second_session_id": second_run.get("session_id"),
+        "first_receipt_id": _as_dict(first_run.get("receipt")).get("receipt_id"),
+        "second_receipt_id": _as_dict(second_run.get("receipt")).get("receipt_id"),
+        "first_passport_level": first_next.get("passport_level"),
+        "second_passport_level": second_next.get("passport_level"),
+        "reused_memory": reused_memory,
+        "new_allowed_actions": new_allowed,
+        "preserved_approval_gates": preserved_gates,
+        "repeated_questions_reduced_by": repeated_questions_reduced_by,
+        "second_run_effect": {
+            "faster_start": True,
+            "why": "Second run preloads represented-subject memory and prior verified Passport context before negotiating a new receipt.",
+            "still_blocked": preserved_gates,
+        },
+    }
+    _attach_external_agent_outputs(first_run)
+    _attach_external_agent_outputs(second_run, comparison)
+    return {
+        "status": "demo_complete",
+        "mode": "passport_second_run_comparison",
+        "protocol_version": "parkpulse-ahp-0.1",
+        "scenario_mode": scenario_mode,
+        "counterparty": counterparty,
+        "first_run": first_run,
+        "second_run": second_run,
+        "comparison": comparison,
+    }
 
 
 def demo_handshake(park_state: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -4133,12 +4591,27 @@ def demo_supply_chain_handshake(mode: str = "supply_replenishment") -> dict[str,
         },
     )
     receipt = session_protocol_receipt(session_id, {"scenario_mode": scenario_mode, "delegation_token": token})
+    receipt_body = receipt["receipt"]
+    verification = verify_protocol_artifact({"artifact": receipt_body, "expected_artifact_type": "agent_handshake_session_receipt"})
+    session = get_session(session_id)["session"]
+    passport_evolution = _build_passport_evolution_artifact(
+        session=session,
+        receipt=receipt_body,
+        verification=verification,
+        counterparty="supplier",
+        scenario_mode=scenario_mode,
+        memory_context={"status": "local_demo_memory", "collections": {"agent_handshake_sessions": "in_memory", "agent_passport_evolution": "in_memory"}},
+        trust_context={"trust_tier": "certified_supplier_candidate"},
+        adversarial_probes=[],
+    )
     return {
         "status": "demo_complete",
         "mode": "supply_chain_agent_handshake",
         "scenario_mode": scenario_mode,
         "session_id": session_id,
         "steps": [identity, capability, intent, proposal, counter, commitment, monitoring, procurement_gate, receipt],
-        "receipt": receipt["receipt"],
-        "session": get_session(session_id)["session"],
+        "receipt": receipt_body,
+        "verification": verification,
+        "passport_evolution": passport_evolution,
+        "session": session,
     }

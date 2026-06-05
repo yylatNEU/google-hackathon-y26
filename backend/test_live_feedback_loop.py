@@ -733,13 +733,13 @@ def test_live_feed_outcome_measurement_builds_reward_candidate_from_post_action_
                         "age_seconds": 8,
                         "value": {"guard_team_count": 8, "health_team_count": 4},
                     },
-                    {
-                        "source": "ride_ops",
-                        "latest_event_id": "before-ride",
-                        "latest_signal_type": "capacity",
-                        "age_seconds": 8,
-                        "value": {"capacity_pressure_pct": 22, "down_ride_count": 1},
-                    },
+                {
+                    "source": "ride_ops",
+                    "latest_event_id": "before-ride",
+                    "latest_signal_type": "capacity",
+                    "age_seconds": 8,
+                    "value": {"capacity_pressure_pct": 22, "down_ride_count": 1, "ride_count": 5},
+                },
                     {
                         "source": "operator_signal",
                         "latest_event_id": "before-ops",
@@ -764,6 +764,27 @@ def test_live_feed_outcome_measurement_builds_reward_candidate_from_post_action_
             "hard_decision_follow_through": {"status": "routed", "unresolved_without_owner_count": 0},
             "role_agent_proposals": {
                 "negotiation_rounds": [{"round": 1}, {"round": 2}, {"round": 3}, {"round": 4}],
+                "alternative_action_negotiation": {
+                    "status": "negotiated",
+                    "substitute_count": 1,
+                    "safe_executable_substitute_count": 1,
+                    "unresolved_without_safe_substitute_count": 0,
+                    "rows": [
+                        {
+                            "alternative_id": "alt-test-ops-marketing",
+                            "held_agent": "ride_ops_agent",
+                            "held_department": "operations",
+                            "held_tool": "recommend_route_change",
+                            "held_policy_status": "requires_executive",
+                            "substitute_agent": "event_creative_agent",
+                            "substitute_department": "marketing",
+                            "substitute_tool": "redirect_offer",
+                            "substitute_executable_if_approved": True,
+                            "tradeoff_reason": "Redirect demand without changing crowd-routing authority.",
+                            "execution_boundary": "Use the substitute only through its own policy-passed envelope; never convert the held action into execution.",
+                        }
+                    ],
+                },
                 "proposals": [
                     {
                         "proposal_envelope": {"policy_check": "passed"},
@@ -806,7 +827,7 @@ def test_live_feed_outcome_measurement_builds_reward_candidate_from_post_action_
                     "latest_event_id": "after-ride",
                     "latest_signal_type": "capacity",
                     "age_seconds": 0,
-                    "value": {"capacity_pressure_pct": 22, "down_ride_count": 1},
+                    "value": {"capacity_pressure_pct": 22, "down_ride_count": 1, "ride_count": 5},
                 },
                 {
                     "source": "operator_signal",
@@ -828,6 +849,12 @@ def test_live_feed_outcome_measurement_builds_reward_candidate_from_post_action_
     assert result["reward_layers"]["execution_reward"] > 0
     assert result["reward_layers"]["operational_reward"] == result["reward_value"]
     assert result["reward_layers"]["learning_reward"] >= 0
+    assert result["reward_layers"]["metrics"]["stability_watch_points"] >= 1
+    assert result["reward_layers"]["metrics"]["actionable_metric_points"] < (
+        result["reward_layers"]["metrics"]["improvement_points"]
+        + result["reward_layers"]["metrics"]["regression_points"]
+        + result["reward_layers"]["metrics"]["stable_points"]
+    )
     assert result["promotion_eligible"] == result["reward_layers"]["promotion_eligible"]
     assert result["attribution_confidence"] >= 0.7
     assert result["source_coverage"] == 1
@@ -842,6 +869,21 @@ def test_live_feed_outcome_measurement_builds_reward_candidate_from_post_action_
     assert by_family["inventory_or_restock"]["score"] > 0
     assert by_family["demand_redirect"]["executed"] is True
     assert by_family["labor_support"]["executed"] is True
+    substitute = result["substitute_outcome_attribution"]
+    assert substitute["status"] == "scored"
+    assert substitute["branch_count"] == 1
+    assert substitute["executed_branch_count"] == 1
+    assert substitute["average_lift_vs_monitor"] > 0
+    assert substitute["bundle"]["decision"] == "prefer_safe_substitute_bundle"
+    assert substitute["selected_bundle"]["bundle_id"] == "pressure_relief_bundle"
+    assert len(substitute["bundle_candidates"]) == 4
+    assert substitute["bundle"]["rejected_bundles"]
+    branch = substitute["rows"][0]
+    assert branch["held_department"] == "operations"
+    assert branch["substitute_department"] == "marketing"
+    assert branch["best_branch"] == "safe_substitute"
+    assert branch["held_action_counterfactual"]["status"] == "not_scored_policy_blocked"
+    assert result["reward_layers"]["metrics"]["substitute_executed_branch_count"] == 1
 
 
 def test_demand_spike_maps_to_food_spike_for_case_bank_and_reports():
@@ -925,6 +967,298 @@ def test_live_feed_memory_priors_enrich_proposals_without_execution_rights():
     assert "memory_prior_outcome_id" not in safety["proposal_envelope"]
     assert enriched["negotiation_turns"][0]["agent"] == "memory_ops_agent"
     assert enriched["memory_decision_deltas"]
+
+
+def test_live_feed_semantic_learning_priors_adjust_low_risk_reasoning(monkeypatch):
+    import parkpulse_api
+
+    outcome = {
+        "_id": "outcome-semantic",
+        "decisionId": "decision-semantic",
+        "loopId": "loop-semantic",
+        "mode": "policy_recovery_closed_loop",
+        "responseMetrics": {"score": 46, "status": "watch"},
+        "stateImpact": {},
+        "learning": {},
+    }
+    monkeypatch.setattr(
+        parkpulse_api,
+        "get_operational_memory_dashboard",
+        lambda _query: {
+            "status": {"mode": "mongodb", "connected": True},
+            "retrieved": {
+                "method": "mongodb_vector_search_voyage",
+                "learnings": [
+                    {
+                        "_id": "learning-semantic",
+                        "score": 0.82,
+                        "sourceOutcomeId": "outcome-semantic",
+                        "lesson": "Low guest take-rate: use stronger or more personalized offers.",
+                        "rule": "Increase promotion strength, split routing, and cap overloaded indoor targets.",
+                        "department": "operations",
+                        "learning_type": "incident",
+                        "scope": "ride_ops",
+                    }
+                ],
+            },
+            "latest_outcomes": [],
+        },
+    )
+    monkeypatch.setattr(parkpulse_api, "get_memory_document", lambda collection, document_id: outcome)
+
+    priors = parkpulse_api._live_feed_memory_priors_from_dashboard(
+        {"scenario_key": "ride_down", "lead_source": "ride_ops", "lead_signal_type": "capacity"},
+        limit=3,
+    )
+    proposals = {
+        "proposals": [
+            {
+                "agent_id": "event_creative_agent",
+                "department": "marketing",
+                "evidence": ["live_feed:guest_flow"],
+                "department_reasoning": {
+                    "candidate_actions": [{"action": "redirect_offer", "score": 0.78}],
+                    "forecast": {"expected_outcome": "redirect demand"},
+                    "memory_carry_forward": {"carry": [], "do_better_next_time": []},
+                },
+                "proposal_envelope": {"requested_tool": "redirect_offer"},
+            },
+            {
+                "agent_id": "ride_ops_agent",
+                "department": "operations",
+                "evidence": ["live_feed:ride_ops"],
+                "department_reasoning": {
+                    "candidate_actions": [{"action": "recommend_route_change", "score": 0.9}],
+                    "forecast": {"expected_outcome": "reduce queue"},
+                    "memory_carry_forward": {"carry": [], "do_better_next_time": []},
+                },
+                "proposal_envelope": {"requested_tool": "recommend_route_change"},
+            },
+        ],
+        "negotiation_turns": [],
+    }
+
+    enriched = parkpulse_api._apply_live_feed_memory_priors_to_proposals(proposals, priors)
+
+    assert priors["semantic_prior_count"] == 1
+    assert priors["retrieval_method"] == "mongodb_vector_search_voyage"
+    assert priors["semantic_learning_ids"] == ["learning-semantic"]
+    marketing = enriched["proposals"][0]
+    operations = enriched["proposals"][1]
+    assert marketing["memory_use"]["status"] == "accepted_semantic_learning"
+    assert marketing["memory_decision_delta"]["effect"] == "semantic_learning_adjusted_candidate"
+    assert marketing["department_reasoning"]["candidate_actions"][0]["semantic_memory_learning_id"] == "learning-semantic"
+    assert marketing["proposal_envelope"]["semantic_action_parameters"]["routing_strategy"] == "split_across_low_wait_destinations"
+    assert marketing["proposal_envelope"]["proposal_payload"]["offer_action"] == "redirect_to_multiple_lower_pressure_destinations"
+    assert "semantic_memory:learning-semantic:score=0.82:source_outcome=outcome-semantic" in marketing["evidence"]
+    assert operations["memory_use"]["status"] == "semantic_context_only"
+    assert operations["memory_relevance_judge"]["accepted_by_judge"] is False
+
+
+def test_live_feed_training_closure_preserves_semantic_payload_material(tmp_path):
+    from scripts.live_feed_training_closure import close_live_feed_training_loop
+
+    semantic_params = {
+        "source": "semantic_agent_learning",
+        "learning_id": "learning-semantic",
+        "source_outcome_id": "outcome-semantic",
+        "routing_strategy": "split_across_low_wait_destinations",
+        "traffic_cap_policy": "cap_overloaded_indoor_targets",
+        "tool_payload_delta": {"offer_action": "redirect_to_multiple_lower_pressure_destinations"},
+        "policy": "Parameters refine only low-risk receiver payloads; they do not grant new execution authority.",
+    }
+    payload = {
+        "summary": {"proposal_count": 1, "active_departments": ["marketing"], "status": "passed"},
+        "live_feed_memory_priors": {
+            "status": "retrieved",
+            "retrieval_method": "mongodb_vector_search_voyage",
+            "semantic_prior_count": 1,
+            "semantic_learning_ids": ["learning-semantic"],
+            "latest_outcome_ids": ["outcome-semantic"],
+            "prior_count": 1,
+        },
+        "role_agent_proposals": {
+            "memory_prior_use": {
+                "rows": [{"department": "marketing", "status": "accepted_semantic_learning"}],
+                "weak_context_rows": [{"department": "operations", "status": "semantic_context_only"}],
+            },
+            "proposals": [
+                {
+                    "agent_id": "event_creative_agent",
+                    "department": "marketing",
+                    "requested_tool": "redirect_offer",
+                    "proposal_envelope": {
+                        "requested_tool": "redirect_offer",
+                        "semantic_action_parameters": semantic_params,
+                        "proposal_payload": {"offer_action": "redirect_to_multiple_lower_pressure_destinations"},
+                    },
+                    "policy_judge": {"status": "passed"},
+                    "department_reasoning": {"memory_carry_forward": {"carry": [], "do_better_next_time": []}},
+                    "agent_loop": {"trace": "observe_interpret_predict_recommend"},
+                    "live_feed_grounding": {"event_ids": ["feed-1"], "sources": ["guest_flow"]},
+                }
+            ],
+        },
+        "tool_executor_live_test": {
+            "semantic_action_parameter_count": 1,
+            "receipts": [
+                {
+                    "agent": "event_creative_agent",
+                    "department": "marketing",
+                    "source_tool": "redirect_offer",
+                    "approved_for_controlled_executor": True,
+                    "semantic_action_parameters": semantic_params,
+                    "result": {"status": "executed", "executed": True, "semantic_action_parameters": semantic_params},
+                }
+            ],
+        },
+        "live_feed_outcome_measurement": {
+            "semantic_parameters_applied": True,
+            "measurement_rows": [
+                {
+                    "source": "guest_flow",
+                    "before_event_id": "feed-before",
+                    "after_event_id": "feed-after",
+                    "metrics": [{"metric": "routing_take_rate_pct", "before": 82, "after": 90, "impact": "improved"}],
+                }
+            ],
+            "reward_layers": {
+                "operational_reward": 0.62,
+                "composite_reward": 0.8,
+                "promotion_eligible": True,
+                "metrics": {
+                    "semantic_action_parameter_count": 1,
+                    "semantic_action_quality_reward": 0.04,
+                    "commerce_action_average_score": 0.5,
+                },
+            },
+            "controlled_effect_projection": {
+                "semantic_parameters_applied": True,
+                "semantic_parameter_rows": [semantic_params],
+            },
+        },
+    }
+    input_path = tmp_path / "smoke.json"
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    manifest = close_live_feed_training_loop(input_path, tmp_path / "out", record_ledger=False, reviewer="unit")
+
+    summary = manifest["summary"]
+    assert summary["semantic_retrieval_method"] == "mongodb_vector_search_voyage"
+    assert summary["semantic_prior_accepted_departments"] == ["marketing"]
+    assert summary["semantic_context_only_departments"] == ["operations"]
+    assert summary["semantic_action_parameter_count"] == 1
+    assert summary["semantic_parameters_applied"] is True
+    assert summary["semantic_measurement_delta_count"] == 1
+    assert summary["semantic_action_quality_reward"] == 0.04
+    material = manifest["semantic_memory_training_material"]
+    assert material["semantic_parameter_rows"][0]["tool_payload_delta"]["offer_action"] == "redirect_to_multiple_lower_pressure_destinations"
+    assert material["measurement_deltas"][0]["metric"] == "routing_take_rate_pct"
+
+
+def test_live_feed_executor_runs_semantic_companion_inventory_action():
+    import parkpulse_api
+
+    result = parkpulse_api._controlled_live_feed_tool_executor_run(
+        {
+            "decision_id": "decision-semantic-companion",
+            "role_agent_proposals": {
+                "proposals": [
+                    {
+                        "agent_id": "food_demand_agent",
+                        "department": "food_retail",
+                        "recommendation": "Control constrained promo and alert inventory.",
+                        "proposal_envelope": {
+                            "requested_tool": "pause_launch_promo",
+                            "intent": "Control constrained promo and alert inventory.",
+                            "policy_check": "passed_food_inventory_no_unavailable_promo",
+                            "executor_status": "ready_for_executor",
+                            "policy_judge": {"status": "passed"},
+                            "semantic_action_parameters": {
+                                "source": "semantic_agent_learning",
+                                "learning_id": "learning-semantic",
+                                "companion_tools": ["inventory_alert"],
+                                "tool_payload_delta": {"inventory_guard": "prevent stockout"},
+                            },
+                        },
+                        "action_disposition": {
+                            "decision": "execute_controlled_internal",
+                            "next_owner": "tool_executor_agent",
+                            "exit_condition": "Receiver acknowledges handoff.",
+                            "fallback": "Cancel if feed normalizes.",
+                            "live_feed_event_ids": ["feed-food"],
+                        },
+                    }
+                ]
+            },
+        },
+        execute=True,
+    )
+
+    executed_tools = [
+        row["source_tool"]
+        for row in result["receipts"]
+        if isinstance(row, dict) and (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("executed")
+    ]
+    assert result["executed_count"] == 2
+    assert executed_tools == ["pause_launch_promo", "inventory_alert"]
+    companion = result["receipts"][1]
+    assert companion["companion_action"] is True
+    assert companion["companion_parent_tool"] == "pause_launch_promo"
+    assert companion["result"]["companion_source"] == "semantic_agent_learning"
+
+
+def test_live_feed_alternative_negotiation_names_safe_substitute_for_held_ops_action():
+    import parkpulse_api
+
+    proposals = {
+        "proposals": [
+            {
+                "agent_id": "ride_ops_agent",
+                "department": "operations",
+                "proposal_envelope": {
+                    "requested_tool": "recommend_route_change",
+                    "executor_status": "awaiting_executive",
+                    "policy_judge": {"status": "requires_executive"},
+                },
+                "policy_judge": {"status": "requires_executive"},
+                "live_feed_grounding": {"event_ids": ["feed-ride"]},
+                "action_disposition": {
+                    "decision": "reject_execution_hold_recommendation",
+                    "next_owner": "operations_lead_with_executive",
+                },
+            },
+            {
+                "agent_id": "event_creative_agent",
+                "department": "marketing",
+                "proposal_envelope": {
+                    "requested_tool": "redirect_offer",
+                    "executor_status": "ready_for_executor",
+                    "policy_judge": {"status": "passed"},
+                },
+                "policy_judge": {"status": "passed"},
+                "action_disposition": {"decision": "execute_controlled_internal"},
+            },
+        ],
+        "executive_tradeoff": {},
+        "negotiation_rounds": [{"round": 1, "name": "local_department_positions"}],
+        "negotiation_turns": [],
+    }
+
+    board = parkpulse_api._build_live_feed_alternative_action_negotiation(proposals)
+
+    assert board["status"] == "negotiated"
+    assert board["substitute_count"] == 1
+    assert board["safe_executable_substitute_count"] == 1
+    assert board["unresolved_without_safe_substitute_count"] == 0
+    row = board["rows"][0]
+    assert row["held_department"] == "operations"
+    assert row["substitute_department"] == "marketing"
+    assert row["substitute_tool"] == "redirect_offer"
+    assert row["substitute_executable_if_approved"] is True
+    assert row["execution_boundary"].startswith("Use the substitute only through its own policy-passed envelope")
+    assert proposals["executive_tradeoff"]["alternative_action_negotiation"]["substitute_count"] == 1
+    assert any(turn["turn"] == "alternative_actions" for turn in proposals["negotiation_turns"])
 
 
 def test_live_feed_memory_priors_fall_back_to_case_bank_when_mongo_empty(tmp_path, monkeypatch):

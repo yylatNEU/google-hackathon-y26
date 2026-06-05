@@ -74,6 +74,14 @@
         "review_status": "venue_approved",
         "last_verified_at": "2026-06-03T00:00:00Z",
         "max_age_seconds": 604800
+      },
+      "synthetic_experience_design_intelligence": {
+        "label": "Approved synthetic experience design intelligence",
+        "source_type": "synthetic_venue_export.profile_intelligence.experience_rules",
+        "confidence": 0.93,
+        "review_status": "venue_approved",
+        "last_verified_at": "2026-06-05T00:00:00Z",
+        "max_age_seconds": 604800
       }
     },
     "field_sources": {
@@ -84,7 +92,10 @@
       "landmarks": ["synthetic_public_map"],
       "shows": ["synthetic_event_schedule", "synthetic_attraction_rules"],
       "family_services": ["synthetic_public_map"],
-      "copy_variants": ["synthetic_guest_copy"]
+      "copy_variants": ["synthetic_guest_copy"],
+      "guest_segments": ["synthetic_experience_design_intelligence"],
+      "experience_rules": ["synthetic_experience_design_intelligence"],
+      "brand_bible": ["synthetic_guest_copy", "synthetic_experience_design_intelligence"]
     },
     "review_queue": [],
     "publish_gates": [
@@ -99,6 +110,68 @@
     "email": "CRM Journey Owner",
     "staff_cue": "Guest Experience Training Owner"
   },
+  "guest_segments": [
+    {
+      "id": "families_with_strollers",
+      "label": "Families with strollers",
+      "decisionDrivers": ["short walks", "step-free paths", "family restrooms", "seating resets", "clear opt-outs"],
+      "preferredZones": ["entrancePlaza", "indoorHub", "coveredPlaza", "foodCourt1", "careLagoon"],
+      "storyNeeds": ["permission to pause", "visible next marker", "caregiver-friendly language", "no forced completion"],
+      "avoid": ["long exposed walks", "tight crowd pockets", "ambiguous stairs or transfer language"],
+      "handoffTriggers": ["lost child", "stroller path blockage", "weather exposure", "accessibility uncertainty"],
+      "source_ids": ["synthetic_experience_design_intelligence"]
+    },
+    {
+      "id": "mixed_age_family_groups",
+      "label": "Mixed-age family groups",
+      "decisionDrivers": ["shared wins", "nearby alternates", "snack and restroom breaks", "range of thrill levels"],
+      "preferredZones": ["indoorHub", "arcadeZone", "careLagoon", "foodCourt1", "coveredPlaza"],
+      "storyNeeds": ["let older kids feel agency", "give younger kids simple clues", "keep adults oriented"],
+      "avoid": ["one-size-fits-all pacing", "reward claims without owner approval", "route copy that strands non-riders"],
+      "handoffTriggers": ["height requirement mismatch", "separated-party support", "ride closure dispute"],
+      "source_ids": ["synthetic_experience_design_intelligence"]
+    },
+    {
+      "id": "low_sensory_guests",
+      "label": "Guests seeking lower-stimulus routes",
+      "decisionDrivers": ["predictable transitions", "quiet reset points", "audio and light notes", "optional exits"],
+      "preferredZones": ["indoorHub", "coveredPlaza", "careLagoon"],
+      "storyNeeds": ["plain wording", "advance notice before high-audio areas", "named bypasses", "calm closure"],
+      "avoid": ["surprise countdowns", "arcade-heavy routes without a reset option", "crowd-energy language"],
+      "handoffTriggers": ["sensory overload", "quiet space unavailable", "accessibility accommodation question"],
+      "source_ids": ["synthetic_experience_design_intelligence"]
+    },
+    {
+      "id": "rainy_day_parties",
+      "label": "Rainy-day parties",
+      "decisionDrivers": ["covered path confidence", "indoor dwell", "slip-risk avoidance", "warm food or seated breaks"],
+      "preferredZones": ["indoorHub", "arcadeZone", "coveredPlaza", "foodCourt1", "foodCourt2"],
+      "storyNeeds": ["comfort-first framing", "dry start", "clear regroup moments", "app-confirmed current options"],
+      "avoid": ["weather guarantees", "fully covered claims unless certified", "rushing through exposed crossings"],
+      "handoffTriggers": ["lightning advisory", "temporary outdoor closure", "blocked covered path"],
+      "source_ids": ["synthetic_experience_design_intelligence"]
+    },
+    {
+      "id": "vip_hosted_groups",
+      "label": "VIP hosted groups",
+      "decisionDrivers": ["signature moments", "polished transitions", "host narration", "private-feeling pauses"],
+      "preferredZones": ["entrancePlaza", "coasterPlaza", "indoorHub", "careLagoon", "coveredPlaza"],
+      "storyNeeds": ["insider context", "choice architecture", "graceful alternates", "keepsake close"],
+      "avoid": ["guaranteed access language", "backstage claims", "staffing promises"],
+      "handoffTriggers": ["availability question", "access request", "weather reroute", "guest recovery moment"],
+      "source_ids": ["synthetic_experience_design_intelligence"]
+    },
+    {
+      "id": "allergy_or_dietary_guests",
+      "label": "Guests with allergy or dietary questions",
+      "decisionDrivers": ["staff confirmation", "menu-source freshness", "simple dining handoff", "low-crowd seating"],
+      "preferredZones": ["foodCourt1", "foodCourt2", "coveredPlaza", "guestServices"],
+      "storyNeeds": ["never imply ingredient certainty", "route to staff confirmation", "make dining optional"],
+      "avoid": ["allergen-free claims", "medical assurance", "ingredient assumptions"],
+      "handoffTriggers": ["ingredient confirmation", "cross-contact concern", "medical uncertainty"],
+      "source_ids": ["synthetic_experience_design_intelligence"]
+    }
+  ],
   "attractions": [
     {
       "id": "dragonCoaster",
@@ -366,6 +439,360 @@
       {"id": "coveredPlaza", "name": "Covered Plaza", "type": "sheltered_area", "zone_id": "coveredPlaza", "x": 500, "y": 230, "width": 160, "height": 92, "source_ids": ["synthetic_public_map"]},
       {"id": "sensoryBreakIndoorHub", "name": "Indoor Hub Lower-Stimulus Corner", "type": "quiet_or_cooling", "zone_id": "indoorHub", "x": 135, "y": 255, "width": 92, "height": 50, "source_ids": ["synthetic_public_map"]}
     ]
+  },
+  "profile_intelligence": {
+    "version": "profile_intelligence_v1",
+    "experience_rules": {
+      "source": "synthetic_experience_design_intelligence",
+      "eventReadyZones": ["entrancePlaza", "indoorHub", "coveredPlaza", "arcadeZone", "foodCourt1", "foodCourt2", "careLagoon"],
+      "rainyDayAnchors": ["indoorHub", "arcadeZone", "coveredPlaza", "foodCourt1", "foodCourt2"],
+      "kidFriendlyAnchors": ["Theater B", "Storybook Boats", "Arcade Zone", "Shade Garden", "Lagoon Lanterns", "Indoor Hub Lower-Stimulus Corner", "Food Court B", "Family Reunification Point"],
+      "lowSensoryAnchors": ["Theater B", "Shade Garden", "Indoor Hub Lower-Stimulus Corner", "Covered Plaza", "Care Lagoon Family Room"],
+      "halloweenCandidateLocations": ["Dragon Arch Photo Spot", "Lagoon Lanterns", "Storybook Boats", "Theater B", "Covered Plaza", "Shade Garden", "Main Street Shops", "Food Court B"],
+      "vipRouteAnchors": ["Guest Services", "Dragon Arch Photo Spot", "Dragon Coaster", "Indoor Launch", "Theater B", "Lagoon Lanterns", "Harbor Treats", "Covered Plaza"],
+      "signatureStoryAnchors": [
+        {
+          "id": "dragon_gate_opening",
+          "location": "Dragon Arch Photo Spot",
+          "zoneId": "coasterPlaza",
+          "themeRole": "arrival myth",
+          "guestEmotion": "anticipation",
+          "bestFor": ["Halloween route", "VIP tour", "photo quest"]
+        },
+        {
+          "id": "indoor_launch_spark",
+          "location": "Indoor Launch",
+          "zoneId": "indoorHub",
+          "themeRole": "energy lift",
+          "guestEmotion": "momentum",
+          "bestFor": ["rainy-day journey", "VIP tour", "thrill-family split plan"]
+        },
+        {
+          "id": "lantern_lagoon_close",
+          "location": "Lagoon Lanterns",
+          "zoneId": "careLagoon",
+          "themeRole": "gentle finale",
+          "guestEmotion": "resolution",
+          "bestFor": ["kid quest", "low-sensory path", "evening scavenger hunt"]
+        }
+      ],
+      "routePatterns": {
+        "rainy_day": {
+          "recommendedArc": ["dry start", "choice pause", "seated reset", "food or restroom option", "covered close"],
+          "preferredStops": ["Indoor Launch", "Arcade Zone", "Theater B", "Food Court A", "Food Court B"],
+          "mustInclude": ["one seated reset", "one app-confirmed current-options cue", "one explicit opt-out"],
+          "avoidClaims": ["fully covered route unless every path segment is certified covered", "weather guarantee", "staff availability guarantee"]
+        },
+        "kid_quest": {
+          "recommendedArc": ["mission start", "visual clue", "low-pressure discovery", "caregiver reset", "celebration"],
+          "preferredStops": ["Theater B", "Storybook Boats", "Lagoon Lanterns", "Shade Garden", "Food Court B"],
+          "mustInclude": ["caregiver bypass language", "non-purchase reward option", "visible clue object"],
+          "avoidClaims": ["guaranteed prize", "age suitability beyond approved attraction rules"]
+        },
+        "low_sensory": {
+          "recommendedArc": ["orient", "quiet move", "reset", "optional delight", "easy return"],
+          "preferredStops": ["Indoor Hub Lower-Stimulus Corner", "Theater B", "Shade Garden", "Covered Plaza", "Care Lagoon Family Room"],
+          "mustInclude": ["audio/light expectations", "named bypass", "permission to stop"],
+          "avoidClaims": ["quiet guarantee", "medical or diagnosis-specific advice"]
+        },
+        "vip_tour": {
+          "recommendedArc": ["host welcome", "insider reveal", "signature moment", "relaxed pause", "keepsake close"],
+          "preferredStops": ["Guest Services", "Dragon Arch Photo Spot", "Dragon Coaster", "Indoor Launch", "Lagoon Lanterns"],
+          "mustInclude": ["availability caveat", "weather alternate", "host transition script"],
+          "avoidClaims": ["backstage access", "priority access guarantee", "staffing promise"]
+        },
+        "halloween_route": {
+          "recommendedArc": ["soft spooky invite", "glow clue", "creature-free mystery", "treat or photo pause", "lantern finale"],
+          "preferredStops": ["Dragon Arch Photo Spot", "Theater B", "Storybook Boats", "Lagoon Lanterns", "Food Court B"],
+          "mustInclude": ["family-safe scare level", "well-lit exit option", "no jump-scare wording"],
+          "avoidClaims": ["fear pressure", "dark route guarantee", "age-inappropriate threat language"]
+        }
+      },
+      "noGoPairings": [
+        {"rule": "Do not route low-sensory guests through Arcade Zone without naming Theater B or Shade Garden as an immediate reset.", "severity": "high"},
+        {"rule": "Do not combine rain messaging with fully covered claims unless each path segment has covered=true and guest_route_copy allowed.", "severity": "critical"},
+        {"rule": "Do not write allergy or dietary content as assurance; route to staff confirmation and current menu source.", "severity": "critical"},
+        {"rule": "Do not use parade crossing zones during blackout windows without a timing caveat.", "severity": "high"},
+        {"rule": "Do not make VIP copy imply private access, backstage access, or priority access unless supplied by a separate approved entitlement feed.", "severity": "critical"}
+      ],
+      "channelArtifactRules": {
+        "guest_app": ["short headline", "optional route framing", "current-options caveat", "one tap to accessibility info"],
+        "signage": ["six words or fewer for headline", "one action per sign", "avoid conditional clauses"],
+        "email": ["prepare guests before arrival", "do not imply live availability", "include accessibility preference handoff"],
+        "staff_cue": ["plain spoken language", "route is optional", "defer live status to app or supervisor"]
+      }
+    },
+    "certified_paths": [
+      {
+        "id": "path_indoor_launch_arcade",
+        "fromZoneId": "indoorHub",
+        "toZoneId": "arcadeZone",
+        "estimatedWalkMinutes": 5,
+        "stepFree": true,
+        "covered": true,
+        "crowdSensitivity": "medium",
+        "certificationStatus": "venue_certified",
+        "allowedUses": ["guest_route_copy", "internal_ranking", "accessibility_planning"],
+        "blockedClaims": ["ada_compliant_path"],
+        "source": "synthetic_public_map.certified_accessibility_path_audit"
+      },
+      {
+        "id": "path_arcade_theater_b",
+        "fromZoneId": "arcadeZone",
+        "toZoneId": "indoorHub",
+        "estimatedWalkMinutes": 4,
+        "stepFree": true,
+        "covered": true,
+        "crowdSensitivity": "medium",
+        "certificationStatus": "venue_certified",
+        "allowedUses": ["guest_route_copy", "internal_ranking", "accessibility_planning"],
+        "blockedClaims": ["ada_compliant_path"],
+        "source": "synthetic_public_map.certified_accessibility_path_audit"
+      },
+      {
+        "id": "path_theater_food_court_a",
+        "fromZoneId": "indoorHub",
+        "toZoneId": "foodCourt1",
+        "estimatedWalkMinutes": 7,
+        "stepFree": true,
+        "covered": false,
+        "crowdSensitivity": "high",
+        "certificationStatus": "venue_certified",
+        "allowedUses": ["internal_ranking", "accessibility_planning"],
+        "blockedClaims": ["fully_covered_route", "ada_compliant_path"],
+        "source": "synthetic_public_map.certified_accessibility_path_audit"
+      },
+      {
+        "id": "path_food_court_a_food_court_b",
+        "fromZoneId": "foodCourt1",
+        "toZoneId": "foodCourt2",
+        "estimatedWalkMinutes": 6,
+        "stepFree": true,
+        "covered": true,
+        "crowdSensitivity": "medium",
+        "certificationStatus": "venue_certified",
+        "allowedUses": ["guest_route_copy", "internal_ranking", "accessibility_planning"],
+        "blockedClaims": ["ada_compliant_path"],
+        "source": "synthetic_public_map.certified_accessibility_path_audit"
+      }
+    ],
+    "capacity_model": {
+      "status": "venue_certified",
+      "source": "synthetic_capacity_and_seating_audit",
+      "zoneComfort": [
+        {
+          "zoneId": "indoorHub",
+          "comfortCapacityEstimate": 460,
+          "seatingCapacity": 165,
+          "decompressionCapacity": 55,
+          "dwellMinutesTypical": 28,
+          "spillbackRisk": "medium",
+          "confidence": "venue_certified"
+        },
+        {
+          "zoneId": "arcadeZone",
+          "comfortCapacityEstimate": 260,
+          "seatingCapacity": 34,
+          "decompressionCapacity": 12,
+          "dwellMinutesTypical": 22,
+          "spillbackRisk": "medium",
+          "confidence": "venue_certified"
+        },
+        {
+          "zoneId": "foodCourt1",
+          "comfortCapacityEstimate": 520,
+          "seatingCapacity": 310,
+          "decompressionCapacity": 36,
+          "dwellMinutesTypical": 38,
+          "spillbackRisk": "high",
+          "confidence": "venue_certified"
+        },
+        {
+          "zoneId": "foodCourt2",
+          "comfortCapacityEstimate": 240,
+          "seatingCapacity": 116,
+          "decompressionCapacity": 20,
+          "dwellMinutesTypical": 30,
+          "spillbackRisk": "medium",
+          "confidence": "venue_certified"
+        },
+        {
+          "zoneId": "coveredPlaza",
+          "comfortCapacityEstimate": 320,
+          "seatingCapacity": 88,
+          "decompressionCapacity": 42,
+          "dwellMinutesTypical": 24,
+          "spillbackRisk": "low",
+          "confidence": "venue_certified"
+        }
+      ],
+      "blockedClaims": ["fire_code_limit", "staffing_level", "guaranteed_space"]
+    },
+    "timing_model": {
+      "status": "venue_scheduled",
+      "source": "synthetic_event_schedule.certified_daily_operating_calendar",
+      "showtimes": [
+        {
+          "id": "theater_b_1100",
+          "name": "Theater B Cooling Show",
+          "zoneId": "indoorHub",
+          "startsAtLocal": "11:00",
+          "endsAtLocal": "11:18",
+          "setupWindowMinutes": 12,
+          "teardownWindowMinutes": 8
+        },
+        {
+          "id": "theater_b_1400",
+          "name": "Theater B Cooling Show",
+          "zoneId": "indoorHub",
+          "startsAtLocal": "14:00",
+          "endsAtLocal": "14:18",
+          "setupWindowMinutes": 12,
+          "teardownWindowMinutes": 8
+        },
+        {
+          "id": "lagoon_lantern_1830",
+          "name": "Lagoon Lantern Moment",
+          "zoneId": "careLagoon",
+          "startsAtLocal": "18:30",
+          "endsAtLocal": "18:40",
+          "setupWindowMinutes": 15,
+          "teardownWindowMinutes": 10
+        }
+      ],
+      "paradeRoutes": [
+        {
+          "id": "main_parade_crossing",
+          "name": "Main Parade Crossing",
+          "affectedZoneIds": ["coasterPlaza", "coveredPlaza"],
+          "startsAtLocal": "15:45",
+          "endsAtLocal": "16:15"
+        }
+      ],
+      "blackoutWindows": [
+        {
+          "id": "main_parade_setup",
+          "reason": "Parade setup and crossing control",
+          "affectedZoneIds": ["coasterPlaza", "coveredPlaza"],
+          "startsAtLocal": "15:20",
+          "endsAtLocal": "16:25"
+        },
+        {
+          "id": "theater_b_turnover_1400",
+          "reason": "Theater B show seating and exit pulse",
+          "affectedZoneIds": ["indoorHub"],
+          "startsAtLocal": "13:48",
+          "endsAtLocal": "14:28"
+        }
+      ]
+    },
+    "review_owners": {
+      "experience_design": "Park Experience Content Owner",
+      "accessibility": "Guest Experience Training Owner",
+      "safety": "Operations Review Lead",
+      "crm": "CRM Journey Owner",
+      "digital": "Digital Experience Owner"
+    },
+    "brand_bible": {
+      "brandName": "ParkPulse Adventure Park",
+      "source": "synthetic_guest_copy + synthetic_experience_design_intelligence",
+      "tone": ["clear", "warm", "family-friendly", "lightly adventurous", "operationally cautious"],
+      "audiences": ["families", "thrill seekers", "mixed-age groups", "guests seeking lower-stimulus routes"],
+      "voicePrinciples": [
+        "Lead with comfort and choice before novelty.",
+        "Make every route feel optional and easy to exit.",
+        "Use concrete public place names rather than vague magical language.",
+        "Keep spooky, premium, and playful concepts family-safe and pressure-free.",
+        "State review-sensitive facts as confirmation steps, not promises."
+      ],
+      "approvedPhrases": [
+        "when you are ready",
+        "optional route",
+        "check the app for current options",
+        "ask a team member for the approved route information",
+        "pause here if this stop works better for your group",
+        "follow the next visible marker"
+      ],
+      "bannedClaims": ["guaranteed", "allergen-free", "ADA compliant", "always available", "no wait", "priority access", "backstage access", "private route"],
+      "copyRules": [
+        "Use public place names exactly as venue-approved.",
+        "Prefer plain language for safety, accessibility, weather, and wayfinding.",
+        "Use staff-confirmation language for allergy, medical, accessibility, ride-rule, and live-availability uncertainty.",
+        "Avoid fear-based phrasing during weather, crowd, safety, Halloween, or low-sensory guidance.",
+        "For kid quests, make the reward a memory, sticker placeholder, photo prompt, or owner-approved artifact."
+      ],
+      "thematicLexicon": {
+        "dragon": ["arch", "spark", "launch", "crest", "glow"],
+        "lagoon": ["lantern", "ripple", "quiet water", "south rail", "soft finale"],
+        "rain": ["dry marker", "covered regroup", "warm pause", "comfort stop"],
+        "low_sensory": ["quiet reset", "easy return", "lower-stimulus corner", "plain next step"],
+        "vip": ["host welcome", "insider reveal", "graceful alternate", "keepsake close"]
+      },
+      "supportedLocales": ["en", "es"],
+      "approvedSnippets": {
+        "en": {
+          "route_help": "I can show an optional public route from here.",
+          "service_help": "Guest Services and First Aid are available on the public map.",
+          "weather_help": "For heat or rain, prefer Indoor Hub, Theater B, Arcade Zone, or Covered Plaza.",
+          "low_sensory_help": "For a quieter break, consider Indoor Hub Lower-Stimulus Corner, Shade Garden, or Theater B between showtimes.",
+          "availability_boundary": "Check the app or ask a team member for current availability before you move."
+        },
+        "es": {
+          "route_help": "Puedo mostrar una ruta publica opcional desde aqui.",
+          "service_help": "Servicios al visitante y primeros auxilios aparecen en el mapa publico.",
+          "weather_help": "Con calor o lluvia, use Indoor Hub, Theater B, Arcade Zone o Covered Plaza.",
+          "low_sensory_help": "Para un descanso mas tranquilo, considere Indoor Hub Lower-Stimulus Corner, Shade Garden o Theater B entre funciones.",
+          "availability_boundary": "Revise la app o pregunte a un miembro del equipo por la disponibilidad actual antes de moverse."
+        }
+      }
+    },
+    "module_policy": {
+      "experience_studio": {
+        "mayDraft": ["themed copy", "guest journey concepts", "kid quests", "scavenger hunts", "VIP scripts", "pre-arrival email drafts", "signage language"],
+        "mustReview": ["safety messaging", "accessibility language", "claims about availability or staff actions", "weather shelter language", "reward fulfillment", "VIP entitlement language"],
+        "neverClaim": ["guaranteed access", "certified safety status", "medical or allergy assurance", "ADA compliance", "priority access", "private or backstage access"],
+        "preferredOutputs": ["executive concept", "route storyboard", "channel copy", "staff cue", "owner questions", "reasoning trace", "review packet"]
+      },
+      "accessibility_journey": {
+        "mayRecommend": ["public route options", "rest points", "staff handoff points", "conservative alternates"],
+        "mustReview": ["ride transfer help", "route blockage", "low-sensory claims", "mobility claims"],
+        "neverClaim": ["ADA compliance", "equipment availability", "diagnosis-specific advice"]
+      },
+      "learning_evaluation": {
+        "mayLearnFrom": ["reviewer labels", "aggregate route outcomes", "source version", "zone and segment context"],
+        "mustExclude": ["private guest identity", "medical diagnosis", "disability identity", "protected class"]
+      }
+    },
+    "learning_schema": {
+      "version": "venue_profile_learning_schema_v1",
+      "observationKeys": ["venueProfileVersion", "profileIntelligenceVersion", "zoneId", "guestSegmentId", "templateId", "weatherCondition", "crowdDensityBand", "humanReviewOutcome", "guestFeedbackLabel"],
+      "feedbackLabels": ["accepted_as_drafted", "edited_for_brand_voice", "edited_for_safety", "rerouted_by_staff", "blocked_by_missing_profile_fact", "accessibility_staff_confirmed", "guest_completed_route", "guest_abandoned_route", "guest_reported_confusion", "owner_rejected_claim"],
+      "successMetrics": ["reviewer_accepted_without_safety_edit", "guest_completed_route", "lower_confusion_report_rate", "staff_handoff_completed_when_required"],
+      "failureMetrics": ["edited_for_safety", "rerouted_by_staff", "blocked_by_missing_profile_fact", "guest_reported_confusion", "owner_rejected_claim"],
+      "updateTargets": {
+        "profile_update": ["blocked_by_missing_profile_fact", "rerouted_by_staff"],
+        "prompt_or_policy_update": ["edited_for_safety", "guest_reported_confusion", "owner_rejected_claim"],
+        "source_feed_update": ["stale_source_detected", "live_feed_binding_missing"]
+      }
+    },
+    "live_feed_bindings": {
+      "zones": [
+        {"zoneId": "indoorHub", "liveFeed": "guestFlow.zones", "matchStrategy": "zone_id", "profileRole": "shelter_show_or_reset"},
+        {"zoneId": "arcadeZone", "liveFeed": "guestFlow.zones", "matchStrategy": "zone_id", "profileRole": "indoor_games"},
+        {"zoneId": "foodCourt1", "liveFeed": "guestFlow.zones", "matchStrategy": "zone_id", "profileRole": "dining_and_dwell"},
+        {"zoneId": "coveredPlaza", "liveFeed": "guestFlow.zones", "matchStrategy": "zone_id", "profileRole": "shelter_corridor"}
+      ],
+      "attractions": [
+        {"name": "Dragon Coaster", "zoneId": "coasterPlaza", "liveFeed": "guestFlow.rides", "matchStrategy": "name_or_profile_id"},
+        {"name": "Indoor Launch", "zoneId": "indoorHub", "liveFeed": "guestFlow.rides", "matchStrategy": "name_or_profile_id"},
+        {"name": "Theater B", "zoneId": "indoorHub", "liveFeed": "guestFlow.shows", "matchStrategy": "name_or_profile_id"}
+      ],
+      "weather": [
+        {"profileField": "experienceRules.rainyDayAnchors", "liveFeed": "weather.precipitation", "use": "rank shelter and exposed-route risk"},
+        {"profileField": "experienceRules.lowSensoryAnchors", "liveFeed": "weather.heatIndexF", "use": "rank cooling and reset breaks"}
+      ],
+      "missingBindingsPolicy": "If a live feed cannot be matched, Experience Studio may draft but must mark current availability and movement claims for owner confirmation."
+    }
   },
   "copy_variants": {
     "en": {

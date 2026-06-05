@@ -37,6 +37,7 @@ from agent_handshake import (  # noqa: E402
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
     run_external_client_agent_demo,
+    run_passport_second_run_demo,
     run_agent_handshake_scenario_evaluations,
     run_agent_handshake_policy_challenges,
     session_protocol_receipt,
@@ -389,6 +390,15 @@ def test_dedicated_supply_chain_handshake_demo_uses_supplier_scopes_and_signed_r
     assert {handoff["internal_agent_id"] for handoff in session["internal_handoffs"]} >= {"supply_chain_agent", "procurement_agent", "safety_agent", "food_agent"}
     assert any(decision["action"] == "bypass_food_safety" and decision["allowed"] is False for decision in session["policy_decisions"])
     assert any(decision["action"] == "vendor_payment_release" and decision["requires_user_approval"] is True for decision in session["policy_decisions"])
+    assert demo["verification"]["status"] == "verified"
+    evolution = demo["passport_evolution"]
+    assert evolution["memory_scope"]["isolation"] == "represented_subject"
+    assert evolution["memory_scope"]["represented_subject"] == "supplier_vendor_cold_chain_42"
+    assert evolution["memory_scope"]["counterparty"] == "supplier"
+    assert evolution["trace"]["receipt_id"] == receipt["receipt_id"]
+    assert evolution["eval"]["authority_respected"] is True
+    assert "cold_chain_status" in evolution["next_passport"]["allowed"]
+    assert {"purchase_order", "vendor_payment_release", "bypass_food_safety"}.issubset(set(evolution["next_passport"]["requires_approval"]))
     _sessions.pop(demo["session_id"], None)
 
 
@@ -419,7 +429,45 @@ def test_external_client_agent_demo_runs_counterparty_loop_and_adversarial_probe
     }
     assert demo["memory_context"]["memory_role"]
     assert demo["trust_context"]["certification_required"] is True
+    assert demo["external_agent_result"]["artifact_type"] == "external_agent_useful_result"
+    assert demo["external_agent_result"]["final_plan"]
+    assert demo["external_agent_result"]["message_to_represented_party"]
+    assert demo["agent_dialogue"]
+    assert any(turn["phase"] == "Plan Build" and turn.get("final_plan") for turn in demo["agent_dialogue"])
+    assert any(turn["phase"] == "Receipt" and "Deliver to external agent" in turn.get("final_plan", "") for turn in demo["agent_dialogue"])
+    evolution = demo["passport_evolution"]
+    assert evolution["artifact_type"] == "agent_passport_evolution"
+    assert evolution["memory_scope"]["isolation"] == "represented_subject"
+    assert evolution["memory_scope"]["represented_subject"] == "supplier_vendor_cold_chain_incident"
+    assert evolution["memory_scope"]["counterparty"] == "supplier"
+    assert evolution["trace"]["receipt_id"] == demo["receipt"]["receipt_id"]
+    assert evolution["eval"]["receipt_verified"] is True
+    assert evolution["eval"]["memory_isolated"] is True
+    assert evolution["next_passport"]["passport_level"] >= 2
+    assert {"purchase_order", "vendor_payment_release", "bypass_food_safety"}.issubset(set(evolution["next_passport"]["requires_approval"]))
     _sessions.pop(demo["session_id"], None)
+
+
+def test_passport_second_run_demo_executes_two_runs_and_preserves_gates():
+    demo = run_passport_second_run_demo({"scenario_mode": "incident_response", "agent_id": "john_personal_agent", "represents": "guest_user_123"})
+
+    assert demo["status"] == "demo_complete"
+    assert demo["mode"] == "passport_second_run_comparison"
+    first = demo["first_run"]
+    second = demo["second_run"]
+    comparison = demo["comparison"]
+    assert first["session_id"] != second["session_id"]
+    assert first["receipt"]["receipt_id"] != second["receipt"]["receipt_id"]
+    assert comparison["subject_isolation_preserved"] is True
+    assert comparison["first_passport_level"] == 2
+    assert comparison["second_passport_level"] == 2
+    assert comparison["repeated_questions_reduced_by"] > 0
+    assert {"payment", "share_health_data", "refund"}.issubset(set(comparison["preserved_approval_gates"]))
+    assert first["passport_evolution"]["memory_scope"]["memory_scope_key"] == second["passport_evolution"]["memory_scope"]["memory_scope_key"]
+    assert second["external_agent_result"]["second_run_comparison"]["second_receipt_id"] == comparison["second_receipt_id"]
+    assert any(turn["phase"] == "Second Run" and "Run 1" in turn["park"] for turn in second["agent_dialogue"])
+    _sessions.pop(first["session_id"], None)
+    _sessions.pop(second["session_id"], None)
 
 
 def test_protocol_docs_consent_and_live_state_artifacts_are_available():

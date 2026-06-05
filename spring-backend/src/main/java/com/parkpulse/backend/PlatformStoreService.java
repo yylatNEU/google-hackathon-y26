@@ -137,6 +137,7 @@ public class PlatformStoreService {
             "/readyz",
             "/api/park/auth/dev-session",
             "/api/park/auth/status",
+            "/api/park/state-lite",
             "/api/park/role-access-contracts",
             "/api/park/reliability",
             "/api/park/latency-diagnostics",

@@ -69,6 +69,7 @@ async def main() -> int:
     park_profile_summary = payload.get("park_profile_summary", {}) if isinstance(payload.get("park_profile_summary"), dict) else {}
     memory_priors = payload.get("live_feed_memory_priors", {}) if isinstance(payload.get("live_feed_memory_priors"), dict) else {}
     memory_prior_use = proposals.get("memory_prior_use", {}) if isinstance(proposals.get("memory_prior_use"), dict) else {}
+    alternative_negotiation = proposals.get("alternative_action_negotiation", {}) if isinstance(proposals.get("alternative_action_negotiation"), dict) else payload.get("alternative_action_negotiation", {}) if isinstance(payload.get("alternative_action_negotiation"), dict) else {}
     negotiation_rounds = proposals.get("negotiation_rounds", []) if isinstance(proposals.get("negotiation_rounds"), list) else []
     tradeoff_matrix = proposals.get("tradeoff_matrix", []) if isinstance(proposals.get("tradeoff_matrix"), list) else []
     memory_decision_deltas = proposals.get("memory_decision_deltas", []) if isinstance(proposals.get("memory_decision_deltas"), list) else []
@@ -76,9 +77,19 @@ async def main() -> int:
     hard_follow = payload.get("hard_decision_follow_through", {}) if isinstance(payload.get("hard_decision_follow_through"), dict) else {}
     receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
     outcome_measurement = payload.get("live_feed_outcome_measurement", {}) if isinstance(payload.get("live_feed_outcome_measurement"), dict) else {}
+    substitute_attribution = outcome_measurement.get("substitute_outcome_attribution", {}) if isinstance(outcome_measurement.get("substitute_outcome_attribution"), dict) else (outcome_measurement.get("reward_layers", {}) if isinstance(outcome_measurement.get("reward_layers"), dict) else {}).get("substitute_outcome_attribution", {}) if isinstance((outcome_measurement.get("reward_layers", {}) if isinstance(outcome_measurement.get("reward_layers"), dict) else {}).get("substitute_outcome_attribution"), dict) else {}
     outcome_memory = payload.get("live_feed_outcome_memory", {}) if isinstance(payload.get("live_feed_outcome_memory"), dict) else {}
     outcome = outcome_memory.get("outcome", {}) if isinstance(outcome_memory.get("outcome"), dict) else {}
     response_metrics = outcome.get("response_metrics", {}) if isinstance(outcome.get("response_metrics"), dict) else {}
+    executor_receipts = executor_test.get("receipts", []) if isinstance(executor_test.get("receipts"), list) else []
+    semantic_action_parameter_count = sum(
+        1
+        for row in executor_receipts
+        if isinstance(row, dict)
+        and isinstance(row.get("semantic_action_parameters") or row.get("action_parameters"), dict)
+        and (row.get("semantic_action_parameters") or row.get("action_parameters")).get("source") == "semantic_agent_learning"
+    )
+    controlled_projection = outcome_measurement.get("controlled_effect_projection", {}) if isinstance(outcome_measurement.get("controlled_effect_projection"), dict) else {}
     proposal_count = int(tool_use.get("proposal_count") or 0)
     grounded_proposal_count = int(tool_use.get("live_feed_grounded_proposal_count") or 0)
     deep_reasoning_proposal_count = sum(1 for proposal in proposal_rows if isinstance(proposal, dict) and _proposal_has_deep_reasoning(proposal))
@@ -166,6 +177,8 @@ async def main() -> int:
         and tradeoff_evidence_argument_count == len(tradeoff_matrix)
         and proposals.get("park_profile_context_status") == "attached"
         and len(negotiation_rounds) >= 4
+        and int(alternative_negotiation.get("substitute_count") or 0) > 0
+        and int(alternative_negotiation.get("unresolved_without_safe_substitute_count") or 0) == 0
         and len(tradeoff_matrix) == proposal_count
         and missing_policy_check_count == 0
         and concrete_policy_count == proposal_count
@@ -189,6 +202,8 @@ async def main() -> int:
         and outcome_measurement.get("measured_outcome_available") is True
         and float(outcome_measurement.get("attribution_confidence") or 0) >= 0.7
         and outcome_measurement.get("eligible_for_reward") is True
+        and substitute_attribution.get("status") == "scored"
+        and int(substitute_attribution.get("executed_branch_count") or 0) > 0
         and outcome_memory.get("status") in {"recorded", "skipped"}
         and bool(outcome_memory.get("outcome_id"))
         and response_metrics.get("measuredOutcomeAvailable") is True
@@ -217,6 +232,12 @@ async def main() -> int:
         "park_profile_context_status": proposals.get("park_profile_context_status"),
         "park_profile_summary": park_profile_summary,
         "negotiation_round_count": len(negotiation_rounds),
+        "alternative_action_negotiation": {
+            "status": alternative_negotiation.get("status"),
+            "substitute_count": alternative_negotiation.get("substitute_count"),
+            "safe_executable_substitute_count": alternative_negotiation.get("safe_executable_substitute_count"),
+            "unresolved_without_safe_substitute_count": alternative_negotiation.get("unresolved_without_safe_substitute_count"),
+        },
         "tradeoff_matrix_count": len(tradeoff_matrix),
         "memory_decision_delta_count": len(memory_decision_deltas),
         "live_feed_evidence_count": tool_use.get("live_feed_evidence_count"),
@@ -224,9 +245,17 @@ async def main() -> int:
         "live_feed_memory_priors": {
             "status": memory_priors.get("status"),
             "prior_count": memory_priors.get("prior_count"),
+            "semantic_prior_count": memory_priors.get("semantic_prior_count"),
+            "semantic_learning_ids": memory_priors.get("semantic_learning_ids", []),
+            "retrieval_method": memory_priors.get("retrieval_method"),
             "latest_outcome_ids": memory_priors.get("latest_outcome_ids", []),
+            "dashboard_connected": (memory_priors.get("dashboard_status", {}) if isinstance(memory_priors.get("dashboard_status"), dict) else {}).get("connected"),
+            "dashboard_mode": (memory_priors.get("dashboard_status", {}) if isinstance(memory_priors.get("dashboard_status"), dict) else {}).get("mode"),
+            "dashboard_database": (memory_priors.get("dashboard_status", {}) if isinstance(memory_priors.get("dashboard_status"), dict) else {}).get("database"),
             "applied_count": memory_prior_use.get("applied_count"),
             "applied_prior_outcome_ids": memory_prior_use.get("prior_outcome_ids", []),
+            "semantic_companion_count": memory_prior_use.get("semantic_companion_count"),
+            "semantic_companion_tools": memory_prior_use.get("semantic_companion_tools", []),
             "weak_context_count": memory_prior_use.get("weak_context_count"),
             "blocked_count": memory_prior_use.get("blocked_count"),
             "rejected_count": memory_prior_use.get("rejected_count"),
@@ -242,6 +271,7 @@ async def main() -> int:
             "held_count": executor_test.get("held_count"),
             "held_disposition_count": executor_test.get("held_disposition_count"),
             "receipt_count": executor_test.get("receipt_count"),
+            "semantic_action_parameter_count": semantic_action_parameter_count,
         },
         "hard_decision_follow_through": {
             "status": hard_follow.get("status"),
@@ -254,6 +284,8 @@ async def main() -> int:
         "live_feed_receiver_delivery": {
             "status": receiver_delivery.get("status"),
             "proof_id": receiver_delivery.get("proof_id"),
+            "execution_mode": receiver_delivery.get("execution_mode"),
+            "action_effect_boundary": receiver_delivery.get("action_effect_boundary"),
             "executed_count": receiver_delivery.get("executed_count"),
             "delivered_count": receiver_delivery.get("delivered_count"),
             "acknowledged_count": receiver_delivery.get("acknowledged_count"),
@@ -268,6 +300,12 @@ async def main() -> int:
             "eligible_for_reward": outcome_measurement.get("eligible_for_reward"),
             "reward_value": outcome_measurement.get("reward_value"),
             "measured_source_count": len(outcome_measurement.get("measurement_rows", []) if isinstance(outcome_measurement.get("measurement_rows"), list) else []),
+            "semantic_parameters_applied": controlled_projection.get("semantic_parameters_applied"),
+            "substitute_outcome_status": substitute_attribution.get("status"),
+            "substitute_branch_count": substitute_attribution.get("branch_count"),
+            "substitute_executed_branch_count": substitute_attribution.get("executed_branch_count"),
+            "substitute_average_score": substitute_attribution.get("average_substitute_score"),
+            "substitute_average_lift_vs_monitor": substitute_attribution.get("average_lift_vs_monitor"),
         },
         "live_feed_outcome_memory": {
             "status": outcome_memory.get("status"),
@@ -281,10 +319,19 @@ async def main() -> int:
     }
     report = {
         "mode": "live_feed_agent_smoke",
+        "status": summary["status"],
+        "run_status": summary.get("run_status"),
+        "mongo_connected": (memory_priors.get("dashboard_status", {}) if isinstance(memory_priors.get("dashboard_status"), dict) else {}).get("connected"),
+        "memory_backend": (memory_priors.get("dashboard_status", {}) if isinstance(memory_priors.get("dashboard_status"), dict) else {}).get("mode"),
+        "retrieval_method": memory_priors.get("retrieval_method"),
+        "semantic_prior_count": memory_priors.get("semantic_prior_count"),
+        "semantic_companion_count": memory_prior_use.get("semantic_companion_count"),
+        "semantic_action_parameter_count": semantic_action_parameter_count,
         "summary": summary,
         "load_results": load_results,
         "live_feed_case": live_case,
         "live_feed_cooperation": payload.get("live_feed_cooperation"),
+        "alternative_action_negotiation": alternative_negotiation,
         "role_agent_proposals": payload.get("role_agent_proposals"),
         "park_profile_summary": park_profile_summary,
         "live_feed_memory_priors": memory_priors,

@@ -32,6 +32,15 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def fallback_memory():
+    memory = mongo_memory.OperationalMemory()
+    memory.initialize()
+    memory.connected = False
+    memory.db = None
+    memory.mode = "fallback"
+    return memory
+
+
 def sample_state():
     state = run(ParkSimulation().get_state())
     state["guestFlow"]["zones"].append({"id": "packed", "name": "Packed Zone", "density": 105})
@@ -321,8 +330,7 @@ def test_autodream_benchmark_and_mongo_measurement_paths(monkeypatch, capsys):
     assert park_autodream_benchmark._confidence(5, 0.8, 0.01) == "directional"
     assert park_autodream_benchmark._confidence(5, 0.5, 0.01) == "mixed"
 
-    memory = mongo_memory.OperationalMemory()
-    memory.initialize()
+    memory = fallback_memory()
     assert memory.ground_truth_improvement()["status"] == "not_measured"
     measurement = {
         "status": "improved",
@@ -504,8 +512,7 @@ def test_digital_twin_helpers_and_simulation_tail_paths():
 
 def test_mongo_ground_truth_confidence_branches():
     def measured_status(items):
-        memory = mongo_memory.OperationalMemory()
-        memory.initialize()
+        memory = fallback_memory()
         memory._fallback["outcome_events"] = [{"_id": "outcome", "createdAt": "2026-05-24T00:00:00Z", "promotionImpactMeasurements": items}]
         return memory.ground_truth_improvement(limit=10)
 
