@@ -286,7 +286,26 @@ def _bounded_examples(examples: list[dict[str, Any]], max_examples: int) -> list
     deduped: dict[str, dict[str, Any]] = {}
     for row in examples:
         deduped[str(row["id"])] = row
-    return list(deduped.values())[:limit]
+    rows = list(deduped.values())
+    selected: list[dict[str, Any]] = []
+    selected_ids: set[str] = set()
+    for agent_id in TRAINING_AGENT_ORDER:
+        role_row = next((row for row in rows if row.get("agent_id") == agent_id and str(row.get("id")) not in selected_ids), None)
+        if role_row is None:
+            continue
+        selected.append(role_row)
+        selected_ids.add(str(role_row.get("id")))
+        if len(selected) >= limit:
+            return selected
+    for row in rows:
+        row_id = str(row.get("id"))
+        if row_id in selected_ids:
+            continue
+        selected.append(row)
+        selected_ids.add(row_id)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _example(

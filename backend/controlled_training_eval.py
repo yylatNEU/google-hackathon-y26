@@ -253,7 +253,13 @@ def _ops_decision_score(row: dict[str, Any], score: int, failures: list[str]) ->
 def _role_requirement_failures(agent_id: str, rows: list[dict[str, Any]]) -> list[str]:
     if agent_id in {"react_agent", "proactive_agent"}:
         has_observed_outcome = any(row.get("source") == "observed_outcome_training_row" for row in rows)
-        return [] if has_observed_outcome else ["React/proactive gate requires at least one observed outcome example."]
+        has_approved_label = any(
+            row.get("source") == "approved_review_label_decision"
+            and isinstance(row.get("expected_output"), dict)
+            and bool((row.get("expected_output") or {}).get("label"))
+            for row in rows
+        )
+        return [] if has_observed_outcome or has_approved_label else ["React/proactive gate requires observed outcome or approved supervised-label coverage."]
     if agent_id == "rl_action_policy":
         has_reward_row = any(
             row.get("source") == "observed_outcome_training_row"
