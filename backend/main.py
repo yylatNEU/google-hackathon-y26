@@ -2066,6 +2066,29 @@ async def _fast_park_state_lite() -> dict[str, Any]:
     return state
 
 
+async def _customer_public_hot_path_state() -> dict[str, Any]:
+    if _fast_park_simulation is None:
+        return {
+            "status": "simulation_unavailable",
+            "entrypoint": "lazy-main",
+            "operationsAudit": {"ready": False, "mode": "customer_hot_path_state_unavailable"},
+        }
+    get_state_lite = getattr(_fast_park_simulation, "get_state_lite", None)
+    raw_state = await get_state_lite() if callable(get_state_lite) else await _fast_park_simulation.get_state()
+    state = dict(raw_state) if isinstance(raw_state, dict) else {}
+    state.pop("industrialDossiers", None)
+    state.setdefault(
+        "operationsAudit",
+        {
+            "ready": True,
+            "mode": "customer_public_hot_path_state",
+            "findings": [],
+            "policy_refs": ["PARK-CARE-001"],
+        },
+    )
+    return state
+
+
 def _scenario_slice_gate(snapshot: dict[str, Any] | None, scenario_key: str) -> dict[str, Any]:
     if not snapshot:
         return {"status": "no_snapshot", "allowed": False, "reason": "No policy snapshot is loaded."}
@@ -9016,7 +9039,7 @@ async def _proact_role_payload(message: str, mode: str, route: dict[str, Any]) -
 
 
 async def _customer_role_hot_path_payload(message: str, mode: str, route: dict[str, Any]) -> dict[str, Any]:
-    state = await _fast_park_state()
+    state = await _customer_public_hot_path_state()
     agent_builder = _customer_support_agent_builder_contract("recommendation")
     payload = _customer_support_fallback_response(
         {"question": message, "mode": "recommendation"},

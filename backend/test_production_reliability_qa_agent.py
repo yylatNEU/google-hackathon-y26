@@ -175,6 +175,43 @@ def test_customer_role_run_uses_bounded_hot_path(monkeypatch):
     assert payload["run_telemetry"]["governance"]["gate_status"] == "customer_read_only"
 
 
+def test_customer_role_hot_path_does_not_advance_or_read_live_feed_overlays(monkeypatch):
+    class FastCustomerSimulation:
+        async def step(self):
+            raise AssertionError("customer hot path must not advance simulator time")
+
+        async def get_state_lite(self):
+            return {
+                "product": {"name": "ParkPulse Park"},
+                "weather": {"condition": "clear", "temperatureF": 78, "stormRisk": 0},
+                "guestFlow": {
+                    "rides": [{"id": "theater-b", "name": "Theater B", "waitMins": 8, "status": "normal"}],
+                    "zones": [{"id": "arcade", "name": "Arcade Zone", "density": 22, "waitMins": 0}],
+                    "paths": [{"from": "entry", "to": "arcade", "fromName": "Entry", "toName": "Arcade Zone", "walkMinutes": 4, "congestionLevel": 12, "status": "open"}],
+                },
+                "foodInventory": {
+                    "locations": [{"id": "main-snacks", "name": "Main Street snacks", "pickupEtaMinutes": 5, "mobileOrderBacklog": 1}]
+                },
+            }
+
+    async def fail_advance():
+        raise AssertionError("customer hot path must not run wall-clock catch-up")
+
+    def fail_overlay(state):
+        raise AssertionError("customer hot path must not read live-feed overlays")
+
+    monkeypatch.setattr(main, "_fast_park_simulation", FastCustomerSimulation())
+    monkeypatch.setattr(main, "_advance_fast_park_from_wall_clock", fail_advance)
+    monkeypatch.setattr(main, "_apply_live_feed_overlays", fail_overlay)
+
+    payload = asyncio.run(main._agent_role_run_payload("where should my family go next", "customer"))
+
+    assert payload["selected_role"] == "customer"
+    assert payload["mode"] == "bounded_customer_role_hot_path"
+    assert payload["park_details"]["mode"] == "customer_public_park_details"
+    assert payload["park_details"]["feed_contract"]["customer_safe"] is True
+
+
 def test_agent_role_trace_sample_timeout_degrades(monkeypatch):
     def slow_trace_sample(*args, **kwargs):
         time.sleep(0.1)
