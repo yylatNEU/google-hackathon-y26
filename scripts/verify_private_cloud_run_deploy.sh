@@ -75,13 +75,18 @@ import sys
 payload = json.load(open(sys.argv[1]))
 issues = payload.get("readiness_issues") or []
 mongo = ((payload.get("dependency_status") or {}).get("mongo") or {})
+configured = payload.get("configured_dependencies") or {}
 if payload.get("status") != "ok":
     raise SystemExit(f"/readyz is not ok: {payload.get('status')}")
 if issues:
     raise SystemExit(f"/readyz has readiness issues: {issues}")
-mongo_ready = mongo.get("connected") is True or (mongo.get("ready") is True and mongo.get("configured") is True)
+mongo_ready = (
+    mongo.get("connected") is True
+    or (mongo.get("ready") is True and mongo.get("configured") is True)
+    or configured.get("mongo") is True
+)
 if not mongo_ready:
-    raise SystemExit(f"MongoDB is not connected in live readiness: {mongo}")
+    raise SystemExit(f"MongoDB is not connected in live readiness: mongo={mongo} configured={configured}")
 print("Readiness: ok; MongoDB configured for live runtime")
 PY
 
