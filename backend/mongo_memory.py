@@ -5290,6 +5290,8 @@ def record_controlled_training_eval(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_latest_controlled_training_eval() -> dict[str, Any] | None:
+    if (_memory.mode != "mongodb" or not _memory.connected) and _mongodb_configured():
+        init_operational_memory(force=True)
     return _safe_memory_call(
         "mongo.controlled_training_eval.latest",
         lambda: _memory.get_latest_controlled_training_eval(),

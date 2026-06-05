@@ -1812,6 +1812,33 @@ def test_controlled_eval_record_rejects_configured_mongo_fallback(monkeypatch):
         memory.record_controlled_training_eval({"id": "controlled-eval-no-fallback"})
 
 
+def test_latest_controlled_eval_reconnects_when_mongo_configured(monkeypatch):
+    class ReconnectableMemory:
+        mode = "demo_fallback_degraded"
+        connected = False
+
+        def get_latest_controlled_training_eval(self):
+            return {"id": "controlled-eval-latest", "status": "passed"}
+
+    reconnectable = ReconnectableMemory()
+    monkeypatch.setenv("MONGODB_URI", "mongodb+srv://user:pass@example.mongodb.net/?appName=ParkPulse")
+    monkeypatch.setattr(mongo_memory, "_memory", reconnectable)
+    monkeypatch.setattr(mongo_memory, "_memory_initialized", True)
+
+    def fake_init(force=False):
+        reconnectable.mode = "mongodb"
+        reconnectable.connected = True
+        return {"mode": "mongodb", "connected": True}
+
+    monkeypatch.setattr(mongo_memory, "init_operational_memory", fake_init)
+
+    latest = mongo_memory.get_latest_controlled_training_eval()
+
+    assert latest["id"] == "controlled-eval-latest"
+    assert reconnectable.mode == "mongodb"
+    assert reconnectable.connected is True
+
+
 def test_memory_ops_agent_reports_depth_and_embedding_coverage(monkeypatch):
     monkeypatch.setenv("MONGODB_URI", "mongodb://example")
     monkeypatch.setattr(mongo_memory, "MongoClient", FakeMongoClient)
