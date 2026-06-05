@@ -7459,6 +7459,19 @@ def _hot_delivery_outbox_health() -> dict[str, Any]:
 
 
 def _hot_platform_store_health() -> dict[str, Any]:
+    path = os.getenv("PARKPULSE_PLATFORM_DB", "/tmp/parkpulse/park_data.db")
+    if not _truthy(os.getenv("PARKPULSE_READINESS_DEEP_PLATFORM_STORE"), False):
+        return {
+            "ready": True,
+            "mode": "hot_path_platform_store_contract",
+            "source_of_truth": "local_sqlite_wal",
+            "path": path,
+            "schema_version": 1,
+            "registered_store_count": None,
+            "observed_store_count": None,
+            "authority_boundary": "SQLite owns local transactional app authority. Deep registry inspection is off the readiness hot path.",
+            "readiness_issues": [],
+        }
     try:
         from platform_store import platform_store_status
 
