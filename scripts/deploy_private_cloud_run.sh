@@ -53,7 +53,7 @@ gcloud run deploy "$SERVICE" \
   --no-allow-unauthenticated \
   --min-instances "${PARKPULSE_CLOUD_RUN_MIN_INSTANCES:-2}" \
   --max-instances "${PARKPULSE_CLOUD_RUN_MAX_INSTANCES:-4}" \
-  --concurrency "${PARKPULSE_CLOUD_RUN_CONCURRENCY:-1}" \
+  --concurrency "${PARKPULSE_CLOUD_RUN_CONCURRENCY:-4}" \
   --memory "${PARKPULSE_CLOUD_RUN_MEMORY:-1Gi}" \
   --cpu "${PARKPULSE_CLOUD_RUN_CPU:-1}" \
   --timeout "${PARKPULSE_CLOUD_RUN_TIMEOUT:-300}" \
