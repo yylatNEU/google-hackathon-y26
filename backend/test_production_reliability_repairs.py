@@ -180,6 +180,12 @@ def test_readyz_platform_store_deep_mode_remains_available(monkeypatch):
     assert health["observed_store_count"] == 7
 
 
+def test_live_feed_refresh_worker_is_opt_in_for_hot_runtime(monkeypatch):
+    monkeypatch.delenv("PARKPULSE_LIVE_FEED_REFRESH_WORKER_ENABLED", raising=False)
+
+    assert main._live_feed_refresh_worker_enabled() is False
+
+
 def test_run_receipt_endpoint_returns_stored_final_payload(monkeypatch):
     async def unavailable_full_module():
         raise RuntimeError("full runtime unavailable")
