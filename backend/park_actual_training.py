@@ -1487,10 +1487,35 @@ def gcp_training_dry_run_readiness(
     validate_tables: bool = False,
     live_feed_preflight: dict[str, Any] | None = None,
     controlled_eval: dict[str, Any] | None = None,
+    fast_readiness: bool = False,
 ) -> dict[str, Any]:
-    bq = bigquery_status()
-    training = actual_training_status(min_rows=min_rows, run_gcp_training=False, detail="readiness")
-    eval_gate = _scoped_bqml_eval_gate(controlled_eval)
+    bq = _fast_bigquery_status() if fast_readiness and not validate_tables else bigquery_status()
+    training = (
+        {
+            "status": "not_checked",
+            "detail": "bounded_dry_run_fast_readiness",
+            "sample_count": None,
+            "source": "not_loaded",
+            "debug": {
+                "readiness_issues": [
+                    "Deep observed-row readiness was not run in bounded dry-run mode. Set deepReadiness=true for the expensive readiness scan."
+                ]
+            },
+        }
+        if fast_readiness
+        else actual_training_status(min_rows=min_rows, run_gcp_training=False, detail="readiness")
+    )
+    eval_gate = (
+        _scoped_bqml_eval_gate(controlled_eval)
+        if (not fast_readiness or isinstance(controlled_eval, dict))
+        else {
+            "allowed": False,
+            "status": "not_checked",
+            "readiness_issues": [
+                "Controlled eval was not loaded in bounded dry-run mode. Pass controlledEval or set deepReadiness=true to read the latest durable eval."
+            ],
+        }
+    )
     table_validation = _validate_bqml_start_tables(bq, validate_tables=validate_tables)
     gcp_enabled = _env_bool("PARKPULSE_ENABLE_GCP_ML_TRAINING")
     real_bqml_start_enabled = _env_bool("PARKPULSE_ENABLE_REAL_BQML_START")
@@ -1567,6 +1592,28 @@ def gcp_training_dry_run_readiness(
         "llm_used_for_reward_or_label": False,
         "gcp_training_started": False,
         "model_promotion_started": False,
+    }
+
+
+def _fast_bigquery_status() -> dict[str, Any]:
+    enabled = _env_bool("ENABLE_BIGQUERY_ANALYTICS")
+    project = os.getenv("BIGQUERY_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT")
+    dataset = os.getenv("BIGQUERY_DATASET", "parkpulse_analytics")
+    ready = bool(enabled and project and dataset)
+    return {
+        "platform": "BigQuery",
+        "role": "historical analytics and aggregate learning, not real-time operational memory",
+        "enabled": enabled,
+        "ready": ready,
+        "project": project,
+        "dataset": dataset,
+        "location": os.getenv("BIGQUERY_LOCATION", "US"),
+        "auto_create_tables": _env_bool("BIGQUERY_AUTO_CREATE_TABLES", True),
+        "mode": "configured_not_pinged" if ready else "analytics_fallback",
+        "tables": [],
+        "readiness_issues": [] if ready else ["BigQuery env config is incomplete."],
+        "hot_path": True,
+        "validation_path": "Bounded dry-run uses env readiness only; set validateTables=true or deepReadiness=true for live BigQuery checks.",
     }
 
 

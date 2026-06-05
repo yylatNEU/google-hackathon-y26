@@ -15,6 +15,8 @@ def test_trace_context_valid_template_project_and_invalid_paths(monkeypatch):
     import trace_context
 
     monkeypatch.delenv("PARKPULSE_ENABLE_OTEL_SPANS", raising=False)
+    monkeypatch.delenv("ARIZE_TRACE_URL_TEMPLATE", raising=False)
+    monkeypatch.delenv("GCP_TRACE_PROJECT", raising=False)
     assert trace_context.current_trace_context()["trace_id"] == ""
 
     monkeypatch.setenv("PARKPULSE_ENABLE_OTEL_SPANS", "true")
@@ -217,6 +219,7 @@ def test_gemini_hard_timeout_worker_error_payloads(monkeypatch):
             return process
 
         monkeypatch.setenv("PARKPULSE_DISABLE_GEMINI_REST_FAST_PATH", "1")
+        monkeypatch.setenv("PARKPULSE_DISABLE_VERTEX_REST_FAST_PATH", "1")
         monkeypatch.setattr(gemini_hard_timeout.asyncio, "create_subprocess_exec", fake_create)
         return await gemini_hard_timeout.generate_gemini_json_hard_timeout({"x": 1}, timeout_seconds=1)
 
@@ -281,6 +284,7 @@ def test_gemini_hard_timeout_main_sdk_fallback(monkeypatch, capsys):
 
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("PARKPULSE_DISABLE_VERTEX_REST_FAST_PATH", "1")
     monkeypatch.setitem(sys.modules, "env_bootstrap", types.SimpleNamespace(load_backend_env=lambda: ()))
 
     class Config:

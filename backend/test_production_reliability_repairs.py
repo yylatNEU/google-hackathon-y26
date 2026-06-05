@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
+import types
 
 os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
 
@@ -139,6 +141,43 @@ def test_readyz_reports_degraded_dependencies():
     assert response["status"] in {"ok", "degraded", "not_ready"}
     assert "dependency_status" in response
     assert {"gemini", "mongo", "bigquery", "delivery_outbox"}.issubset(response["dependency_status"])
+
+
+def test_readyz_platform_store_uses_fast_contract_by_default(monkeypatch):
+    monkeypatch.delenv("PARKPULSE_READINESS_DEEP_PLATFORM_STORE", raising=False)
+
+    health = main._hot_platform_store_health()
+
+    assert health["ready"] is True
+    assert health["mode"] == "hot_path_platform_store_contract"
+    assert health["observed_store_count"] is None
+
+
+def test_readyz_platform_store_deep_mode_remains_available(monkeypatch):
+    monkeypatch.setenv("PARKPULSE_READINESS_DEEP_PLATFORM_STORE", "true")
+    monkeypatch.setitem(
+        sys.modules,
+        "platform_store",
+        types.SimpleNamespace(
+            platform_store_status=lambda: {
+                "ready": True,
+                "mode": "sqlite_platform_registry",
+                "source_of_truth": "local_sqlite_wal",
+                "path": "/tmp/parkpulse/park_data.db",
+                "schema_version": 1,
+                "registered_store_count": 2,
+                "observed_store_count": 7,
+                "authority_boundary": "test",
+                "readiness_issues": [],
+            }
+        ),
+    )
+
+    health = main._hot_platform_store_health()
+
+    assert health["ready"] is True
+    assert health["mode"] == "sqlite_platform_registry"
+    assert health["observed_store_count"] == 7
 
 
 def test_run_receipt_endpoint_returns_stored_final_payload(monkeypatch):

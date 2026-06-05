@@ -2,6 +2,7 @@ import asyncio
 from copy import deepcopy
 import json
 import os
+import time
 
 os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
 
@@ -157,6 +158,79 @@ def test_customer_role_run_uses_customer_contract_not_scan():
     assert payload["role_receipt"]["read_only"] is True
     assert payload["role_work_contract"]["role"] == "customer"
     assert payload["role_work_contract"]["role_specific_work"]["privacy_boundary"]
+
+
+def test_customer_role_run_uses_bounded_hot_path(monkeypatch):
+    async def fail_customer_provider_path(payload):
+        raise AssertionError("agent-role-run customer path should not wait on the provider-backed customer agent")
+
+    monkeypatch.setattr(main, "_customer_support_agent_payload", fail_customer_provider_path)
+
+    payload = asyncio.run(main._agent_role_run_payload("where should my family go next", "customer"))
+
+    assert payload["selected_role"] == "customer"
+    assert payload["mode"] == "bounded_customer_role_hot_path"
+    assert payload["runtime"]["live"] is False
+    assert payload["role_run"]["dispatch_allowed"] is False
+    assert payload["run_telemetry"]["governance"]["gate_status"] == "customer_read_only"
+
+
+def test_customer_role_hot_path_does_not_advance_or_read_live_feed_overlays(monkeypatch):
+    class FastCustomerSimulation:
+        async def step(self):
+            raise AssertionError("customer hot path must not advance simulator time")
+
+        async def get_state_lite(self):
+            return {
+                "product": {"name": "ParkPulse Park"},
+                "weather": {"condition": "clear", "temperatureF": 78, "stormRisk": 0},
+                "guestFlow": {
+                    "rides": [{"id": "theater-b", "name": "Theater B", "waitMins": 8, "status": "normal"}],
+                    "zones": [{"id": "arcade", "name": "Arcade Zone", "density": 22, "waitMins": 0}],
+                    "paths": [{"from": "entry", "to": "arcade", "fromName": "Entry", "toName": "Arcade Zone", "walkMinutes": 4, "congestionLevel": 12, "status": "open"}],
+                },
+                "foodInventory": {
+                    "locations": [{"id": "main-snacks", "name": "Main Street snacks", "pickupEtaMinutes": 5, "mobileOrderBacklog": 1}]
+                },
+            }
+
+    async def fail_advance():
+        raise AssertionError("customer hot path must not run wall-clock catch-up")
+
+    def fail_overlay(state):
+        raise AssertionError("customer hot path must not read live-feed overlays")
+
+    monkeypatch.setattr(main, "_fast_park_simulation", FastCustomerSimulation())
+    monkeypatch.setattr(main, "_advance_fast_park_from_wall_clock", fail_advance)
+    monkeypatch.setattr(main, "_apply_live_feed_overlays", fail_overlay)
+
+    payload = asyncio.run(main._agent_role_run_payload("where should my family go next", "customer"))
+
+    assert payload["selected_role"] == "customer"
+    assert payload["mode"] == "bounded_customer_role_hot_path"
+    assert payload["park_details"]["mode"] == "customer_public_park_details"
+    assert payload["park_details"]["feed_contract"]["customer_safe"] is True
+
+
+def test_agent_role_trace_sample_timeout_degrades(monkeypatch):
+    def slow_trace_sample(*args, **kwargs):
+        time.sleep(0.1)
+        return {"status": "recorded"}
+
+    monkeypatch.setenv("PARKPULSE_AGENT_ROLE_TRACE_SAMPLE_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setattr(main, "record_agent_role_trace_sample", slow_trace_sample)
+
+    receipt = asyncio.run(
+        main._record_agent_role_trace_sample_bounded(
+            {"selected_role": "scan", "digital_twin_tools": {}},
+            message="scan",
+            mode="scan",
+            source="test",
+        )
+    )
+
+    assert receipt["status"] == "deferred"
+    assert "hot response path" in receipt["readiness_issues"][0]
 
 
 def test_agent_role_eval_api_surface_returns_report():

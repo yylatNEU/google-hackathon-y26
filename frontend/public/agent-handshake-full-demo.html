@@ -798,7 +798,7 @@
     .live-conversation {
       display: grid;
       gap: 10px;
-      min-height: 246px;
+      min-height: 360px;
       align-content: start;
     }
 
@@ -882,6 +882,17 @@
       background: rgba(131, 227, 119, .07);
     }
 
+    .chat-line.evidence {
+      border-color: rgba(141, 182, 255, .36);
+      background: rgba(141, 182, 255, .07);
+    }
+
+    .chat-line.final-plan {
+      border-color: rgba(131, 227, 119, .58);
+      background: rgba(131, 227, 119, .12);
+      box-shadow: 0 0 0 1px rgba(131, 227, 119, .1) inset;
+    }
+
     .speaker {
       display: block;
       margin-bottom: 6px;
@@ -894,9 +905,175 @@
     .chat-line p {
       margin: 0;
       color: #d4e2e7;
-      font-size: 14px;
-      line-height: 1.48;
+      font-size: 13px;
+      line-height: 1.55;
       font-weight: 760;
+    }
+
+    .deck-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0;
+    }
+
+    .deck-controls button {
+      min-width: 86px;
+    }
+
+    .final-result {
+      border: 1px solid rgba(131, 227, 119, .45);
+      background: rgba(131, 227, 119, .08);
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 10px;
+    }
+
+    .final-result strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 14px;
+    }
+
+    .final-result p {
+      margin: 0;
+      color: #d9e8dc;
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 760;
+    }
+
+    .passport-loop {
+      grid-column: 1 / -1;
+      border: 1px solid rgba(141, 182, 255, .38);
+      background: rgba(141, 182, 255, .055);
+      border-radius: 8px;
+      padding: 14px;
+      min-width: 0;
+    }
+
+    .passport-flow {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .passport-card {
+      border: 1px solid rgba(255,255,255,.1);
+      background: rgba(5, 10, 13, .72);
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 150px;
+    }
+
+    .passport-card .eyebrow {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 1000;
+      text-transform: uppercase;
+      margin-bottom: 7px;
+    }
+
+    .passport-card strong {
+      display: block;
+      font-size: 15px;
+      line-height: 1.22;
+      margin-bottom: 8px;
+    }
+
+    .passport-card p,
+    .passport-card li {
+      color: #cbdbe2;
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 740;
+    }
+
+    .passport-card p {
+      margin: 0;
+    }
+
+    .passport-card ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .trace-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .trace-pill {
+      border: 1px solid rgba(255,255,255,.09);
+      background: rgba(255,255,255,.035);
+      border-radius: 8px;
+      padding: 9px;
+      min-height: 76px;
+    }
+
+    .trace-pill span {
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 1000;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+
+    .trace-pill strong {
+      display: block;
+      color: var(--ink);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .second-run {
+      margin-top: 10px;
+      border-top: 1px solid rgba(255,255,255,.1);
+      padding-top: 10px;
+      display: grid;
+      grid-template-columns: .9fr 1.1fr;
+      gap: 10px;
+    }
+
+    .second-run .delta,
+    .second-run .guard {
+      border-radius: 8px;
+      padding: 10px;
+    }
+
+    .second-run .delta {
+      border: 1px solid rgba(131, 227, 119, .28);
+      background: rgba(131, 227, 119, .06);
+    }
+
+    .second-run .guard {
+      border: 1px solid rgba(255, 107, 122, .26);
+      background: rgba(255, 107, 122, .055);
+    }
+
+    .second-run strong {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 5px;
+    }
+
+    .second-run p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 760;
+    }
+
+    .passport-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
 
     @keyframes liveGlow {
@@ -1018,10 +1195,19 @@
       grid-template-columns: 28px 1fr;
       gap: 10px;
       align-items: start;
+      width: 100%;
       padding: 9px;
       border-radius: 8px;
       border: 1px solid transparent;
       background: rgba(255,255,255,.025);
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .timeline-step:hover {
+      border-color: rgba(255,255,255,.24);
+      background: rgba(255,255,255,.055);
     }
 
     .timeline-step.done {
@@ -1077,6 +1263,7 @@
       .policy-grid { grid-template-columns: 1fr 1fr; }
       .exchange-body { grid-template-columns: 1fr; }
       .story-grid { grid-template-columns: repeat(2, 1fr); }
+      .passport-flow, .trace-strip, .second-run { grid-template-columns: 1fr; }
     }
 
     @media (max-width: 720px) {
@@ -1159,7 +1346,28 @@
               </div>
             </div>
             <div id="liveConversation" class="live-conversation"></div>
+            <div class="deck-controls" aria-label="Presentation controls">
+              <button id="prevStep" type="button">Previous</button>
+              <button id="nextStep" type="button" class="primary">Next</button>
+              <button id="replaySteps" type="button">Replay</button>
+            </div>
+            <div id="finalResult" class="final-result"></div>
             <div id="liveTimeline"></div>
+          </section>
+
+          <section class="passport-loop">
+            <div class="section-title">
+              <div>
+                <div class="kicker">Passport product loop</div>
+                <h3>Before Passport -> verified run -> next Passport</h3>
+                <p class="section-note">The protocol does not just answer once. It turns a verified interaction into bounded memory, an eval score, and a better scoped Passport for the next run.</p>
+              </div>
+              <div class="passport-actions">
+                <button id="runSecondPass" type="button">Run second pass</button>
+                <span id="passportBadge" class="badge">waiting</span>
+              </div>
+            </div>
+            <div id="passportLoop"></div>
           </section>
         </div>
       </section>
@@ -1469,6 +1677,7 @@
       externalClient: null,
       protocolDocs: null,
       lastPayload: null,
+      secondRunDemo: null,
       liveStep: 0,
       apiOnline: false,
       error: null
@@ -1592,6 +1801,7 @@
       try {
         setRunning("custom");
         state.externalClient = null;
+        state.secondRunDemo = null;
         const input = currentInput();
         const steps = [];
         const tokenPayload = await api("/api/park/delegation-token", {
@@ -1643,9 +1853,12 @@
 
     async function runSupplyDemo() {
       try {
+        const supplyScenario = scenarios[state.selectedScenario]?.kind === "supplier" ? state.selectedScenario : "supply_replenishment";
+        if (state.selectedScenario !== supplyScenario) configureScenario(supplyScenario);
         setRunning("supply");
         state.externalClient = null;
-        const payload = await api("/api/park/agent-handshake/supply-chain/demo", { scenario_mode: state.selectedScenario });
+        state.secondRunDemo = null;
+        const payload = await api("/api/park/agent-handshake/supply-chain/demo", { scenario_mode: supplyScenario });
         const verification = await api("/api/park/agent-handshake/verify-artifact", { artifact: payload.receipt, expected_artifact_type: "agent_handshake_session_receipt" });
         state.session = payload.session;
         state.receipt = payload.receipt;
@@ -1664,6 +1877,7 @@
         setRunning("external");
         state.scenarioEval = null;
         state.policyChallenge = null;
+        state.secondRunDemo = null;
         const input = currentInput();
         const [payload, docs] = await Promise.all([
           api("/api/park/agent-handshake/external-client-demo", {
@@ -1687,10 +1901,56 @@
       }
     }
 
+    async function runSecondPassDemo() {
+      try {
+        setRunning("second");
+        const input = currentInput();
+        const payload = await api("/api/park/agent-handshake/passport-second-run-demo", {
+          scenario_mode: input.scenario,
+          agent_id: input.agentId,
+          represents: input.represents
+        });
+        state.secondRunDemo = payload;
+        state.externalClient = payload.second_run;
+        state.session = payload.second_run.session;
+        state.receipt = payload.second_run.receipt;
+        state.verification = payload.second_run.verification;
+        state.lastPayload = {
+          status: payload.status,
+          mode: payload.mode,
+          scenario_mode: payload.scenario_mode,
+          comparison: payload.comparison,
+          first_run_summary: {
+            session_id: payload.first_run?.session_id,
+            receipt_id: payload.first_run?.receipt?.receipt_id,
+            passport_evolution: payload.first_run?.passport_evolution
+          },
+          second_run_summary: {
+            session_id: payload.second_run?.session_id,
+            receipt_id: payload.second_run?.receipt?.receipt_id,
+            passport_evolution: payload.second_run?.passport_evolution
+          },
+          passport_evolution: payload.second_run.passport_evolution,
+          external_agent_result: payload.second_run.external_agent_result,
+          agent_dialogue: payload.second_run.agent_dialogue,
+          session: payload.second_run.session,
+          receipt: payload.second_run.receipt,
+          verification: payload.second_run.verification
+        };
+        renderAll();
+        clearRunning("passed");
+        state.liveStep = 7;
+        renderLiveExchange();
+      } catch (error) {
+        showError(error);
+      }
+    }
+
     async function runJudge() {
       try {
         setRunning("judge");
         state.externalClient = null;
+        state.secondRunDemo = null;
         const [scenarioEval, policyChallenge] = await Promise.all([
           api("/api/park/agent-handshake/scenario-eval", { scenarios: Object.keys(scenarios) }),
           api("/api/park/agent-handshake/policy-challenges", {})
@@ -1817,77 +2077,306 @@
       return blocked.slice(-2).map((item) => `${titleize(item.action)} stayed ${titleize(item.status)}: ${item.reason || "approval required"}`).join(" ");
     }
 
+    function actionSummary(status) {
+      const decisions = state.session?.policy_decisions || state.receipt?.policy_gates_triggered || [];
+      const hidden = new Set(["delegation_policy_check"]);
+      const filtered = decisions.filter((item) => !hidden.has(item.action) && (item.status === status || (status === "blocked" && item.allowed === false)));
+      const unique = Array.from(new Set(filtered.map((item) => titleize(item.action))));
+      return unique.length ? unique.slice(-3).join(", ") : "none recorded";
+    }
+
+    function handoffSummary() {
+      const handoffs = state.session?.internal_handoffs || state.receipt?.internal_handoffs || [];
+      const unique = Array.from(new Set(handoffs.map((item) => item.internal_agent || item.internal_agent_id).filter(Boolean)));
+      return unique.length ? unique.slice(0, 5).join(", ") : "waiting for internal agent handoffs";
+    }
+
+    function verificationSummary() {
+      const verification = state.verification || {};
+      const receipt = state.receipt || {};
+      const digest = String(receipt.signature?.sha256 || verification.claimed_sha256 || "").slice(0, 18);
+      if (!receipt.receipt_id) return "No receipt has been issued yet.";
+      return `${receipt.receipt_id}; signature ${verification.signature_status || "pending"}; digest ${verification.digest_status || "pending"}${digest ? ` (${digest}...)` : ""}.`;
+    }
+
+    function finalResultSummary() {
+      if (!state.session) {
+        return {
+          title: "Final result appears after the run",
+          text: "Run the agent demo to see the accepted plan, receipt status, blocked actions, and internal handoffs."
+        };
+      }
+      const blocked = actionSummary("blocked");
+      const allowed = actionSummary("allowed");
+      const receipt = state.receipt?.receipt_id ? `${state.receipt.receipt_id} (${state.verification?.status || "issued"})` : "not issued";
+      return {
+        title: `${state.selectedScenario === "visit_planning" ? "John's accepted plan" : "Accepted outcome"}`,
+        text: `${planText()}. Receipt: ${receipt}. Blocked: ${blocked}. Allowed: ${allowed}. Handoffs: ${handoffSummary()}.${passportEvolutionText()}`
+      };
+    }
+
+    function passportEvolutionText() {
+      const evolution = state.lastPayload?.passport_evolution;
+      if (!evolution) return "";
+      const next = evolution.next_passport || {};
+      const scope = evolution.memory_scope || {};
+      const level = next.passport_level || "-";
+      const allowed = shortList(next.allowed, "none");
+      const gated = shortList(next.requires_approval, "none");
+      const subject = scope.represented_subject || state.session?.client_agent?.represents || "represented subject";
+      return ` Next Passport: level ${level}; new allowed actions: ${allowed}; still approval-gated: ${gated}; memory isolated to ${subject}.`;
+    }
+
+    function passportList(values, fallback, max = 4) {
+      const list = Array.isArray(values) ? values.filter(Boolean) : [];
+      if (!list.length) return [fallback];
+      return list.slice(0, max).map((item) => titleize(item));
+    }
+
+    function renderPassportLoop() {
+      const evolution = state.lastPayload?.passport_evolution;
+      const secondDemo = state.secondRunDemo;
+      const comparison = secondDemo?.comparison || state.lastPayload?.second_run_comparison;
+      const input = currentInput();
+      if (!evolution) {
+        $("passportBadge").textContent = "waiting";
+        $("passportBadge").className = "badge";
+        $("passportLoop").innerHTML = `
+          <div class="passport-flow">
+            <article class="passport-card">
+              <div class="eyebrow">Before</div>
+              <strong>Cold start Passport</strong>
+              <p>The agent must declare identity, scopes, constraints, and cannot-do actions before ParkPulse can plan.</p>
+            </article>
+            <article class="passport-card">
+              <div class="eyebrow">This run</div>
+              <strong>Interaction becomes evidence</strong>
+              <p>Run the demo to generate the signed receipt, policy decisions, handoffs, eval, and memory update.</p>
+            </article>
+            <article class="passport-card">
+              <div class="eyebrow">Next</div>
+              <strong>Passport improves only after proof</strong>
+              <p>The next Passport can remember bounded preferences while payment, safety, medical, and identity gates stay locked.</p>
+            </article>
+          </div>`;
+        return;
+      }
+      const scope = evolution.memory_scope || {};
+      const trace = evolution.trace || {};
+      const evalResult = evolution.eval || {};
+      const memory = evolution.memory_update || {};
+      const subjectMemory = memory.subject_memory || {};
+      const next = evolution.next_passport || {};
+      const isSupplier = scope.counterparty === "supplier" || input.counterparty === "supplier";
+      const writes = passportList(subjectMemory.write, isSupplier ? "approved supplier constraints" : "family preferences", 5);
+      const allowed = passportList(next.allowed, "bounded helper actions", 5);
+      const gated = passportList(next.requires_approval, "sensitive actions", 5);
+      const plan = passportList(trace.accepted_plan, "accepted plan", 4);
+      const handoffs = passportList(trace.internal_handoffs, "ParkPulse agent", 4);
+      const beforeQuestion = isSupplier ? "Supplier ETA, approved SKU, dock window, safety status" : "party size, wait tolerance, allergy, walking preference";
+      const afterQuestion = isSupplier ? "known supplier constraints and safety gate history preload" : "known family constraints and route preferences preload";
+      $("passportBadge").textContent = comparison ? `2 runs compared` : `level ${next.passport_level || 1}`;
+      $("passportBadge").className = "badge good";
+      const nextRunTrace = comparison
+        ? `actual second receipt ${comparison.second_receipt_id || trace.receipt_id}`
+        : "fewer repeated questions, same hard gates";
+      const secondDeltaTitle = comparison ? "Actual second run got better" : "Second run gets better";
+      const secondDeltaCopy = comparison
+        ? `Run 1 receipt ${comparison.first_receipt_id}; Run 2 receipt ${comparison.second_receipt_id}. Repeated questions reduced by ${comparison.repeated_questions_reduced_by}, and memory reused: ${shortList(comparison.reused_memory, "bounded subject memory")}.`
+        : `ParkPulse can start from ${safe(afterQuestion)}, reuse the verified scope, and propose a plan faster because the previous receipt earned Level ${safe(next.passport_level || 1)}.`;
+      const secondGuardTitle = comparison ? "Actual second run stayed bounded" : "Second run does not get more dangerous";
+      const secondGuardCopy = comparison
+        ? `Subject isolation preserved: ${String(Boolean(comparison.subject_isolation_preserved))}. Gates preserved across both runs: ${shortList(comparison.preserved_approval_gates, gated.join(", "))}.`
+        : `The Passport still cannot cross ${safe(gated.join(", "))}. Memory belongs to ${safe(scope.represented_subject || input.represents)}, not every user, supplier, or agent.`;
+      $("passportLoop").innerHTML = `
+        <div class="passport-flow">
+          <article class="passport-card">
+            <div class="eyebrow">Before Passport</div>
+            <strong>Level 1: ask, verify, constrain</strong>
+            <ul>
+              <li>Subject: ${safe(scope.represented_subject || input.represents)}</li>
+              <li>Agent: ${safe(scope.agent_id || input.agentId)}</li>
+              <li>Must restate: ${safe(beforeQuestion)}</li>
+              <li>Cannot-do boundaries are declared before planning.</li>
+            </ul>
+          </article>
+          <article class="passport-card">
+            <div class="eyebrow">This verified run</div>
+            <strong>Receipt -> eval -> memory write</strong>
+            <ul>
+              <li>Receipt: ${safe(trace.receipt_id || state.receipt?.receipt_id || "issued")}</li>
+              <li>Eval score: ${safe(evalResult.score ?? "pending")}; authority respected: ${safe(String(Boolean(evalResult.authority_respected)))}</li>
+              <li>Plan learned: ${safe(plan.join(", "))}</li>
+              <li>Handoffs: ${safe(handoffs.join(", "))}</li>
+            </ul>
+          </article>
+          <article class="passport-card">
+            <div class="eyebrow">Next Passport</div>
+            <strong>Level ${safe(next.passport_level || 1)}: faster, still gated</strong>
+            <ul>
+              <li>Allowed: ${safe(allowed.join(", "))}</li>
+              <li>Approval-gated: ${safe(gated.join(", "))}</li>
+              <li>Memory writes: ${safe(writes.join(", "))}</li>
+              <li>Isolation key: ${safe(scope.memory_scope_key || "subject scoped")}</li>
+            </ul>
+          </article>
+        </div>
+        <div class="trace-strip">
+          <div class="trace-pill"><span>1 receipt</span><strong>${safe(trace.verification_status || state.verification?.status || "verified")}</strong></div>
+          <div class="trace-pill"><span>2 eval</span><strong>${safe(evalResult.receipt_verified ? "receipt verified" : "pending")}; score ${safe(evalResult.score ?? "-")}</strong></div>
+          <div class="trace-pill"><span>3 memory</span><strong>${safe(scope.isolation || "represented_subject")} only</strong></div>
+          <div class="trace-pill"><span>4 next run</span><strong>${safe(nextRunTrace)}</strong></div>
+        </div>
+        <div class="second-run">
+          <div class="delta">
+            <strong>${safe(secondDeltaTitle)}</strong>
+            <p>${safe(secondDeltaCopy)}</p>
+          </div>
+          <div class="guard">
+            <strong>${safe(secondGuardTitle)}</strong>
+            <p>${safe(secondGuardCopy)}</p>
+          </div>
+        </div>`;
+    }
+
     function buildLiveSteps() {
       const input = currentInput();
+      const backendDialogue = Array.isArray(state.lastPayload?.agent_dialogue) ? state.lastPayload.agent_dialogue : [];
+      if (backendDialogue.length) {
+        return backendDialogue.map((step) => ({
+          phase: step.phase || "Dialogue",
+          title: step.title || step.phase || "Agent dialogue",
+          clientSpeaker: step.client_speaker || (input.counterparty === "supplier" ? "Supplier agent" : "John's agent"),
+          client: step.client || "",
+          park: step.park || "",
+          outcome: step.outcome || "",
+          evidence: step.evidence || "",
+          finalPlan: step.final_plan || ""
+        }));
+      }
       const session = state.session || {};
       const permissions = session.permissions || {};
       const intent = session.intent || {};
       const proposal = session.proposal || {};
       const monitoring = session.monitoring || {};
       const verification = state.verification?.status || "not issued";
+      const evolution = state.lastPayload?.passport_evolution;
       const consent = state.externalClient?.consent_grant;
       const transcript = state.externalClient?.external_agent_transcript || [];
       const proposalReview = transcript.find((turn) => turn.label === "proposal_review")?.decision || {};
       const counter = transcript.find((turn) => turn.label === "counterproposal")?.decision || {};
       const selectedAlternative = proposalReview.chosen_alternative ? titleize(proposalReview.chosen_alternative) : "best bounded plan";
-      return [
+      const alternatives = Array.isArray(proposalReview.alternatives) ? proposalReview.alternatives : [];
+      const rejectedAlternative = alternatives.find((item) => item.rejection_reason);
+      const canShare = permissions.client_agent?.can_share || [];
+      const canReceive = permissions.client_agent?.can_receive || [];
+      const cannot = permissions.client_agent?.cannot_do || input.cannotDo;
+      const approvalList = permissions.park_agent?.requires_approval_for || ["payment", "refund", "medical escalation", "identity-sensitive action"];
+      const delegationTokenId = session.delegation?.token?.token_id || state.externalClient?.protocol_replay?.find((step) => step.path === "/api/park/delegation-token")?.response?.token?.token_id;
+      const sessionId = session.session_id || state.externalClient?.session_id || "not created yet";
+      const isSupplier = input.counterparty === "supplier";
+      const clientSpeaker = isSupplier ? "Supplier agent" : "John's agent";
+      const representedLabel = isSupplier ? "supplier operator" : "John";
+      const receiptId = state.receipt?.receipt_id || "not issued";
+      const liveSource = state.externalClient?.live_state?.source || "live evidence adapter";
+      const passport = evolution?.next_passport || {};
+      const comparison = state.secondRunDemo?.comparison || state.lastPayload?.comparison;
+      const preservedGates = comparison?.preserved_approval_gates || passport.requires_approval || approvalList;
+      const initialPlan = Array.isArray(proposalReview.plan) && proposalReview.plan.length ? proposalReview.plan : [];
+      const revisedPlan = Array.isArray(proposal.plan) && proposal.plan.length ? proposal.plan : [];
+      const committedPlan = Array.isArray(state.receipt?.accepted_plan?.plan) && state.receipt.accepted_plan.plan.length ? state.receipt.accepted_plan.plan : revisedPlan;
+      const planBuildText = state.session
+        ? `Candidate: ${shortList(initialPlan, "not proposed yet")}. Revised after counter: ${shortList(revisedPlan, "not revised yet")}. Committed: ${shortList(committedPlan, "not committed yet")}.`
+        : "Candidate, revised, and committed plans appear after the run.";
+      const finalPlanLine = state.session
+        ? `Final generated plan: ${planText()}. ${state.receipt ? `Receipt ${receiptId} is ${state.verification?.status || "issued"}.` : session.commitment?.accepted ? "Committed; receipt pending." : "Candidate plan; not committed yet."} Still approval-gated: ${shortList(preservedGates, "payment, refund, medical, identity, safety, procurement")}.`
+        : "";
+      const caseSummary = (session.case_evaluations || []).length
+        ? `${(session.case_evaluations || []).filter((item) => item.status === "passed").length}/${(session.case_evaluations || []).length} case checks passed`
+        : "case checks pending";
+      const steps = [
         {
           phase: "Identity",
-          title: "External agent asks to speak for the represented party",
-          client: `I represent ${input.represents}. My job is to get the best outcome for ${titleize(input.goal)} without overstepping.`,
-          park: session.identity ? `Verified. I can work with this agent as a ${titleize(session.identity.guest_role || "counterparty")} under ${titleize(session.identity.trust_level || "standard")} trust.` : "I need to verify who this agent represents before I plan anything.",
-          outcome: consent ? `A signed consent grant exists and can be revoked. The agent is allowed to negotiate, not take unlimited action.` : "No plan starts until representation is verified."
+          title: "Representation is proven before advice begins",
+          client: `I am ${input.agentId}. I am not asking for a recommendation as myself; I am acting for ${input.represents}. Bind this run to that represented subject, issue a revocable authority envelope, and reject me if my token does not match.`,
+          park: session.identity ? `Accepted. Session ${sessionId} is bound to ${session.client_agent?.represents || input.represents}; token ${delegationTokenId || "verified"} matches the agent and subject. I will treat you as a counterparty with limited delegated authority, not as the user or park operator.` : "I cannot plan yet. Send a representation claim, signed proof, subject id, and requested session before any optimization starts.",
+          outcome: consent ? `Consent grant ${consent.grant_id} created. This is already beyond POST: the session now has revocation, expiry, approval callback, represented subject, and proof chain before any itinerary or supplier action exists.` : "Nothing has been planned yet because representation has not been verified.",
+          evidence: `Recorded fields: agent_id=${input.agentId}; represents=${input.represents}; session=${sessionId}; proof=${titleize(session.identity?.proof_type || "pending")}.`
         },
         {
           phase: "Scope",
-          title: "The agents agree on what can and cannot be shared",
-          client: `I can share ${shortList(permissions.client_agent?.can_share, shortList(input.scopes, "declared scopes"))}. I cannot do ${shortList(permissions.client_agent?.cannot_do, shortList(input.cannotDo, "unsafe actions"))}.`,
-          park: `I can offer ${shortList(permissions.park_agent?.can_offer, "route planning, alerts, food recommendations, and gated offers")}.`,
-          outcome: "The represented person gets help without giving up payment, refund, medical, identity, or safety control."
+          title: "The agents negotiate the authority envelope",
+          client: `For this run I can share ${shortList(canShare, shortList(input.scopes, "declared scopes"))}; I can receive ${shortList(canReceive, "route plans, alerts, food suggestions, and safety notices")}. I am explicitly barred from ${shortList(cannot, "unsafe actions")}, even if those actions would make the plan easier.`,
+          park: `I can offer ${shortList(permissions.park_agent?.can_offer, "dynamic itinerary, queue prediction, reroute, restaurant timing, incident alert")}. I will not let this session silently cross ${shortList(approvalList, "payment, refund, medical escalation, identity-sensitive actions")}.`,
+          outcome: `This is the first hard difference from POST: the request is not just input data. It becomes a negotiated contract for what each agent may share, receive, perform, and escalate.`,
+          evidence: `Session ${sessionId} stores can_share=${canShare.length || input.scopes.length}, can_receive=${canReceive.length || "pending"}, cannot_do=${(cannot || []).length || input.cannotDo.length}.`
         },
         {
           phase: "Intent",
-          title: "The client agent turns preference into an objective",
-          client: `My user wants ${titleize(intent.client_agent?.goal || input.goal)}. Here are the constraints: ${compact(intent.client_agent?.constraints || input.constraints, 180)}.`,
-          park: intent.park_agent?.accepted_goal ? `I will optimize for ${shortList(intent.park_agent.optimization_targets, "low wait, safe, useful")}.` : "Waiting for a goal before proposing.",
-          outcome: "The plan is personalized before ParkPulse proposes anything."
+          title: "Preference becomes an optimization contract",
+          client: `Do not just return a plan. Optimize ${titleize(intent.client_agent?.goal || input.goal)} over ${intent.client_agent?.time_window || (isSupplier ? "2 hours" : "3 hours")} with these constraints: ${compact(intent.client_agent?.constraints || input.constraints, 260)}. If goals conflict, tell me before you commit.`,
+          park: intent.park_agent?.accepted_goal ? `Accepted. I will optimize for ${shortList(intent.park_agent.optimization_targets, isSupplier ? "service continuity, safety, receiving capacity" : "low wait, low walking, kid friendly, safe food")}. Conflict notice: ${intent.park_agent.conflict_notice || "none recorded"}.` : "Waiting for an explicit goal and constraints before proposing.",
+          outcome: `The agents now share the same objective function. ParkPulse is accountable for what it optimized, not just for producing a plausible answer.`,
+          evidence: `Goal=${titleize(intent.client_agent?.goal || input.goal)}; scenario=${titleize(input.scenario)}; live source=${liveSource}.`
         },
         {
           phase: "Proposal",
-          title: "ParkPulse proposes a bounded plan",
-          client: `I am comparing the offer against time, safety, authority, and user value. Best option so far: ${selectedAlternative}.`,
-          park: proposal.proposal_id ? `Here is my bounded plan: ${planText()}. Confidence ${Math.round(Number(proposal.confidence || 0) * 100)}%.` : `Draft plan: ${planText()}.`,
-          outcome: "The represented party gets a concrete plan, not a generic API response."
+          title: "ParkPulse proposes, but the client agent judges it",
+          client: alternatives.length ? `I scored ${alternatives.length} options against safety, time, authority, and represented-party value. I prefer ${selectedAlternative}.${rejectedAlternative ? ` I rejected ${titleize(rejectedAlternative.id || rejectedAlternative.label)} because ${rejectedAlternative.rejection_reason}` : ""}` : `I am checking the offer against authority, safety, time, and represented-party value before I accept anything.`,
+          park: proposal.proposal_id ? `Proposal ${proposal.proposal_id}: ${planText()}. Confidence ${Math.round(Number(proposal.confidence || 0) * 100)}%. Tradeoffs: ${shortList(proposal.tradeoffs, proposal.rationale || "bounded by declared authority")}.` : `Draft bounded plan: ${planText()}.`,
+          outcome: `This is agent-to-agent work: ParkPulse proposes with evidence, the client agent evaluates alternatives, and unsafe or low-authority options are rejected before commitment.`,
+          evidence: `Handoffs so far: ${handoffSummary()}. Proposal confidence=${Math.round(Number(proposal.confidence || 0) * 100)}%.`
         },
         {
           phase: "Counter",
-          title: "The external agent negotiates, not just posts a request",
-          client: counter.counter_request || proposal.countered_from?.counter_request || "I want a plan that better fits the represented party.",
-          park: proposal.rationale || "I will revise the plan while preserving the authority boundaries.",
-          outcome: "The agent improves the experience through negotiation, not repeated button clicks."
+          title: "The client agent counters with a new priority stack",
+          client: `${counter.counter_request || proposal.countered_from?.counter_request || "Revise this plan to better serve the represented party."} New priority stack: ${compact(counter.priority_change || proposal.countered_from?.priority_change || { walking_distance: "highest", wait_time: "medium" }, 220)}. Keep the same cannot-do boundaries.`,
+          park: proposal.rationale || `I revised the plan while preserving authority boundaries. Revised route: ${planText()}.`,
+          outcome: `A POST would require another prompt. Here the agents negotiate inside the same session, and the revision inherits the original authority envelope.`,
+          evidence: `Counter stored on proposal ${proposal.proposal_id || "pending"}; accepted route now ${planText()}.`
+        },
+        {
+          phase: "Plan Build",
+          title: "The plan is built in stages, not dropped in at the end",
+          client: `Show me the delta. What did you first propose, what changed after my counter, and what exactly will be sent to ${representedLabel}? I need a concrete plan I can defend, not a generic itinerary.`,
+          park: planBuildText,
+          outcome: `This makes the plan construction inspectable: candidate plan, revised plan, and committed plan are separate protocol states instead of one opaque answer.`,
+          evidence: `Candidate items=${initialPlan.length || 0}; revised items=${revisedPlan.length || 0}; committed items=${committedPlan.length || 0}; proposal=${proposal.proposal_id || "pending"}.`
         },
         {
           phase: "Commit",
-          title: "The final plan is committed without expanding authority",
-          client: session.commitment?.accepted ? "Accepted. Tell my user what changed and what still needs approval." : "Waiting for final acceptance.",
-          park: session.commitment?.commitment_id ? `Committed: ${planText()}.` : "No commitment yet.",
-          outcome: monitoring.accepted_resolution || "The accepted plan becomes a trackable session."
+          title: "Commit creates a monitored operating state",
+          client: session.commitment?.accepted ? `Accepted commitment ${session.commitment.commitment_id}. Notify ${representedLabel} with the plan. Do not treat acceptance of the plan as permission to pay, settle, reopen, bypass safety, or disclose sensitive data.` : "Waiting for final acceptance.",
+          park: session.commitment?.commitment_id ? `Committed. The live plan is ${planText()}. Monitoring is attached to event "${monitoring.event || "pending"}" with current resolution "${monitoring.accepted_resolution || "pending"}".` : "No commitment yet.",
+          outcome: `${caseSummary}. The output is now an operating session that can be monitored, renegotiated, audited, and closed.`,
+          evidence: `Commitment=${session.commitment?.commitment_id || "pending"}; state=${session.state || "not started"}; receipt=${receiptId}.`
         },
         {
           phase: "Boundary",
-          title: "Unsafe or sensitive actions are blocked",
-          client: `Probe requested: ${titleize(input.commerceAction)}.`,
-          park: blockedPolicyText(),
-          outcome: "ParkPulse helps the user, but does not silently spend money, release unsafe stock, or share protected data."
+          title: "Sensitive actions become policy decisions, not hidden side effects",
+          client: `Boundary probe: ${titleize(input.commerceAction)}. If this action requires ${isSupplier ? "procurement, finance, or safety review" : "user approval"}, return a structured block. Do not silently complete it just because it helps the plan.`,
+          park: `${blockedPolicyText()} Allowed actions recorded: ${actionSummary("allowed")}. Blocked actions recorded: ${actionSummary("blocked")}.`,
+          outcome: `This is the third hard difference from POST: unsafe actions are neither ignored nor executed. They become auditable policy decisions with reasons, internal handoffs, and approval status.`,
+          evidence: `Preserved gates include ${shortList(preservedGates, "payment, refund, medical, identity, food-safety, procurement")}.`
         },
         {
           phase: "Receipt",
-          title: "The outcome is verifiable and replayable",
-          client: verification === "verified" ? "Receipt verified. Notify represented party." : "Waiting for receipt verification.",
-          park: state.receipt ? `Receipt ${state.receipt.receipt_id} signed with digest ${String(state.receipt.signature?.sha256 || "").slice(0, 18)}...` : "No receipt issued yet.",
-          outcome: verification === "verified" ? "The demo ends with evidence the judge can inspect, replay, and verify." : "Run the demo to issue a receipt."
+          title: comparison ? "The second run proves the Passport evolved safely" : "The receipt produces the next Passport",
+          client: verification === "verified" ? `Receipt verified. I can tell ${representedLabel}: here is the accepted plan, here is what stayed approval-gated, and here is what the next Passport may remember for this represented subject only.` : "Waiting for receipt verification before I trust this outcome.",
+          park: state.receipt ? `Receipt ${receiptId} is ${state.verification?.status || "issued"}. It binds plan, monitoring result, policy gates, internal handoffs, conversation digest, and signature into one artifact.` : "No receipt issued yet.",
+          outcome: comparison ? `Actual second run comparison: Run 1 ${comparison.first_receipt_id}; Run 2 ${comparison.second_receipt_id}; repeated questions reduced by ${comparison.repeated_questions_reduced_by}; approval gates preserved: ${shortList(comparison.preserved_approval_gates, "hard gates")}.` : evolution ? `Passport evolution score ${evolution.eval?.score}. ${passportEvolutionText().trim()} The agent improves on the next run, but the approval gates do not weaken.` : verification === "verified" ? `Final result: ${planText()}. The session records what was allowed, what was blocked, which internal agents were involved, and why the plan was accepted.` : "Run the demo to issue a signed receipt for the final plan.",
+          evidence: comparison ? `Subject isolation preserved=${String(Boolean(comparison.subject_isolation_preserved))}; first session=${comparison.first_session_id}; second session=${comparison.second_session_id}.` : `Receipt=${receiptId}; digest=${String(state.receipt?.signature?.sha256 || "").slice(0, 18) || "pending"}; next Passport level=${passport.passport_level || "pending"}.`
+        },
+        {
+          phase: "Second Run",
+          title: comparison ? "Run 2 uses the Passport without weakening gates" : "Run 2 can be executed from the evolved Passport",
+          client: comparison ? `Compare this run against the prior receipt. Did ParkPulse reuse only ${input.represents}'s scoped memory, and did it avoid asking repeated setup questions?` : `If I run again, preload only this represented subject's Passport. Do not borrow another guest or supplier's memory, and do not unlock payment, refund, safety, or procurement gates.`,
+          park: comparison ? `Run 1 session ${comparison.first_session_id}; Run 2 session ${comparison.second_session_id}. Reused memory: ${shortList(comparison.reused_memory, "bounded subject memory")}. Repeated questions reduced by ${comparison.repeated_questions_reduced_by}.` : `Ready. Click "Run second pass" to execute another real handshake. The second run will receive the prior Passport context but must produce a new receipt and preserve approval gates.`,
+          outcome: comparison ? `The evolution is now proven inside the dialogue: the Passport improved the next interaction while preserving ${shortList(comparison.preserved_approval_gates, "hard approval gates")}.` : `This is the product loop: receipt creates Passport, Passport improves next run, next run still produces a new receipt.`,
+          evidence: comparison ? `First receipt=${comparison.first_receipt_id}; second receipt=${comparison.second_receipt_id}; isolation=${String(Boolean(comparison.subject_isolation_preserved))}.` : `Awaiting second-run comparison. Current Passport level=${passport.passport_level || "pending"}.`
         }
       ];
+      return steps.map((step) => ({ clientSpeaker, finalPlan: finalPlanLine, ...step }));
     }
 
     function renderLiveExchange() {
@@ -1898,8 +2387,13 @@
       $("liveBadge").className = state.running ? "badge warn" : hasSession ? "badge good" : "badge info";
       $("liveHeadline").textContent = steps[maxIndex]?.title || "Run the agent demo";
       $("liveSubhead").textContent = hasSession
-        ? `${steps.length} protocol moments from the actual run.`
-        : "The protocol evidence stays below; this panel shows what the agents actually decided.";
+        ? `${steps.length} protocol moments from the actual run. Click any step below to inspect it.`
+        : "Run the demo, then click any step below to inspect what happened.";
+      $("prevStep").disabled = maxIndex === 0;
+      $("nextStep").disabled = maxIndex >= steps.length - 1;
+      const finalResult = finalResultSummary();
+      $("finalResult").innerHTML = `<strong>${safe(finalResult.title)}</strong><p>${safe(finalResult.text)}</p>`;
+      renderPassportLoop();
       const step = steps[maxIndex];
       $("liveConversation").innerHTML = step ? `<article class="live-turn visible active conversation-frame">
           <div class="live-turn-head">
@@ -1910,25 +2404,40 @@
             <span class="badge info">${safe(step.phase)}</span>
           </div>
           <div class="chat-line client">
-            <span class="speaker">John's agent</span>
+            <span class="speaker">${safe(step.clientSpeaker || "External agent")}</span>
             <p>${safe(step.client)}</p>
           </div>
           <div class="chat-line park">
             <span class="speaker">ParkPulse agent</span>
             <p>${safe(step.park)}</p>
           </div>
+          ${step.finalPlan ? `<div class="chat-line final-plan">
+            <span class="speaker">Final plan</span>
+            <p>${safe(step.finalPlan)}</p>
+          </div>` : ""}
           <div class="chat-line narrator">
             <span class="speaker">Narrator</span>
             <p>${safe(step.outcome)}</p>
           </div>
+          ${step.evidence ? `<div class="chat-line evidence">
+            <span class="speaker">Evidence</span>
+            <p>${safe(step.evidence)}</p>
+          </div>` : ""}
         </article>` : "";
       $("liveTimeline").innerHTML = steps.map((step, index) => {
         const cls = index < maxIndex ? "timeline-step done" : index === maxIndex ? "timeline-step active" : "timeline-step";
-        return `<div class="${cls}">
+        return `<button type="button" class="${cls}" data-step="${index}" aria-label="Show ${safe(step.phase)} step">
           <div class="timeline-dot">${index + 1}</div>
           <div><strong>${safe(step.phase)}</strong><p>${safe(step.title)}</p></div>
-        </div>`;
+        </button>`;
       }).join("");
+      for (const item of $("liveTimeline").querySelectorAll(".timeline-step")) {
+        item.addEventListener("click", () => {
+          window.clearInterval(liveTimer);
+          state.liveStep = Number(item.dataset.step || 0);
+          renderLiveExchange();
+        });
+      }
       scrollLiveConversation();
     }
 
@@ -1952,6 +2461,13 @@
         }
         renderLiveExchange();
       }, 850);
+    }
+
+    function goToLiveStep(delta) {
+      window.clearInterval(liveTimer);
+      const steps = buildLiveSteps();
+      state.liveStep = Math.max(0, Math.min((state.liveStep || 0) + delta, steps.length - 1));
+      renderLiveExchange();
     }
 
     function renderStorySteps() {
@@ -2292,7 +2808,11 @@ await client.externalClientDemo({ scenario_mode: "${safe(state.selectedScenario)
       $("runCustom").addEventListener("click", runCustomHandshake);
       $("runExternal").addEventListener("click", runExternalAgentDemo);
       $("runSupply").addEventListener("click", runSupplyDemo);
+      $("runSecondPass").addEventListener("click", runSecondPassDemo);
       $("runJudge").addEventListener("click", runJudge);
+      $("prevStep").addEventListener("click", () => goToLiveStep(-1));
+      $("nextStep").addEventListener("click", () => goToLiveStep(1));
+      $("replaySteps").addEventListener("click", startLivePlayback);
     }
 
     bind();

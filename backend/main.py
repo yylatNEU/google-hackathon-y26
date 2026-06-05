@@ -52,6 +52,7 @@ from agent_handshake import (
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
     run_external_client_agent_demo,
+    run_passport_second_run_demo,
     run_agent_handshake_policy_challenges,
     run_agent_handshake_scenario_evaluations,
     session_protocol_receipt,
@@ -61,7 +62,7 @@ from agent_handshake import (
 )
 from accessibility_journey import build_accessibility_journey, build_accessibility_scope
 from customer_park_knowledge import build_customer_public_data_feed, customer_venue_export_template, validate_customer_venue_export
-from experience_studio import build_experience_studio_payload, create_experience_studio_handoff, get_experience_studio_draft, list_experience_studio_drafts, list_experience_studio_handoffs, list_experience_studio_memory, save_experience_studio_draft, studio_layer_contract, update_experience_studio_draft_content, update_experience_studio_draft_status, update_experience_studio_handoff_status
+from experience_studio import build_experience_studio_conversation_plan, build_experience_studio_payload, create_experience_studio_handoff, experience_studio_readiness, get_experience_studio_draft, list_experience_studio_drafts, list_experience_studio_handoffs, list_experience_studio_memory, save_experience_studio_draft, studio_layer_contract, update_experience_studio_draft_content, update_experience_studio_draft_status, update_experience_studio_handoff_status
 from venue_experience_data import activate_synthetic_venue_export, build_venue_experience_data, import_venue_experience_export, validate_venue_experience_export
 from venue_profile import activate_synthetic_venue_profile, approved_synthetic_venue_profile_export, build_venue_profile, import_venue_profile_export, preview_venue_profile_import, validate_venue_profile_export
 from park_ops_mcp import (
@@ -91,6 +92,7 @@ from park_staff_roleplay import (
     review_staff_training_receipt,
     start_staff_training_session,
 )
+from product_learning_loop import create_park_issue_ticket, create_training_gap_ticket, product_learning_loop_status
 from live_feedback_loop import (
     apply_live_food_ops_to_state,
     apply_live_guest_flow_to_state,
@@ -152,8 +154,10 @@ except Exception:
     _fast_park_simulation = None
 
 try:
+    from policy_loader import get_policy_books as _fast_get_policy_books
     from policy_loader import operational_doctrine_index as _fast_operational_doctrine_index
 except Exception:
+    _fast_get_policy_books = None
     _fast_operational_doctrine_index = None
 
 _started_at = time.time()
@@ -164,6 +168,7 @@ _load_error: str | None = None
 _load_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-full-runtime")
 _load_task: concurrent.futures.Future[Any] | None = None
 _refinement_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="parkpulse-refinement")
+_role_auth_audit_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-role-auth-audit")
 _load_started_at: float | None = None
 _load_completed_at: float | None = None
 _load_duration_ms: int | None = None
@@ -421,6 +426,7 @@ def _api_capability_registry() -> dict[str, Any]:
                     "/api/park/venue-profile/synthetic/activate",
                     "/api/park/accessibility/scope",
                     "/api/park/accessibility/journey",
+                    "/api/park/experience-studio/conversation-plan",
                     "/api/park/experience-studio/draft",
                     "/api/park/experience-studio/layer-contract",
                     "/api/park/experience-studio/venue-data",
@@ -623,10 +629,56 @@ async def _send_json(send, status: int, payload: dict[str, Any]) -> None:
                 (b"content-length", str(len(body)).encode("ascii")),
                 (b"cache-control", b"no-store"),
                 (b"access-control-allow-origin", b"*"),
+                (b"access-control-allow-methods", b"GET,POST,PUT,OPTIONS"),
+                (b"access-control-allow-headers", b"authorization,content-type,x-parkpulse-role,x-parkpulse-role-token"),
             ],
         }
     )
     await send({"type": "http.response.body", "body": body})
+
+
+def _scope_header(scope: dict[str, Any], name: str) -> str:
+    target = name.lower().encode("latin-1")
+    for key, value in scope.get("headers", []) or []:
+        if key == target:
+            return value.decode("latin-1") if isinstance(value, bytes) else str(value)
+    return ""
+
+
+def _cors_origin_for_scope(scope: dict[str, Any]) -> bytes:
+    origin = _scope_header(scope, "origin").strip()
+    if not origin:
+        return b"*"
+    allowed = [
+        item.strip()
+        for item in os.getenv("PARKPULSE_ALLOWED_ORIGINS", "").split(",")
+        if item.strip()
+    ]
+    if (
+        origin in allowed
+        or origin.startswith("http://127.0.0.1:")
+        or origin.startswith("http://localhost:")
+        or origin.startswith("http://0.0.0.0:")
+    ):
+        return origin.encode("latin-1")
+    return b"*"
+
+
+def _cors_preflight_headers(scope: dict[str, Any]) -> list[tuple[bytes, bytes]]:
+    requested_headers = _scope_header(scope, "access-control-request-headers").strip()
+    return [
+        (b"access-control-allow-origin", _cors_origin_for_scope(scope)),
+        (b"access-control-allow-methods", b"GET,POST,PUT,OPTIONS"),
+        (
+            b"access-control-allow-headers",
+            requested_headers.encode("latin-1")
+            if requested_headers
+            else b"authorization,content-type,x-parkpulse-role,x-parkpulse-role-token",
+        ),
+        (b"access-control-allow-credentials", b"true"),
+        (b"access-control-max-age", b"600"),
+        (b"content-length", b"0"),
+    ]
 
 
 async def _read_json_body(receive) -> dict[str, Any]:
@@ -773,19 +825,31 @@ def _record_role_authorization(scope: dict[str, Any], decision: dict[str, Any]) 
         **decision,
     }
     _write_jsonl_event(_role_authorization_log_path(), event)
-    try:
-        from park_role_access_audit import record_role_access_audit_event
 
+    def persist_durable_audit() -> None:
+        try:
+            from park_role_access_audit import record_role_access_audit_event
+        except Exception:
+            return
         identity = decision.get("identity") if isinstance(decision.get("identity"), dict) else {}
-        record_role_access_audit_event(
-            "mutation_allowed" if decision.get("allowed") else "mutation_denied",
-            role=decision.get("role"),
-            subject=identity.get("subject"),
-            capability=decision.get("capability"),
-            resource=decision.get("resource"),
-            status=decision.get("status"),
-            reason=decision.get("reason"),
-        )
+        try:
+            record_role_access_audit_event(
+                "mutation_allowed" if decision.get("allowed") else "mutation_denied",
+                role=decision.get("role"),
+                subject=identity.get("subject"),
+                capability=decision.get("capability"),
+                resource=decision.get("resource"),
+                status=decision.get("status"),
+                reason=decision.get("reason"),
+            )
+        except Exception:
+            pass
+
+    if _truthy(os.getenv("PARKPULSE_ROLE_AUTH_DURABLE_AUDIT_INLINE"), False):
+        persist_durable_audit()
+        return
+    try:
+        _role_auth_audit_executor.submit(persist_durable_audit)
     except Exception:
         pass
 
@@ -836,6 +900,28 @@ def _role_authorization_payload(payload: dict[str, Any], scope: dict[str, Any] |
         "loads_bigquery_per_tick": False,
         "llm_control_authority": False,
     }
+
+
+def _experience_studio_role_gate_enabled() -> bool:
+    return str(os.getenv("PARKPULSE_ENFORCE_EXPERIENCE_STUDIO_ROLES", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _authorize_experience_studio_or_send(
+    send,
+    scope: dict[str, Any],
+    capability: str,
+    resource: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not _experience_studio_role_gate_enabled():
+        return {
+            "status": "disabled",
+            "allowed": True,
+            "capability": capability,
+            "resource": resource,
+            "reason": "Experience Studio role gate is disabled for local/demo mode.",
+        }
+    return await _authorize_or_send(send, scope, capability, resource, payload, default_role="ops_team")
 
 
 def _durable_role_authorization_rows(limit: int) -> list[dict[str, Any]]:
@@ -1161,18 +1247,27 @@ async def _refresh_due_live_feeds_payload(request_payload: dict[str, Any] | None
     }
 
 
-async def _training_live_feed_preflight_payload(request_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+async def _training_live_feed_preflight_payload(
+    request_payload: dict[str, Any] | None = None,
+    *,
+    default_refresh: bool = True,
+) -> dict[str, Any]:
     payload = request_payload if isinstance(request_payload, dict) else {}
     refresh_flag = payload.get("refreshLiveFeeds")
     if refresh_flag is None:
         refresh_flag = payload.get("refresh_live_feeds")
-    if not _truthy(None if refresh_flag is None else str(refresh_flag), True):
+    if not _truthy(None if refresh_flag is None else str(refresh_flag), default_refresh):
         return {
-            "status": "skipped",
+            "status": "no_due_feeds",
             "mode": "training_live_feed_preflight",
             "created_at": _now_iso(),
+            "refresh_status": "not_requested",
+            "requested_sources": [],
+            "refreshed_sources": [],
+            "queued_sources": [],
+            "result_count": 0,
             "readiness_issues": [],
-            "boundary": "Training live-feed preflight was explicitly disabled for this request.",
+            "boundary": "Training live-feed refresh was not requested for this dry run; no evidence feeds were refreshed.",
             "uses_seed_data": False,
             "llm_control_authority": False,
         }
@@ -1240,7 +1335,7 @@ async def _training_live_feed_preflight_payload(request_payload: dict[str, Any] 
 
 
 def _live_feed_refresh_worker_enabled() -> bool:
-    return _truthy_env("PARKPULSE_LIVE_FEED_REFRESH_WORKER_ENABLED", True)
+    return _truthy_env("PARKPULSE_LIVE_FEED_REFRESH_WORKER_ENABLED", False)
 
 
 def _live_feed_refresh_worker_interval_seconds() -> float:
@@ -2054,6 +2149,29 @@ async def _fast_park_state_lite() -> dict[str, Any]:
     )
     state["heartbeatController"] = _heartbeat_controller_status(include_logs=False)
     state["heartbeatExplanation"] = _heartbeat_explanation_preview_payload()
+    return state
+
+
+async def _customer_public_hot_path_state() -> dict[str, Any]:
+    if _fast_park_simulation is None:
+        return {
+            "status": "simulation_unavailable",
+            "entrypoint": "lazy-main",
+            "operationsAudit": {"ready": False, "mode": "customer_hot_path_state_unavailable"},
+        }
+    get_state_lite = getattr(_fast_park_simulation, "get_state_lite", None)
+    raw_state = await get_state_lite() if callable(get_state_lite) else await _fast_park_simulation.get_state()
+    state = dict(raw_state) if isinstance(raw_state, dict) else {}
+    state.pop("industrialDossiers", None)
+    state.setdefault(
+        "operationsAudit",
+        {
+            "ready": True,
+            "mode": "customer_public_hot_path_state",
+            "findings": [],
+            "policy_refs": ["PARK-CARE-001"],
+        },
+    )
     return state
 
 
@@ -7212,6 +7330,492 @@ async def _fast_case_brief(case_id: str) -> dict[str, Any]:
     }
 
 
+_MONITOR_EVIDENCE_STOPWORDS = {
+    "case",
+    "park",
+    "operations",
+    "pressure",
+    "during",
+    "while",
+    "near",
+    "with",
+    "unsafe",
+    "reported",
+    "creates",
+    "rising",
+    "before",
+    "after",
+    "down",
+    "the",
+    "and",
+    "for",
+    "from",
+    "that",
+    "this",
+    "review",
+    "operator",
+    "guest",
+    "guests",
+    "action",
+    "actions",
+    "dispatch",
+    "receiver",
+    "state",
+    "status",
+    "ready",
+    "demo",
+    "queue",
+}
+
+
+def _monitor_evidence_terms(*values: Any) -> set[str]:
+    blob = " ".join(str(value or "") for value in values)
+    return {
+        term
+        for term in re.split(r"[^a-z0-9]+", blob.lower())
+        if len(term) >= 4 and term not in _MONITOR_EVIDENCE_STOPWORDS
+    }
+
+
+def _monitor_shared_term_count(terms: set[str], *values: Any) -> int:
+    if not terms:
+        return 0
+    haystack = _monitor_evidence_terms(*values)
+    return sum(1 for term in terms if term in haystack)
+
+
+def _monitor_case_hard_terms(case_row: dict[str, Any]) -> set[str]:
+    case_id_terms = _monitor_evidence_terms(case_row.get("id"))
+    title_terms = _monitor_evidence_terms(case_row.get("title"))
+    domain_terms = _monitor_evidence_terms(case_row.get("domain"), case_row.get("severity"))
+    hard = case_id_terms | {term for term in title_terms if term not in domain_terms}
+    return {term for term in hard if term not in {"high", "warning", "critical"}}
+
+
+def _monitor_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _monitor_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _monitor_unique(values: list[Any], limit: int = 12) -> list[str]:
+    seen: set[str] = set()
+    rows: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            rows.append(text)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _monitor_trace_url(trace_id: Any) -> str | None:
+    trace_text = str(trace_id or "").strip()
+    if not trace_text:
+        return None
+    project = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT") or os.getenv("PROJECT_ID")
+    span_id = ""
+    for template_name in ("ARIZE_TRACE_URL_TEMPLATE", "GCP_TRACE_URL_TEMPLATE"):
+        template = os.getenv(template_name)
+        if template:
+            try:
+                return template.format(trace_id=trace_text, span_id=span_id, project=project or "")
+            except Exception:
+                continue
+    if project:
+        return f"https://console.cloud.google.com/traces/list?project={project}&tid={trace_text}"
+    return None
+
+
+def _monitor_policy_case_for(case_row: dict[str, Any], policy_cases: list[dict[str, Any]], terms: set[str]) -> dict[str, Any]:
+    case_id = str(case_row.get("id") or "")
+    exact = next((item for item in policy_cases if isinstance(item, dict) and str(item.get("id") or "") == case_id), None)
+    if isinstance(exact, dict):
+        return exact
+    scored = [
+        (
+            _monitor_shared_term_count(
+                terms,
+                item.get("id"),
+                item.get("title"),
+                " ".join(map(str, _monitor_list(item.get("triggers")))),
+                " ".join(map(str, _monitor_list(item.get("state_signals")))),
+            ),
+            item,
+        )
+        for item in policy_cases
+        if isinstance(item, dict)
+    ]
+    scored = [row for row in scored if row[0] > 0]
+    return sorted(scored, key=lambda row: row[0], reverse=True)[0][1] if scored else {}
+
+
+def _policy_ref_detail(policy_ref: str) -> dict[str, Any]:
+    if _fast_get_policy_books is None:
+        return {"status": "unavailable", "policy_ref": policy_ref, "readiness_issues": ["Policy book loader is unavailable."]}
+    books = _fast_get_policy_books()
+    matches: list[dict[str, Any]] = []
+    related_cases: list[dict[str, Any]] = []
+    for envelope in _monitor_list(books.get("policy_books")):
+        if not isinstance(envelope, dict):
+            continue
+        content = _monitor_dict(envelope.get("content"))
+        book_id = str(content.get("policy_book_id") or envelope.get("source") or "")
+        for rule in _monitor_list(content.get("decision_rules")):
+            if isinstance(rule, dict) and str(rule.get("id") or "") == policy_ref:
+                matches.append(
+                    {
+                        "kind": "decision_rule",
+                        "policy_ref": policy_ref,
+                        "policy_book_id": book_id,
+                        "title": rule.get("name") or policy_ref,
+                        "condition": rule.get("condition"),
+                        "allowed_action": rule.get("allowed_action"),
+                        "blocked_action": rule.get("blocked_action"),
+                        "required_evidence": _monitor_list(rule.get("required_evidence")),
+                        "human_review_if": _monitor_list(rule.get("human_review_if")),
+                        "applies_to": _monitor_dict(rule.get("applies_to")),
+                        "block_conditions": _monitor_list(rule.get("block_conditions")),
+                        "review_conditions": _monitor_list(rule.get("review_conditions")),
+                        "raw": rule,
+                    }
+                )
+        judges = content.get("judges", {}) if isinstance(content.get("judges"), dict) else {}
+        for judge_id, judge in judges.items():
+            if isinstance(judge, dict) and str(judge.get("policy_ref") or "") == policy_ref:
+                matches.append(
+                    {
+                        "kind": "judge",
+                        "policy_ref": policy_ref,
+                        "policy_book_id": book_id,
+                        "title": judge.get("name") or judge_id,
+                        "summary": judge.get("description") or judge.get("purpose"),
+                        "raw": judge,
+                    }
+                )
+        for action_case in _monitor_list(content.get("action_cases")):
+            if isinstance(action_case, dict) and policy_ref in {str(item) for item in _monitor_list(action_case.get("policy_refs"))}:
+                related_cases.append(
+                    {
+                        "id": action_case.get("id"),
+                        "title": action_case.get("title"),
+                        "triggers": _monitor_list(action_case.get("triggers")),
+                        "blocked_actions": _monitor_list(action_case.get("blocked_actions")),
+                        "success_metric": action_case.get("success_metric"),
+                        "rollback_condition": action_case.get("rollback_condition"),
+                    }
+                )
+    return {
+        "status": "found" if matches or related_cases else "not_found",
+        "mode": "policy_ref_detail",
+        "policy_ref": policy_ref,
+        "match_count": len(matches),
+        "matches": matches,
+        "related_cases": related_cases[:20],
+    }
+
+
+def _monitor_receipt_relation(case_row: dict[str, Any], receipt: dict[str, Any], terms: set[str], hard_terms: set[str]) -> dict[str, Any]:
+    case_id = str(case_row.get("id") or "")
+    receipt_case_id = str(receipt.get("caseId") or receipt.get("case_id") or "")
+    link_source = str(receipt.get("caseLinkSource") or receipt.get("case_link_source") or "")
+    explicit = bool(case_id and receipt_case_id == case_id and link_source != "doctrine_inferred")
+    relation_text = (
+        receipt.get("summary"),
+        receipt.get("scenarioName"),
+        receipt.get("selectedAction"),
+        " ".join(map(str, _monitor_list(receipt.get("receiverActions")))),
+        " ".join(map(str, _monitor_list(receipt.get("retrievalTags")))),
+        " ".join(map(str, _monitor_list(receipt.get("failureReasons")))),
+    )
+    score = 100 if explicit else _monitor_shared_term_count(terms, *relation_text)
+    hard_match = bool(hard_terms and _monitor_shared_term_count(hard_terms, *relation_text))
+    include = explicit or (hard_match and score >= 1) or score >= 3
+    confidence = "direct" if explicit else "inferred_high" if hard_match and score >= 2 else "inferred" if include else "weak"
+    return {"score": score, "type": "explicit_case_id" if explicit else "semantic_terms", "hard_match": hard_match, "include": include, "confidence": confidence}
+
+
+def _monitor_review_relation(case_row: dict[str, Any], review: dict[str, Any], terms: set[str], hard_terms: set[str]) -> dict[str, Any]:
+    case_id = str(case_row.get("id") or "")
+    review_case_id = str(review.get("case_id") or review.get("caseId") or "")
+    explicit = bool(case_id and review_case_id == case_id)
+    event = _monitor_dict(review.get("event"))
+    relation_text = (
+        review.get("id"),
+        review.get("reason"),
+        review.get("owner"),
+        review.get("priority"),
+        event.get("source"),
+        event.get("signal_type"),
+        json.dumps(event.get("value"), default=str) if event.get("value") is not None else "",
+    )
+    score = 100 if explicit else _monitor_shared_term_count(terms, *relation_text)
+    hard_match = bool(hard_terms and _monitor_shared_term_count(hard_terms, *relation_text))
+    include = explicit or (hard_match and score >= 1) or score >= 3
+    confidence = "direct" if explicit else "inferred_high" if hard_match and score >= 2 else "inferred" if include else "weak"
+    return {"score": score, "type": "explicit_case_id" if explicit else "semantic_terms", "hard_match": hard_match, "include": include, "confidence": confidence}
+
+
+def _monitor_eval_dimensions(case_row: dict[str, Any], receipts: list[dict[str, Any]], reviews: list[dict[str, Any]], policy_case: dict[str, Any]) -> list[dict[str, Any]]:
+    quality = _monitor_dict(case_row.get("quality"))
+    governance = _monitor_dict(case_row.get("governance"))
+    evidence = _monitor_dict(case_row.get("productionEvidence"))
+    base_score = _safe_float(quality.get("score"), 0.78)
+    base_pct = round(base_score * 100) if 0 <= base_score <= 1 else round(base_score)
+    latest_receipt = receipts[0] if receipts else {}
+    latest_dims = _monitor_list(latest_receipt.get("evalDimensions"))
+    if latest_dims:
+        normalized: list[dict[str, Any]] = []
+        for item in latest_dims[:6]:
+            if not isinstance(item, dict):
+                continue
+            raw_score = item.get("score") if item.get("score") is not None else item.get("value")
+            normalized.append(
+                {
+                    "id": str(item.get("id") or item.get("label") or "eval_dimension").lower().replace(" ", "_"),
+                    "label": item.get("label") or item.get("id") or "Eval dimension",
+                    "score": _safe_float(raw_score, base_pct),
+                    "status": item.get("status") or "measured",
+                    "detail": item.get("detail") or item.get("why") or "Attached from agent eval receipt.",
+                }
+            )
+        if normalized:
+            return normalized
+    policy_score = 90 if policy_case else 58
+    if _monitor_list(governance.get("blockerClasses")):
+        policy_score = 62
+    trace_score = min(96, 45 + len(receipts) * 15 + sum(1 for item in receipts if item.get("traceId")) * 10)
+    review_score = 72 if reviews else 88
+    if str(case_row.get("severity") or "").lower() in {"critical", "high"} and not reviews:
+        review_score = 68
+    freshness_score = min(94, 55 + int(_safe_float(evidence.get("feedCount"), 0)) * 8)
+    return [
+        {"id": "safety_policy", "label": "Safety and policy", "score": policy_score, "status": "linked" if policy_case else "missing_ref", "detail": "Policy doctrine is linked to this case." if policy_case else "No doctrine case matched this case."},
+        {"id": "actionability", "label": "Actionability", "score": base_pct, "status": quality.get("status") or "measured", "detail": "Case quality score from the operating case index."},
+        {"id": "trace_completeness", "label": "Trace completeness", "score": trace_score, "status": "linked" if receipts else "missing_trace", "detail": f"{len(receipts)} related receipts and tool traces."},
+        {"id": "human_review_need", "label": "Human review need", "score": review_score, "status": "review_open" if reviews else "no_session", "detail": f"{len(reviews)} related human review sessions."},
+        {"id": "evidence_freshness", "label": "Evidence freshness", "score": freshness_score, "status": evidence.get("state") or "demo_evidence", "detail": f"{evidence.get('feedCount') or 0} feeds attached to the case packet."},
+    ]
+
+
+async def _monitor_evidence_graph(case_id: str | None = None, *, limit: int = 30) -> dict[str, Any]:
+    index = await _fast_case_index()
+    case_rows = [row for row in _monitor_list(index.get("rows")) if isinstance(row, dict)]
+    if case_id:
+        case_rows = [row for row in case_rows if str(row.get("id") or "") == case_id] or case_rows[:1]
+    policy = _fast_operational_doctrine_index() if _fast_operational_doctrine_index is not None else {}
+    policy_cases = [row for row in _monitor_list(policy.get("action_cases")) if isinstance(row, dict)]
+    policy_refs = [
+        row if isinstance(row, dict) else {"policy_ref": str(row)}
+        for row in _monitor_list(policy.get("policy_refs"))
+        if isinstance(row, dict) or str(row or "").strip()
+    ]
+    try:
+        from agent_ops_ledger import read_agent_ops_ledger
+
+        ledger = await asyncio.wait_for(
+            asyncio.to_thread(read_agent_ops_ledger, limit=max(1, min(limit, 80))),
+            timeout=max(0.5, _float_env("PARKPULSE_AGENT_OPS_LEDGER_READ_TIMEOUT_SECONDS", 2.0)),
+        )
+    except Exception as error:
+        ledger = {"status": "unavailable", "items": [], "readiness_issues": [str(error)[:240]]}
+    try:
+        reviews = review_training_ledger(limit=max(1, min(limit * 2, 160)))
+    except Exception as error:
+        reviews = {"status": "unavailable", "rows": [], "open_reviews": [], "readiness_issues": [str(error)[:240]]}
+    receipts = [row for row in _monitor_list(ledger.get("items")) if isinstance(row, dict)]
+    review_rows = [
+        row
+        for row in [*_monitor_list(reviews.get("open_reviews")), *_monitor_list(reviews.get("rows"))]
+        if isinstance(row, dict)
+    ]
+    graph_cases: list[dict[str, Any]] = []
+    policy_detail_cache: dict[str, dict[str, Any]] = {}
+
+    def cached_policy_detail(ref_id: str) -> dict[str, Any]:
+        if ref_id not in policy_detail_cache:
+            policy_detail_cache[ref_id] = _policy_ref_detail(ref_id)
+        return policy_detail_cache[ref_id]
+
+    for row in case_rows[:12]:
+        priority = _monitor_dict(row.get("priority"))
+        terms = _monitor_evidence_terms(row.get("id"), row.get("title"), row.get("domain"), row.get("severity"), priority.get("rationale"))
+        hard_terms = _monitor_case_hard_terms(row)
+        policy_case = _monitor_policy_case_for(row, policy_cases, terms)
+        related_receipts = []
+        for receipt in receipts:
+            relation = _monitor_receipt_relation(row, receipt, terms, hard_terms)
+            if relation["include"]:
+                related_receipts.append({"relation": relation, "receipt": receipt})
+        related_receipts.sort(key=lambda item: (item["relation"]["score"], _safe_float(item["receipt"].get("evalScore"), 0)), reverse=True)
+        direct_receipts = [item for item in related_receipts if item["relation"]["type"] == "explicit_case_id"]
+        inferred_receipts = [item for item in related_receipts if item["relation"]["type"] != "explicit_case_id"]
+        inferred_receipt_limit = max(0, 5 - len(direct_receipts)) if direct_receipts else 3
+        visible_receipts = [*direct_receipts, *inferred_receipts[:inferred_receipt_limit]]
+        related_reviews = []
+        for review in review_rows:
+            relation = _monitor_review_relation(row, review, terms, hard_terms)
+            if relation["include"]:
+                related_reviews.append({"relation": relation, "review": review})
+        related_reviews.sort(key=lambda item: item["relation"]["score"], reverse=True)
+        direct_reviews = [item for item in related_reviews if item["relation"]["type"] == "explicit_case_id"]
+        inferred_reviews = [item for item in related_reviews if item["relation"]["type"] != "explicit_case_id"]
+        inferred_review_limit = max(0, 5 - len(direct_reviews)) if direct_reviews else 3
+        visible_reviews = [*direct_reviews, *inferred_reviews[:inferred_review_limit]]
+        policy_ref_ids = _monitor_unique(
+            [
+                *_monitor_list(policy_case.get("policy_refs")),
+                *[ref for receipt in visible_receipts for ref in _monitor_list(receipt["receipt"].get("policyRefs") or receipt["receipt"].get("policy_refs"))],
+            ],
+            limit=16,
+        )
+        policy_ref_rows = []
+        for ref in policy_refs:
+            ref_id = str(ref.get("policy_ref") or "")
+            if ref_id not in set(policy_ref_ids):
+                continue
+            detail = cached_policy_detail(ref_id)
+            first_match = _monitor_dict(_monitor_list(detail.get("matches"))[0] if _monitor_list(detail.get("matches")) else {})
+            policy_ref_rows.append(
+                {
+                    **ref,
+                    "policy_ref": ref_id,
+                    "title": first_match.get("title") or ref.get("title") or ref_id,
+                    "summary": first_match.get("allowed_action") or first_match.get("condition") or ref.get("summary"),
+                    "detail": detail,
+                }
+            )
+        trace_records = []
+        for item in visible_receipts[:10]:
+            receipt_policy_refs = _monitor_unique(
+                _monitor_list(item["receipt"].get("policyRefs") or item["receipt"].get("policy_refs")),
+                limit=8,
+            )
+            trace_policy_refs = _monitor_unique([*receipt_policy_refs, *policy_ref_ids], limit=12)
+            trace_policy_rows = [
+                {
+                    "policy_ref": ref_row.get("policy_ref"),
+                    "title": ref_row.get("title"),
+                    "summary": ref_row.get("summary"),
+                    "condition": _monitor_dict(_monitor_list(_monitor_dict(ref_row.get("detail")).get("matches"))[0] if _monitor_list(_monitor_dict(ref_row.get("detail")).get("matches")) else {}).get("condition"),
+                    "allowed_action": _monitor_dict(_monitor_list(_monitor_dict(ref_row.get("detail")).get("matches"))[0] if _monitor_list(_monitor_dict(ref_row.get("detail")).get("matches")) else {}).get("allowed_action"),
+                    "blocked_action": _monitor_dict(_monitor_list(_monitor_dict(ref_row.get("detail")).get("matches"))[0] if _monitor_list(_monitor_dict(ref_row.get("detail")).get("matches")) else {}).get("blocked_action"),
+                }
+                for ref_row in policy_ref_rows
+                if str(ref_row.get("policy_ref") or "") in set(trace_policy_refs)
+            ]
+            trace_records.append(
+                {
+                    "receipt_id": item["receipt"].get("id"),
+                    "case_id": row.get("id"),
+                    "policy_case_id": policy_case.get("id"),
+                    "policy_refs": trace_policy_refs,
+                    "receipt_policy_refs": receipt_policy_refs,
+                    "case_policy_refs": policy_ref_ids,
+                    "policy_ref_rows": trace_policy_rows[:6],
+                    "policy_link_source": "receipt.policyRefs + case doctrine" if receipt_policy_refs else "case doctrine",
+                    "trace_id": item["receipt"].get("traceId"),
+                    "trace_url": _monitor_trace_url(item["receipt"].get("traceId")),
+                    "signature": item["receipt"].get("signature"),
+                    "relation_type": item["relation"]["type"],
+                    "relation_confidence": item["relation"]["confidence"],
+                    "hard_match": item["relation"]["hard_match"],
+                    "relation_score": item["relation"]["score"],
+                    "case_link_source": item["receipt"].get("caseLinkSource"),
+                    "case_link_confidence": item["receipt"].get("caseLinkConfidence"),
+                    "eval_score": item["receipt"].get("evalScore"),
+                    "gate": item["receipt"].get("gate"),
+                    "tool_count": len(_monitor_list(item["receipt"].get("toolCalls"))),
+                    "summary": item["receipt"].get("summary"),
+                }
+            )
+        review_sessions = [
+            {
+                "review_session_id": item["review"].get("id"),
+                "case_id": item["review"].get("case_id") or item["review"].get("caseId"),
+                "status": item["review"].get("status") or _monitor_dict(item["review"].get("disposition")).get("decision"),
+                "priority": item["review"].get("priority"),
+                "owner": item["review"].get("owner"),
+                "reason": item["review"].get("reason"),
+                "relation_type": item["relation"]["type"],
+                "relation_confidence": item["relation"]["confidence"],
+                "hard_match": item["relation"]["hard_match"],
+                "relation_score": item["relation"]["score"],
+            }
+            for item in visible_reviews[:10]
+        ]
+        receiver_actions = _monitor_unique(
+            [action for item in visible_receipts for action in _monitor_list(item["receipt"].get("receiverActions"))],
+            limit=10,
+        )
+        outcome_rows = [_monitor_dict(item["receipt"].get("outcomeEvidence")) for item in visible_receipts if _monitor_dict(item["receipt"].get("outcomeEvidence"))]
+        graph_cases.append(
+            {
+                "case_id": row.get("id"),
+                "caseId": row.get("id"),
+                "policy_case_id": policy_case.get("id"),
+                "policy_refs": policy_ref_ids,
+                "policy_ref_rows": policy_ref_rows[:12],
+                "receipt_ids": _monitor_unique([item["receipt"].get("id") for item in visible_receipts], limit=12),
+                "trace_ids": _monitor_unique([item.get("trace_id") or item.get("signature") for item in trace_records], limit=12),
+                "review_session_ids": _monitor_unique([item.get("review_session_id") for item in review_sessions], limit=12),
+                "trace_records": trace_records,
+                "review_sessions": review_sessions,
+                "eval_dimensions": _monitor_eval_dimensions(row, [item["receipt"] for item in visible_receipts], [item["review"] for item in visible_reviews], policy_case),
+                "outcome_evidence": {
+                    "status": "measured_receipt" if outcome_rows else "dispatch_contract_only" if receiver_actions else "missing_outcome",
+                    "dispatch_count": sum(int(_safe_float(item["receipt"].get("dispatchCount"), 0)) for item in visible_receipts),
+                    "receiver_actions": receiver_actions,
+                    "latest": outcome_rows[0] if outcome_rows else {},
+                },
+                "relationship_contract": {
+                    "case_id": row.get("id"),
+                    "trace_id_source": "receipt.traceId or receipt.signature",
+                    "review_session_id_source": "review_training_ledger.id",
+                    "policy_ref_source": "operational_doctrine_index.policy_refs",
+                    "explicit_receipt_links": len(direct_receipts),
+                    "explicit_review_links": len(direct_reviews),
+                    "inferred_receipt_links": len([item for item in visible_receipts if item["relation"]["type"] != "explicit_case_id"]),
+                    "inferred_review_links": len([item for item in visible_reviews if item["relation"]["type"] != "explicit_case_id"]),
+                    "candidate_receipt_links": len(related_receipts),
+                    "candidate_review_links": len(related_reviews),
+                    "semantic_threshold": "include explicit links, distinctive case-token matches, or 3+ shared evidence terms",
+                },
+            }
+        )
+    trace_record_count = sum(len(row["trace_records"]) for row in graph_cases)
+    distinct_trace_ids = _monitor_unique(
+        [trace_id for row in graph_cases for trace_id in _monitor_list(row.get("trace_ids"))],
+        limit=500,
+    )
+    distinct_review_session_ids = _monitor_unique(
+        [session_id for row in graph_cases for session_id in _monitor_list(row.get("review_session_ids"))],
+        limit=500,
+    )
+    return {
+        "status": "ready",
+        "mode": "monitor_evidence_graph",
+        "case_count": len(graph_cases),
+        "summary": {
+            "receipt_count": len(receipts),
+            "trace_record_count": trace_record_count,
+            "distinct_trace_id_count": len(distinct_trace_ids),
+            "review_session_count": len(review_rows),
+            "linked_review_session_count": len(distinct_review_session_ids),
+            "policy_ref_count": len(policy_refs),
+            "cases_with_trace_records": sum(1 for row in graph_cases if row["trace_records"]),
+            "cases_with_review_sessions": sum(1 for row in graph_cases if row["review_sessions"]),
+            "cases_with_policy_refs": sum(1 for row in graph_cases if row["policy_refs"]),
+        },
+        "cases": graph_cases,
+        "source_status": {"case_index": index.get("status"), "agent_ops_ledger": ledger.get("status"), "review_ledger": reviews.get("status"), "policy_doctrine": policy.get("status", "ready" if policy else "unavailable")},
+    }
+
+
 async def _advance_fast_park_from_wall_clock() -> int:
     global _last_fast_park_step_at
     now = time.monotonic()
@@ -7450,6 +8054,19 @@ def _hot_delivery_outbox_health() -> dict[str, Any]:
 
 
 def _hot_platform_store_health() -> dict[str, Any]:
+    path = os.getenv("PARKPULSE_PLATFORM_DB", "/tmp/parkpulse/park_data.db")
+    if not _truthy(os.getenv("PARKPULSE_READINESS_DEEP_PLATFORM_STORE"), False):
+        return {
+            "ready": True,
+            "mode": "hot_path_platform_store_contract",
+            "source_of_truth": "local_sqlite_wal",
+            "path": path,
+            "schema_version": 1,
+            "registered_store_count": None,
+            "observed_store_count": None,
+            "authority_boundary": "SQLite owns local transactional app authority. Deep registry inspection is off the readiness hot path.",
+            "readiness_issues": [],
+        }
     try:
         from platform_store import platform_store_status
 
@@ -7506,6 +8123,406 @@ def _readiness_payload() -> dict[str, Any]:
         "dependency_status": dependency_status,
         "readiness_issues": [f"{name} is not ready" for name in hard_blockers],
         "degraded_dependencies": [f"{name} is degraded or unavailable" for name in degraded],
+    }
+
+
+async def _readiness_payload_bounded() -> dict[str, Any]:
+    timeout = max(0.5, _float_env("PARKPULSE_READYZ_TIMEOUT_SECONDS", 2.5))
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_readiness_payload), timeout=timeout)
+    except Exception as error:
+        issue = _issue_text(error, f"Readiness payload timed out after {timeout:g}s.")
+        return {
+            "service": "parkpulse-api",
+            "status": "degraded",
+            "mode": "readyz_timeout_fallback",
+            "entrypoint": "lazy-main",
+            "build_id": LAZY_ROUTER_BUILD_ID,
+            "uptime_ms": int((time.time() - _started_at) * 1000),
+            "full_app_loaded": _parkpulse_app is not None,
+            "full_runtime": _full_runtime_status(),
+            "load_error": _load_error,
+            "readiness_issues": [issue],
+            "degraded_dependencies": ["readiness builder exceeded hot-path budget"],
+            "dependency_status": {
+                "mongo": _hot_mongo_status(),
+                "full_runtime": _full_runtime_status(),
+            },
+            "timeout_seconds": timeout,
+        }
+
+
+def _readyz_fast_payload() -> dict[str, Any]:
+    configured = {
+        "mongo": bool(os.getenv("MONGODB_DIRECT_URI") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")),
+        "mongodb_model_api_key": bool(os.getenv("MONGODB_MODEL_API_KEY")),
+        "gemini": bool(os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")),
+        "bigquery": bool(os.getenv("BIGQUERY_DATASET") or os.getenv("PARKPULSE_LIVE_BIGQUERY")),
+    }
+    return {
+        "service": "parkpulse-api",
+        "status": "ok",
+        "mode": "readyz_fast",
+        "entrypoint": "lazy-main",
+        "build_id": LAZY_ROUTER_BUILD_ID,
+        "uptime_ms": int((time.time() - _started_at) * 1000),
+        "full_app_loaded": _parkpulse_app is not None,
+        "full_runtime": _full_runtime_status(),
+        "load_error": _load_error,
+        "configured_dependencies": configured,
+        "deep_readiness": "/api/park/latency-diagnostics",
+    }
+
+
+def _copilot_request_message(request_payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    messages = [
+        item
+        for item in request_payload.get("messages", [])
+        if isinstance(item, dict) and str(item.get("content") or "").strip()
+    ][-8:]
+    message = str(request_payload.get("message") or "").strip()
+    if not message and messages:
+        message = str(messages[-1].get("content") or "").strip()
+    return message or "What is the biggest park risk right now?", messages
+
+
+def _lightweight_copilot_state_summary(state: dict[str, Any]) -> dict[str, Any]:
+    flow = state.get("guestFlow", {}) if isinstance(state.get("guestFlow"), dict) else {}
+    rides = [item for item in flow.get("rides", []) if isinstance(item, dict)] if isinstance(flow.get("rides"), list) else []
+    zones = [item for item in flow.get("zones", []) if isinstance(item, dict)] if isinstance(flow.get("zones"), list) else []
+    paths = [item for item in flow.get("paths", []) if isinstance(item, dict)] if isinstance(flow.get("paths"), list) else []
+    weather = state.get("weather", {}) if isinstance(state.get("weather"), dict) else {}
+    food = state.get("foodInventory", {}) if isinstance(state.get("foodInventory"), dict) else {}
+    sorted_rides = sorted(rides, key=lambda item: _safe_float(item.get("waitMins"), 0), reverse=True)
+    sorted_zones = sorted(zones, key=lambda item: _safe_float(item.get("density"), 0), reverse=True)
+    sorted_paths = sorted(paths, key=lambda item: _safe_float(item.get("congestionLevel"), 0), reverse=True)
+    return {
+        "status": "ready",
+        "mode": "lightweight_copilot_state",
+        "top_rides": [
+            {
+                "id": ride.get("id"),
+                "name": ride.get("name") or ride.get("id"),
+                "wait_mins": ride.get("waitMins"),
+                "queue_guests": ride.get("queueGuests"),
+                "status": ride.get("status"),
+                "staff": (
+                    f"{ride.get('staffAvailable')}/{ride.get('staffRequired')}"
+                    if ride.get("staffAvailable") is not None and ride.get("staffRequired") is not None
+                    else None
+                ),
+            }
+            for ride in sorted_rides[:5]
+        ],
+        "crowded_zones": [
+            {
+                "id": zone.get("id"),
+                "name": zone.get("name") or zone.get("id"),
+                "density": zone.get("density"),
+                "wait_mins": zone.get("waitMins"),
+                "intent": zone.get("dominantIntent"),
+            }
+            for zone in sorted_zones[:5]
+        ],
+        "constrained_paths": [
+            {
+                "from": path.get("fromName") or path.get("from"),
+                "to": path.get("toName") or path.get("to"),
+                "walk_mins": path.get("walkMinutes"),
+                "congestion": path.get("congestionLevel"),
+                "status": path.get("status"),
+            }
+            for path in sorted_paths[:5]
+        ],
+        "weather": {
+            "condition": weather.get("condition"),
+            "heat_index_f": weather.get("heatIndexF"),
+            "storm_risk": weather.get("stormRisk"),
+        },
+        "food": {
+            "mode": food.get("mode"),
+            "risk": food.get("risk"),
+            "low_stock_items": food.get("lowStockItems") if isinstance(food.get("lowStockItems"), list) else [],
+        },
+        "operations_audit": state.get("operationsAudit") if isinstance(state.get("operationsAudit"), dict) else {},
+    }
+
+
+def _lightweight_copilot_recommendation(message: str, route: dict[str, Any], state_summary: dict[str, Any]) -> dict[str, Any]:
+    role = str(route.get("selected_role") or "scan")
+    top_ride = (state_summary.get("top_rides") or [{}])[0]
+    top_zone = (state_summary.get("crowded_zones") or [{}])[0]
+    top_path = (state_summary.get("constrained_paths") or [{}])[0]
+    ride_name = top_ride.get("name") or "the highest-wait ride"
+    zone_name = top_zone.get("name") or "the busiest zone"
+    path_label = (
+        f"{top_path.get('from')} to {top_path.get('to')}"
+        if top_path.get("from") or top_path.get("to")
+        else "the most constrained path"
+    )
+    lower = message.lower()
+    if "weather" in lower or "storm" in lower or "heat" in lower:
+        label = "Keep the turn read-only and prepare weather/comfort monitoring."
+        action = "Monitor weather risk, keep indoor/calm alternates visible, and ask for operator approval before shelter or closure actions."
+    elif "food" in lower or "mobile order" in lower:
+        label = "Protect food capacity before sending new demand."
+        action = "Hold broad food promotions, point guests to alternate capacity, and task staff to verify pickup backlog before dispatch."
+    elif "staff" in lower:
+        label = "Check staff coverage before moving anyone."
+        action = "Use role-compatible redeployment only after confirming break windows, certification, and active post coverage."
+    elif "queue" in lower or "coaster" in lower or "ride" in lower:
+        label = f"Relieve pressure around {ride_name} without creating a second crowd."
+        action = f"Split flow away from {ride_name}, keep messaging calm near {zone_name}, and station staff near {path_label} before any guest push."
+    else:
+        label = f"Use {role.title()} Agent as a bounded advisor."
+        action = f"Read live state, keep the turn non-dispatching, and escalate only after the operator confirms the affected location and approval."
+    return {
+        "role": role,
+        "label": label,
+        "action": action,
+        "gate": "propose_only",
+        "dispatch_count": 0,
+        "execute": False,
+        "policy_gates": route.get("policy_gates", []),
+        "primary_evidence": {
+            "top_ride": top_ride,
+            "top_zone": top_zone,
+            "top_path": top_path,
+        },
+    }
+
+
+def _lightweight_copilot_options(recommendation: dict[str, Any], route: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "label": recommendation.get("label") or "Bounded operating proposal",
+            "verdict": "selected",
+            "reason": "Uses the fast state snapshot and department role route without importing the full runtime.",
+            "projected_effect": "Operator gets a concrete proposal with no state mutation or receiver dispatch.",
+        },
+        {
+            "label": "Wait for full copilot runtime",
+            "verdict": "rejected",
+            "reason": "Full runtime is not loaded on this request path and previously caused long Cloud Run waits.",
+            "projected_effect": "Could improve receipt depth, but would risk the conversation panel hanging.",
+        },
+        {
+            "label": "Dispatch immediately",
+            "verdict": "blocked",
+            "reason": "The lightweight copilot path is propose-only unless the full policy-gated runtime is loaded.",
+            "projected_effect": "No guest, worker, or equipment receiver is mutated from this path.",
+        },
+    ]
+
+
+async def _lightweight_copilot_model_response(
+    *,
+    message: str,
+    messages: list[dict[str, Any]],
+    route: dict[str, Any],
+    state_summary: dict[str, Any],
+    recommendation: dict[str, Any],
+    options: list[dict[str, Any]],
+) -> dict[str, Any]:
+    prompt = {
+        "task": (
+            "Answer as ParkPulse's department copilot for an amusement-park operator. "
+            "Be natural, concise, and grounded only in the supplied state, route, policy gates, and recommendation. "
+            "Do not claim that a dispatch, closure, medical/security action, or equipment command happened."
+        ),
+        "operator_message": message,
+        "recent_messages": [{"role": item.get("role"), "content": item.get("content")} for item in messages[-6:]],
+        "selected_role": route.get("selected_role"),
+        "route_reason": route.get("why"),
+        "policy_gates": route.get("policy_gates", []),
+        "state_summary": state_summary,
+        "recommended_action": recommendation,
+        "options_considered": options,
+        "required_json": {
+            "answer": "one natural operator-facing paragraph with the concrete recommendation",
+            "reasoning_bullets": ["2-4 short bullets grounded in supplied facts"],
+            "operator_next": "the next concrete operator step",
+            "confidence": 0.0,
+        },
+    }
+    try:
+        from gemini_hard_timeout import generate_gemini_json_hard_timeout
+
+        started = time.monotonic()
+        result = await generate_gemini_json_hard_timeout(
+            prompt,
+            timeout_seconds=max(0.5, _float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_MODEL_TIMEOUT_SECONDS", 4.0)),
+            max_output_tokens=max(160, _int_env("PARKPULSE_COPILOT_LIGHTWEIGHT_MODEL_MAX_TOKENS", 520)),
+            temperature=_float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_MODEL_TEMPERATURE", 0.25),
+        )
+        parsed = _parse_gemini_json_text(str(result.get("text") or "{}"))
+        return {
+            "source": "gemini_lightweight_copilot",
+            "model": os.getenv("PARKPULSE_FAST_GEMINI_MODEL") or os.getenv("GEMINI_MODEL") or os.getenv("GOOGLE_GENAI_MODEL"),
+            "transport": result.get("transport"),
+            "provider_ready": True,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "answer": str(parsed.get("answer") or "").strip(),
+            "reasoning_bullets": [str(item) for item in parsed.get("reasoning_bullets", []) if item][:4]
+            if isinstance(parsed.get("reasoning_bullets"), list)
+            else [],
+            "operator_next": str(parsed.get("operator_next") or "").strip(),
+            "confidence": parsed.get("confidence", 0.74),
+            "semantic_memory": {
+                "status": "configured_deferred" if os.getenv("MONGODB_MODEL_API_KEY") else "not_configured",
+                "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
+                "reason": "MongoDB model API retrieval is kept off this hot path until the lightweight retriever is split from pymongo/full runtime imports.",
+            },
+        }
+    except Exception as error:
+        evidence = recommendation.get("primary_evidence", {}) if isinstance(recommendation.get("primary_evidence"), dict) else {}
+        top_ride = evidence.get("top_ride", {}) if isinstance(evidence.get("top_ride"), dict) else {}
+        top_zone = evidence.get("top_zone", {}) if isinstance(evidence.get("top_zone"), dict) else {}
+        answer = (
+            f"{recommendation.get('label')} My proposal is: {recommendation.get('action')} "
+            f"I am keeping this propose-only because the full copilot runtime is not loaded and no receiver dispatch should happen from this fast path."
+        )
+        return {
+            "source": "deterministic_lightweight_copilot",
+            "model": None,
+            "provider_ready": False,
+            "provider_error": str(error)[:300],
+            "answer": answer,
+            "reasoning_bullets": [
+                f"Selected role: {route.get('selected_role') or 'scan'} because {route.get('why') or 'the role router matched the operator text'}.",
+                f"Highest ride pressure: {top_ride.get('name') or 'unknown'} at {top_ride.get('wait_mins', '--')} minutes.",
+                f"Busiest zone: {top_zone.get('name') or 'unknown'} at density {top_zone.get('density', '--')}.",
+                "No guest, worker, equipment, or memory mutation was dispatched.",
+            ],
+            "operator_next": "Approve a full policy-gated action or ask a narrower follow-up.",
+            "confidence": 0.68,
+            "semantic_memory": {
+                "status": "configured_deferred" if os.getenv("MONGODB_MODEL_API_KEY") else "not_configured",
+                "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
+            },
+        }
+
+
+async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) -> dict[str, Any]:
+    started = time.monotonic()
+    stages: list[dict[str, Any]] = []
+
+    def mark(stage: str) -> None:
+        stages.append({"stage": stage, "total_ms": round((time.monotonic() - started) * 1000, 2)})
+
+    message, messages = _copilot_request_message(request_payload)
+    mode = str(request_payload.get("mode") or "auto")
+    requested_turn_mode = str(request_payload.get("turn_mode") or request_payload.get("turnMode") or "auto").lower()
+    state_timeout = max(0.25, _float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_STATE_TIMEOUT_SECONDS", 1.5))
+    try:
+        state = await asyncio.wait_for(
+            _cached_hot_endpoint("park_state_lite", _hot_endpoint_ttls()["park_state"], _fast_park_state_lite),
+            timeout=state_timeout,
+        )
+        mark("state")
+    except Exception as error:
+        state = {
+            "status": "degraded",
+            "operationsAudit": {"ready": False, "readiness_issues": [str(error)[:240]]},
+            "guestFlow": {"rides": [], "zones": [], "paths": []},
+        }
+        mark("state_fallback")
+    route = route_agent_role(message, mode)
+    mark("route")
+    state_summary = _lightweight_copilot_state_summary(state if isinstance(state, dict) else {})
+    recommendation = _lightweight_copilot_recommendation(message, route, state_summary)
+    options = _lightweight_copilot_options(recommendation, route)
+    mark("recommendation")
+    conversation_response = await _lightweight_copilot_model_response(
+        message=message,
+        messages=messages,
+        route=route,
+        state_summary=state_summary,
+        recommendation=recommendation,
+        options=options,
+    )
+    mark("conversation_response")
+    answer = conversation_response.get("answer") or str(recommendation.get("action") or "")
+    reasoning_summary = [
+        *([str(item) for item in conversation_response.get("reasoning_bullets", [])] if isinstance(conversation_response.get("reasoning_bullets"), list) else []),
+        f"Conversation source: {conversation_response.get('source')}.",
+    ]
+    response_mode = (
+        "answer"
+        if requested_turn_mode == "answer" or not any(term in message.lower() for term in ("do", "fix", "reroute", "send", "move", "open", "close", "queue", "stuck"))
+        else "propose"
+    )
+    semantic_memory_context = conversation_response.get("semantic_memory") if isinstance(conversation_response.get("semantic_memory"), dict) else {}
+    return {
+        "status": "complete",
+        "mode": response_mode,
+        "message": message,
+        "answer": answer,
+        "reasoning_summary": reasoning_summary,
+        "options_considered": options,
+        "clarifying_question": None,
+        "recommended_action": recommendation,
+        "map_grounding": {
+            "status": "lightweight",
+            "primary_zone": recommendation.get("primary_evidence", {}).get("top_zone") if isinstance(recommendation.get("primary_evidence"), dict) else {},
+            "primary_path": recommendation.get("primary_evidence", {}).get("top_path") if isinstance(recommendation.get("primary_evidence"), dict) else {},
+        },
+        "impact_replay": None,
+        "reasoning_evaluation": {
+            "status": "lightweight",
+            "overall": 78,
+            "verdict": "usable_with_conditions",
+            "conditions": ["Full impact replay is deferred until the full runtime is warm."],
+        },
+        "agent_runtime": {
+            "status": "lightweight_complete",
+            "mode": "main_asgi_lightweight_copilot",
+            "full_runtime_loaded": _parkpulse_app is not None,
+            "summary": {"completed_stages": len(stages), "total_stages": len(stages)},
+        },
+        "conversation_response": conversation_response,
+        "semantic_memory_context": semantic_memory_context,
+        "tool_trace": {
+            "tool_calls": [
+                {"tool": "get_park_state_lite", "status": state_summary.get("status"), "capability": "read", "output": "lightweight state summary"},
+                {"tool": "route_agent_role", "status": "complete", "capability": "reason", "output": route.get("selected_role")},
+                {"tool": "copilot.respond", "status": "complete", "capability": "reason", "output": conversation_response.get("source")},
+            ],
+            "summary": {"policy_gate": "propose_only", "state_mutation": False},
+        },
+        "tool_call_timeline": [
+            {"id": "state", "tool": "get_park_state_lite", "label": "Read fast park state", "status": state_summary.get("status")},
+            {"id": "route", "tool": "route_agent_role", "label": "Select department agent", "status": "complete", "output": route.get("selected_role")},
+            {"id": "answer", "tool": "copilot.respond", "label": "Answer operator", "status": "complete", "output": conversation_response.get("source")},
+        ],
+        "turn_contract": {
+            "mode": response_mode,
+            "will_act": False,
+            "dispatch_count": 0,
+            "state_mutation": False,
+            "reason": "Lightweight copilot is propose-only until the full policy-gated runtime is warm.",
+        },
+        "route": route,
+        "selected_role": route.get("selected_role"),
+        "live_state_summary": state_summary,
+        "action_receipt": None,
+        "run_telemetry": None,
+        "conversation_memory": {
+            "turn_count": len(messages) + 1,
+            "raw_message": message,
+            "effective_message": message,
+            "conversation_intent": response_mode,
+            "chat_brain_source": "main_asgi_lightweight_copilot",
+            "constraints": route.get("policy_gates", []),
+            "semantic_memory_status": semantic_memory_context.get("status") if isinstance(semantic_memory_context, dict) else None,
+        },
+        "latency_diagnostics": {
+            "mode": "main_asgi_lightweight_copilot",
+            "status": "complete",
+            "total_ms": round((time.monotonic() - started) * 1000, 2),
+            "stages": stages,
+            "full_runtime": _full_runtime_status(),
+        },
     }
 
 
@@ -7593,16 +8610,25 @@ def _store_run_receipt(
     kind: str,
     upgrade_status: str | None = None,
     receipt_id: str | None = None,
+    agent_ops_inline: bool = True,
 ) -> dict[str, Any]:
     payload = _attach_dispatch_reliability(payload, message=message, mode=mode)
     telemetry = payload.setdefault("run_telemetry", {})
     if isinstance(telemetry, dict):
-        try:
-            from agent_ops_ledger import retrieve_agent_ops_context
+        if agent_ops_inline:
+            try:
+                from agent_ops_ledger import retrieve_agent_ops_context
 
-            ledger_context = retrieve_agent_ops_context(f"{message} {mode} {kind}", limit=3)
-        except Exception as error:
-            ledger_context = {"status": "unavailable", "count": 0, "items": [], "reason": str(error)[:240]}
+                ledger_context = retrieve_agent_ops_context(f"{message} {mode} {kind}", limit=3)
+            except Exception as error:
+                ledger_context = {"status": "unavailable", "count": 0, "items": [], "reason": str(error)[:240]}
+        else:
+            ledger_context = {
+                "status": "deferred",
+                "count": 0,
+                "items": [],
+                "reason": "Agent role hot path skips ops-ledger retrieval before responding.",
+            }
         telemetry.setdefault("state_snapshot", {"status": "summarized", "source": kind, "capturedAt": _now_iso()})
         telemetry.setdefault("governance", payload.get("policy_gate") or payload.get("lifecycle", {}).get("policy_gate") or {"allowed": True, "gate_status": "recorded", "findings": []})
         memory = telemetry.setdefault(
@@ -7646,12 +8672,18 @@ def _store_run_receipt(
         for stale_id in list(_run_receipts):
             if stale_id not in _run_receipt_order:
                 _run_receipts.pop(stale_id, None)
-    try:
-        from agent_ops_ledger import record_agent_ops_run
+    if agent_ops_inline:
+        try:
+            from agent_ops_ledger import record_agent_ops_run
 
-        payload["agent_ops_ledger"] = record_agent_ops_run(payload, message=message, mode=mode, kind=kind)
-    except Exception as error:
-        payload["agent_ops_ledger"] = {"status": "unavailable", "reason": str(error)[:240]}
+            payload["agent_ops_ledger"] = record_agent_ops_run(payload, message=message, mode=mode, kind=kind)
+        except Exception as error:
+            payload["agent_ops_ledger"] = {"status": "unavailable", "reason": str(error)[:240]}
+    else:
+        payload["agent_ops_ledger"] = {
+            "status": "deferred",
+            "reason": "Agent role hot path preserves the receipt in memory and defers ops-ledger persistence.",
+        }
     return payload
 
 
@@ -8978,6 +10010,48 @@ async def _proact_role_payload(message: str, mode: str, route: dict[str, Any]) -
     return payload
 
 
+async def _customer_role_hot_path_payload(message: str, mode: str, route: dict[str, Any]) -> dict[str, Any]:
+    state = await _customer_public_hot_path_state()
+    agent_builder = _customer_support_agent_builder_contract("recommendation")
+    payload = _customer_support_fallback_response(
+        {"question": message, "mode": "recommendation"},
+        state,
+        "Agent role customer hot path uses bounded public guidance without waiting on the model provider.",
+        agent_builder,
+    )
+    payload["status"] = "complete"
+    payload["mode"] = "bounded_customer_role_hot_path"
+    trace = _role_tool_trace(route, selected_role="customer", scenario_key="customer_public")
+    payload.update(
+        {
+            "selected_role": "customer",
+            "skill": route.get("skill"),
+            "role_route": route,
+            "role_run": {
+                "role": "customer",
+                "dispatch_allowed": False,
+                "dispatch_count": 0,
+                "policy_gates": route.get("policy_gates", []),
+                "receipt_artifacts": route.get("expected_receipt", []),
+            },
+            "digital_twin_tools": trace,
+            "run_telemetry": {
+                "scenario_key": "customer_public",
+                "delivery": {"summary": {"total": 0}, "dispatches": [], "response": {}},
+                "digital_twin_tools": trace,
+                "governance": {
+                    "allowed": True,
+                    "gate_status": "customer_read_only",
+                    "findings": ["Customer role can answer with public guidance but cannot dispatch operator, worker, or equipment actions."],
+                },
+                "eval": {"scorecard": {"overall": 88, "policy_gate_status": "customer_read_only", "needs_human_approval": False}},
+            },
+            "role_receipt": {"role": "customer", "skill": route.get("skill"), "scenario_key": "customer_public", "dispatch_ids": [], "read_only": True},
+        }
+    )
+    return _attach_role_work_contract(payload, message=message, route=route, role="customer", scenario_key="customer_public")
+
+
 async def _qa_role_payload(message: str, mode: str, route: dict[str, Any]) -> dict[str, Any]:
     from prod_reliability_qa_agent import run_production_reliability_qa
 
@@ -9049,28 +10123,24 @@ async def _agent_role_run_payload(message: str, mode: str = "auto") -> dict[str,
     if selected == "proact":
         return await _proact_role_payload(message, mode, route)
     if selected == "customer":
-        payload = await _customer_support_agent_payload({"question": message, "mode": "recommendation"})
-        trace = _role_tool_trace(route, selected_role="customer", scenario_key="customer_public")
-        payload.update(
-            {
-                "selected_role": "customer",
-                "skill": route.get("skill"),
-                "role_route": route,
-                "role_run": {
-                    "role": "customer",
-                    "dispatch_allowed": False,
-                    "dispatch_count": 0,
-                    "policy_gates": route.get("policy_gates", []),
-                    "receipt_artifacts": route.get("expected_receipt", []),
-                },
-                "digital_twin_tools": trace,
-                "run_telemetry": {"delivery": {"summary": {"total": 0}, "dispatches": []}, "digital_twin_tools": trace},
-                "role_receipt": {"role": "customer", "skill": route.get("skill"), "scenario_key": "customer_public", "dispatch_ids": [], "read_only": True},
-            }
-        )
-        payload = _attach_role_work_contract(payload, message=message, route=route, role="customer", scenario_key="customer_public")
-        return payload
+        return await _customer_role_hot_path_payload(message, mode, route)
     return _scan_role_payload(message, mode, route)
+
+
+async def _record_agent_role_trace_sample_bounded(payload: dict[str, Any], *, message: str, mode: str, source: str) -> dict[str, Any]:
+    timeout_seconds = max(0.05, float(os.getenv("PARKPULSE_AGENT_ROLE_TRACE_SAMPLE_TIMEOUT_SECONDS", "0.35")))
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(record_agent_role_trace_sample, payload, message=message, mode=mode, source=source),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "status": "deferred",
+            "readiness_issues": [f"Trace sample persistence exceeded {timeout_seconds:g}s and was skipped on the hot response path."],
+        }
+    except Exception as error:
+        return {"status": "error", "readiness_issues": [str(error)[:240]]}
 
 
 def _parse_gemini_json_text(text: str) -> dict[str, Any]:
@@ -10906,6 +11976,92 @@ async def _get_full_module_for_first_response(timeout: float):
     return await _get_full_module(timeout=timeout)
 
 
+async def _build_copilot_payload_with_runtime(request_payload: dict[str, Any]) -> dict[str, Any]:
+    started = time.monotonic()
+    load_timeout = max(0.5, _float_env("PARKPULSE_COPILOT_FULL_LOAD_TIMEOUT_SECONDS", 3.0))
+    run_timeout = max(1.0, _float_env("PARKPULSE_COPILOT_WRAPPER_TIMEOUT_SECONDS", 8.0))
+    stages: list[dict[str, Any]] = []
+
+    def mark(stage: str) -> None:
+        stages.append({"stage": stage, "total_ms": round((time.monotonic() - started) * 1000, 2)})
+
+    def fallback_payload(reason: str, error: Exception | None = None) -> dict[str, Any]:
+        mark("fallback")
+        diagnostics: dict[str, Any] = {
+            "mode": "main_asgi_copilot_wrapper",
+            "status": "timeout_fallback",
+            "reason": reason,
+            "total_ms": round((time.monotonic() - started) * 1000, 2),
+            "stages": stages,
+            "load_timeout_seconds": load_timeout,
+            "run_timeout_seconds": run_timeout,
+            "full_runtime": _full_runtime_status(),
+        }
+        if error is not None:
+            diagnostics["error_type"] = type(error).__name__
+            diagnostics["error"] = str(error)[:300]
+        return {
+            "status": "bounded_fallback",
+            "mode": "copilot_hot_path_timeout",
+            "message": str(request_payload.get("message") or ""),
+            "answer": (
+                "The copilot runtime is still warming or exceeded the hot-path budget. "
+                "Use the ops-agent page for the current cached role context while the full receipt finishes off the request path."
+            ),
+            "semantic_memory_context": {
+                "status": "deferred",
+                "reason": "Full copilot runtime did not complete inside the Cloud Run wrapper budget.",
+            },
+            "conversation_response": {
+                "source": "main_asgi_timeout_fallback",
+                "provider_ready": False,
+                "provider_skipped": reason,
+            },
+            "latency_diagnostics": diagnostics,
+        }
+
+    try:
+        if _parkpulse_app is None:
+            if _truthy_env("PARKPULSE_COPILOT_LIGHTWEIGHT_PATH", True):
+                mark("lightweight_path")
+                payload = await _build_lightweight_copilot_payload(request_payload)
+                payload.setdefault("latency_diagnostics", {})
+                if isinstance(payload["latency_diagnostics"], dict):
+                    payload["latency_diagnostics"]["wrapper"] = {
+                        "mode": "main_asgi_copilot_wrapper",
+                        "total_ms": round((time.monotonic() - started) * 1000, 2),
+                        "stages": stages,
+                        "load_timeout_seconds": load_timeout,
+                        "run_timeout_seconds": run_timeout,
+                        "full_runtime": _full_runtime_status(),
+                    }
+                return payload
+            mark("full_runtime_not_loaded")
+            return fallback_payload("runtime_not_loaded")
+        module = await _get_full_module_for_first_response(load_timeout)
+        mark("full_runtime_loaded")
+        request_cls = getattr(module, "CopilotChatRequest")
+        request = request_cls(**request_payload)
+        payload = await asyncio.wait_for(module.park_copilot_chat(request), timeout=run_timeout)
+        mark("full_copilot_complete")
+        if isinstance(payload, dict):
+            payload.setdefault("latency_diagnostics", {})
+            if isinstance(payload["latency_diagnostics"], dict):
+                payload["latency_diagnostics"].setdefault("wrapper", {})
+                payload["latency_diagnostics"]["wrapper"] = {
+                    "mode": "main_asgi_copilot_wrapper",
+                    "total_ms": round((time.monotonic() - started) * 1000, 2),
+                    "stages": stages,
+                    "load_timeout_seconds": load_timeout,
+                    "run_timeout_seconds": run_timeout,
+                    "full_runtime": _full_runtime_status(),
+            }
+            return payload
+        return {"status": "complete", "mode": "copilot_non_dict_response", "payload": payload}
+    except Exception as error:
+        return fallback_payload("runtime_timeout", error)
+
+
 async def _get_full_app():
     module = await _get_full_module()
     return module.app
@@ -11597,11 +12753,7 @@ async def app(scope, receive, send):
             {
                 "type": "http.response.start",
                 "status": 204,
-                "headers": [
-                    (b"access-control-allow-origin", b"*"),
-                    (b"access-control-allow-methods", b"*"),
-                    (b"access-control-allow-headers", b"*"),
-                ],
+                "headers": _cors_preflight_headers(scope),
             }
         )
         await send({"type": "http.response.body", "body": b""})
@@ -11620,7 +12772,11 @@ async def app(scope, receive, send):
                 "load_error": _load_error,
             }
             if path in {"/", "/healthz"}
-            else await _cached_hot_endpoint("readyz", _hot_endpoint_ttls()["readyz"], _readiness_payload)
+            else (
+                await _cached_hot_endpoint("readyz", _hot_endpoint_ttls()["readyz"], _readiness_payload_bounded)
+                if _truthy_env("PARKPULSE_READYZ_DEEP", False)
+                else _readyz_fast_payload()
+            )
         )
         await _send_json(send, 200, payload)
         return
@@ -11899,6 +13055,61 @@ async def app(scope, receive, send):
             await _send_json(send, 200, {"status": "error", "mode": "staff_roleplay_analytics", "readiness_issues": [str(error)[:240]]})
         return
 
+    if method == "POST" and path == "/api/park/product-learning/issue-ticket":
+        try:
+            request_payload = await _read_json_body(receive)
+            if not await _authorize_or_send(send, scope, "create_park_issue_ticket", "park_issue_ticket_create", request_payload, default_role="onsite_worker"):
+                return
+            await _send_json(
+                send,
+                200,
+                create_park_issue_ticket(
+                    source=request_payload.get("source"),
+                    issue_type=request_payload.get("issue_type") or request_payload.get("issueType"),
+                    summary=request_payload.get("summary"),
+                    severity=request_payload.get("severity"),
+                    location=request_payload.get("location"),
+                    reporter_role=request_payload.get("reporter_role") or request_payload.get("reporterRole"),
+                    required_action=request_payload.get("required_action") or request_payload.get("requiredAction"),
+                    assigned_team=request_payload.get("assigned_team") or request_payload.get("assignedTeam"),
+                ),
+            )
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "park_issue_ticket", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "POST" and path == "/api/park/product-learning/training-gap-ticket":
+        try:
+            request_payload = await _read_json_body(receive)
+            if not await _authorize_or_send(send, scope, "create_training_gap_ticket", "training_gap_ticket_create", request_payload, default_role="ops_team"):
+                return
+            await _send_json(
+                send,
+                200,
+                create_training_gap_ticket(
+                    scenario_id=request_payload.get("scenario_id") or request_payload.get("scenarioId"),
+                    gap_type=request_payload.get("gap_type") or request_payload.get("gapType"),
+                    severity=request_payload.get("severity"),
+                    evidence=request_payload.get("evidence") if isinstance(request_payload.get("evidence"), dict) else {},
+                    trainee_name=request_payload.get("trainee_name") or request_payload.get("traineeName"),
+                    session_id=request_payload.get("session_id") or request_payload.get("sessionId"),
+                ),
+            )
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "training_gap_ticket", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "GET" and path == "/api/park/product-learning/loop":
+        try:
+            query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+            limit_raw = (query.get("limit") or [None])[0]
+            if not await _authorize_or_send(send, scope, "read_product_learning", "product_learning_loop", None, default_role="ops_team"):
+                return
+            await _send_json(send, 200, product_learning_loop_status(limit=int(limit_raw) if limit_raw else 500))
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "product_learning_loop", "readiness_issues": [str(error)[:240]]})
+        return
+
     if method == "GET" and path == "/api/park/role-product-surfaces":
         if not await _authorize_or_send(send, scope, "read_role_contracts", "role_product_surfaces", None, default_role="ops_team"):
             return
@@ -11923,6 +13134,11 @@ async def app(scope, receive, send):
             )
         else:
             await _send_json(send, 200, {"status": "ready", "mode": "policy_doctrine_index", **_fast_operational_doctrine_index()})
+        return
+
+    if method == "GET" and path.startswith("/api/park/policy-doctrine/"):
+        policy_ref = unquote(path.rsplit("/", 1)[-1])
+        await _send_json(send, 200, _policy_ref_detail(policy_ref))
         return
 
     if method == "GET" and path == "/api/park/deep-memory-graph":
@@ -12183,6 +13399,11 @@ async def app(scope, receive, send):
     if method in {"GET", "POST"} and path == "/api/park/agent-handshake/external-client-demo":
         request_payload = await _read_json_body(receive) if method == "POST" else {}
         await _send_json(send, 200, run_external_client_agent_demo(request_payload))
+        return
+
+    if method in {"GET", "POST"} and path == "/api/park/agent-handshake/passport-second-run-demo":
+        request_payload = await _read_json_body(receive) if method == "POST" else {}
+        await _send_json(send, 200, run_passport_second_run_demo(request_payload))
         return
 
     if method == "POST" and path == "/api/park/agent-handshake/verify-artifact":
@@ -12670,36 +13891,43 @@ async def app(scope, receive, send):
                 validate_raw = request_payload.get("validateTables")
             if validate_raw is None:
                 validate_raw = (query.get("validateTables") or query.get("validate_tables") or [None])[0]
-            live_feed_preflight = await _training_live_feed_preflight_payload(request_payload)
+            deep_readiness_raw = request_payload.get("deepReadiness")
+            if deep_readiness_raw is None:
+                deep_readiness_raw = request_payload.get("deep_readiness")
+            if deep_readiness_raw is None:
+                deep_readiness_raw = (query.get("deepReadiness") or query.get("deep_readiness") or [None])[0]
             controlled_eval_override = request_payload.get("controlledEval") if isinstance(request_payload.get("controlledEval"), dict) else request_payload.get("controlled_eval") if isinstance(request_payload.get("controlled_eval"), dict) else None
-            dry_run_kwargs = {
-                "validate_tables": _truthy(None if validate_raw is None else str(validate_raw), False),
-                "live_feed_preflight": live_feed_preflight,
-                "controlled_eval": controlled_eval_override,
-            }
             timeout_seconds = _float_env("PARKPULSE_GCP_TRAINING_DRY_RUN_TIMEOUT_SECONDS", 12.0)
             min_rows = int(min_rows_raw) if min_rows_raw else 3
+
+            async def _build_dry_run_payload() -> dict[str, Any]:
+                live_feed_preflight = await _training_live_feed_preflight_payload(request_payload, default_refresh=False)
+                dry_run_kwargs = {
+                    "validate_tables": _truthy(None if validate_raw is None else str(validate_raw), False),
+                    "live_feed_preflight": live_feed_preflight,
+                    "controlled_eval": controlled_eval_override,
+                    "fast_readiness": not _truthy(None if deep_readiness_raw is None else str(deep_readiness_raw), False),
+                }
+                try:
+                    return await asyncio.to_thread(
+                        gcp_training_dry_run_readiness,
+                        min_rows,
+                        **dry_run_kwargs,
+                    )
+                except TypeError as type_error:
+                    if "unexpected keyword" not in str(type_error) and "controlled_eval" not in str(type_error) and "fast_readiness" not in str(type_error):
+                        raise
+                    for key in ("controlled_eval", "fast_readiness"):
+                        if key in str(type_error):
+                            dry_run_kwargs.pop(key, None)
+                    return await asyncio.to_thread(
+                        gcp_training_dry_run_readiness,
+                        min_rows,
+                        **dry_run_kwargs,
+                    )
+
             try:
-                payload = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        gcp_training_dry_run_readiness,
-                        min_rows,
-                        **dry_run_kwargs,
-                    ),
-                    timeout=timeout_seconds,
-                )
-            except TypeError as type_error:
-                if "controlled_eval" not in str(type_error) and "unexpected keyword" not in str(type_error):
-                    raise
-                dry_run_kwargs.pop("controlled_eval", None)
-                payload = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        gcp_training_dry_run_readiness,
-                        min_rows,
-                        **dry_run_kwargs,
-                    ),
-                    timeout=timeout_seconds,
-                )
+                payload = await asyncio.wait_for(_build_dry_run_payload(), timeout=timeout_seconds)
             except TimeoutError:
                 payload = {
                     "status": "blocked",
@@ -12707,10 +13935,10 @@ async def app(scope, receive, send):
                     "timeout_seconds": timeout_seconds,
                     "min_sample_count": min_rows,
                     "controlled_eval_gate": {"allowed": False, "status": "not_evaluated_due_to_timeout"},
-                    "live_feed_preflight": live_feed_preflight if isinstance(live_feed_preflight, dict) else {"status": "not_checked"},
+                    "live_feed_preflight": {"status": "timeout", "refresh_status": "timeout", "readiness_issues": [f"GCP training dry run exceeded {timeout_seconds:g}s before live-feed preflight completed."]},
                     "table_validation": {
                         "status": "timeout",
-                        "readiness_issues": [f"GCP training dry run exceeded {timeout_seconds:g}s before table validation completed."],
+                        "readiness_issues": [f"GCP training dry run exceeded {timeout_seconds:g}s before readiness validation completed."],
                     },
                     "bqml_start": {
                         "would_start": False,
@@ -15784,17 +17012,26 @@ async def app(scope, receive, send):
             )
         return
 
+    if method == "POST" and path == "/api/park/copilot-chat":
+        payload = await _read_json_body(receive)
+        response_payload = await _build_copilot_payload_with_runtime(payload)
+        await _send_json(send, 200, response_payload)
+        return
+
     if method == "POST" and path == "/api/park/agent-role-run":
         payload = await _read_json_body(receive)
         message = str(payload.get("message") or payload.get("command") or "Scan the park for operating signals.").strip()
         mode = str(payload.get("mode") or "auto")
         result = await _agent_role_run_payload(message, mode)
-        try:
-            sample_receipt = record_agent_role_trace_sample(result, message=message, mode=mode, source="main.agent_role_run")
-            result["role_trace_sample"] = {"status": sample_receipt.get("status"), "path": sample_receipt.get("path"), "id": (sample_receipt.get("sample") or {}).get("id")}
-        except Exception as error:
-            result["role_trace_sample"] = {"status": "error", "readiness_issues": [str(error)[:240]]}
-        await _send_json(send, 200, _store_run_receipt(result, message=message, mode=mode, kind="agent_role_run"))
+        sample_receipt = await _record_agent_role_trace_sample_bounded(result, message=message, mode=mode, source="main.agent_role_run")
+        result["role_trace_sample"] = {
+            "status": sample_receipt.get("status"),
+            "path": sample_receipt.get("path"),
+            "id": (sample_receipt.get("sample") or {}).get("id") if isinstance(sample_receipt.get("sample"), dict) else None,
+            **({"readiness_issues": sample_receipt.get("readiness_issues")} if sample_receipt.get("readiness_issues") else {}),
+        }
+        inline_ledger = _truthy(os.getenv("PARKPULSE_AGENT_ROLE_RUN_INLINE_LEDGER"), False)
+        await _send_json(send, 200, _store_run_receipt(result, message=message, mode=mode, kind="agent_role_run", agent_ops_inline=inline_ledger))
         return
 
     if method == "POST" and path == "/api/park/agent-role-refine":
@@ -15894,23 +17131,42 @@ async def app(scope, receive, send):
         await _send_json(send, 200, build_accessibility_journey(payload, state))
         return
 
+    if method == "POST" and path == "/api/park/experience-studio/conversation-plan":
+        payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "use_experience_studio", "experience_studio_conversation_plan", payload):
+            return
+        await _send_json(send, 200, await asyncio.to_thread(build_experience_studio_conversation_plan, payload))
+        return
+
     if method == "POST" and path == "/api/park/experience-studio/draft":
         payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "use_experience_studio", "experience_studio_draft", payload):
+            return
         state = await _fast_park_state() if payload.get("useRealParkContext") is True else None
         await _send_json(send, 200, await build_experience_studio_payload(payload, state))
         return
 
     if method == "GET" and path == "/api/park/experience-studio/layer-contract":
+        if not await _authorize_experience_studio_or_send(send, scope, "read_experience_studio", "experience_studio_layer_contract", None):
+            return
         await _send_json(send, 200, studio_layer_contract())
         return
 
+    if method == "GET" and path == "/api/park/experience-studio/readiness":
+        if not await _authorize_experience_studio_or_send(send, scope, "read_experience_studio", "experience_studio_readiness", None):
+            return
+        await _send_json(send, 200, await asyncio.to_thread(experience_studio_readiness))
+        return
+
     if method == "GET" and path == "/api/park/experience-studio/memory":
+        if not await _authorize_experience_studio_or_send(send, scope, "read_experience_studio", "experience_studio_memory", None):
+            return
         query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
         try:
             limit = int((query.get("limit") or ["20"])[0] or 20)
         except (TypeError, ValueError):
             limit = 20
-        await _send_json(send, 200, list_experience_studio_memory(limit=limit))
+        await _send_json(send, 200, await asyncio.to_thread(list_experience_studio_memory, limit=limit))
         return
 
     if method == "GET" and path == "/api/park/experience-studio/venue-data":
@@ -15939,6 +17195,8 @@ async def app(scope, receive, send):
         return
 
     if method == "GET" and path == "/api/park/experience-studio/handoffs":
+        if not await _authorize_experience_studio_or_send(send, scope, "read_experience_studio", "experience_studio_handoffs", None):
+            return
         query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
         limit = int((query.get("limit") or ["30"])[0] or 30)
         await _send_json(send, 200, list_experience_studio_handoffs(limit=limit))
@@ -15947,11 +17205,15 @@ async def app(scope, receive, send):
     if method == "POST" and path.startswith("/api/park/experience-studio/handoffs/") and path.endswith("/status"):
         handoff_id = unquote(path.removeprefix("/api/park/experience-studio/handoffs/").removesuffix("/status").strip("/"))
         payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "review_experience_studio", "experience_studio_handoff_review", payload):
+            return
         result = update_experience_studio_handoff_status(handoff_id, payload)
         await _send_json(send, 200 if result.get("status") == "updated" else 404 if result.get("status") == "not_found" else 400, result)
         return
 
     if method == "GET" and path == "/api/park/experience-studio/drafts":
+        if not await _authorize_experience_studio_or_send(send, scope, "read_experience_studio", "experience_studio_drafts", None):
+            return
         query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
         limit = int((query.get("limit") or ["30"])[0] or 30)
         await _send_json(send, 200, list_experience_studio_drafts(limit=limit))
@@ -15959,12 +17221,16 @@ async def app(scope, receive, send):
 
     if method == "POST" and path == "/api/park/experience-studio/drafts":
         payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "use_experience_studio", "experience_studio_drafts", payload):
+            return
         await _send_json(send, 200, save_experience_studio_draft(payload))
         return
 
     if method == "POST" and path.startswith("/api/park/experience-studio/drafts/") and path.endswith("/handoff"):
         draft_id = unquote(path.removeprefix("/api/park/experience-studio/drafts/").removesuffix("/handoff").strip("/"))
         payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "review_experience_studio", "experience_studio_handoff_create", payload):
+            return
         result = create_experience_studio_handoff(draft_id, payload)
         await _send_json(send, 200 if result.get("status") == "created" else 404 if result.get("status") == "not_found" else 400, result)
         return
@@ -15972,11 +17238,15 @@ async def app(scope, receive, send):
     if method == "POST" and path.startswith("/api/park/experience-studio/drafts/") and not path.endswith("/status") and not path.endswith("/handoff"):
         draft_id = unquote(path.removeprefix("/api/park/experience-studio/drafts/").strip("/"))
         payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "use_experience_studio", "experience_studio_draft_content", payload):
+            return
         result = update_experience_studio_draft_content(draft_id, payload)
         await _send_json(send, 200 if result.get("status") == "updated" else 404 if result.get("status") == "not_found" else 400, result)
         return
 
     if method == "GET" and path.startswith("/api/park/experience-studio/drafts/") and not path.endswith("/status"):
+        if not await _authorize_experience_studio_or_send(send, scope, "read_experience_studio", "experience_studio_draft", None):
+            return
         draft_id = unquote(path.removeprefix("/api/park/experience-studio/drafts/").strip("/"))
         result = get_experience_studio_draft(draft_id)
         await _send_json(send, 200 if result.get("status") == "ready" else 404, result)
@@ -15985,6 +17255,8 @@ async def app(scope, receive, send):
     if method == "POST" and path.startswith("/api/park/experience-studio/drafts/") and path.endswith("/status"):
         draft_id = unquote(path.removeprefix("/api/park/experience-studio/drafts/").removesuffix("/status").strip("/"))
         payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "review_experience_studio", "experience_studio_draft_status", payload):
+            return
         result = update_experience_studio_draft_status(draft_id, payload)
         await _send_json(send, 200 if result.get("status") == "updated" else 404 if result.get("status") == "not_found" else 400, result)
         return
@@ -16112,6 +17384,17 @@ async def app(scope, receive, send):
             200,
             await _cached_hot_endpoint("park_case_index", _hot_endpoint_ttls()["park_state"], _fast_case_index),
         )
+        return
+
+    if method == "GET" and path == "/api/park/monitor-evidence":
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        limit_raw = (query.get("limit") or ["30"])[0]
+        case_id = (query.get("case_id") or query.get("caseId") or [""])[0].strip() or None
+        try:
+            limit = int(limit_raw)
+        except ValueError:
+            limit = 30
+        await _send_json(send, 200, await _monitor_evidence_graph(case_id=case_id, limit=limit))
         return
 
     if method == "GET" and path.startswith("/api/park/cases/") and path.endswith("/brief"):

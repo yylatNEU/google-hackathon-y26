@@ -378,7 +378,7 @@ def test_vertex_guest_generator_uses_provider_without_changing_score(monkeypatch
     assert turn["llm_guest"]["transport"] == "google_genai_sdk"
     assert turn["llm_guest"]["emotion"] == "worried"
     assert turn["session"]["guest_simulator"]["llm_controls_score"] is False
-    assert captured["timeout_seconds"] == 12
+    assert captured["timeout_seconds"] == 4
     assert captured["prompt"]["vertex_ai_contract"]["never_controls_score"] is True
     assert captured["prompt"]["scenario"]["id"] == "lost_child_report"
 

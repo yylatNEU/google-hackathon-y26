@@ -27,7 +27,16 @@ def _parse_time(value: Any) -> datetime | None:
 def _documents_for_embedding_check(collection_name: str, limit: int = 100) -> list[dict[str, Any]]:
     memory = mongo_memory._memory
     collection = memory._collection(collection_name)
-    projection = {"_id": 1, "embedding": 1, "embeddingText": 1, "updatedAt": 1, "createdAt": 1}
+    projection = {
+        "_id": 1,
+        "embedding": 1,
+        "embeddingText": 1,
+        "embeddingMetadata": 1,
+        "modelEmbedding": 1,
+        "modelEmbeddingMetadata": 1,
+        "updatedAt": 1,
+        "createdAt": 1,
+    }
     if collection is not None:
         try:
             return [dict(row) for row in collection.find({}, projection).limit(limit)]
@@ -47,27 +56,44 @@ def _collection_count(collections: list[dict[str, Any]], name: str) -> int:
     return 0
 
 
-def _embedding_coverage(collections: list[dict[str, Any]], collection_name: str) -> dict[str, Any]:
+def _embedding_coverage(
+    collections: list[dict[str, Any]],
+    collection_name: str,
+    *,
+    vector_field: str = "embedding",
+    metadata_field: str = "embeddingMetadata",
+) -> dict[str, Any]:
     total = _collection_count(collections, collection_name)
     sampled = _documents_for_embedding_check(collection_name)
     embedded = [
         row
         for row in sampled
-        if isinstance(row.get("embedding"), list)
-        and len(row.get("embedding", [])) > 0
+        if isinstance(row.get(vector_field), list)
+        and len(row.get(vector_field, [])) > 0
         and bool(str(row.get("embeddingText", "")).strip())
     ]
+    dimensions = sorted({len(row.get(vector_field, [])) for row in embedded if isinstance(row.get(vector_field), list)})
+    providers = sorted(
+        {
+            str((row.get(metadata_field) or {}).get("provider"))
+            for row in embedded
+            if isinstance(row.get(metadata_field), dict) and (row.get(metadata_field) or {}).get("provider")
+        }
+    )
     sample_count = len(sampled)
     coverage = round((len(embedded) / sample_count) * 100) if sample_count else 0
     missing_ids = [str(row.get("_id")) for row in sampled if row not in embedded][:8]
     status = "clear" if coverage >= 95 and (total == 0 or sample_count > 0) else "watch" if coverage >= 70 else "action_required"
     return {
         "collection": collection_name,
+        "vector_field": vector_field,
         "status": status,
         "total_docs": total,
         "sampled_docs": sample_count,
         "embedded_docs": len(embedded),
         "coverage_pct": coverage,
+        "dimensions": dimensions,
+        "providers": providers,
         "missing_sample_ids": missing_ids,
     }
 
@@ -90,7 +116,8 @@ def _retrieval_depth_score(dashboard: dict[str, Any]) -> dict[str, Any]:
     score += min(25, playbook_count * 3)
     score += min(25, incident_count * 4)
     score += min(20, learning_count * 6)
-    score += 15 if method == "mongodb_vector_search" else 8 if "text" in method else 3
+    uses_vector_search = method.startswith("mongodb_vector_search")
+    score += 15 if uses_vector_search else 8 if "text" in method else 3
     score += min(15, len(grounded_decisions) * 3)
     score = max(0, min(100, score))
 
@@ -137,6 +164,57 @@ def _staleness_check(dashboard: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _model_api_readiness(status: dict[str, Any], model_embedding_checks: list[dict[str, Any]]) -> dict[str, Any]:
+    model_api = status.get("modelApi", {}) if isinstance(status.get("modelApi"), dict) else {}
+    enabled = bool(model_api.get("enabled"))
+    configured = bool(model_api.get("configured"))
+    expected_dimensions = model_api.get("dimensions")
+    blockers: list[str] = []
+    warnings: list[str] = []
+
+    if not enabled:
+        if not configured:
+            blockers.append("Mongo/Voyage model API key is not configured.")
+        if model_api.get("readinessIssues"):
+            blockers.extend(str(item) for item in model_api.get("readinessIssues", [])[:4])
+        return {
+            "status": "not_enabled" if not blockers else "blocked",
+            "enabled": enabled,
+            "configured": configured,
+            "provider": model_api.get("provider"),
+            "model": model_api.get("model"),
+            "vector_field": model_api.get("vectorPath"),
+            "expected_dimensions": expected_dimensions,
+            "blockers": blockers,
+            "warnings": warnings,
+        }
+
+    for check in model_embedding_checks:
+        if check["total_docs"] > 0 and check["coverage_pct"] < 95:
+            blockers.append(
+                f"{check['collection']} model embedding coverage is {check['coverage_pct']}% for {check['vector_field']}."
+            )
+        dimensions = check.get("dimensions") or []
+        if expected_dimensions and dimensions and int(expected_dimensions) not in {int(value) for value in dimensions}:
+            blockers.append(
+                f"{check['collection']} model embedding dimensions {dimensions} do not match configured {expected_dimensions}."
+            )
+        if not dimensions and check["total_docs"] > 0:
+            warnings.append(f"{check['collection']} has no sampled model embedding dimensions yet.")
+
+    return {
+        "status": "ready" if not blockers else "blocked",
+        "enabled": enabled,
+        "configured": configured,
+        "provider": model_api.get("provider"),
+        "model": model_api.get("model"),
+        "vector_field": model_api.get("vectorPath"),
+        "expected_dimensions": expected_dimensions,
+        "blockers": blockers,
+        "warnings": warnings,
+    }
+
+
 def build_memory_ops_report(query: str = "ride down crowd staff food") -> dict[str, Any]:
     dashboard = get_operational_memory_dashboard(query)
     status = dashboard.get("status", {}) if isinstance(dashboard.get("status"), dict) else {}
@@ -147,6 +225,12 @@ def build_memory_ops_report(query: str = "ride down crowd staff food") -> dict[s
         _embedding_coverage(collections, "incidents"),
         _embedding_coverage(collections, "agent_learnings"),
     ]
+    model_embedding_checks = [
+        _embedding_coverage(collections, "playbooks", vector_field="modelEmbedding", metadata_field="modelEmbeddingMetadata"),
+        _embedding_coverage(collections, "incidents", vector_field="modelEmbedding", metadata_field="modelEmbeddingMetadata"),
+        _embedding_coverage(collections, "agent_learnings", vector_field="modelEmbedding", metadata_field="modelEmbeddingMetadata"),
+    ]
+    model_api_readiness = _model_api_readiness(status, model_embedding_checks)
     staleness = _staleness_check(dashboard)
 
     findings: list[dict[str, Any]] = []
@@ -172,7 +256,7 @@ def build_memory_ops_report(query: str = "ride down crowd staff food") -> dict[s
         )
         recommendations.append("Seed more scenario-specific playbooks, incidents, and outcome learnings.")
 
-    if retrieval_depth["retrieval_method"] != "mongodb_vector_search":
+    if not str(retrieval_depth["retrieval_method"]).startswith("mongodb_vector_search"):
         findings.append(
             {
                 "severity": "warning",
@@ -192,6 +276,26 @@ def build_memory_ops_report(query: str = "ride down crowd staff food") -> dict[s
                 }
             )
             recommendations.append(f"Backfill embedding and embeddingText for {check['collection']} documents.")
+
+    if model_api_readiness["status"] == "blocked":
+        for blocker in model_api_readiness["blockers"]:
+            findings.append(
+                {
+                    "severity": "critical",
+                    "area": "model_api_grounding",
+                    "finding": blocker,
+                }
+            )
+        recommendations.append("Store the model API key, create matching Atlas vector indexes, then backfill modelEmbedding.")
+    elif model_api_readiness["status"] == "not_enabled":
+        findings.append(
+            {
+                "severity": "info",
+                "area": "model_api_grounding",
+                "finding": "Mongo model API grounding is not enabled; conversations use local/vector fallback memory.",
+            }
+        )
+        recommendations.append("Enable PARKPULSE_COPILOT_SEMANTIC_MEMORY and PARKPULSE_MONGO_MODEL_EMBEDDINGS after key/index/backfill are ready.")
 
     if staleness["status"] != "clear":
         findings.append(
@@ -224,11 +328,14 @@ def build_memory_ops_report(query: str = "ride down crowd staff food") -> dict[s
             "retrieval_depth_score": retrieval_depth["score"],
             "mongo_connected": bool(status.get("connected")),
             "vector_index": (status.get("vectorSearch", {}) if isinstance(status.get("vectorSearch"), dict) else {}).get("index"),
+            "model_api_status": model_api_readiness["status"],
             "finding_count": len(findings),
             "blocking_findings": sum(1 for item in findings if item.get("severity") == "critical"),
         },
         "retrieval_depth": retrieval_depth,
         "embedding_coverage": embedding_checks,
+        "model_api_readiness": model_api_readiness,
+        "model_embedding_coverage": model_embedding_checks,
         "staleness": staleness,
         "findings": findings,
         "recommended_actions": sorted(set(recommendations)),

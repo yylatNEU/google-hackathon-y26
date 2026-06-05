@@ -117,6 +117,59 @@ def test_agent_ops_ledger_builds_record_from_run_payload(monkeypatch, tmp_path):
     assert record["memoryId"] == "outcome-1"
 
 
+def test_agent_ops_run_binds_runtime_case_and_policy_refs(monkeypatch, tmp_path):
+    monkeypatch.setenv("PARKPULSE_AGENT_OPS_LEDGER", str(tmp_path / "agent_ops.jsonl"))
+
+    record = build_ledger_record_from_run(
+        {
+            "run_receipt": {"id": "receipt_case_binding"},
+            "run_telemetry": {
+                "planner": {"selected_action": {"label": "Pause intake and split affected coaster guests"}},
+                "governance": {"gate_status": "review"},
+                "eval": {"scorecard": {"overall": 78, "failure_reasons": []}},
+                "delivery": {
+                    "summary": {"total": 2},
+                    "response": {"takeRate": 0.5},
+                    "dispatches": [{"channel": "guest_app", "message": "Use signed alternate route away from parade spillback."}],
+                },
+            },
+        },
+        message="ride down near parade with families stuck in the coaster queue",
+        mode="react",
+        kind="agent_run",
+    )
+
+    assert record["caseId"] == "CASE-RIDE-DOWN-PARADE-001"
+    assert record["caseLinkSource"] == "runtime_case_binding"
+    assert record["caseLinkConfidence"] >= 0.7
+    assert "PARK-SAFE-001" in record["policyRefs"]
+    assert "PARK-ACT-001" in record["policyRefs"]
+
+
+def test_agent_ops_upgrades_old_doctrine_inferred_case_when_runtime_binding_is_clear(monkeypatch, tmp_path):
+    monkeypatch.setenv("PARKPULSE_AGENT_OPS_LEDGER", str(tmp_path / "agent_ops.jsonl"))
+
+    result = record_agent_ops_record(
+        {
+            "id": "old-receipt",
+            "signature": "old-sig",
+            "scenarioName": "ride_down",
+            "selectedAction": "React Agent created an observed receiver outcome for ride_down.",
+            "summary": "Coaster is down while parade releases nearby and queue spillback is rising.",
+            "caseId": "CASE-RIDE-DOWN-PARADE-001",
+            "caseLinkSource": "doctrine_inferred",
+            "policyRefs": ["PARK-SAFE-001"],
+            "evalScore": 78,
+        }
+    )
+
+    row = result["record"]
+    assert row["caseId"] == "CASE-RIDE-DOWN-PARADE-001"
+    assert row["caseLinkSource"] == "runtime_case_binding"
+    assert "PARK-OPS-002" in row["policyRefs"]
+    assert row["caseLinkEvidence"]["strongHits"] >= 1
+
+
 def test_agent_ops_backlog_covers_enterprise_pressure_and_decision_market(monkeypatch, tmp_path):
     monkeypatch.setenv("PARKPULSE_AGENT_OPS_LEDGER", str(tmp_path / "agent_ops.jsonl"))
     for index in range(3):

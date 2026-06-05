@@ -4,8 +4,11 @@ import hashlib
 import json
 import math
 import os
+import ssl
 import threading
 import time
+import urllib.error
+import urllib.request
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,6 +22,8 @@ MongoClient = None
 UpdateOne = None
 Collection = Any
 _MONGO_DRIVER_IMPORT_ATTEMPTED = False
+_QUERY_EMBEDDING_CACHE_LOCK = threading.Lock()
+_QUERY_EMBEDDING_CACHE: dict[str, tuple[float, list[float], str, dict[str, Any]]] = {}
 
 
 def _ensure_mongo_driver() -> bool:
@@ -521,6 +526,41 @@ def _vectorize(text: str, dimensions: int = 64) -> list[float]:
     return [round(value / norm, 6) for value in vector]
 
 
+def _model_embedding_dimensions() -> int:
+    return _int_env("MONGODB_MODEL_EMBEDDING_DIMENSIONS", 256, minimum=1)
+
+
+def _local_embedding_dimensions() -> int:
+    return _int_env("MONGODB_LOCAL_EMBEDDING_DIMENSIONS", 64, minimum=1)
+
+
+def _mongo_model_api_key() -> str:
+    for name in ("MONGODB_MODEL_API_KEY", "MONGODB_VOYAGE_API_KEY", "VOYAGE_API_KEY"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _mongo_model_embeddings_enabled() -> bool:
+    return _truthy(os.getenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false"))
+
+
+def _mongo_model_api_status() -> dict[str, Any]:
+    key_configured = bool(_mongo_model_api_key())
+    enabled = _mongo_model_embeddings_enabled()
+    return {
+        "provider": "voyage",
+        "configured": key_configured,
+        "enabled": enabled and key_configured,
+        "model": os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite"),
+        "endpoint": os.getenv("MONGODB_MODEL_EMBEDDING_ENDPOINT", "https://ai.mongodb.com/v1/embeddings"),
+        "dimensions": _model_embedding_dimensions(),
+        "vectorPath": os.getenv("MONGODB_MODEL_EMBEDDING_PATH", "modelEmbedding"),
+        "readinessIssues": [] if key_configured or not enabled else ["PARKPULSE_MONGO_MODEL_EMBEDDINGS=true but no Mongo/Voyage model API key is configured."],
+    }
+
+
 def _embedding_metadata(dimensions: int = 64) -> dict[str, Any]:
     return {
         "provider": "local_hash",
@@ -530,10 +570,123 @@ def _embedding_metadata(dimensions: int = 64) -> dict[str, Any]:
     }
 
 
+def _voyage_embedding_request(text: str, *, input_type: str, timeout_seconds: float) -> list[float]:
+    api_key = _mongo_model_api_key()
+    if not api_key:
+        raise RuntimeError("Mongo/Voyage model API key is not configured.")
+    endpoint = os.getenv("MONGODB_MODEL_EMBEDDING_ENDPOINT", "https://ai.mongodb.com/v1/embeddings").strip()
+    model = os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite").strip() or "voyage-4-lite"
+    payload = {
+        "input": text[: int(_int_env("MONGODB_MODEL_EMBEDDING_MAX_CHARS", 12000, minimum=100))],
+        "model": model,
+        "input_type": input_type,
+        "truncation": True,
+        "output_dimension": _model_embedding_dimensions(),
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        context = ssl.create_default_context()
+        try:
+            import certifi
+
+            context = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            pass
+        with urllib.request.urlopen(request, timeout=timeout_seconds, context=context) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")[:240]
+        raise RuntimeError(f"Mongo/Voyage embedding request failed: {error.code} {detail}") from error
+    payload = json.loads(body)
+    data = payload.get("data") if isinstance(payload, dict) else None
+    embedding = data[0].get("embedding") if isinstance(data, list) and data and isinstance(data[0], dict) else None
+    if not isinstance(embedding, list) or not embedding:
+        raise RuntimeError("Mongo/Voyage embedding response did not include an embedding.")
+    return [float(value) for value in embedding]
+
+
+def _model_embedding_metadata(vector: list[float], input_type: str) -> dict[str, Any]:
+    return {
+        "provider": "voyage",
+        "model": os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite"),
+        "dimensions": len(vector),
+        "inputType": input_type,
+        "vectorPath": os.getenv("MONGODB_MODEL_EMBEDDING_PATH", "modelEmbedding"),
+        "note": "Provider embedding from MongoDB Atlas/Voyage model API; key is never stored in memory documents.",
+    }
+
+
+def _embedding_update(text: str, *, input_type: str = "document") -> dict[str, Any]:
+    local_dimensions = _local_embedding_dimensions()
+    update: dict[str, Any] = {
+        "embeddingText": text,
+        "embedding": _vectorize(text, local_dimensions),
+        "embeddingMetadata": _embedding_metadata(local_dimensions),
+    }
+    if _mongo_model_embeddings_enabled() and _mongo_model_api_key():
+        timeout = max(0.2, _float_env("MONGODB_MODEL_EMBEDDING_TIMEOUT_SECONDS", 1.5))
+        try:
+            vector = _voyage_embedding_request(text, input_type=input_type, timeout_seconds=timeout)
+            update[os.getenv("MONGODB_MODEL_EMBEDDING_PATH", "modelEmbedding")] = vector
+            update["modelEmbeddingMetadata"] = _model_embedding_metadata(vector, input_type)
+        except Exception as error:
+            update["modelEmbeddingMetadata"] = {
+                **_mongo_model_api_status(),
+                "status": "fallback_local_embedding",
+                "error": str(error)[:240],
+            }
+    return update
+
+
+def _query_embedding(search_text: str) -> tuple[list[float], str, dict[str, Any]]:
+    if _mongo_model_embeddings_enabled() and _mongo_model_api_key():
+        cache_key = json.dumps(
+            {
+                "text": search_text,
+                "endpoint": os.getenv("MONGODB_MODEL_EMBEDDING_ENDPOINT", "https://ai.mongodb.com/v1/embeddings"),
+                "model": os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite"),
+                "dimensions": _model_embedding_dimensions(),
+                "path": os.getenv("MONGODB_MODEL_EMBEDDING_PATH", "modelEmbedding"),
+            },
+            sort_keys=True,
+        )
+        ttl = max(0.0, _float_env("MONGODB_MODEL_QUERY_EMBEDDING_CACHE_TTL_SECONDS", 60.0))
+        now = time.monotonic()
+        with _QUERY_EMBEDDING_CACHE_LOCK:
+            cached = _QUERY_EMBEDDING_CACHE.get(cache_key)
+            if cached and now - cached[0] <= ttl:
+                return list(cached[1]), cached[2], dict(cached[3])
+        try:
+            timeout = max(0.2, _float_env("MONGODB_MODEL_EMBEDDING_TIMEOUT_SECONDS", 4.0))
+            vector = _voyage_embedding_request(search_text, input_type="query", timeout_seconds=timeout)
+            metadata = _model_embedding_metadata(vector, "query")
+            vector_path = str(metadata["vectorPath"])
+            with _QUERY_EMBEDDING_CACHE_LOCK:
+                if len(_QUERY_EMBEDDING_CACHE) >= 128:
+                    oldest_key = min(_QUERY_EMBEDDING_CACHE, key=lambda key: _QUERY_EMBEDDING_CACHE[key][0])
+                    _QUERY_EMBEDDING_CACHE.pop(oldest_key, None)
+                _QUERY_EMBEDDING_CACHE[cache_key] = (now, list(vector), vector_path, dict(metadata))
+            return vector, vector_path, metadata
+        except Exception:
+            pass
+    dimensions = _local_embedding_dimensions()
+    return _vectorize(search_text, dimensions), "embedding", _embedding_metadata(dimensions)
+
+
 def _document_text(document: dict[str, Any]) -> str:
     parts = [
         document.get("title", ""),
         document.get("summary", ""),
+        document.get("text", ""),
+        document.get("agent_id", ""),
+        document.get("department", ""),
+        document.get("learning_type", ""),
+        document.get("scope", ""),
         document.get("incidentType", ""),
         document.get("scenarioKey", ""),
         document.get("outcomeLabel", ""),
@@ -546,6 +699,141 @@ def _document_text(document: dict[str, Any]) -> str:
         document.get("operatorSummary", ""),
     ]
     return " ".join(str(part) for part in parts if part)
+
+
+def _department_from_learning(document: dict[str, Any], scenario_key: str) -> str:
+    explicit = str(document.get("department") or "").strip()
+    if explicit:
+        return explicit
+    agent_id = str(document.get("agent_id") or document.get("agentId") or "").lower()
+    if "qa" in agent_id or "eval" in agent_id or "dream" in agent_id:
+        return "qa_judge"
+    if "safety" in agent_id:
+        return "safety"
+    if "food" in agent_id or "commerce" in agent_id:
+        return "food_retail"
+    if "labor" in agent_id or "staff" in agent_id:
+        return "hr_labor"
+    if "maint" in agent_id or "facilities" in agent_id:
+        return "maintenance"
+    if "guest" in agent_id or "customer" in agent_id:
+        return "guest_experience"
+    if "marketing" in agent_id or "creative" in agent_id:
+        return "marketing"
+    if scenario_key == "food_spike":
+        return "food_retail"
+    if scenario_key == "staff_shortage":
+        return "hr_labor"
+    if scenario_key in {"ride_down", "storm_response", "proactive_eventops", "proactive_event_monitoring"}:
+        return "operations"
+    return "operations"
+
+
+def _learning_type_from_document(document: dict[str, Any]) -> str:
+    explicit = str(document.get("learning_type") or document.get("learningType") or "").strip()
+    if explicit:
+        return explicit
+    source = " ".join(str(document.get(key, "")) for key in ("source", "documentType", "outcomeLabel", "sourceDreamLearningId")).lower()
+    tags = " ".join(str(tag) for tag in document.get("tags", []) if tag).lower() if isinstance(document.get("tags"), list) else ""
+    text = f"{source} {tags} {_document_text(document).lower()}"
+    if "eval" in text or "failure" in text or "regression" in text:
+        return "eval_failure"
+    if "policy" in text or "approval" in text or "guardrail" in text:
+        return "policy_update"
+    if "trace" in text or "cache" in text or "pattern" in text:
+        return "trace_pattern"
+    if "incident" in text or "outcome" in text or "closed_loop" in text:
+        return "incident"
+    return "decision_outcome"
+
+
+def _learning_scope_from_document(document: dict[str, Any], scenario_key: str) -> str:
+    explicit = str(document.get("scope") or "").strip()
+    if explicit:
+        return explicit
+    if scenario_key == "ride_down":
+        return "ride_ops"
+    if scenario_key == "food_spike":
+        return "restaurant"
+    if scenario_key == "staff_shortage":
+        return "staffing"
+    if scenario_key == "storm_response":
+        return "weather_shelter"
+    if scenario_key in {"guest_recovery", "lost_child"}:
+        return "guest_comms"
+    if scenario_key in {"proactive_eventops", "proactive_event_monitoring"}:
+        return "event_ops"
+    return "park_ops"
+
+
+def _normalize_agent_learning_document(document: dict[str, Any], now: str | None = None) -> dict[str, Any]:
+    now = now or _utc_now()
+    normalized = dict(document or {})
+    scenario_key = str(normalized.get("scenarioKey") or normalized.get("scenario_key") or "unknown")
+    agent_id = str(normalized.get("agent_id") or normalized.get("agentId") or normalized.get("sourceAgentId") or "parkpulse_learning_agent")
+    created_at = str(normalized.get("created_at") or normalized.get("createdAt") or now)
+    updated_at = str(normalized.get("updated_at") or normalized.get("updatedAt") or now)
+    text = str(normalized.get("text") or _document_text(normalized)).strip()
+    normalized.update(
+        {
+            "agent_id": agent_id,
+            "agentId": agent_id,
+            "department": _department_from_learning(normalized, scenario_key),
+            "learning_type": _learning_type_from_document(normalized),
+            "learningType": _learning_type_from_document(normalized),
+            "scope": _learning_scope_from_document(normalized, scenario_key),
+            "text": text,
+            "scenarioKey": scenario_key,
+            "scenario_key": scenario_key,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "createdAt": created_at,
+            "updatedAt": updated_at,
+        }
+    )
+    return normalized
+
+
+def _learning_vector_filter(search_text: str) -> dict[str, Any]:
+    lowered = search_text.lower().replace("-", "_")
+    filters: dict[str, Any] = {}
+    departments = {
+        "operations": ["operations", "ops", "ride_down", "queue"],
+        "qa_judge": ["qa", "eval", "judge", "regression"],
+        "food_retail": ["food", "commerce", "restaurant", "inventory", "promo"],
+        "hr_labor": ["labor", "staff", "fatigue", "overtime"],
+        "safety": ["safety", "incident", "hazard"],
+        "maintenance": ["maintenance", "repair", "inspection", "asset"],
+        "guest_experience": ["guest", "recovery", "message", "sentiment"],
+        "marketing": ["marketing", "campaign", "offer"],
+    }
+    for department, terms in departments.items():
+        if any(term in lowered for term in terms):
+            filters["department"] = department
+            break
+    learning_types = {
+        "eval_failure": ["eval_failure", "regression", "failed eval", "failure"],
+        "policy_update": ["policy_update", "policy", "approval", "guardrail"],
+        "trace_pattern": ["trace_pattern", "trace", "cache", "pattern"],
+        "incident": ["incident", "outcome", "closed_loop"],
+    }
+    for learning_type, terms in learning_types.items():
+        if any(term in lowered for term in terms):
+            filters["learning_type"] = learning_type
+            break
+    scopes = {
+        "ride_ops": ["ride", "queue", "ride_down"],
+        "restaurant": ["food", "restaurant", "inventory"],
+        "staffing": ["staff", "labor", "fatigue"],
+        "guest_comms": ["guest", "message", "recovery"],
+        "event_ops": ["event", "proactive", "overlay"],
+        "weather_shelter": ["storm", "weather", "shelter"],
+    }
+    for scope, terms in scopes.items():
+        if any(term in lowered for term in terms):
+            filters["scope"] = scope
+            break
+    return filters
 
 
 def _query_text(query: str, state: dict[str, Any] | None = None) -> str:
@@ -1089,7 +1377,7 @@ class OperationalMemory:
         self.database_name = os.getenv("MONGODB_DATABASE", "parkpulse_ops")
         self.vector_index = os.getenv("MONGODB_PLAYBOOK_VECTOR_INDEX", "playbook_vector_index")
         self.incident_vector_index = os.getenv("MONGODB_INCIDENT_VECTOR_INDEX", self.vector_index)
-        self.learning_vector_index = os.getenv("MONGODB_LEARNING_VECTOR_INDEX", self.vector_index)
+        self.learning_vector_index = os.getenv("MONGODB_LEARNING_VECTOR_INDEX", "agent_learnings_vector")
         self.append_decisions = not _truthy(os.getenv("MONGODB_DISABLE_DECISION_WRITES"))
         self.operation_timeout_ms = _int_env("MONGODB_OPERATION_TIMEOUT_MS", 5000)
         self.eager_setup = _truthy(os.getenv("MONGODB_EAGER_SETUP", "false"))
@@ -1285,41 +1573,118 @@ class OperationalMemory:
                 "collections": {},
             }
 
+        vector_path = (
+            os.getenv("MONGODB_MODEL_EMBEDDING_PATH", "modelEmbedding")
+            if _mongo_model_embeddings_enabled()
+            else "embedding"
+        )
+        vector_dimensions = _model_embedding_dimensions() if _mongo_model_embeddings_enabled() else _local_embedding_dimensions()
+
+        def vector_definition(index: dict[str, Any]) -> dict[str, Any]:
+            definition = index.get("latestDefinition") if isinstance(index.get("latestDefinition"), dict) else index.get("definition")
+            if not isinstance(definition, dict):
+                return {}
+            fields = definition.get("fields")
+            if not isinstance(fields, list):
+                return {}
+            vector_fields = [field for field in fields if isinstance(field, dict) and field.get("type") == "vector"]
+            return vector_fields[0] if vector_fields else {}
+
+        def vector_definition_matches(index: dict[str, Any]) -> bool:
+            current = vector_definition(index)
+            if not current:
+                return True
+            return current.get("path") == vector_path and int(current.get("numDimensions") or 0) == vector_dimensions
+
         specs = {
-            "playbooks": self.vector_index,
-            "incidents": self.incident_vector_index,
-            "agent_learnings": self.learning_vector_index,
+            "playbooks": {
+                "index": self.vector_index,
+                "filters": ["incidentType", "scenarioKey", "tags"],
+                "cleanup_noncanonical": False,
+            },
+            "incidents": {
+                "index": self.incident_vector_index,
+                "filters": ["incidentType", "scenarioKey", "tags"],
+                "cleanup_noncanonical": False,
+            },
+            "agent_learnings": {
+                "index": self.learning_vector_index,
+                "filters": ["agent_id", "department", "learning_type", "scope", "scenarioKey", "created_at", "createdAt", "tags"],
+                "cleanup_noncanonical": True,
+            },
         }
         results: dict[str, Any] = {}
-        for collection_name, index_name in specs.items():
+        for collection_name, spec in specs.items():
+            index_name = str(spec["index"])
             collection = self._collection(collection_name)
             if collection is None:
                 results[collection_name] = {"status": "skipped", "reason": "collection_unavailable", "index": index_name}
                 continue
             try:
                 existing = {row.get("name"): row for row in collection.list_search_indexes()}
+                if spec.get("cleanup_noncanonical"):
+                    for existing_name in list(existing):
+                        if existing_name and existing_name != index_name:
+                            try:
+                                collection.drop_search_index(str(existing_name))
+                                existing.pop(existing_name, None)
+                            except Exception as cleanup_error:
+                                self.errors.append(f"Learning index cleanup skipped for {existing_name}: {cleanup_error}")
                 if index_name in existing:
                     index = existing[index_name]
-                    results[collection_name] = {
-                        "status": "exists",
-                        "index": index_name,
-                        "indexStatus": index.get("status"),
-                        "queryable": bool(index.get("queryable")),
-                    }
-                    continue
+                    if not vector_definition_matches(index):
+                        current = vector_definition(index)
+                        collection.drop_search_index(index_name)
+                        existing.pop(index_name, None)
+                    else:
+                        results[collection_name] = {
+                            "status": "exists",
+                            "index": index_name,
+                            "indexStatus": index.get("status"),
+                            "queryable": bool(index.get("queryable")),
+                            "filters": list(spec.get("filters", [])),
+                            "vectorPath": vector_path,
+                            "numDimensions": vector_dimensions,
+                        }
+                        continue
+                else:
+                    current = {}
                 model = SearchIndexModel(
                     definition={
                         "fields": [
-                            {"type": "vector", "path": "embedding", "numDimensions": 64, "similarity": "cosine"},
-                            {"type": "filter", "path": "incidentType"},
-                            {"type": "filter", "path": "scenarioKey"},
+                            {
+                                "type": "vector",
+                                "path": vector_path,
+                                "numDimensions": vector_dimensions,
+                                "similarity": "cosine",
+                            },
+                            *[{"type": "filter", "path": path} for path in spec.get("filters", [])],
                         ]
                     },
                     name=index_name,
                     type="vectorSearch",
                 )
                 created = collection.create_search_index(model=model)
-                results[collection_name] = {"status": "created", "index": index_name, "result": str(created)}
+                if current:
+                    results[collection_name] = {
+                        "status": "recreated",
+                        "index": index_name,
+                        "result": str(created),
+                        "filters": list(spec.get("filters", [])),
+                        "vectorPath": vector_path,
+                        "numDimensions": vector_dimensions,
+                        "previousVectorPath": current.get("path"),
+                        "previousNumDimensions": current.get("numDimensions"),
+                    }
+                    continue
+                results[collection_name] = {
+                    "status": "created",
+                    "index": index_name,
+                    "result": str(created),
+                    "filters": list(spec.get("filters", [])),
+                    "vectorPath": vector_path,
+                    "numDimensions": vector_dimensions,
+                }
             except Exception as error:
                 error_text = str(error)
                 limited = "maximum number of FTS indexes" in error_text
@@ -1329,9 +1694,10 @@ class OperationalMemory:
                     "reason": "atlas_fts_index_limit" if limited else error_text[:300],
                 }
         severe_errors = [row for row in results.values() if row.get("status") == "error"]
-        created = [row for row in results.values() if row.get("status") == "created"]
+        created = [row for row in results.values() if row.get("status") in {"created", "recreated"}]
+        limited = [row for row in results.values() if row.get("status") == "limited"]
         return {
-            "status": "error" if severe_errors else "created" if created else "ready",
+            "status": "error" if severe_errors else "created" if created else "ready_with_atlas_quota_limits" if limited else "ready",
             "mode": self.mode,
             "collections": results,
         }
@@ -1345,9 +1711,7 @@ class OperationalMemory:
                 "documentType": "playbook",
                 "createdAt": playbook.get("createdAt", now),
                 "updatedAt": now,
-                "embeddingText": _document_text(playbook),
-                "embedding": _vectorize(_document_text(playbook)),
-                "embeddingMetadata": _embedding_metadata(),
+                **_embedding_update(_document_text(playbook), input_type="document"),
             }
             for playbook in PLAYBOOK_SEEDS
         ]
@@ -1357,9 +1721,7 @@ class OperationalMemory:
                 "documentType": "incident",
                 "createdAt": incident.get("createdAt", now),
                 "updatedAt": now,
-                "embeddingText": _document_text(incident),
-                "embedding": _vectorize(_document_text(incident)),
-                "embeddingMetadata": _embedding_metadata(),
+                **_embedding_update(_document_text(incident), input_type="document"),
             }
             for incident in INCIDENT_SEEDS
         ]
@@ -1405,6 +1767,7 @@ class OperationalMemory:
                 "incidentIndex": self.incident_vector_index,
                 "learningIndex": self.learning_vector_index,
             },
+            "modelApi": _mongo_model_api_status(),
             "pipelinePolicy": {
                 "park_state": "upsert live state only",
                 "reference_collections": "upsert seeded playbooks/incidents/rides/staff/food",
@@ -1546,6 +1909,7 @@ class OperationalMemory:
         role = _normalize_agent_role(agent_role, search_text)
         precomputed_cache = self._latest_agent_context_cache(scenario_key) if scenario_key != "unknown" else None
         bypass_role_cache = cache_policy in {"bypass_role_cache", "fresh_retrieval", "no_cache"}
+        role_cache_only = cache_policy in {"role_cache_only", "cache_only", "hot_cache_only"}
         role_cache = None if bypass_role_cache else self._latest_role_context_cache(scenario_key, role) if scenario_key != "unknown" else None
         current_state_for_gate = current_state or state or {}
         current_state_fingerprint = _state_fingerprint(current_state_for_gate)
@@ -1574,6 +1938,12 @@ class OperationalMemory:
             playbook_method = "role_context_cache" if freshness_gate.get("trustLevel") == "fresh" else "role_context_cache_stale_usable"
             if persist_trace and freshness_gate.get("trustLevel") == "stale_usable":
                 self._schedule_role_cache_refresh(scenario_key, role, search_text)
+        elif role_cache_only:
+            retrieved_payload = role_cache.get("retrieved", {}) if role_cache and isinstance(role_cache.get("retrieved"), dict) else {}
+            playbooks = retrieved_payload.get("playbooks", [])[:limit] if isinstance(retrieved_payload.get("playbooks"), list) else []
+            incidents = retrieved_payload.get("incidents", [])[:limit] if isinstance(retrieved_payload.get("incidents"), list) else []
+            learnings = retrieved_payload.get("learnings", [])[:limit] if isinstance(retrieved_payload.get("learnings"), list) else []
+            playbook_method = "role_context_cache_stale_unvalidated" if retrieved_payload else "role_context_cache_miss"
         else:
             playbooks, playbook_method = self._retrieve_playbooks(search_text, limit)
             incidents = self._retrieve_incidents(search_text, limit)
@@ -1644,17 +2014,18 @@ class OperationalMemory:
 
     def _retrieve_playbooks(self, search_text: str, limit: int) -> tuple[list[dict[str, Any]], str]:
         collection = self._collection("playbooks")
-        projection = {"embedding": 0, "embeddingText": 0}
+        projection = {"embedding": 0, "modelEmbedding": 0, "embeddingText": 0}
         if collection is not None:
             try:
+                query_vector, vector_path, embedding_meta = _query_embedding(search_text)
                 rows = list(
                     collection.aggregate(
                         [
                             {
                                 "$vectorSearch": {
                                     "index": self.vector_index,
-                                    "path": "embedding",
-                                    "queryVector": _vectorize(search_text),
+                                    "path": vector_path,
+                                    "queryVector": query_vector,
                                     "numCandidates": 50,
                                     "limit": limit,
                                 }
@@ -1665,7 +2036,8 @@ class OperationalMemory:
                 )
                 rows = [row for row in rows if not _is_rollback_watch_document(row)]
                 if rows:
-                    return [_public_doc(row) for row in rows[:limit]], "mongodb_vector_search"
+                    provider = str(embedding_meta.get("provider") or "local_hash")
+                    return [_public_doc(row) for row in rows[:limit]], f"mongodb_vector_search_{provider}"
                 self.errors.append("Vector search returned no playbooks; text search fallback used.")
             except Exception as error:
                 self.errors.append(f"Vector search fallback used: {error}")
@@ -1693,17 +2065,18 @@ class OperationalMemory:
 
     def _retrieve_incidents(self, search_text: str, limit: int) -> list[dict[str, Any]]:
         collection = self._collection("incidents")
-        projection = {"embedding": 0, "embeddingText": 0}
+        projection = {"embedding": 0, "modelEmbedding": 0, "embeddingText": 0}
         if collection is not None:
             try:
+                query_vector, vector_path, _embedding_meta = _query_embedding(search_text)
                 rows = list(
                     collection.aggregate(
                         [
                             {
                                 "$vectorSearch": {
                                     "index": self.incident_vector_index,
-                                    "path": "embedding",
-                                    "queryVector": _vectorize(search_text),
+                                    "path": vector_path,
+                                    "queryVector": query_vector,
                                     "numCandidates": 50,
                                     "limit": limit,
                                 }
@@ -1741,21 +2114,24 @@ class OperationalMemory:
 
     def _retrieve_learnings(self, search_text: str, limit: int) -> list[dict[str, Any]]:
         collection = self._collection("agent_learnings")
-        projection = {"embedding": 0, "embeddingText": 0}
+        projection = {"embedding": 0, "modelEmbedding": 0, "embeddingText": 0}
         if collection is not None:
             try:
+                query_vector, vector_path, _embedding_meta = _query_embedding(search_text)
+                vector_search = {
+                    "index": self.learning_vector_index,
+                    "path": vector_path,
+                    "queryVector": query_vector,
+                    "numCandidates": 50,
+                    "limit": limit,
+                }
+                learning_filter = _learning_vector_filter(search_text)
+                if learning_filter:
+                    vector_search["filter"] = learning_filter
                 rows = list(
                     collection.aggregate(
                         [
-                            {
-                                "$vectorSearch": {
-                                    "index": self.learning_vector_index,
-                                    "path": "embedding",
-                                    "queryVector": _vectorize(search_text),
-                                    "numCandidates": 50,
-                                    "limit": limit,
-                                }
-                            },
+                            {"$vectorSearch": vector_search},
                             {"$project": {**projection, "score": {"$meta": "vectorSearchScore"}}},
                         ]
                     )
@@ -3301,7 +3677,7 @@ class OperationalMemory:
 
         existing_count = int((previous or {}).get("useCount", 0) or 0)
         created_at = str((previous or {}).get("createdAt") or document.get("createdAt") or now)
-        payload = _clean_for_bson(
+        payload = _normalize_agent_learning_document(
             {
                 **document,
                 "_id": document_id,
@@ -3309,8 +3685,10 @@ class OperationalMemory:
                 "createdAt": created_at,
                 "updatedAt": now,
                 "useCount": existing_count + 1,
-            }
+            },
+            now,
         )
+        payload = _clean_for_bson(payload)
         embedding_text = _document_text(payload)
         payload["embeddingText"] = embedding_text
         payload["embedding"] = _vectorize(embedding_text)
@@ -4095,7 +4473,7 @@ class OperationalMemory:
             existing_count = int((previous or {}).get("useCount", 0) or 0)
             existing_created_at = str((previous or {}).get("createdAt") or now)
 
-        document = _clean_for_bson(
+        document = _normalize_agent_learning_document(
             {
                 "_id": document_id,
                 "documentType": "agent_learning",
@@ -4122,8 +4500,10 @@ class OperationalMemory:
                     "takeRateSignal": learning.get("take_rate_signal", ""),
                 },
                 "tags": [scenario_key, outcome_label, "closed_loop_learning", "take_rate", "operations_memory"],
-            }
+            },
+            now,
         )
+        document = _clean_for_bson(document)
         embedding_text = _document_text(document)
         document["embeddingText"] = embedding_text
         document["embedding"] = _vectorize(embedding_text)
@@ -4499,6 +4879,21 @@ class OperationalMemory:
             return [_public_doc(row) for row in self._latest_experience_studio_fallback(collection_name, limit)]
         return [_public_doc(row) for row in deepcopy(self._fallback.get(collection_name, [])[:limit])]
 
+    def document_by_id(self, collection_name: str, document_id: str) -> dict[str, Any] | None:
+        safe_collection = str(collection_name or "").strip()
+        safe_id = str(document_id or "").strip()
+        if not safe_collection or not safe_id:
+            return None
+        projection = {"embedding": 0, "modelEmbedding": 0, "embeddingText": 0}
+        collection = self._collection(safe_collection)
+        if collection is not None:
+            row = collection.find_one({"_id": safe_id}, projection)
+            return _public_doc(row) if row else None
+        for row in self._fallback.get(safe_collection, []):
+            if isinstance(row, dict) and str(row.get("_id") or "") == safe_id:
+                return _public_doc(deepcopy(row))
+        return None
+
     def collection_count(self, collection_name: str) -> int:
         collection = self._collection(collection_name)
         if collection is not None:
@@ -4679,14 +5074,36 @@ class OperationalMemory:
                 try:
                     rows = list(collection.find({}, {}).limit(safe_limit))
                     for row in rows:
+                        row = _normalize_agent_learning_document(row, now) if name == "agent_learnings" else row
                         text = _document_text(row)
                         if not text.strip():
                             skipped += 1
                             continue
                         document_update = {
-                            "embeddingText": text,
-                            "embedding": _vectorize(text),
-                            "embeddingMetadata": _embedding_metadata(),
+                            **(
+                                {
+                                    key: row.get(key)
+                                    for key in (
+                                        "agent_id",
+                                        "agentId",
+                                        "department",
+                                        "learning_type",
+                                        "learningType",
+                                        "scope",
+                                        "text",
+                                        "scenarioKey",
+                                        "scenario_key",
+                                        "created_at",
+                                        "updated_at",
+                                        "createdAt",
+                                        "updatedAt",
+                                    )
+                                    if row.get(key) is not None
+                                }
+                                if name == "agent_learnings"
+                                else {}
+                            ),
+                            **_embedding_update(text, input_type="document"),
                             "embeddingUpdatedAt": now,
                         }
                         collection.update_one({"_id": row.get("_id")}, {"$set": document_update}, upsert=False)
@@ -4696,13 +5113,13 @@ class OperationalMemory:
             else:
                 rows = self._fallback.get(name, [])[:safe_limit]
                 for row in rows:
+                    if name == "agent_learnings":
+                        row.update(_normalize_agent_learning_document(row, now))
                     text = _document_text(row)
                     if not text.strip():
                         skipped += 1
                         continue
-                    row["embeddingText"] = text
-                    row["embedding"] = _vectorize(text)
-                    row["embeddingMetadata"] = _embedding_metadata()
+                    row.update(_embedding_update(text, input_type="document"))
                     row["embeddingUpdatedAt"] = now
                     updated += 1
 
@@ -5431,6 +5848,14 @@ def get_latest_memory_documents(collection_name: str, limit: int = 5) -> list[di
         "mongo.latest_documents",
         lambda: _memory.latest_documents(collection_name, limit),
         lambda error: [],
+    )
+
+
+def get_memory_document(collection_name: str, document_id: str) -> dict[str, Any] | None:
+    return _safe_memory_call(
+        "mongo.document_by_id",
+        lambda: _memory.document_by_id(collection_name, document_id),
+        lambda error: None,
     )
 
 

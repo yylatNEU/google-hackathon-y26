@@ -131,6 +131,15 @@ class ParkPulseSpringBackendApplicationTests {
 	}
 
 	@Test
+	void stateLiteRunsNativelyInSpringForHotUiPolling() throws Exception {
+		mockMvc.perform(get("/api/park/state-lite"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.guestFlow.rides[0].waitMins", notNullValue()))
+			.andExpect(jsonPath("$.operationsAudit.mode", equalTo("spring_state_lite")));
+	}
+
+	@Test
 	void reliabilityDiagnosticsAndAuthorizationAuditRunNativelyInSpring() throws Exception {
 		mockMvc.perform(get("/api/park/reliability").header("authorization", "Bearer " + signedRoleToken("customer")))
 			.andExpect(status().isForbidden());

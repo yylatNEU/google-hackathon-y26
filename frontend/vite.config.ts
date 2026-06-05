@@ -33,11 +33,11 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       "/api": {
-        target: process.env.VITE_PARKPULSE_API_PROXY ?? "http://127.0.0.1:8000",
+        target: process.env.VITE_PARKPULSE_API_PROXY ?? "http://127.0.0.1:8010",
         changeOrigin: true,
       },
       "/readyz": {
-        target: process.env.VITE_PARKPULSE_API_PROXY ?? "http://127.0.0.1:8000",
+        target: process.env.VITE_PARKPULSE_API_PROXY ?? "http://127.0.0.1:8010",
         changeOrigin: true,
       },
     },

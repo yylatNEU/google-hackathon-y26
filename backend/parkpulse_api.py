@@ -84,6 +84,7 @@ from agent_handshake import (
     revoke_agent_certification_credential,
     rotate_agent_certification_key,
     run_external_client_agent_demo,
+    run_passport_second_run_demo,
     run_agent_handshake_policy_challenges,
     run_agent_handshake_scenario_evaluations,
     session_protocol_receipt,
@@ -159,6 +160,7 @@ from park_autodream_benchmark import run_autodream_benchmark
 from world_state_reconciliation import latest_reconciliation, reconcile_world_state
 from mongo_memory import (
     get_operational_memory_dashboard,
+    get_memory_document,
     get_latest_memory_documents,
     get_role_quality_priors,
     init_operational_memory,
@@ -693,6 +695,12 @@ async def park_agent_handshake_policy_challenges(body: dict[str, Any] | None = N
 @app.post("/api/park/agent-handshake/external-client-demo")
 async def park_agent_handshake_external_client_demo(body: dict[str, Any] | None = None):
     return run_external_client_agent_demo(body or {})
+
+
+@app.get("/api/park/agent-handshake/passport-second-run-demo")
+@app.post("/api/park/agent-handshake/passport-second-run-demo")
+async def park_agent_handshake_passport_second_run_demo(body: dict[str, Any] | None = None):
+    return run_passport_second_run_demo(body or {})
 
 
 @app.post("/api/park/agent-handshake/verify-artifact")
@@ -1821,8 +1829,20 @@ def _retrieve_operational_context(query: str, state: dict[str, Any], **kwargs: A
     except TypeError as error:
         if "unexpected keyword argument" not in str(error):
             raise
-        compatible_kwargs = {key: value for key, value in kwargs.items() if key not in {"agent_role"}}
-        return retrieve_operational_context(query, state, **compatible_kwargs)
+        fallback_kwargs = [
+            {key: value for key, value in kwargs.items() if key not in {"agent_role"}},
+            {key: value for key, value in kwargs.items() if key not in {"agent_role", "cache_policy", "persist_trace"}},
+            {},
+        ]
+        last_error: TypeError = error
+        for compatible_kwargs in fallback_kwargs:
+            try:
+                return retrieve_operational_context(query, state, **compatible_kwargs)
+            except TypeError as fallback_error:
+                if "unexpected keyword argument" not in str(fallback_error):
+                    raise
+                last_error = fallback_error
+        raise last_error
 
 
 def _role_outcome_attribution(
@@ -9333,6 +9353,8 @@ def _controlled_live_feed_tool_executor_run(payload: dict[str, Any], *, execute:
             "policyGateStatus": policy_status,
             "decision_id": payload.get("decision_id"),
             "approved_action_envelope": envelope,
+            "action_parameters": envelope.get("action_parameters") or proposal.get("semantic_action_parameters") or {},
+            "semantic_action_parameters": envelope.get("semantic_action_parameters") or proposal.get("semantic_action_parameters") or {},
             "live_feed_event_ids": envelope.get("live_feed_event_ids") or (proposal.get("live_feed_grounding", {}) if isinstance(proposal.get("live_feed_grounding"), dict) else {}).get("event_ids", []),
         }
         if approved_for_controlled_executor:
@@ -9347,12 +9369,15 @@ def _controlled_live_feed_tool_executor_run(payload: dict[str, Any], *, execute:
                     "source_agent": proposal.get("agent_id"),
                     "source_department": proposal.get("department"),
                     "source_tool": envelope.get("requested_tool") or proposal.get("requested_tool"),
+                    "action_parameters": context.get("action_parameters"),
+                    "semantic_action_parameters": context.get("semantic_action_parameters"),
                     "idempotency_key": hashlib.sha1(
                         json.dumps(
                             {
                                 "decision_id": payload.get("decision_id"),
                                 "agent": proposal.get("agent_id"),
                                 "tool": envelope.get("requested_tool") or proposal.get("requested_tool"),
+                                "action_parameters": context.get("action_parameters"),
                                 "events": context["live_feed_event_ids"],
                             },
                             sort_keys=True,
@@ -9386,10 +9411,82 @@ def _controlled_live_feed_tool_executor_run(payload: dict[str, Any], *, execute:
                 "executor_status": executor_status,
                 "approved_for_controlled_executor": approved_for_controlled_executor,
                 "live_feed_event_ids": action_disposition.get("live_feed_event_ids") or context["live_feed_event_ids"],
+                "action_parameters": context.get("action_parameters"),
+                "semantic_action_parameters": context.get("semantic_action_parameters"),
                 "action_disposition": action_disposition,
                 "result": result,
             }
         )
+        companion_tools = []
+        semantic_params = context.get("semantic_action_parameters")
+        if approved_for_controlled_executor and isinstance(semantic_params, dict):
+            companion_tools = [
+                str(tool)
+                for tool in semantic_params.get("companion_tools", [])
+                if str(tool) in {"inventory_alert", "restock_request"}
+            ]
+        for companion_tool in companion_tools:
+            companion_context = {
+                **context,
+                "tool": "execute_approved_action",
+                "intent": f"Execute semantic-memory companion action {companion_tool} for {proposal.get('department')}",
+                "expected_outcome": "Companion action records bounded stockout prevention while preserving the original controlled handoff.",
+                "source_companion_tool": companion_tool,
+            }
+            companion_result = run_agent_tool(
+                "tool_executor_agent",
+                "execute_approved_action",
+                companion_context,
+                lambda proposal=proposal, companion_tool=companion_tool: {
+                    "status": "executed_controlled" if execute else "preview_controlled",
+                    "mode": "controlled_live_feed_tool_executor",
+                    "executed": bool(execute),
+                    "source_agent": proposal.get("agent_id"),
+                    "source_department": proposal.get("department"),
+                    "source_tool": companion_tool,
+                    "companion_action": True,
+                    "companion_source": "semantic_agent_learning",
+                    "action_parameters": companion_context.get("action_parameters"),
+                    "semantic_action_parameters": companion_context.get("semantic_action_parameters"),
+                    "idempotency_key": hashlib.sha1(
+                        json.dumps(
+                            {
+                                "decision_id": payload.get("decision_id"),
+                                "agent": proposal.get("agent_id"),
+                                "tool": companion_tool,
+                                "action_parameters": companion_context.get("action_parameters"),
+                                "events": companion_context["live_feed_event_ids"],
+                            },
+                            sort_keys=True,
+                            default=str,
+                        ).encode("utf-8")
+                    ).hexdigest()[:16],
+                    "rollback": "Cancel companion inventory alert if stockout risk clears or receiver rejects the parent action.",
+                },
+            )
+            receipts.append(
+                {
+                    "agent": proposal.get("agent_id"),
+                    "department": proposal.get("department"),
+                    "source_tool": companion_tool,
+                    "policy_check": envelope.get("policy_check") or proposal.get("policy_check"),
+                    "policy_status": policy_status,
+                    "executor_status": executor_status,
+                    "approved_for_controlled_executor": approved_for_controlled_executor,
+                    "live_feed_event_ids": action_disposition.get("live_feed_event_ids") or context["live_feed_event_ids"],
+                    "action_parameters": companion_context.get("action_parameters"),
+                    "semantic_action_parameters": companion_context.get("semantic_action_parameters"),
+                    "action_disposition": {
+                        **action_disposition,
+                        "decision": "execute_semantic_companion_action",
+                        "why_not_undecided": "Semantic memory proposed a same-department low-risk companion tool with live-feed evidence and an executable parent envelope.",
+                    },
+                    "companion_action": True,
+                    "companion_parent_tool": envelope.get("requested_tool") or proposal.get("requested_tool"),
+                    "companion_source": "semantic_agent_learning",
+                    "result": companion_result,
+                }
+            )
     executed_count = sum(1 for row in receipts if (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "executed_controlled")
     preview_count = sum(1 for row in receipts if (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "preview_controlled")
     held_count = sum(1 for row in receipts if (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "held")
@@ -9602,6 +9699,9 @@ def _controlled_live_feed_receiver_delivery_proof(payload: dict[str, Any]) -> di
         "mode": "controlled_live_feed_receiver_delivery_proof",
         "proof_id": proof_id,
         "status": "proven_controlled" if executed_count and delivered_count == executed_count and acknowledged_count == executed_count else "incomplete",
+        "execution_mode": "controlled_internal_receiver_handoff",
+        "action_effect_boundary": "Actions create durable internal receiver tasks and acknowledgements only; they intentionally do not mutate the simulated park state or send public guest messages.",
+        "material_mutation_policy": "blocked_for_smoke_validation",
         "executor_agent": "tool_executor_agent",
         "delivery_agent": "delivery_proof_agent",
         "executed_count": executed_count,
@@ -9691,6 +9791,15 @@ def _apply_controlled_receiver_effect_projection(payload: dict[str, Any], post_a
     ]
     executed_departments = {str(row.get("department")) for row in executed if row.get("department")}
     executed_tools = {str(row.get("source_tool")) for row in executed if row.get("source_tool")}
+    semantic_parameter_rows = [
+        row.get("semantic_action_parameters") or row.get("action_parameters") or (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("semantic_action_parameters") or {}
+        for row in executed
+        if isinstance(row, dict)
+    ]
+    semantic_parameters_applied = any(isinstance(row, dict) and row.get("source") == "semantic_agent_learning" for row in semantic_parameter_rows)
+    split_routing_applied = any(isinstance(row, dict) and row.get("routing_strategy") == "split_across_low_wait_destinations" for row in semantic_parameter_rows)
+    stronger_offer_applied = any(isinstance(row, dict) and row.get("offer_strength") == "stronger_personalized" for row in semantic_parameter_rows)
+    cap_overloaded_targets_applied = any(isinstance(row, dict) and row.get("traffic_cap_policy") == "cap_overloaded_indoor_targets" for row in semantic_parameter_rows)
     if not executed_departments:
         return refresh
 
@@ -9710,22 +9819,22 @@ def _apply_controlled_receiver_effect_projection(payload: dict[str, Any], post_a
 
         if source == "food_ops" and "food_retail" in executed_departments:
             before = value.get("kitchen_load_pct")
-            if _live_feed_adjust_metric(value, "kitchen_load_pct", -8):
+            if _live_feed_adjust_metric(value, "kitchen_load_pct", -11 if cap_overloaded_targets_applied else -8):
                 record_metric("kitchen_load_pct", before)
             before = value.get("mobile_order_backlog")
-            if _live_feed_adjust_metric(value, "mobile_order_backlog", -6):
+            if _live_feed_adjust_metric(value, "mobile_order_backlog", -10 if stronger_offer_applied else -6):
                 record_metric("mobile_order_backlog", before)
-            if isinstance(value.get("low_inventory_items"), list) and value["low_inventory_items"]:
+            if executed_tools.intersection({"inventory_alert", "restock_request"}) and isinstance(value.get("low_inventory_items"), list) and value["low_inventory_items"]:
                 before_items = list(value["low_inventory_items"])
                 value["low_inventory_items"] = before_items[:-1]
                 changed_metrics.append({"metric": "low_inventory_items_count", "before": len(before_items), "after": len(value["low_inventory_items"])})
 
         if source == "guest_flow" and "marketing" in executed_departments:
             before = value.get("routing_take_rate_pct")
-            if _live_feed_adjust_metric(value, "routing_take_rate_pct", 5):
+            if _live_feed_adjust_metric(value, "routing_take_rate_pct", 8 if stronger_offer_applied else 5):
                 record_metric("routing_take_rate_pct", before)
             before = value.get("avg_satisfaction")
-            if _live_feed_adjust_metric(value, "avg_satisfaction", 2):
+            if _live_feed_adjust_metric(value, "avg_satisfaction", 3 if split_routing_applied else 2):
                 record_metric("avg_satisfaction", before)
 
         if source == "staffing" and "hr_labor" in executed_departments:
@@ -9744,15 +9853,15 @@ def _apply_controlled_receiver_effect_projection(payload: dict[str, Any], post_a
 
         if source == "operator_signal" and {"food_retail", "marketing"}.intersection(executed_departments):
             before = value.get("open_cases")
-            if _live_feed_adjust_metric(value, "open_cases", -2):
+            if _live_feed_adjust_metric(value, "open_cases", -3 if semantic_parameters_applied else -2):
                 record_metric("open_cases", before)
             before = value.get("complaint_rate_pct")
-            if _live_feed_adjust_metric(value, "complaint_rate_pct", -0.2):
+            if _live_feed_adjust_metric(value, "complaint_rate_pct", -0.35 if split_routing_applied else -0.2):
                 record_metric("complaint_rate_pct", before)
 
         if source == "ride_ops" and "marketing" in executed_departments:
             before = value.get("capacity_pressure_pct")
-            if _live_feed_adjust_metric(value, "capacity_pressure_pct", -2):
+            if _live_feed_adjust_metric(value, "capacity_pressure_pct", -3 if split_routing_applied else -2):
                 record_metric("capacity_pressure_pct", before)
 
         if changed_metrics:
@@ -9761,6 +9870,7 @@ def _apply_controlled_receiver_effect_projection(payload: dict[str, Any], post_a
                 "source": source,
                 "departments": sorted(executed_departments),
                 "tools": sorted(executed_tools),
+                "semantic_parameters_applied": semantic_parameters_applied,
                 "event": adjusted.get("latest_event_id"),
             }
             adjusted["value"] = value
@@ -9772,6 +9882,8 @@ def _apply_controlled_receiver_effect_projection(payload: dict[str, Any], post_a
                 "material_state_mutation": False,
                 "executed_departments": sorted(executed_departments),
                 "executed_tools": sorted(executed_tools),
+                "semantic_parameters_applied": semantic_parameters_applied,
+                "semantic_parameter_rows": [row for row in semantic_parameter_rows if isinstance(row, dict) and row],
                 "changed_metrics": changed_metrics,
             }
             projection_rows.append(
@@ -9790,6 +9902,8 @@ def _apply_controlled_receiver_effect_projection(payload: dict[str, Any], post_a
             "mode": "receiver_acknowledged_controlled_effect_projection",
             "executed_departments": sorted(executed_departments),
             "executed_tools": sorted(executed_tools),
+            "semantic_parameters_applied": semantic_parameters_applied,
+            "semantic_parameter_rows": [row for row in semantic_parameter_rows if isinstance(row, dict) and row],
             "projection_count": len(projection_rows),
             "rows": projection_rows,
             "material_state_mutation": False,
@@ -9899,6 +10013,206 @@ def _commerce_action_attribution(rows: list[dict[str, Any]], receipts: list[dict
     }
 
 
+def _action_family_scores(commerce_attribution: dict[str, Any]) -> dict[str, float]:
+    rows = commerce_attribution.get("rows", []) if isinstance(commerce_attribution.get("rows"), list) else []
+    return {
+        str(row.get("action_family")): float(row.get("score") or 0)
+        for row in rows
+        if isinstance(row, dict) and row.get("action_family")
+    }
+
+
+def _substitute_action_family(tool: str) -> str:
+    mapping = {
+        "pause_launch_promo": "promo_pause_or_load_relief",
+        "pause_promo": "promo_pause_or_load_relief",
+        "inventory_alert": "inventory_or_restock",
+        "restock_request": "inventory_or_restock",
+        "redirect_offer": "demand_redirect",
+        "shift_adjustment_recommendation": "labor_support",
+        "overtime_warning": "labor_support",
+        "break_reminder": "labor_support",
+    }
+    return mapping.get(str(tool or ""), "unscored_review_or_trace")
+
+
+def _substitute_family_metrics(rows: list[dict[str, Any]], action_family: str) -> list[dict[str, Any]]:
+    wanted = {
+        "promo_pause_or_load_relief": {("food_ops", "kitchen_load_pct"), ("food_ops", "mobile_order_backlog"), ("food_ops", "pickup_eta_minutes")},
+        "inventory_or_restock": {("food_ops", "low_inventory_items_count")},
+        "demand_redirect": {("guest_flow", "routing_take_rate_pct"), ("guest_flow", "avg_satisfaction"), ("ride_ops", "capacity_pressure_pct")},
+        "labor_support": {("staffing", "guard_team_count"), ("staffing", "health_team_count")},
+    }.get(action_family, set())
+    evidence: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        source = str(row.get("source") or "")
+        for metric in row.get("metrics", []) if isinstance(row.get("metrics"), list) else []:
+            if isinstance(metric, dict) and (source, str(metric.get("metric") or "")) in wanted:
+                evidence.append(
+                    {
+                        "source": source,
+                        "metric": metric.get("metric"),
+                        "delta": metric.get("delta"),
+                        "impact": metric.get("impact"),
+                        "reward_scope": metric.get("reward_scope"),
+                        "before_event_id": row.get("before_event_id"),
+                        "after_event_id": row.get("after_event_id"),
+                    }
+                )
+    return evidence
+
+
+def _build_substitute_outcome_attribution(
+    payload: dict[str, Any],
+    rows: list[dict[str, Any]],
+    commerce_attribution: dict[str, Any],
+) -> dict[str, Any]:
+    proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
+    board = proposals.get("alternative_action_negotiation", {}) if isinstance(proposals.get("alternative_action_negotiation"), dict) else payload.get("alternative_action_negotiation", {}) if isinstance(payload.get("alternative_action_negotiation"), dict) else {}
+    substitute_rows = board.get("rows", []) if isinstance(board.get("rows"), list) else []
+    executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
+    receipts = executor.get("receipts", []) if isinstance(executor.get("receipts"), list) else []
+    executed_pairs = {
+        (str(row.get("department") or ""), str(row.get("source_tool") or ""))
+        for row in receipts
+        if isinstance(row, dict)
+        and isinstance(row.get("result"), dict)
+        and row["result"].get("status") == "executed_controlled"
+    }
+    family_scores = _action_family_scores(commerce_attribution)
+    branch_rows: list[dict[str, Any]] = []
+    monitor_only_score = 0.05
+    for alternative in substitute_rows:
+        if not isinstance(alternative, dict):
+            continue
+        substitute_department = str(alternative.get("substitute_department") or "")
+        substitute_tool = str(alternative.get("substitute_tool") or "")
+        action_family = _substitute_action_family(substitute_tool)
+        substitute_executed = (substitute_department, substitute_tool) in executed_pairs
+        substitute_score = _bounded_reward(family_scores.get(action_family, 0.0) if substitute_executed else 0.0)
+        branch_lift = round(substitute_score - monitor_only_score, 3) if substitute_executed else None
+        branch_rows.append(
+            {
+                "alternative_id": alternative.get("alternative_id"),
+                "held_agent": alternative.get("held_agent"),
+                "held_department": alternative.get("held_department"),
+                "held_tool": alternative.get("held_tool"),
+                "held_policy_status": alternative.get("held_policy_status"),
+                "substitute_agent": alternative.get("substitute_agent"),
+                "substitute_department": substitute_department,
+                "substitute_tool": substitute_tool,
+                "action_family": action_family,
+                "substitute_executed": substitute_executed,
+                "substitute_outcome_score": substitute_score,
+                "monitor_only_counterfactual_score": monitor_only_score,
+                "branch_lift_vs_monitor": branch_lift,
+                "held_action_counterfactual": {
+                    "status": "not_scored_policy_blocked",
+                    "reason": "The held sensitive action is not rewarded or simulated as executable because policy did not allow it.",
+                },
+                "best_branch": (
+                    "safe_substitute"
+                    if substitute_executed and substitute_score >= monitor_only_score
+                    else "monitor_only"
+                    if substitute_executed
+                    else "not_executed_collect_more_evidence"
+                ),
+                "measurement_evidence": _substitute_family_metrics(rows, action_family),
+                "tradeoff_reason": alternative.get("tradeoff_reason"),
+                "execution_boundary": alternative.get("execution_boundary"),
+            }
+        )
+
+    scored_rows = [row for row in branch_rows if row.get("substitute_executed")]
+    average_score = _bounded_reward(sum(float(row.get("substitute_outcome_score") or 0) for row in scored_rows) / len(scored_rows)) if scored_rows else 0.0
+    average_lift = round(sum(float(row.get("branch_lift_vs_monitor") or 0) for row in scored_rows) / len(scored_rows), 3) if scored_rows else 0.0
+
+    def bundle_candidate(bundle_id: str, family_set: set[str], *, label: str, monitor_only: bool = False) -> dict[str, Any]:
+        included = []
+        if not monitor_only:
+            included = [row for row in scored_rows if str(row.get("action_family") or "") in family_set]
+        if monitor_only:
+            score = monitor_only_score
+            lift = 0.0
+            selected_tools: list[str] = []
+            reason = "Fallback preserves policy but does not actively relieve demand, labor, or inventory pressure."
+        else:
+            score = _bounded_reward(sum(float(row.get("substitute_outcome_score") or 0) for row in included) / len(included)) if included else 0.0
+            lift = round(sum(float(row.get("branch_lift_vs_monitor") or 0) for row in included) / len(included), 3) if included else -monitor_only_score
+            selected_tools = sorted({f"{row.get('substitute_department')}::{row.get('substitute_tool')}" for row in included})
+            reason = f"{label} uses {len(included)} measured safe substitute branch(es) and keeps held sensitive actions non-executable."
+        coverage_bonus = min(0.12, len(included) * 0.03) if not monitor_only else 0.0
+        bundle_score = _bounded_reward((0.78 * score) + (0.22 * max(0.0, lift)) + coverage_bonus)
+        return {
+            "bundle_id": bundle_id,
+            "label": label,
+            "branch_count": len(included),
+            "selected_tools": selected_tools,
+            "score": bundle_score,
+            "average_substitute_score": score,
+            "average_lift_vs_monitor": lift,
+            "decision_rationale": reason,
+            "policy": "Bundle candidate contains only policy-passed substitutes or monitor-only fallback; held sensitive actions remain blocked.",
+        }
+
+    bundle_candidates = [
+        bundle_candidate(
+            "pressure_relief_bundle",
+            {"promo_pause_or_load_relief", "demand_redirect", "labor_support", "inventory_or_restock"},
+            label="Pressure relief bundle",
+        ),
+        bundle_candidate(
+            "commerce_demand_bundle",
+            {"promo_pause_or_load_relief", "demand_redirect", "inventory_or_restock"},
+            label="Commerce and demand-shaping bundle",
+        ),
+        bundle_candidate(
+            "labor_support_bundle",
+            {"labor_support"},
+            label="Labor support bundle",
+        ),
+        bundle_candidate(
+            "monitor_compliance_fallback",
+            set(),
+            label="Monitor and compliance-only fallback",
+            monitor_only=True,
+        ),
+    ]
+    selected_bundle = max(bundle_candidates, key=lambda row: (float(row.get("score") or 0), int(row.get("branch_count") or 0)))
+    bundle = {
+        **selected_bundle,
+        "bundle_id": selected_bundle.get("bundle_id"),
+        "executed_branch_count": len(scored_rows),
+        "total_branch_count": len(branch_rows),
+        "decision": "prefer_safe_substitute_bundle" if selected_bundle.get("bundle_id") != "monitor_compliance_fallback" else "collect_more_evidence",
+        "rejected_bundles": [
+            {
+                "bundle_id": row.get("bundle_id"),
+                "label": row.get("label"),
+                "score": row.get("score"),
+                "reason": "Lower score, narrower coverage, or monitor-only fallback under current measured branch evidence.",
+            }
+            for row in bundle_candidates
+            if row.get("bundle_id") != selected_bundle.get("bundle_id")
+        ],
+    }
+    return {
+        "mode": "safe_substitute_branch_outcome_attribution",
+        "status": "scored" if branch_rows else "not_available",
+        "branch_count": len(branch_rows),
+        "executed_branch_count": len(scored_rows),
+        "average_substitute_score": average_score,
+        "average_lift_vs_monitor": average_lift,
+        "rows": branch_rows,
+        "bundle_candidates": bundle_candidates,
+        "selected_bundle": selected_bundle,
+        "bundle": bundle,
+        "boundary": "Substitute attribution scores only policy-passed substitute branches against monitor-only; it does not reward or execute held sensitive actions.",
+    }
+
+
 def _live_feed_reward_layers(
     payload: dict[str, Any],
     *,
@@ -9912,6 +10226,10 @@ def _live_feed_reward_layers(
     improvement_points: int,
     regression_points: int,
     stable_points: int,
+    actionable_improvement_points: int | None = None,
+    actionable_regression_points: int | None = None,
+    actionable_stable_points: int | None = None,
+    stability_watch_points: int | None = None,
 ) -> dict[str, Any]:
     proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
     proposal_rows = proposals.get("proposals", []) if isinstance(proposals.get("proposals"), list) else []
@@ -9920,6 +10238,7 @@ def _live_feed_reward_layers(
     receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
     memory_priors = payload.get("live_feed_memory_priors", {}) if isinstance(payload.get("live_feed_memory_priors"), dict) else {}
     memory_prior_use = proposals.get("memory_prior_use", {}) if isinstance(proposals.get("memory_prior_use"), dict) else {}
+    alternative_negotiation = proposals.get("alternative_action_negotiation", {}) if isinstance(proposals.get("alternative_action_negotiation"), dict) else payload.get("alternative_action_negotiation", {}) if isinstance(payload.get("alternative_action_negotiation"), dict) else {}
 
     proposal_count = len([row for row in proposal_rows if isinstance(row, dict)])
     evidence_argument_count = sum(
@@ -9939,6 +10258,19 @@ def _live_feed_reward_layers(
     negotiation_rounds = proposals.get("negotiation_rounds", []) if isinstance(proposals.get("negotiation_rounds"), list) else []
     receipts = executor.get("receipts", []) if isinstance(executor.get("receipts"), list) else []
     commerce_attribution = _commerce_action_attribution(rows, receipts)
+    substitute_attribution = _build_substitute_outcome_attribution(payload, rows, commerce_attribution)
+    semantic_action_parameter_count = sum(
+        1
+        for row in receipts
+        if isinstance(row, dict)
+        and isinstance(row.get("semantic_action_parameters") or row.get("action_parameters"), dict)
+        and (row.get("semantic_action_parameters") or row.get("action_parameters")).get("source") == "semantic_agent_learning"
+    )
+    commerce_action_quality = (
+        float(commerce_attribution.get("average_action_score") or 0)
+        if isinstance(commerce_attribution, dict) and commerce_attribution.get("average_action_score") is not None
+        else 0.0
+    )
     executed_count = int(executor.get("executed_count") or 0)
     held_count = int(executor.get("held_count") or 0)
     held_disposition_count = int(executor.get("held_disposition_count") or 0)
@@ -9952,6 +10284,12 @@ def _live_feed_reward_layers(
         1.0 if proposal_count and evidence_argument_count == proposal_count else evidence_argument_count / max(1, proposal_count),
         1.0 if len(negotiation_rounds) >= 4 else len(negotiation_rounds) / 4,
         1.0 if follow_through.get("status") == "routed" and ownerless_count == 0 else 0.4 if follow_through.get("status") == "routed" else 0.0,
+        1.0
+        if int(alternative_negotiation.get("substitute_count") or 0) > 0
+        and int(alternative_negotiation.get("unresolved_without_safe_substitute_count") or 0) == 0
+        else 0.6
+        if int(alternative_negotiation.get("substitute_count") or 0) > 0
+        else 0.0,
     ]
     trace_reward = _bounded_reward(sum(trace_components) / len(trace_components))
 
@@ -9971,12 +10309,16 @@ def _live_feed_reward_layers(
     ]
     execution_reward = _bounded_reward(sum(execution_components) / len(execution_components))
 
-    directional_total = max(1, improvement_points + regression_points + stable_points)
+    actionable_improvement = improvement_points if actionable_improvement_points is None else actionable_improvement_points
+    actionable_regression = regression_points if actionable_regression_points is None else actionable_regression_points
+    actionable_stable = stable_points if actionable_stable_points is None else actionable_stable_points
+    actionable_total = max(1, actionable_improvement + actionable_regression + actionable_stable)
     operational_reward = _bounded_reward(
         (0.25 if measurement_available else 0.05)
-        + (0.5 * (improvement_points / directional_total))
-        - (0.6 * (regression_points / directional_total))
-        + (0.05 * (stable_points / directional_total))
+        + (0.5 * (actionable_improvement / actionable_total))
+        - (0.6 * (actionable_regression / actionable_total))
+        + (0.05 * (actionable_stable / actionable_total))
+        + ((0.08 * commerce_action_quality) if semantic_action_parameter_count > 0 else 0.0)
     )
 
     memory_applied = int(memory_prior_use.get("applied_count") or 0)
@@ -9988,6 +10330,7 @@ def _live_feed_reward_layers(
         + (0.15 if memory_prior_count > 0 else 0.0)
         + (0.15 if regression_points == 0 else -0.2)
         + (0.1 if improvement_points > 0 else 0.0)
+        + (0.05 if int(substitute_attribution.get("executed_branch_count") or 0) > 0 else 0.0)
     )
 
     promotion_eligible = (
@@ -10020,6 +10363,9 @@ def _live_feed_reward_layers(
             "evidence_argument_count": evidence_argument_count,
             "concrete_policy_count": concrete_policy_count,
             "negotiation_round_count": len(negotiation_rounds),
+            "alternative_substitute_count": int(alternative_negotiation.get("substitute_count") or 0),
+            "safe_executable_substitute_count": int(alternative_negotiation.get("safe_executable_substitute_count") or 0),
+            "unresolved_without_safe_substitute_count": int(alternative_negotiation.get("unresolved_without_safe_substitute_count") or 0),
             "executed_department_count": len(executed_departments),
             "executed_count": executed_count,
             "held_count": held_count,
@@ -10033,12 +10379,24 @@ def _live_feed_reward_layers(
             "improvement_points": improvement_points,
             "regression_points": regression_points,
             "stable_points": stable_points,
+            "actionable_improvement_points": actionable_improvement,
+            "actionable_regression_points": actionable_regression,
+            "actionable_stable_points": actionable_stable,
+            "actionable_metric_points": actionable_improvement + actionable_regression + actionable_stable,
+            "stability_watch_points": stability_watch_points if stability_watch_points is not None else stable_points,
             "measurement_source_count": len(rows),
             "memory_prior_count": memory_prior_count,
             "memory_applied_count": memory_applied,
+            "semantic_action_parameter_count": semantic_action_parameter_count,
+            "semantic_action_quality_reward": _bounded_reward(0.08 * commerce_action_quality) if semantic_action_parameter_count > 0 else 0.0,
             "commerce_action_average_score": commerce_attribution.get("average_action_score") if isinstance(commerce_attribution, dict) else None,
+            "substitute_branch_count": substitute_attribution.get("branch_count"),
+            "substitute_executed_branch_count": substitute_attribution.get("executed_branch_count"),
+            "substitute_average_score": substitute_attribution.get("average_substitute_score"),
+            "substitute_average_lift_vs_monitor": substitute_attribution.get("average_lift_vs_monitor"),
         },
         "commerce_action_attribution": commerce_attribution,
+        "substitute_outcome_attribution": substitute_attribution,
         "promotion_blockers": [
             blocker
             for blocker in [
@@ -10089,6 +10447,10 @@ def _build_live_feed_outcome_measurement(payload: dict[str, Any], post_action_re
     improvement_points = 0
     regression_points = 0
     stable_points = 0
+    actionable_improvement_points = 0
+    actionable_regression_points = 0
+    actionable_stable_points = 0
+    stability_watch_points = 0
     for source in sorted(source for source in measured_sources if source in before_by_source or source in after_by_source):
         before_row = before_by_source.get(source, {})
         after_row = after_by_source.get(source, {})
@@ -10101,20 +10463,30 @@ def _build_live_feed_outcome_measurement(payload: dict[str, Any], post_action_re
             if metric not in before_metrics or metric not in after_metrics:
                 continue
             delta = round(after_metrics[metric] - before_metrics[metric], 3)
+            direction = _live_feed_metric_direction(source, metric)
             metric_score = _live_feed_metric_score(source, metric, delta)
             if metric_score > 0:
                 improvement_points += 1
+                if direction != "stability_watch":
+                    actionable_improvement_points += 1
             elif metric_score < 0:
                 regression_points += 1
+                if direction != "stability_watch":
+                    actionable_regression_points += 1
             else:
                 stable_points += 1
+                if direction == "stability_watch":
+                    stability_watch_points += 1
+                else:
+                    actionable_stable_points += 1
             metric_rows.append(
                 {
                     "metric": metric,
                     "before": before_metrics[metric],
                     "after": after_metrics[metric],
                     "delta": delta,
-                    "direction": _live_feed_metric_direction(source, metric),
+                    "direction": direction,
+                    "reward_scope": "stability_watch" if direction == "stability_watch" else "actionable_directional",
                     "impact": "improved" if metric_score > 0 else "regressed" if metric_score < 0 else "stable",
                 }
             )
@@ -10165,7 +10537,12 @@ def _build_live_feed_outcome_measurement(payload: dict[str, Any], post_action_re
         improvement_points=improvement_points,
         regression_points=regression_points,
         stable_points=stable_points,
+        actionable_improvement_points=actionable_improvement_points,
+        actionable_regression_points=actionable_regression_points,
+        actionable_stable_points=actionable_stable_points,
+        stability_watch_points=stability_watch_points,
     )
+    substitute_outcome_attribution = reward_layers.get("substitute_outcome_attribution", {}) if isinstance(reward_layers.get("substitute_outcome_attribution"), dict) else {}
     reward_value = reward_layers["operational_reward"]
     reward_label = (
         "operational_lift_with_policy_safe_execution"
@@ -10188,17 +10565,104 @@ def _build_live_feed_outcome_measurement(payload: dict[str, Any], post_action_re
         "improvement_points": improvement_points,
         "regression_points": regression_points,
         "stable_points": stable_points,
+        "actionable_improvement_points": actionable_improvement_points,
+        "actionable_regression_points": actionable_regression_points,
+        "actionable_stable_points": actionable_stable_points,
+        "stability_watch_points": stability_watch_points,
         "measured_outcome_available": measurement_available,
         "eligible_for_reward": reward_ready,
         "reward_value": reward_value if reward_ready else None,
         "reward_label": reward_label,
         "reward_layers": reward_layers,
         "promotion_eligible": bool(reward_ready and reward_layers.get("promotion_eligible")),
+        "substitute_outcome_attribution": substitute_outcome_attribution,
         "controlled_effect_projection": controlled_effect_projection,
         "material_state_mutation": False,
         "measurement_rows": rows,
         "boundary": "Measures post-action live-feed state, receiver acknowledgements, and bounded controlled-effect projections only; it does not infer safety clearance, send public messages, mutate park state, start training, or promote a model.",
     }
+
+
+def _live_feed_prior_from_outcome(
+    row: dict[str, Any],
+    *,
+    source: str = "latest_outcome",
+    semantic_learning: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    learning = row.get("learning", {}) if isinstance(row.get("learning"), dict) else {}
+    metrics = row.get("responseMetrics", {}) if isinstance(row.get("responseMetrics"), dict) else {}
+    impact = row.get("stateImpact", {}) if isinstance(row.get("stateImpact"), dict) else {}
+    measured = bool(metrics.get("measuredOutcomeAvailable") or learning.get("eligible_for_reward"))
+    semantic_learning = semantic_learning if isinstance(semantic_learning, dict) else None
+    if not measured and not semantic_learning:
+        return None
+    prior = {
+        "outcome_id": row.get("_id"),
+        "decision_id": row.get("decisionId"),
+        "loop_id": row.get("loopId"),
+        "mode": row.get("mode"),
+        "source": source,
+        "executed_tools": impact.get("executed_tools", []),
+        "held_tools": impact.get("held_tools", []),
+        "executed_departments": impact.get("executed_departments", []),
+        "held_departments": impact.get("held_departments", []),
+        "reward_value": learning.get("reward_value") if learning.get("reward_value") is not None else metrics.get("rewardValue"),
+        "response_score": metrics.get("score"),
+        "response_status": metrics.get("status"),
+        "attribution_confidence": metrics.get("attributionConfidence"),
+        "receiver_delivery_proven": metrics.get("receiverDeliveryProven"),
+        "measured_outcome_available": metrics.get("measuredOutcomeAvailable"),
+        "measurement_id": impact.get("post_action_measurement_id"),
+        "state_scenario": row.get("stateScenario"),
+        "status": "usable_prior" if measured else "semantic_learning_prior",
+    }
+    if semantic_learning:
+        prior.update(
+            {
+                "source": "semantic_agent_learning",
+                "semantic_learning_id": semantic_learning.get("_id"),
+                "semantic_score": semantic_learning.get("score"),
+                "semantic_lesson": semantic_learning.get("lesson") or semantic_learning.get("text"),
+                "semantic_rule": semantic_learning.get("rule"),
+                "semantic_department": semantic_learning.get("department"),
+                "semantic_learning_type": semantic_learning.get("learning_type") or semantic_learning.get("learningType"),
+                "semantic_scope": semantic_learning.get("scope"),
+                "semantic_confidence": semantic_learning.get("confidence"),
+                "semantic_tags": semantic_learning.get("tags", []),
+                "status": "semantic_learning_prior",
+            }
+        )
+    return prior
+
+
+def _semantic_live_feed_memory_priors(dashboard: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    retrieved = dashboard.get("retrieved", {}) if isinstance(dashboard.get("retrieved"), dict) else {}
+    learnings = retrieved.get("learnings", []) if isinstance(retrieved.get("learnings"), list) else []
+    priors: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for learning in learnings:
+        if not isinstance(learning, dict):
+            continue
+        outcome_id = (
+            learning.get("sourceOutcomeId")
+            or learning.get("source_outcome_id")
+            or learning.get("outcomeId")
+            or learning.get("outcome_id")
+        )
+        if not outcome_id or str(outcome_id) in seen:
+            continue
+        outcome = get_memory_document("outcome_events", str(outcome_id))
+        if not isinstance(outcome, dict):
+            continue
+        prior = _live_feed_prior_from_outcome(outcome, source="semantic_agent_learning", semantic_learning=learning)
+        if prior:
+            priors.append(prior)
+            seen.add(str(outcome_id))
+        if len(priors) >= limit:
+            break
+    return priors
 
 
 def _live_feed_memory_priors_from_dashboard(live_case: dict[str, Any], limit: int = 5) -> dict[str, Any]:
@@ -10223,34 +10687,27 @@ def _live_feed_memory_priors_from_dashboard(live_case: dict[str, Any], limit: in
             "priors": [],
             "policy": "Memory retrieval failed closed; live feed and policy gates remain authoritative.",
         }
+    retrieved = dashboard.get("retrieved", {}) if isinstance(dashboard.get("retrieved"), dict) else {}
+    semantic_priors = _semantic_live_feed_memory_priors(dashboard, limit)
     latest = dashboard.get("latest_outcomes", []) if isinstance(dashboard.get("latest_outcomes"), list) else []
     priors = []
+    seen_outcomes: set[str] = set()
+    for prior in semantic_priors:
+        outcome_id = str(prior.get("outcome_id") or "")
+        if outcome_id:
+            seen_outcomes.add(outcome_id)
+        priors.append(prior)
     for row in latest:
         if not isinstance(row, dict):
             continue
-        learning = row.get("learning", {}) if isinstance(row.get("learning"), dict) else {}
-        metrics = row.get("responseMetrics", {}) if isinstance(row.get("responseMetrics"), dict) else {}
-        impact = row.get("stateImpact", {}) if isinstance(row.get("stateImpact"), dict) else {}
-        if not metrics.get("measuredOutcomeAvailable") and not learning.get("eligible_for_reward"):
+        if row.get("_id") and str(row.get("_id")) in seen_outcomes:
             continue
-        priors.append(
-            {
-                "outcome_id": row.get("_id"),
-                "decision_id": row.get("decisionId"),
-                "loop_id": row.get("loopId"),
-                "mode": row.get("mode"),
-                "executed_tools": impact.get("executed_tools", []),
-                "held_tools": impact.get("held_tools", []),
-                "executed_departments": impact.get("executed_departments", []),
-                "held_departments": impact.get("held_departments", []),
-                "reward_value": learning.get("reward_value") if learning.get("reward_value") is not None else metrics.get("rewardValue"),
-                "attribution_confidence": metrics.get("attributionConfidence"),
-                "receiver_delivery_proven": metrics.get("receiverDeliveryProven"),
-                "measured_outcome_available": metrics.get("measuredOutcomeAvailable"),
-                "measurement_id": impact.get("post_action_measurement_id"),
-                "status": "usable_prior" if metrics.get("measuredOutcomeAvailable") else "trace_only",
-            }
-        )
+        prior = _live_feed_prior_from_outcome(row)
+        if not prior:
+            continue
+        priors.append(prior)
+        if row.get("_id"):
+            seen_outcomes.add(str(row.get("_id")))
         if len(priors) >= limit:
             break
     if not priors:
@@ -10265,6 +10722,9 @@ def _live_feed_memory_priors_from_dashboard(live_case: dict[str, Any], limit: in
         "prior_count": len(priors),
         "priors": priors,
         "latest_outcome_ids": [row.get("outcome_id") for row in priors if row.get("outcome_id")],
+        "semantic_prior_count": len(semantic_priors),
+        "semantic_learning_ids": [row.get("semantic_learning_id") for row in semantic_priors if row.get("semantic_learning_id")],
+        "retrieval_method": retrieved.get("method"),
         "dashboard_status": dashboard.get("status"),
         "policy": "Memory can bias only low-risk execute-vs-hold recommendations; live feed evidence, policy judge, and Executive gate remain authoritative.",
     }
@@ -10388,6 +10848,19 @@ def _live_feed_memory_prior_for_department(memory_priors: dict[str, Any], depart
     priors = memory_priors.get("priors", []) if isinstance(memory_priors, dict) else []
     department = str(department or "")
     requested_tool = str(requested_tool or "")
+    low_risk_semantic_departments = {"food_retail", "marketing"}
+    for prior in priors if isinstance(priors, list) else []:
+        if not isinstance(prior, dict) or not prior.get("semantic_learning_id") or department not in low_risk_semantic_departments:
+            continue
+        semantic_text = " ".join(
+            str(prior.get(key) or "")
+            for key in ("semantic_lesson", "semantic_rule", "semantic_scope", "semantic_learning_type")
+        ).lower()
+        if any(
+            term in semantic_text
+            for term in ("offer", "promo", "promotion", "routing", "split", "cap", "take-rate", "take rate", "inventory", "food", "stock")
+        ):
+            return prior
     for prior in priors if isinstance(priors, list) else []:
         if not isinstance(prior, dict):
             continue
@@ -10396,6 +10869,46 @@ def _live_feed_memory_prior_for_department(memory_priors: dict[str, Any], depart
         if department in executed_departments or requested_tool in executed_tools:
             return prior
     return priors[0] if priors and isinstance(priors[0], dict) else None
+
+
+def _semantic_action_parameters_from_prior(prior: dict[str, Any] | None, department: str, requested_tool: str) -> dict[str, Any]:
+    if not isinstance(prior, dict) or not prior.get("semantic_learning_id"):
+        return {}
+    text = " ".join(str(prior.get(key) or "") for key in ("semantic_lesson", "semantic_rule")).lower()
+    params: dict[str, Any] = {
+        "source": "semantic_agent_learning",
+        "learning_id": prior.get("semantic_learning_id"),
+        "source_outcome_id": prior.get("outcome_id"),
+        "semantic_score": prior.get("semantic_score"),
+        "policy": "Parameters refine only low-risk receiver payloads; they do not grant new execution authority.",
+    }
+    if "stronger" in text or "personalized" in text or "offer" in text or "promo" in text or "promotion" in text:
+        params["offer_strength"] = "stronger_personalized"
+        params["guest_segmenting"] = "segment_offer_by_current_location_and_wait_tolerance"
+    if "split" in text or "routing" in text or "reroute" in text:
+        params["routing_strategy"] = "split_across_low_wait_destinations"
+        params["destination_count_min"] = 2
+    if "cap" in text or "overloaded" in text or "indoor" in text:
+        params["traffic_cap_policy"] = "cap_overloaded_indoor_targets"
+        params["avoid_targets"] = ["overloaded_indoor_food_court", "high_spillback_zone"]
+    if department == "food_retail":
+        params["tool_payload_delta"] = {
+            "promo_action": "pause_broad_promo_replace_with_segmented_capacity_safe_offer",
+            "inventory_guard": "hold promo if bottled_drinks or kitchen load remains constrained",
+            "demand_shape": params.get("routing_strategy", "split_across_available_food_locations"),
+        }
+        if "inventory" in text or "stock" in text or "food" in text or "promo" in text:
+            params["companion_tools"] = ["inventory_alert"]
+            params["companion_reason"] = "Semantic learning ties demand shaping to stockout prevention; live food evidence should trigger a bounded inventory alert alongside promo control."
+    elif department == "marketing":
+        params["tool_payload_delta"] = {
+            "offer_action": "redirect_to_multiple_lower_pressure_destinations",
+            "offer_strength": params.get("offer_strength", "standard"),
+            "destination_cap": params.get("traffic_cap_policy", "monitor_destination_pressure"),
+        }
+    else:
+        params["tool_payload_delta"] = {"action": requested_tool, "use": "context_only"}
+    return params
 
 
 def _infer_live_feed_training_scenario(live_case: dict[str, Any]) -> str:
@@ -10488,8 +11001,48 @@ def _judge_live_feed_memory_relevance(prior: dict[str, Any] | None, department: 
     held_tools = {str(item) for item in prior.get("held_tools", []) if item}
     high_risk_departments = {"operations", "maintenance", "guest_experience", "safety", "security"}
     governance_departments = {"executive", "compliance", "qa_judge", "finance"}
+    semantic_text = " ".join(
+        str(prior.get(key) or "")
+        for key in ("semantic_lesson", "semantic_rule", "semantic_scope", "semantic_learning_type")
+    ).lower()
+    semantic_low_risk_match = bool(prior.get("semantic_learning_id")) and department in {"food_retail", "marketing", "hr_labor"} and any(
+        term in semantic_text
+        for term in (
+            "offer",
+            "promo",
+            "promotion",
+            "routing",
+            "split",
+            "cap",
+            "staff",
+            "labor",
+            "inventory",
+            "food",
+            "stock",
+            "take-rate",
+            "take rate",
+        )
+    )
     exact_executed_match = department in executed_departments or requested_tool in executed_tools
     held_match = department in held_departments or requested_tool in held_tools
+    if semantic_low_risk_match:
+        return {
+            "status": "accepted_semantic_learning",
+            "relevance_score": 0.72,
+            "accepted_by_judge": True,
+            "usage_scope": "low_risk_reasoning_bias",
+            "reason": "Vector-retrieved learning is semantically relevant to a low-risk department/tool family.",
+            "policy": "Semantic memory may adjust reasoning and candidate confidence, but cannot grant new execution rights.",
+        }
+    if prior.get("semantic_learning_id") and department in high_risk_departments:
+        return {
+            "status": "semantic_context_only",
+            "relevance_score": 0.5,
+            "accepted_by_judge": False,
+            "usage_scope": "context_only_no_execution_bias",
+            "reason": "Vector-retrieved learning is relevant context, but the department remains sensitive or operations-changing.",
+            "policy": "Semantic memory cannot override safety, security, maintenance, guest-message, or operations gates.",
+        }
     if exact_executed_match and department not in high_risk_departments:
         return {
             "status": "accepted",
@@ -10553,7 +11106,22 @@ def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memor
             "accepted_by_judge": relevance["accepted_by_judge"],
             "memory_relevance_judge": relevance,
         }
-        if relevance["accepted_by_judge"] and prior:
+        if relevance["status"] == "accepted_semantic_learning" and prior:
+            semantic_action_parameters = _semantic_action_parameters_from_prior(
+                prior,
+                str(proposal.get("department") or ""),
+                str(requested_tool or ""),
+            )
+            memory_delta = {
+                "effect": "semantic_learning_adjusted_candidate",
+                "before": "Recommendation used current live feed plus latest reward priors.",
+                "after": prior.get("semantic_rule") or prior.get("semantic_lesson") or "Vector-retrieved learning adjusted candidate confidence.",
+                "score_adjustment": 0.03,
+                "decision_boundary": "Semantic memory affects reasoning only; policy, Executive, and Tool Executor gates remain unchanged.",
+                "action_parameters": semantic_action_parameters,
+            }
+        elif relevance["accepted_by_judge"] and prior:
+            semantic_action_parameters = {}
             memory_delta = {
                 "effect": "reinforced_selected_candidate",
                 "before": "Recommendation was based on current live feed only.",
@@ -10562,6 +11130,7 @@ def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memor
                 "decision_boundary": "Policy, Executive, and Tool Executor gates remain unchanged.",
             }
         elif relevance["status"] == "blocked_policy_boundary":
+            semantic_action_parameters = {}
             memory_delta = {
                 "effect": "blocked_from_execution_bias",
                 "before": "Prior outcome was retrieved for context.",
@@ -10569,15 +11138,17 @@ def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memor
                 "score_adjustment": 0,
                 "decision_boundary": "Memory cannot override human approval or safety/privacy/maintenance gates.",
             }
-        elif relevance["status"] == "weak_context_only":
+        elif relevance["status"] in {"weak_context_only", "semantic_context_only"}:
+            semantic_action_parameters = {}
             memory_delta = {
                 "effect": "context_only",
                 "before": "Prior outcome was retrieved.",
-                "after": "Memory may inform tradeoff explanation but does not alter the selected action.",
+                "after": prior.get("semantic_lesson") if prior and prior.get("semantic_lesson") else "Memory may inform tradeoff explanation but does not alter the selected action.",
                 "score_adjustment": 0,
                 "decision_boundary": "Governance and finance context cannot execute receiver actions.",
             }
         else:
+            semantic_action_parameters = {}
             memory_delta = {
                 "effect": "no_decision_effect",
                 "before": "No relevant measured prior was available.",
@@ -10596,19 +11167,43 @@ def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memor
             if relevance["accepted_by_judge"] and candidate_actions:
                 first = candidate_actions[0]
                 if isinstance(first, dict):
-                    first["memory_adjusted_score"] = round(min(0.99, float(first.get("score") or 0) + 0.05), 2)
+                    first["memory_adjusted_score"] = round(min(0.99, float(first.get("score") or 0) + float(memory_delta.get("score_adjustment") or 0)), 2)
                     first["memory_adjustment_reason"] = memory_delta["after"]
+                    if prior and prior.get("semantic_learning_id"):
+                        first["semantic_memory_learning_id"] = prior.get("semantic_learning_id")
+                        first["semantic_memory_score"] = prior.get("semantic_score")
             forecast = reasoning.get("forecast", {}) if isinstance(reasoning.get("forecast"), dict) else {}
             if forecast:
                 forecast["memory_prior_adjustment"] = memory_delta
+                if semantic_action_parameters:
+                    forecast["semantic_action_parameters"] = semantic_action_parameters
+            carry = reasoning.get("memory_carry_forward", {}) if isinstance(reasoning.get("memory_carry_forward"), dict) else {}
+            if prior and prior.get("semantic_learning_id") and carry:
+                carry_list = carry.get("carry", []) if isinstance(carry.get("carry"), list) else []
+                do_better = carry.get("do_better_next_time", []) if isinstance(carry.get("do_better_next_time"), list) else []
+                carry["carry"] = list(dict.fromkeys([*carry_list, f"semantic_learning:{prior.get('semantic_learning_id')}"]))[:14]
+                if prior.get("semantic_rule"):
+                    do_better.insert(0, str(prior.get("semantic_rule")))
+                carry["do_better_next_time"] = list(dict.fromkeys(str(item) for item in do_better))[:10]
+                reasoning["memory_carry_forward"] = carry
             proposal["department_reasoning"] = reasoning
         if relevance["accepted_by_judge"] and prior:
             proposal.setdefault("evidence", [])
             if isinstance(proposal["evidence"], list):
+                if prior.get("semantic_learning_id"):
+                    memory_evidence = (
+                        f"semantic_memory:{prior.get('semantic_learning_id')}:score={prior.get('semantic_score')}:"
+                        f"source_outcome={prior.get('outcome_id')}"
+                    )
+                else:
+                    memory_evidence = (
+                        f"memory_prior:{prior.get('outcome_id')}:reward={prior.get('reward_value')}:"
+                        f"confidence={prior.get('attribution_confidence')}"
+                    )
                 proposal["evidence"] = list(
                     dict.fromkeys(
                         [
-                            f"memory_prior:{prior.get('outcome_id')}:reward={prior.get('reward_value')}:confidence={prior.get('attribution_confidence')}",
+                            memory_evidence,
                             *[str(item) for item in proposal["evidence"]],
                         ]
                     )
@@ -10617,6 +11212,19 @@ def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memor
             envelope["memory_use"] = memory_use
             envelope["memory_relevance_judge"] = relevance
             envelope["memory_decision_delta"] = memory_delta
+            if semantic_action_parameters:
+                envelope["semantic_action_parameters"] = semantic_action_parameters
+                envelope["action_parameters"] = semantic_action_parameters
+                payload_delta = semantic_action_parameters.get("tool_payload_delta")
+                if isinstance(payload_delta, dict):
+                    proposal_payload = envelope.get("proposal_payload") if isinstance(envelope.get("proposal_payload"), dict) else {}
+                    envelope["proposal_payload"] = {**proposal_payload, **payload_delta, "semantic_learning_id": semantic_action_parameters.get("learning_id")}
+                envelope["expected_outcome"] = (
+                    f"{envelope.get('expected_outcome') or proposal.get('expected_outcome') or 'department proposal reviewed'}; "
+                    f"semantic memory requires {semantic_action_parameters.get('routing_strategy', 'targeted demand shaping')} "
+                    f"and {semantic_action_parameters.get('traffic_cap_policy', 'destination pressure monitoring')}."
+                )
+                proposal["semantic_action_parameters"] = semantic_action_parameters
             if relevance["accepted_by_judge"] and prior:
                 envelope["memory_prior_outcome_id"] = prior.get("outcome_id")
             proposal["proposal_envelope"] = envelope
@@ -10629,10 +11237,15 @@ def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memor
             "accepted_by_judge": relevance["accepted_by_judge"],
             "usage_scope": relevance["usage_scope"],
             "decision_delta": memory_delta,
+            "semantic_companion_tools": (
+                semantic_action_parameters.get("companion_tools", [])
+                if isinstance(semantic_action_parameters, dict) and isinstance(semantic_action_parameters.get("companion_tools"), list)
+                else []
+            ),
         }
         if relevance["accepted_by_judge"]:
             applied.append(row)
-        elif relevance["status"] == "weak_context_only":
+        elif relevance["status"] in {"weak_context_only", "semantic_context_only"}:
             weak_context.append(row)
         elif relevance["status"] == "blocked_policy_boundary":
             blocked.append(row)
@@ -10642,6 +11255,15 @@ def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memor
     proposals["memory_prior_use"] = {
         "status": "applied" if applied else "none",
         "applied_count": len(applied),
+        "semantic_companion_count": sum(len(row.get("semantic_companion_tools", [])) for row in applied if isinstance(row.get("semantic_companion_tools"), list)),
+        "semantic_companion_tools": sorted(
+            {
+                str(tool)
+                for row in applied
+                for tool in (row.get("semantic_companion_tools", []) if isinstance(row.get("semantic_companion_tools"), list) else [])
+                if tool
+            }
+        ),
         "prior_outcome_ids": sorted({str(row.get("prior_outcome_id")) for row in applied if row.get("prior_outcome_id")}),
         "weak_context_count": len(weak_context),
         "blocked_count": len(blocked),
@@ -10662,6 +11284,15 @@ def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memor
             "context_only_count": len(weak_context),
             "blocked_sensitive_count": len(blocked),
             "rejected_irrelevant_count": len(rejected),
+            "semantic_companion_count": sum(len(row.get("semantic_companion_tools", [])) for row in applied if isinstance(row.get("semantic_companion_tools"), list)),
+            "semantic_companion_tools": sorted(
+                {
+                    str(tool)
+                    for row in applied
+                    for tool in (row.get("semantic_companion_tools", []) if isinstance(row.get("semantic_companion_tools"), list) else [])
+                    if tool
+                }
+            ),
             "decision_rule": "Memory can reinforce low-risk candidates but cannot turn held, sensitive, or human-approval actions into executable actions.",
             "deltas": [*applied, *weak_context, *blocked, *rejected],
         }
@@ -10678,7 +11309,15 @@ def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memor
                 "weak_context": weak_context,
                 "blocked": blocked,
                 "rejected": rejected,
-                "resolution": "Use measured prior outcomes only where department/tool relevance and policy boundaries allow it.",
+                "semantic_companion_tools": sorted(
+                    {
+                        str(tool)
+                        for row in applied
+                        for tool in (row.get("semantic_companion_tools", []) if isinstance(row.get("semantic_companion_tools"), list) else [])
+                        if tool
+                    }
+                ),
+                "resolution": "Use measured prior outcomes only where department/tool relevance and policy boundaries allow it; same-department low-risk companion tools may be added when the semantic learning and live feed both support them.",
             },
         )
         proposals["negotiation_rounds"] = rounds
@@ -10690,8 +11329,16 @@ def _apply_live_feed_memory_priors_to_proposals(proposals: dict[str, Any], memor
                 "turn": "memory",
                 "agent": "memory_ops_agent",
                 "decision": "judged_measured_priors",
-                "reason": f"{len(applied)} accepted, {len(weak_context)} weak-context, {len(blocked)} policy-blocked, {len(rejected)} rejected memory prior uses.",
+                "reason": f"{len(applied)} accepted, {len(weak_context)} weak-context, {len(blocked)} policy-blocked, {len(rejected)} rejected memory prior uses; semantic companions: {sum(len(row.get('semantic_companion_tools', [])) for row in applied if isinstance(row.get('semantic_companion_tools'), list))}.",
                 "prior_outcome_ids": sorted({str(row.get("prior_outcome_id")) for row in applied if row.get("prior_outcome_id")}),
+                "semantic_companion_tools": sorted(
+                    {
+                        str(tool)
+                        for row in applied
+                        for tool in (row.get("semantic_companion_tools", []) if isinstance(row.get("semantic_companion_tools"), list) else [])
+                        if tool
+                    }
+                ),
             },
         )
     return proposals
@@ -10912,6 +11559,211 @@ def _apply_live_feed_ml_policy_evidence_to_proposals(proposals: dict[str, Any], 
     return proposals
 
 
+def _proposal_tool_name(proposal: dict[str, Any]) -> str:
+    envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+    return str(envelope.get("requested_tool") or proposal.get("requested_tool") or "")
+
+
+def _proposal_policy_status(proposal: dict[str, Any]) -> str:
+    envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+    policy = envelope.get("policy_judge") if isinstance(envelope.get("policy_judge"), dict) else proposal.get("policy_judge")
+    return str((policy if isinstance(policy, dict) else {}).get("status") or "")
+
+
+def _proposal_executor_status(proposal: dict[str, Any]) -> str:
+    envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+    return str(envelope.get("executor_status") or proposal.get("executor_status") or "")
+
+
+def _proposal_disposition_decision(proposal: dict[str, Any]) -> str:
+    envelope = proposal.get("proposal_envelope", {}) if isinstance(proposal.get("proposal_envelope"), dict) else {}
+    disposition = proposal.get("action_disposition") if isinstance(proposal.get("action_disposition"), dict) else envelope.get("action_disposition")
+    return str((disposition if isinstance(disposition, dict) else {}).get("decision") or "")
+
+
+def _live_feed_substitute_preferences(held_department: str, held_tool: str) -> list[tuple[str, str, str]]:
+    held_department = str(held_department or "")
+    held_tool = str(held_tool or "")
+    common = [
+        ("marketing", "redirect_offer", "Redirect demand away from the constrained area without changing crowd routing authority."),
+        ("food_retail", "pause_launch_promo", "Reduce avoidable commercial demand pressure without sending guests a public route message."),
+        ("hr_labor", "shift_adjustment_recommendation", "Add recommendation-only staffing support while preserving labor rules."),
+    ]
+    mapping = {
+        "operations": common,
+        "guest_experience": [
+            ("marketing", "redirect_offer", "Use a bounded offer redirect instead of a public guest message."),
+            ("food_retail", "pause_launch_promo", "Pause demand creation until message wording and destination capacity clear."),
+            ("compliance", "generate_compliance_note", "Record wording, privacy, and promise constraints before any guest communication."),
+        ],
+        "maintenance": [
+            ("hr_labor", "shift_adjustment_recommendation", "Stage certified support without treating work-order review as reopen clearance."),
+            ("marketing", "redirect_offer", "Reduce demand toward the affected asset while inspection remains pending."),
+            ("compliance", "generate_compliance_note", "Preserve inspection and reopen approval constraints in the trace."),
+        ],
+        "safety": [
+            ("marketing", "redirect_offer", "Stop demand growth into risky zones while human safety approval remains required."),
+            ("food_retail", "pause_launch_promo", "Remove optional demand pressure without implying safety clearance."),
+            ("compliance", "generate_compliance_note", "Name the safety approval chain and blocked scopes."),
+        ],
+        "security": [
+            ("marketing", "redirect_offer", "Avoid adding traffic to monitored zones while security review remains human-owned."),
+            ("hr_labor", "shift_adjustment_recommendation", "Recommend visible staff support without dispatching security control."),
+            ("compliance", "generate_compliance_note", "Name escalation limits and approval requirements."),
+        ],
+    }
+    preferences = mapping.get(held_department, common)
+    if held_tool in {"draft_guest_message", "issue_recovery_offer"}:
+        return mapping["guest_experience"]
+    return preferences
+
+
+def _build_live_feed_alternative_action_negotiation(proposals: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(proposals, dict):
+        return {"status": "missing", "substitute_count": 0, "rows": []}
+    rows = proposals.get("proposals", []) if isinstance(proposals.get("proposals"), list) else []
+    proposal_rows = [row for row in rows if isinstance(row, dict)]
+    by_department_tool: dict[tuple[str, str], dict[str, Any]] = {}
+    for proposal in proposal_rows:
+        by_department_tool[(str(proposal.get("department") or ""), _proposal_tool_name(proposal))] = proposal
+
+    sensitive_departments = {"operations", "maintenance", "guest_experience", "safety", "security"}
+    low_risk_executor_departments = {"food_retail", "hr_labor", "marketing"}
+    substitute_rows: list[dict[str, Any]] = []
+    unresolved_without_safe_substitute = 0
+
+    for held in proposal_rows:
+        held_department = str(held.get("department") or "")
+        if held_department not in sensitive_departments:
+            continue
+        held_status = _proposal_policy_status(held)
+        held_decision = _proposal_disposition_decision(held)
+        if held_status in {"passed", "approved_with_exclusions", "trace_only"} and held_decision != "hold_message_for_compliance":
+            continue
+        held_tool = _proposal_tool_name(held)
+        selected_substitute: dict[str, Any] | None = None
+        selected_reason = ""
+        for substitute_department, substitute_tool, reason in _live_feed_substitute_preferences(held_department, held_tool):
+            candidate = by_department_tool.get((substitute_department, substitute_tool))
+            if not candidate:
+                continue
+            candidate_status = _proposal_policy_status(candidate)
+            candidate_executor = _proposal_executor_status(candidate)
+            if (
+                candidate_status in {"passed", "approved_with_exclusions", "trace_only"}
+                and (
+                    substitute_department in low_risk_executor_departments
+                    or candidate_status == "trace_only"
+                    or substitute_department == "compliance"
+                )
+            ):
+                selected_substitute = candidate
+                selected_reason = reason
+                break
+        if selected_substitute:
+            substitute_department = str(selected_substitute.get("department") or "")
+            substitute_tool = _proposal_tool_name(selected_substitute)
+            substitute_status = _proposal_policy_status(selected_substitute)
+            substitute_executor = _proposal_executor_status(selected_substitute)
+            executable_if_approved = (
+                substitute_department in low_risk_executor_departments
+                and substitute_status in {"passed", "approved_with_exclusions"}
+                and substitute_executor in {"ready_for_executor", "executor_only"}
+            )
+            substitute_agent = selected_substitute.get("agent_id")
+        else:
+            fallback_department, substitute_tool, selected_reason = _live_feed_substitute_preferences(held_department, held_tool)[0]
+            substitute_department = fallback_department
+            substitute_status = "not_available_in_current_proposals"
+            substitute_executor = "not_enqueued"
+            executable_if_approved = False
+            substitute_agent = None
+            unresolved_without_safe_substitute += 1
+
+        grounding = held.get("live_feed_grounding", {}) if isinstance(held.get("live_feed_grounding"), dict) else {}
+        held_disposition = held.get("action_disposition", {}) if isinstance(held.get("action_disposition"), dict) else {}
+        row = {
+            "alternative_id": f"alt_{hashlib.sha1(json.dumps({'agent': held.get('agent_id'), 'department': held_department, 'tool': held_tool, 'substitute_department': substitute_department, 'substitute_tool': substitute_tool}, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:12]}",
+            "held_agent": held.get("agent_id"),
+            "held_department": held_department,
+            "held_tool": held_tool,
+            "held_policy_status": held_status,
+            "held_decision": held_decision,
+            "held_next_owner": held_disposition.get("next_owner"),
+            "substitute_agent": substitute_agent,
+            "substitute_department": substitute_department,
+            "substitute_tool": substitute_tool,
+            "substitute_policy_status": substitute_status,
+            "substitute_executor_status": substitute_executor,
+            "substitute_existing_proposal": bool(selected_substitute),
+            "substitute_executable_if_approved": executable_if_approved,
+            "execution_boundary": "Use the substitute only through its own policy-passed envelope; never convert the held action into execution.",
+            "tradeoff_reason": selected_reason,
+            "live_feed_event_ids": grounding.get("event_ids", []),
+            "memory_context": (held.get("memory_use", {}) if isinstance(held.get("memory_use"), dict) else {}).get("status"),
+            "ml_policy_context": (held.get("ml_policy_evidence_use", {}) if isinstance(held.get("ml_policy_evidence_use"), dict) else {}).get("status"),
+            "resolution": (
+                "safe_substitute_available"
+                if selected_substitute and executable_if_approved
+                else "trace_or_review_substitute_available"
+                if selected_substitute
+                else "owner_follow_up_required_no_safe_substitute"
+            ),
+        }
+        substitute_rows.append(row)
+
+    status = "negotiated" if substitute_rows and unresolved_without_safe_substitute == 0 else "partial" if substitute_rows else "none"
+    board = {
+        "mode": "held_action_alternative_negotiation",
+        "status": status,
+        "substitute_count": len(substitute_rows),
+        "safe_executable_substitute_count": sum(1 for row in substitute_rows if row.get("substitute_executable_if_approved")),
+        "unresolved_without_safe_substitute_count": unresolved_without_safe_substitute,
+        "rows": substitute_rows,
+        "policy": "Held sensitive actions remain held; this board negotiates safer substitutes through existing department envelopes and does not grant new execution rights.",
+    }
+
+    tradeoff = proposals.get("executive_tradeoff", {}) if isinstance(proposals.get("executive_tradeoff"), dict) else {}
+    if isinstance(tradeoff, dict):
+        tradeoff["alternative_action_negotiation"] = {
+            "status": board["status"],
+            "substitute_count": board["substitute_count"],
+            "safe_executable_substitute_count": board["safe_executable_substitute_count"],
+            "unresolved_without_safe_substitute_count": board["unresolved_without_safe_substitute_count"],
+            "decision_rule": board["policy"],
+            "rows": substitute_rows,
+        }
+        proposals["executive_tradeoff"] = tradeoff
+
+    rounds = proposals.get("negotiation_rounds", []) if isinstance(proposals.get("negotiation_rounds"), list) else []
+    if substitute_rows:
+        rounds.insert(
+            min(5, len(rounds)),
+            {
+                "round": "alternative_actions",
+                "name": "held_action_substitute_negotiation",
+                "decision": "safe_substitutes_named_before_follow_through",
+                "substitutes": substitute_rows,
+                "resolution": "Difficult actions are not left undecided: each held sensitive action receives a safer substitute path or a named owner follow-up.",
+            },
+        )
+        proposals["negotiation_rounds"] = rounds
+
+    proposals.setdefault("negotiation_turns", [])
+    if substitute_rows and isinstance(proposals["negotiation_turns"], list):
+        proposals["negotiation_turns"].insert(
+            min(3, len(proposals["negotiation_turns"])),
+            {
+                "turn": "alternative_actions",
+                "agent": "decision_bridge_agent",
+                "decision": "named_safe_substitutes_for_held_actions",
+                "reason": f"{len(substitute_rows)} held sensitive actions received substitute paths; {unresolved_without_safe_substitute} lacked a safe executable substitute.",
+            },
+        )
+    proposals["alternative_action_negotiation"] = board
+    return board
+
+
 def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict[str, Any]:
     executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
     proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
@@ -10922,6 +11774,8 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
     ml_policy_evidence = payload.get("live_feed_ml_policy_evidence", {}) if isinstance(payload.get("live_feed_ml_policy_evidence"), dict) else {}
     ml_policy_use = proposals.get("ml_policy_evidence_use", {}) if isinstance(proposals.get("ml_policy_evidence_use"), dict) else {}
     follow_through = payload.get("hard_decision_follow_through", {}) if isinstance(payload.get("hard_decision_follow_through"), dict) else {}
+    alternative_negotiation = proposals.get("alternative_action_negotiation", {}) if isinstance(proposals.get("alternative_action_negotiation"), dict) else payload.get("alternative_action_negotiation", {}) if isinstance(payload.get("alternative_action_negotiation"), dict) else {}
+    substitute_attribution = outcome_measurement.get("substitute_outcome_attribution", {}) if isinstance(outcome_measurement.get("substitute_outcome_attribution"), dict) else (outcome_measurement.get("reward_layers", {}) if isinstance(outcome_measurement.get("reward_layers"), dict) else {}).get("substitute_outcome_attribution", {}) if isinstance((outcome_measurement.get("reward_layers", {}) if isinstance(outcome_measurement.get("reward_layers"), dict) else {}).get("substitute_outcome_attribution"), dict) else {}
     park_profile_summary = payload.get("park_profile_summary") or proposals.get("park_profile_summary") or {}
     if not isinstance(park_profile_summary, dict):
         park_profile_summary = {}
@@ -10958,10 +11812,12 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
             {"phase": "park_profile_context", "status": proposals.get("park_profile_context_status") or park_profile_summary.get("status") or "missing", "profile_context_proposal_count": proposals.get("profile_context_proposal_count"), "profile_version": proposals.get("profile_version") or park_profile_summary.get("profile_version")},
             {"phase": "propose", "status": "complete", "proposal_count": proposals.get("proposal_count")},
             {"phase": "policy_judge", "status": "complete", "concrete_policy_count": sum(1 for item in proposals.get("proposals", []) if isinstance(item, dict) and item.get("policy_judge")) if isinstance(proposals.get("proposals"), list) else 0},
+            {"phase": "alternative_action_negotiation", "status": alternative_negotiation.get("status") or "missing", "substitute_count": alternative_negotiation.get("substitute_count"), "unresolved_without_safe_substitute_count": alternative_negotiation.get("unresolved_without_safe_substitute_count")},
             {"phase": "controlled_executor", "status": executor.get("status"), "executed_count": executor.get("executed_count"), "held_count": executor.get("held_count")},
             {"phase": "hard_decision_follow_through", "status": follow_through.get("status") or "missing", "task_count": follow_through.get("task_count"), "active_follow_up_count": follow_through.get("active_follow_up_count")},
             {"phase": "receiver_delivery", "status": receiver_delivery.get("status") or "missing", "delivered_count": receiver_delivery.get("delivered_count"), "acknowledged_count": receiver_delivery.get("acknowledged_count")},
             {"phase": "post_action_measurement", "status": outcome_measurement.get("status") or "missing", "attribution_confidence": outcome_measurement.get("attribution_confidence"), "eligible_for_reward": eligible_for_reward},
+            {"phase": "substitute_outcome_attribution", "status": substitute_attribution.get("status") or "missing", "executed_branch_count": substitute_attribution.get("executed_branch_count"), "average_lift_vs_monitor": substitute_attribution.get("average_lift_vs_monitor")},
         ],
         "response_metrics": {
             "controlledExecutionRate": round((len(executed) / len(receipts)), 3) if receipts else 0,
@@ -10989,6 +11845,7 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
             "ml_policy_evidence": ml_policy_evidence,
             "ml_policy_evidence_use": ml_policy_use,
             "ml_policy_decision_deltas": proposals.get("ml_policy_decision_deltas", []),
+            "alternative_action_negotiation": alternative_negotiation,
             "park_profile_summary": park_profile_summary,
             "profile_context_proposal_count": proposals.get("profile_context_proposal_count"),
             "profile_precedence": proposals.get("precedence") or park_profile_summary.get("precedence"),
@@ -11001,6 +11858,7 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
             "post_action_measurement_id": outcome_measurement.get("measurement_id"),
             "post_action_measurement_status": outcome_measurement.get("status"),
             "post_action_measurement_rows": outcome_measurement.get("measurement_rows", []),
+            "substitute_outcome_attribution": substitute_attribution,
         },
         "scorecard": {
             "overall": 86 if executed and held else 72,
@@ -11038,6 +11896,21 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
                 "context_only_count": ml_policy_use.get("context_only_count"),
                 "warning_count": ml_policy_use.get("warning_count"),
                 "training_source": ml_policy_evidence.get("actual_training_source"),
+            },
+            "alternative_action_learning_context": {
+                "status": alternative_negotiation.get("status"),
+                "substitute_count": alternative_negotiation.get("substitute_count"),
+                "safe_executable_substitute_count": alternative_negotiation.get("safe_executable_substitute_count"),
+                "unresolved_without_safe_substitute_count": alternative_negotiation.get("unresolved_without_safe_substitute_count"),
+                "policy": alternative_negotiation.get("policy"),
+            },
+            "substitute_outcome_learning_context": {
+                "status": substitute_attribution.get("status"),
+                "branch_count": substitute_attribution.get("branch_count"),
+                "executed_branch_count": substitute_attribution.get("executed_branch_count"),
+                "average_substitute_score": substitute_attribution.get("average_substitute_score"),
+                "average_lift_vs_monitor": substitute_attribution.get("average_lift_vs_monitor"),
+                "bundle": substitute_attribution.get("bundle", {}),
             },
             "next_gap": "Resolve active hard-decision follow-up tasks and attribute longer-horizon operational lift." if follow_through.get("active_follow_up_count") else "Attribute longer-horizon operational lift after receiver action." if eligible_for_reward else "Record post-action state measurements before reward training.",
         },
@@ -11124,7 +11997,9 @@ async def park_live_feed_agent_run(request: LiveFeedAgentRunRequest):
         proposals = payload.get("role_agent_proposals", {}) if isinstance(payload.get("role_agent_proposals"), dict) else {}
         proposals = _apply_live_feed_memory_priors_to_proposals(proposals, memory_priors)
         proposals = _apply_live_feed_ml_policy_evidence_to_proposals(proposals, ml_policy_evidence)
+        alternative_negotiation = _build_live_feed_alternative_action_negotiation(proposals)
         payload["role_agent_proposals"] = proposals
+        payload["alternative_action_negotiation"] = alternative_negotiation
         payload["park_profile_summary"] = proposals.get("park_profile_summary", {})
         payload["live_feed_cooperation"] = proposals.get("cooperation_graph") or _build_live_feed_cooperation_graph(proposals, live_case)
         payload["tool_executor_live_test"] = _controlled_live_feed_tool_executor_run(
@@ -12689,6 +13564,11 @@ async def _copilot_chat_brain(
     recent_messages: list[CopilotChatMessage],
 ) -> dict[str, Any]:
     fallback = _fallback_copilot_chat_brain(message, compact_state, prior)
+    if _copilot_hot_path_local_only():
+        fallback["provider_ready"] = True
+        fallback["provider_skipped"] = "hot_path_local_only"
+        fallback["source"] = "local_intent_parser_hot_path"
+        return fallback
     props = get_gemini_agent_properties()
     if not props.ready:
         fallback["provider_ready"] = False
@@ -13038,6 +13918,130 @@ def _copilot_reasoning_summary(route: dict[str, Any], intent: dict[str, Any], co
         f"Routed to {selected_role.title()} Agent because {reason}",
         "Dispatched bounded receiver actions with policy/eval receipts." if will_act else "Kept this as a reasoned response without mutating the park.",
     ]
+
+
+def _copilot_semantic_memory_enabled() -> bool:
+    return _truthy(os.getenv("PARKPULSE_COPILOT_SEMANTIC_MEMORY"), False) or _truthy(
+        os.getenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS"),
+        False,
+    )
+
+
+def _copilot_hot_path_local_only() -> bool:
+    return _truthy(os.getenv("PARKPULSE_COPILOT_HOT_PATH_LOCAL_ONLY"), False)
+
+
+def _copilot_memory_doc_summary(document: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: document.get(key)
+        for key in (
+            "_id",
+            "title",
+            "summary",
+            "incidentType",
+            "scenarioKey",
+            "lesson",
+            "rule",
+            "recommendedAction",
+            "score",
+        )
+        if document.get(key) is not None
+    }
+
+
+def _compact_copilot_semantic_memory(memory: dict[str, Any]) -> dict[str, Any]:
+    status = memory.get("status") if isinstance(memory.get("status"), dict) else {}
+    retrieved = memory.get("retrieved") if isinstance(memory.get("retrieved"), dict) else {}
+    playbooks = retrieved.get("playbooks") if isinstance(retrieved.get("playbooks"), list) else []
+    incidents = retrieved.get("incidents") if isinstance(retrieved.get("incidents"), list) else []
+    learnings = retrieved.get("learnings") if isinstance(retrieved.get("learnings"), list) else []
+    retrieval_method = str(retrieved.get("method") or "")
+    model_api = status.get("modelApi") if isinstance(status.get("modelApi"), dict) else None
+    model_api_enabled = bool(model_api and model_api.get("enabled"))
+    cache_backed = retrieval_method in {
+        "role_context_cache",
+        "role_context_cache_stale_usable",
+        "role_context_cache_stale_unvalidated",
+    }
+    vector_backed = retrieval_method.startswith("mongodb_vector_search")
+    degraded_reasons: list[str] = []
+    if retrieval_method == "role_context_cache_miss":
+        degraded_reasons.append("No role-context cache was available; live semantic retrieval is skipped on copilot request paths.")
+    if model_api_enabled and not (cache_backed or vector_backed):
+        degraded_reasons.append(
+            f"Model API is enabled but semantic retrieval used {retrieval_method or 'unknown'} instead of vector search or role cache."
+        )
+    return {
+        "status": "ready" if not degraded_reasons else "degraded",
+        "source": "mongo_operational_memory",
+        "query": memory.get("query"),
+        "scenario_key": memory.get("scenario_key"),
+        "agent_role": memory.get("agent_role"),
+        "cache_policy": memory.get("cache_policy"),
+        "retrieval_method": retrieval_method,
+        "summary": memory.get("summary"),
+        "model_api": model_api,
+        "readiness_issues": degraded_reasons,
+        "counts": {
+            "playbooks": len(playbooks),
+            "incidents": len(incidents),
+            "learnings": len(learnings),
+        },
+        "retrieved": {
+            "playbooks": [_copilot_memory_doc_summary(row) for row in playbooks[:3] if isinstance(row, dict)],
+            "incidents": [_copilot_memory_doc_summary(row) for row in incidents[:3] if isinstance(row, dict)],
+            "learnings": [_copilot_memory_doc_summary(row) for row in learnings[:3] if isinstance(row, dict)],
+        },
+    }
+
+
+async def _copilot_semantic_memory_context(message: str, state: dict[str, Any], selected_role: str) -> dict[str, Any]:
+    if not _copilot_semantic_memory_enabled():
+        return {"status": "not_requested", "reason": "PARKPULSE_COPILOT_SEMANTIC_MEMORY is disabled."}
+    started = time.monotonic()
+    try:
+        timeout = max(0.2, _float_env("PARKPULSE_COPILOT_SEMANTIC_MEMORY_TIMEOUT_SECONDS", 2.0))
+        cache_policy = os.getenv("PARKPULSE_COPILOT_SEMANTIC_MEMORY_CACHE_POLICY", "role_cache_only").strip() or "role_cache_only"
+        memory = await asyncio.wait_for(
+            asyncio.to_thread(
+                retrieve_operational_context,
+                message,
+                state,
+                3,
+                selected_role,
+                cache_policy,
+                False,
+            ),
+            timeout=timeout,
+        )
+        compact = _compact_copilot_semantic_memory(memory if isinstance(memory, dict) else {})
+        compact["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+        compact["timeout_ms"] = round(timeout * 1000, 2)
+        return compact
+    except Exception as error:
+        return {
+            "status": "error",
+            "source": "mongo_operational_memory",
+            "readiness_issues": [str(error)[:240]],
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+        }
+
+
+def _copilot_semantic_memory_tool_event(semantic_memory_context: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(semantic_memory_context, dict) or semantic_memory_context.get("status") == "not_requested":
+        return None
+    counts = semantic_memory_context.get("counts") if isinstance(semantic_memory_context.get("counts"), dict) else {}
+    output = (
+        f"{counts.get('playbooks', 0)} playbooks, {counts.get('incidents', 0)} incidents, "
+        f"{counts.get('learnings', 0)} learnings via {semantic_memory_context.get('retrieval_method') or semantic_memory_context.get('status')}"
+    )
+    return {
+        "id": "retrieve_semantic_memory",
+        "tool": "memory.retrieve_semantic_context",
+        "label": "Retrieve semantic memory",
+        "status": semantic_memory_context.get("status") or "complete",
+        "output": output,
+    }
 
 
 def _copilot_map_grounding(message: str, compact_state: dict[str, Any], role_payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -14782,9 +15786,9 @@ async def _copilot_conversational_response(
     impact_replay: dict[str, Any] | None,
     clarifying_question: str | None,
     prior_copilot: dict[str, Any] | None,
+    semantic_memory_context: dict[str, Any] | None,
     mode: str,
 ) -> dict[str, Any]:
-    props = get_gemini_agent_properties()
     local_response = _local_conversational_copilot_response(
         message,
         answer=base_answer,
@@ -14795,6 +15799,12 @@ async def _copilot_conversational_response(
         clarifying_question=clarifying_question,
         mode=mode,
     )
+    local_response["semantic_memory"] = semantic_memory_context
+    if _copilot_hot_path_local_only():
+        local_response["provider_ready"] = True
+        local_response["provider_skipped"] = "hot_path_local_only"
+        return local_response
+    props = get_gemini_agent_properties()
     if not props.ready:
         local_response["provider_ready"] = False
         local_response["provider_issues"] = props.readiness_issues
@@ -14831,6 +15841,7 @@ async def _copilot_conversational_response(
             "verification_report": (agent_runtime or {}).get("verification_report") if isinstance(agent_runtime, dict) else None,
         },
         "map_grounding": map_grounding,
+        "semantic_memory_context": semantic_memory_context,
         "impact_replay_summary": {
             "executed": impact_replay.get("executed") if isinstance(impact_replay, dict) else False,
             "headline": impact_replay.get("comparison", {}).get("impact", {}).get("headline") if isinstance(impact_replay, dict) and isinstance(impact_replay.get("comparison"), dict) else None,
@@ -14866,6 +15877,7 @@ async def _copilot_conversational_response(
             "reasoning_bullets": [str(item) for item in bullets[:4]] if isinstance(bullets, list) else local_response["reasoning_bullets"],
             "operator_next": str(parsed.get("operator_next") or local_response["operator_next"]),
             "confidence": int(parsed.get("confidence") or local_response.get("confidence") or 0),
+            "semantic_memory": semantic_memory_context,
             "provider_ready": True,
         }
     except Exception as error:
@@ -15113,6 +16125,25 @@ async def get_park_copilot_tasks():
 
 @app.post("/api/park/copilot-chat")
 async def park_copilot_chat(request: CopilotChatRequest):
+    diagnostics_enabled = _truthy(os.getenv("PARKPULSE_COPILOT_LATENCY_DIAGNOSTICS"), False)
+    diagnostics_started = time.monotonic()
+    diagnostics_last = diagnostics_started
+    diagnostics_stages: list[dict[str, Any]] = []
+
+    def mark(stage: str) -> None:
+        nonlocal diagnostics_last
+        if not diagnostics_enabled:
+            return
+        now = time.monotonic()
+        diagnostics_stages.append(
+            {
+                "stage": stage,
+                "delta_ms": round((now - diagnostics_last) * 1000, 2),
+                "total_ms": round((now - diagnostics_started) * 1000, 2),
+            }
+        )
+        diagnostics_last = now
+
     message = request.message.strip()
     recent_messages = [item for item in request.messages[-8:] if item.content.strip()]
     if not message and recent_messages:
@@ -15122,9 +16153,12 @@ async def park_copilot_chat(request: CopilotChatRequest):
 
     raw_message = message
     state = await park_simulation.get_state()
+    mark("get_state")
     compact_state = _compact_copilot_state(state)
+    mark("compact_state")
     prior_copilot = _copilot_prior_context(request.selected_map_context)
     chat_brain = await _copilot_chat_brain(raw_message, compact_state, prior_copilot, recent_messages)
+    mark("chat_brain")
     conversation_intent = str(chat_brain.get("intent") or _copilot_conversation_intent(raw_message, prior_copilot))
     brain_planner_message = str(chat_brain.get("planner_message") or raw_message).strip() or raw_message
     message = _copilot_recent_context_message(brain_planner_message, recent_messages, prior_copilot)
@@ -15257,6 +16291,11 @@ async def park_copilot_chat(request: CopilotChatRequest):
     is_followup = conversation_intent in {"explain_plan", "rollback_plan", "revise_plan"} and _is_copilot_followup(message, prior_copilot)
     tool_trace = _agent_role_tool_trace_for_api(route)
     if is_followup and prior_copilot:
+        semantic_memory_context = (
+            prior_copilot.get("semantic_memory_context")
+            if isinstance(prior_copilot.get("semantic_memory_context"), dict)
+            else await _copilot_semantic_memory_context(message, state, selected_role)
+        )
         prior_map_grounding = prior_copilot.get("map_grounding") if isinstance(prior_copilot.get("map_grounding"), dict) else None
         prior_impact_replay = prior_copilot.get("impact_replay") if isinstance(prior_copilot.get("impact_replay"), dict) else None
         prior_recommended_action = prior_copilot.get("recommended_action") if isinstance(prior_copilot.get("recommended_action"), dict) else None
@@ -15277,6 +16316,7 @@ async def park_copilot_chat(request: CopilotChatRequest):
             impact_replay=prior_impact_replay,
             clarifying_question=None,
             prior_copilot=prior_copilot,
+            semantic_memory_context=semantic_memory_context,
             mode="follow_up",
         )
         answer = conversation_response.get("answer") or answer
@@ -15284,6 +16324,10 @@ async def park_copilot_chat(request: CopilotChatRequest):
             *([str(item) for item in conversation_response.get("reasoning_bullets", [])] if isinstance(conversation_response.get("reasoning_bullets"), list) else []),
             f"Conversation source: {conversation_response.get('source')}.",
         ]
+        followup_timeline = _copilot_tool_call_timeline(tool_trace, None, prior_impact_replay, followup=True)
+        memory_event = _copilot_semantic_memory_tool_event(semantic_memory_context)
+        if memory_event:
+            followup_timeline.insert(1, memory_event)
         return {
             "status": "complete",
             "mode": "follow_up",
@@ -15300,7 +16344,7 @@ async def park_copilot_chat(request: CopilotChatRequest):
             "chat_brain": chat_brain,
             "conversation_response": conversation_response,
             "tool_trace": tool_trace,
-            "tool_call_timeline": _copilot_tool_call_timeline(tool_trace, None, prior_impact_replay, followup=True),
+            "tool_call_timeline": followup_timeline,
             "turn_contract": _copilot_turn_contract(
                 "follow_up",
                 will_act=False,
@@ -15322,8 +16366,9 @@ async def park_copilot_chat(request: CopilotChatRequest):
                     has_impact_replay=bool(prior_impact_replay),
                     reason="Follow-up turns reuse the previous receipt and do not mutate park state.",
                 ),
-                _copilot_tool_call_timeline(tool_trace, None, prior_impact_replay, followup=True),
+                followup_timeline,
             ),
+            "semantic_memory_context": semantic_memory_context,
             "route": route,
             "selected_role": selected_role,
             "live_state_summary": compact_state,
@@ -15341,6 +16386,7 @@ async def park_copilot_chat(request: CopilotChatRequest):
                 },
                 "map_context": request.selected_map_context,
                 "constraints": route.get("policy_gates", []),
+                "semantic_memory_status": semantic_memory_context.get("status") if isinstance(semantic_memory_context, dict) else None,
             },
         }
     actionable_role = selected_role in {"react", "proact"}
@@ -15353,6 +16399,8 @@ async def park_copilot_chat(request: CopilotChatRequest):
             "why": "The operator asked for a solution/action after a scan-style status request, so ParkPulse escalated from Scan to React.",
             "policy_gates": list(dict.fromkeys([*(route.get("policy_gates", []) or []), "ontology_allowed_actions", "operator_apply_required"])),
         }
+    semantic_memory_context = await _copilot_semantic_memory_context(message, state, selected_role)
+    mark("semantic_memory")
     if requested_turn_mode == "answer":
         will_act = False
         response_mode = "propose" if intent.get("asks_action") else "answer"
@@ -15371,6 +16419,7 @@ async def park_copilot_chat(request: CopilotChatRequest):
     policy_doctrine = _copilot_rebalance_generic_policy_doctrine(policy_doctrine, message, intent)
     policy_reasoning = interpret_policy_for_action(policy_query_message, compact_state, policy_doctrine)
     policy_doctrine["policy_query_message"] = policy_query_message
+    mark("policy_doctrine")
 
     clarifying_question = None
     lowered = message.lower()
@@ -15386,6 +16435,7 @@ async def park_copilot_chat(request: CopilotChatRequest):
         will_act=will_act,
     )
     object_action_plan = _attach_policy_doctrine_to_object_plan(object_action_plan, policy_doctrine, policy_reasoning)
+    mark("object_action_plan")
     if will_act and object_action_plan.get("overall_gate") != "passed":
         will_act = False
         response_mode = "propose"
@@ -15409,6 +16459,7 @@ async def park_copilot_chat(request: CopilotChatRequest):
         object_action_plan = _attach_policy_doctrine_to_object_plan(object_action_plan, policy_doctrine, policy_reasoning)
 
     recommended_action = _copilot_recommended_action(route, role_payload, will_act)
+    mark("recommended_action")
     if object_action_plan.get("overall_gate"):
         recommended_action["gate"] = str(object_action_plan.get("overall_gate"))
         recommended_action["object_action_plan_id"] = object_action_plan.get("plan_id")
@@ -15431,6 +16482,16 @@ async def park_copilot_chat(request: CopilotChatRequest):
         reasoning_summary = [
             *reasoning_summary,
             f"Retrieved actionable case {primary_case.get('id')} ({primary_case.get('title')}) with policy refs {', '.join(object_action_plan.get('policy_refs', [])[:5])}.",
+        ]
+    if isinstance(semantic_memory_context, dict) and semantic_memory_context.get("status") == "ready":
+        counts = semantic_memory_context.get("counts") if isinstance(semantic_memory_context.get("counts"), dict) else {}
+        reasoning_summary = [
+            *reasoning_summary,
+            (
+                "Semantic memory grounded the turn with "
+                f"{counts.get('playbooks', 0)} playbook(s), {counts.get('incidents', 0)} incident(s), "
+                f"and {counts.get('learnings', 0)} learning(s) via {semantic_memory_context.get('retrieval_method')}."
+            ),
         ]
     selected_policy_action = policy_reasoning.get("selected_action") if isinstance(policy_reasoning.get("selected_action"), dict) else {}
     if selected_policy_action:
@@ -15492,6 +16553,9 @@ async def park_copilot_chat(request: CopilotChatRequest):
         },
         *tool_call_timeline,
     ]
+    memory_event = _copilot_semantic_memory_tool_event(semantic_memory_context)
+    if memory_event:
+        tool_call_timeline.insert(2, memory_event)
     dispatch_count = int(recommended_action.get("dispatch_count") or 0)
     turn_contract = _copilot_turn_contract(
         response_mode,
@@ -15512,6 +16576,7 @@ async def park_copilot_chat(request: CopilotChatRequest):
         options_considered,
         turn_contract,
     )
+    mark("reasoning_evaluation")
     if reasoning_evaluation.get("overall"):
         reasoning_summary = [
             *reasoning_summary,
@@ -15527,7 +16592,9 @@ async def park_copilot_chat(request: CopilotChatRequest):
         recommended_action,
         object_action_plan,
     )
+    mark("ontology_context")
     analytics_action_layer = build_analytics_to_action_layer(state, policy_doctrine, policy_reasoning)
+    mark("analytics_action_layer")
     branch_comparison = None
     if will_act or intent.get("safety_sensitive") or str(os.getenv("PARKPULSE_COPILOT_INCLUDE_BRANCH_COMPARISON", "")).strip().lower() in {"1", "true", "yes", "on"}:
         branch_comparison = await park_simulation.run_action_branch_comparison(20, execute=False)
@@ -15548,6 +16615,7 @@ async def park_copilot_chat(request: CopilotChatRequest):
         analytics_action_layer=analytics_action_layer,
         branch_comparison=branch_comparison,
     )
+    mark("agent_runtime")
     conversation_response = await _copilot_conversational_response(
         message,
         base_answer=answer,
@@ -15561,8 +16629,10 @@ async def park_copilot_chat(request: CopilotChatRequest):
         impact_replay=impact_replay,
         clarifying_question=clarifying_question,
         prior_copilot=prior_copilot,
+        semantic_memory_context=semantic_memory_context,
         mode=response_mode,
     )
+    mark("conversation_response")
     answer = conversation_response.get("answer") or answer
     conversation_bullets = conversation_response.get("reasoning_bullets")
     reasoning_summary = [
@@ -15571,7 +16641,7 @@ async def park_copilot_chat(request: CopilotChatRequest):
         f"Conversation source: {conversation_response.get('source')}.",
     ]
 
-    return {
+    response_payload = {
         "status": "complete",
         "mode": response_mode,
         "message": message,
@@ -15589,6 +16659,7 @@ async def park_copilot_chat(request: CopilotChatRequest):
         "multi_agent_deliberation": agent_runtime.get("multi_agent_deliberation"),
         "chat_brain": chat_brain,
         "conversation_response": conversation_response,
+        "semantic_memory_context": semantic_memory_context,
         "tool_trace": tool_trace,
         "tool_call_timeline": tool_call_timeline,
         "turn_contract": turn_contract,
@@ -15615,8 +16686,17 @@ async def park_copilot_chat(request: CopilotChatRequest):
             },
             "map_context": request.selected_map_context,
             "constraints": route.get("policy_gates", []),
+            "semantic_memory_status": semantic_memory_context.get("status") if isinstance(semantic_memory_context, dict) else None,
         },
     }
+    mark("response_payload")
+    if diagnostics_enabled:
+        response_payload["latency_diagnostics"] = {
+            "mode": "copilot_stage_timings",
+            "total_ms": round((time.monotonic() - diagnostics_started) * 1000, 2),
+            "stages": diagnostics_stages,
+        }
+    return response_payload
 
 
 class AgentRoleRefineRequest(BaseModel):

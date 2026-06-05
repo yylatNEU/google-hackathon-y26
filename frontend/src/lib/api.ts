@@ -1,4 +1,4 @@
-const localApiUrls = ["http://127.0.0.1:8000", "http://127.0.0.1:8017"];
+const localApiUrls = ["http://127.0.0.1:8010", "http://127.0.0.1:8000", "http://127.0.0.1:8017"];
 const defaultRequestTimeoutMs = 12000;
 const transientTransportAttempts = 2;
 const roleSessionTokenStorageKey = "parkpulse.roleSessionToken";
@@ -83,12 +83,12 @@ export function getApiUrls(): string[] {
     try {
       const url = new URL(sameOrigin);
       if (!["127.0.0.1", "localhost", "::1"].includes(url.hostname)) return false;
-      return !["8000", "8017"].includes(url.port);
+      return !["8010", "8000", "8017"].includes(url.port);
     } catch {
       return false;
     }
   })();
-  if (localDevSameOrigin && sameOrigin) return Array.from(new Set([sameOrigin, ...localApiUrls]));
+  if (localDevSameOrigin && sameOrigin) return Array.from(new Set([...localApiUrls, sameOrigin]));
   const fallbacks = [...localApiUrls, sameOrigin];
   return Array.from(new Set([...configuredUrls, ...fallbacks].filter(Boolean) as string[]));
 }
@@ -183,7 +183,7 @@ function request(url: string, init?: RequestInit, timeoutMs = defaultRequestTime
   if (url.includes("/api/park/staff-training") || url.includes("/api/park/auth/dev-session")) {
     return requestWithXhr(url, init, timeoutMs);
   }
-  if (typeof globalThis.fetch === "function") {
+  if (typeof globalThis.fetch === "function" && typeof globalThis.AbortController === "function") {
     const controller = new AbortController();
     const timeout = globalThis.setTimeout(() => {
       controller.abort(new Error(`ParkPulse API request timed out after ${Math.round(timeoutMs / 1000)}s.`));
@@ -243,10 +243,9 @@ export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestIni
         const requestedRole = headerValue(headerEntries, "x-parkpulse-role");
         const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
         const hasRoleToken = Boolean(headerValue(headerEntries, "x-parkpulse-role-token"));
-        const localStaffTraining = path.startsWith("/api/park/staff-training") && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?/.test(apiUrl);
         const storedRoleToken = !hasAuthorization && !hasRoleToken && path !== "/api/park/auth/dev-session" ? getParkPulseRoleSessionToken() : "";
         const token =
-          requestedRole && !hasAuthorization && !hasRoleToken && !storedRoleToken && path !== "/api/park/auth/dev-session" && !localStaffTraining
+          requestedRole && !hasAuthorization && !hasRoleToken && !storedRoleToken && path !== "/api/park/auth/dev-session"
             ? await getOptionalSignedRoleToken(apiUrl, requestedRole, timeoutMs)
             : undefined;
         const roleToken = storedRoleToken || token || "";

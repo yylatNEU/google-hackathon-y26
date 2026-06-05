@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 test.use({ viewport: { width: 1280, height: 900 } });
 
-const API_URL = process.env.PARKPULSE_TEST_API_URL ?? "http://127.0.0.1:8000";
+const API_URL = process.env.PARKPULSE_TEST_API_URL ?? "http://127.0.0.1:8010";
 const APP_URL = process.env.PARKPULSE_TEST_APP_URL ?? "http://127.0.0.1:3000";
 
 function watchRuntime(page: Page) {

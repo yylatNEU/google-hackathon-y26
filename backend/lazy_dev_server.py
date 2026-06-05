@@ -64,6 +64,8 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(int(self.headers.get("content-length", "0") or 0))
         except TimeoutError:
             return
+        if self._run_health_fast_path(parsed.path):
+            return
         if self._run_experience_studio_fast_path(parsed.path, body):
             return
         if self._run_agent_handshake_fast_path(parsed.path, body):
@@ -168,24 +170,32 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return
 
-    def _send_direct_json(self, status: int, payload: dict[str, Any]) -> None:
+    def _send_direct_json(self, status: int, payload: dict[str, Any]) -> bool:
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-        self.send_response(status)
-        self.send_header("content-type", "application/json")
-        self.send_header("cache-control", "no-store")
-        self.send_header("access-control-allow-origin", "*")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("cache-control", "no-store")
+            self.send_header("access-control-allow-origin", "*")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return False
 
-    def _send_direct_options(self) -> None:
-        self.send_response(204)
-        self.send_header("access-control-allow-origin", "*")
-        self.send_header("access-control-allow-methods", "GET,POST,PUT,OPTIONS")
-        self.send_header("access-control-allow-headers", "authorization,content-type,x-parkpulse-role,x-parkpulse-role-token")
-        self.send_header("access-control-max-age", "600")
-        self.send_header("content-length", "0")
-        self.end_headers()
+    def _send_direct_options(self) -> bool:
+        try:
+            self.send_response(204)
+            self.send_header("access-control-allow-origin", "*")
+            self.send_header("access-control-allow-methods", "GET,POST,PUT,OPTIONS")
+            self.send_header("access-control-allow-headers", "authorization,content-type,x-parkpulse-role,x-parkpulse-role-token")
+            self.send_header("access-control-max-age", "600")
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return True
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return False
 
     def _json_body(self, body: bytes) -> dict[str, Any]:
         try:
@@ -194,9 +204,24 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             return {}
         return payload if isinstance(payload, dict) else {}
 
+    def _run_health_fast_path(self, path: str) -> bool:
+        if self.command != "GET" or path not in {"/", "/healthz", "/readyz"}:
+            return False
+        self._send_direct_json(
+            200,
+            {
+                "service": "parkpulse-api",
+                "status": "ok",
+                "entrypoint": "lazy-dev-server",
+                "mode": "direct_health",
+                "runtime": "python-fallback",
+            },
+        )
+        return True
+
     def _run_experience_studio_fast_path(self, path: str, body: bytes) -> bool:
         try:
-            if path in {"/api/park/venue-profile", "/api/park/experience-studio/draft", "/api/park/experience-studio/drafts", "/api/park/experience-studio/memory"} and self.command == "OPTIONS":
+            if path in {"/api/park/venue-profile", "/api/park/experience-studio/conversation-plan", "/api/park/experience-studio/draft", "/api/park/experience-studio/drafts", "/api/park/experience-studio/memory", "/api/park/experience-studio/readiness"} and self.command == "OPTIONS":
                 self._send_direct_options()
                 return True
             if self.command == "GET" and path == "/api/park/venue-profile":
@@ -219,6 +244,16 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     limit = 20
                 self._send_direct_json(200, list_experience_studio_memory(limit=limit))
+                return True
+            if self.command == "GET" and path == "/api/park/experience-studio/readiness":
+                from experience_studio import experience_studio_readiness
+
+                self._send_direct_json(200, experience_studio_readiness())
+                return True
+            if self.command == "POST" and path == "/api/park/experience-studio/conversation-plan":
+                from experience_studio import build_experience_studio_conversation_plan
+
+                self._send_direct_json(200, build_experience_studio_conversation_plan(self._json_body(body)))
                 return True
             if self.command == "POST" and path == "/api/park/experience-studio/draft":
                 from experience_studio import build_experience_studio_payload
@@ -368,6 +403,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             revoke_agent_certification_credential,
             rotate_agent_certification_key,
             run_external_client_agent_demo,
+            run_passport_second_run_demo,
             run_agent_handshake_policy_challenges,
             run_agent_handshake_scenario_evaluations,
             session_protocol_receipt,
@@ -400,6 +436,9 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                 return True
             if self.command in {"GET", "POST"} and path == "/api/park/agent-handshake/external-client-demo":
                 self._send_direct_json(200, run_external_client_agent_demo(payload))
+                return True
+            if self.command in {"GET", "POST"} and path == "/api/park/agent-handshake/passport-second-run-demo":
+                self._send_direct_json(200, run_passport_second_run_demo(payload))
                 return True
             if self.command == "POST" and path == "/api/park/agent-handshake/verify-artifact":
                 self._send_direct_json(200, verify_protocol_artifact(payload))
@@ -526,11 +565,19 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
         return False
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def main() -> None:
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", "8000"))
-    force_lazy_bridge = os.getenv("PARKPULSE_FORCE_LAZY_ASGI", "").strip().lower() in {"1", "true", "yes", "on"}
-    if not force_lazy_bridge:
+    force_lazy_bridge = _env_flag("PARKPULSE_FORCE_LAZY_ASGI", True)
+    use_uvicorn = _env_flag("PARKPULSE_USE_UVICORN_LAZY_SERVER", False)
+    if use_uvicorn and not force_lazy_bridge:
         try:
             import uvicorn
 

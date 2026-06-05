@@ -93,6 +93,13 @@ def test_controlled_training_eval_latest_reads_durable_copy(tmp_path, monkeypatc
     import controlled_training_eval
 
     monkeypatch.setenv("PARKPULSE_CONTROLLED_TRAINING_ARTIFACT_DIR", str(tmp_path))
+    durable_reports = []
+    monkeypatch.setattr(
+        controlled_training_eval,
+        "_write_durable_eval",
+        lambda report: durable_reports.append(controlled_training_eval._durable_eval_document(report)) or {"status": "stored", "mode": "unit_durable"},
+    )
+    monkeypatch.setattr(controlled_training_eval, "_latest_durable_eval", lambda: durable_reports[-1] if durable_reports else None)
     report = {
         "id": "controlled_training_eval_unit_durable",
         "created_at": "2026-06-04T19:00:00+00:00",

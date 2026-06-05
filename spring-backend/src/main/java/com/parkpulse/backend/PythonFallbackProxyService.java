@@ -26,6 +26,7 @@ public class PythonFallbackProxyService {
     private static final Set<OwnedRoute> SPRING_OWNED_ROUTES = Set.of(
         new OwnedRoute("POST", "/api/park/auth/dev-session"),
         new OwnedRoute("GET", "/api/park/auth/status"),
+        new OwnedRoute("GET", "/api/park/state-lite"),
         new OwnedRoute("GET", "/api/park/role-access-contracts"),
         new OwnedRoute("GET", "/api/park/reliability"),
         new OwnedRoute("GET", "/api/park/latency-diagnostics"),

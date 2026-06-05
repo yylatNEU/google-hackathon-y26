@@ -270,3 +270,88 @@ def test_copilot_multi_agent_routes_ride_incident_to_ride_safety_owner(monkeypat
     assert deliberation["supervisor"]["selected_domain"] == "ride_safety"
     assert "Policy Agent" in [agent["name"] for agent in deliberation["specialists"]]
     assert deliberation["critic"]["failure_modes"]
+
+
+def test_copilot_includes_semantic_memory_context_when_enabled(monkeypatch):
+    _disable_llm(monkeypatch)
+    monkeypatch.setenv("PARKPULSE_COPILOT_SEMANTIC_MEMORY", "true")
+
+    def fake_retrieve_context(query, state, limit, agent_role, cache_policy, persist_trace):
+        assert cache_policy == "role_cache_only"
+        return {
+            "status": {
+                "mode": "demo_fallback",
+                "connected": False,
+                "modelApi": {
+                    "provider": "voyage",
+                    "configured": True,
+                    "enabled": True,
+                    "model": "voyage-4-lite",
+                    "dimensions": 256,
+                    "vectorPath": "modelEmbedding",
+                },
+            },
+            "query": query,
+            "scenario_key": "ride_down",
+            "agent_role": agent_role,
+            "retrieved": {
+                "method": "mongodb_vector_search_voyage",
+                "playbooks": [{"_id": "pb-1", "title": "Ride queue split", "score": 0.91}],
+                "incidents": [{"_id": "inc-1", "summary": "Prior parade congestion incident", "score": 0.88}],
+                "learnings": [{"_id": "learn-1", "lesson": "Avoid routing families through parade edge."}],
+            },
+            "summary": "Retrieved memory for react from provider embeddings.",
+        }
+
+    monkeypatch.setattr(parkpulse_api, "retrieve_operational_context", fake_retrieve_context)
+
+    response = chat("The coaster queue is too long and families are stuck near the parade. What should we do?")
+
+    semantic = response["semantic_memory_context"]
+    assert semantic["status"] == "ready"
+    assert semantic["model_api"]["provider"] == "voyage"
+    assert semantic["retrieval_method"] == "mongodb_vector_search_voyage"
+    assert semantic["counts"] == {"playbooks": 1, "incidents": 1, "learnings": 1}
+    assert response["conversation_response"]["semantic_memory"]["status"] == "ready"
+    assert any(item["tool"] == "memory.retrieve_semantic_context" for item in response["tool_call_timeline"])
+    assert response["conversation_memory"]["semantic_memory_status"] == "ready"
+
+
+def test_copilot_semantic_memory_marks_model_text_fallback_degraded(monkeypatch):
+    _disable_llm(monkeypatch)
+    monkeypatch.setenv("PARKPULSE_COPILOT_SEMANTIC_MEMORY", "true")
+
+    def fake_retrieve_context(query, state, limit, agent_role, cache_policy, persist_trace):
+        return {
+            "status": {
+                "modelApi": {
+                    "provider": "voyage",
+                    "configured": True,
+                    "enabled": True,
+                    "model": "voyage-4-lite",
+                    "dimensions": 256,
+                    "vectorPath": "modelEmbedding",
+                },
+            },
+            "query": query,
+            "scenario_key": "ride_down",
+            "agent_role": agent_role,
+            "cache_policy": cache_policy,
+            "retrieved": {
+                "method": "mongodb_text_search",
+                "playbooks": [{"_id": "pb-1", "title": "Ride queue split"}],
+                "incidents": [],
+                "learnings": [],
+            },
+            "summary": "Retrieved memory via text fallback.",
+        }
+
+    monkeypatch.setattr(parkpulse_api, "retrieve_operational_context", fake_retrieve_context)
+
+    response = chat("The coaster queue is too long. What should we do?")
+
+    semantic = response["semantic_memory_context"]
+    assert semantic["status"] == "degraded"
+    assert semantic["retrieval_method"] == "mongodb_text_search"
+    assert semantic["readiness_issues"]
+    assert response["conversation_memory"]["semantic_memory_status"] == "degraded"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,6 +42,200 @@ def _as_list(value: Any) -> list[Any]:
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+_CASE_INFERENCE_STOPWORDS = {
+    "case",
+    "park",
+    "guest",
+    "guests",
+    "action",
+    "actions",
+    "agent",
+    "review",
+    "state",
+    "ready",
+    "recorded",
+    "completed",
+    "dispatch",
+    "receiver",
+    "policy",
+    "before",
+    "after",
+    "near",
+    "with",
+    "from",
+    "that",
+    "this",
+    "while",
+    "into",
+    "queue",
+}
+
+
+def _case_tokens(*values: Any) -> set[str]:
+    blob = " ".join(str(value or "") for value in values).lower()
+    return {
+        term
+        for term in re.split(r"[^a-z0-9]+", blob)
+        if len(term) >= 4 and term not in _CASE_INFERENCE_STOPWORDS
+    }
+
+
+def _infer_case_from_doctrine(row: dict[str, Any]) -> dict[str, Any]:
+    text_terms = _case_tokens(
+        row.get("scenarioName"),
+        row.get("selectedAction"),
+        row.get("summary"),
+        " ".join(str(item) for item in _as_list(row.get("receiverActions"))),
+        " ".join(str(item) for item in _as_list(row.get("failureReasons"))),
+        " ".join(str(item) for item in _as_list(row.get("retrievalTags"))),
+    )
+    if not text_terms:
+        return {}
+    try:
+        from policy_loader import operational_doctrine_index
+
+        cases = operational_doctrine_index().get("action_cases", [])
+    except Exception:
+        return {}
+    best: tuple[int, dict[str, Any]] = (0, {})
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        case_terms = _case_tokens(
+            case.get("id"),
+            case.get("title"),
+            " ".join(str(item) for item in _as_list(case.get("triggers"))),
+            " ".join(str(item) for item in _as_list(case.get("state_signals"))),
+            " ".join(str(item) for item in _as_list(case.get("recommended_primitives"))),
+        )
+        overlap = len(text_terms & case_terms)
+        if overlap > best[0]:
+            best = (overlap, case)
+    if best[0] < 2 or not best[1]:
+        return {}
+    case = best[1]
+    return {
+        "caseId": case.get("id"),
+        "case_id": case.get("id"),
+        "caseLinkSource": "doctrine_inferred",
+        "caseLinkConfidence": min(0.95, round(0.45 + best[0] * 0.12, 2)),
+        "policyRefs": [str(item) for item in _as_list(case.get("policy_refs"))[:12]],
+    }
+
+
+def _policy_cases() -> list[dict[str, Any]]:
+    try:
+        from policy_loader import operational_doctrine_index
+
+        return [case for case in operational_doctrine_index().get("action_cases", []) if isinstance(case, dict)]
+    except Exception:
+        return []
+
+
+def _unique_strings(values: list[Any], limit: int = 12) -> list[str]:
+    seen: set[str] = set()
+    rows: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            rows.append(text)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _runtime_case_binding(row: dict[str, Any], explicit_policy_refs: list[str] | None = None) -> dict[str, Any]:
+    explicit_refs = set(explicit_policy_refs or [])
+    text_fields = [
+        row.get("id"),
+        row.get("scenarioName"),
+        row.get("mode"),
+        row.get("selectedAction"),
+        row.get("summary"),
+        " ".join(str(item) for item in _as_list(row.get("receiverActions"))),
+        " ".join(str(item) for item in _as_list(row.get("failureReasons"))),
+        " ".join(str(item) for item in _as_list(row.get("retrievalTags"))),
+    ]
+    blob = " ".join(str(item or "") for item in text_fields).replace("_", " ").replace("-", " ").lower()
+    text_terms = _case_tokens(*text_fields)
+    if not blob.strip() or not text_terms:
+        return {}
+    best: tuple[int, int, int, int, dict[str, Any]] = (0, 0, 0, 0, {})
+    for case in _policy_cases():
+        case_refs = {str(item) for item in _as_list(case.get("policy_refs"))}
+        triggers = [str(item).strip().lower() for item in _as_list(case.get("triggers")) if str(item).strip()]
+        title = str(case.get("title") or "").strip().lower()
+        case_id = str(case.get("id") or "").strip().lower()
+        phrase_hits = sum(1 for trigger in triggers if trigger and trigger in blob)
+        title_hit = 1 if title and title in blob else 0
+        id_hit = 1 if case_id and case_id.lower() in blob else 0
+        ref_overlap = len(explicit_refs & case_refs)
+        case_terms = _case_tokens(
+            case.get("id"),
+            case.get("title"),
+            " ".join(str(item) for item in _as_list(case.get("triggers"))),
+            " ".join(str(item) for item in _as_list(case.get("state_signals"))),
+            " ".join(str(item) for item in _as_list(case.get("recommended_primitives"))),
+            " ".join(str(item) for item in _as_list(case.get("blocked_actions"))),
+        )
+        token_overlap = len(text_terms & case_terms)
+        score = id_hit * 18 + title_hit * 14 + phrase_hits * 7 + ref_overlap * 5 + token_overlap
+        candidate = (score, phrase_hits + title_hit + id_hit, ref_overlap, token_overlap, case)
+        if candidate[:4] > best[:4]:
+            best = candidate
+    score, strong_hits, ref_overlap, token_overlap, case = best
+    if not case:
+        return {}
+    has_binding_proof = strong_hits >= 1 or ref_overlap >= 2 or (score >= 9 and token_overlap >= 3)
+    if not has_binding_proof:
+        return {}
+    confidence = min(0.99, round(0.7 + min(score, 12) * 0.025 + min(ref_overlap, 3) * 0.02, 2))
+    case_id = case.get("id")
+    return {
+        "caseId": case_id,
+        "case_id": case_id,
+        "caseLinkSource": "runtime_case_binding",
+        "caseLinkConfidence": confidence,
+        "caseLinkEvidence": {
+            "score": score,
+            "strongHits": strong_hits,
+            "policyRefOverlap": ref_overlap,
+            "tokenOverlap": token_overlap,
+        },
+        "policyRefs": [str(item) for item in _as_list(case.get("policy_refs"))[:12]],
+    }
+
+
+def _review_ids_for_case(case_id: str | None, limit: int = 12) -> list[str]:
+    if not case_id:
+        return []
+    try:
+        from live_feedback_loop import review_training_ledger
+
+        payload = review_training_ledger(limit=160)
+    except Exception:
+        return []
+    rows = [*_as_list(payload.get("open_reviews")), *_as_list(payload.get("rows"))]
+    return _unique_strings(
+        [
+            row.get("id")
+            for row in rows
+            if isinstance(row, dict) and str(row.get("case_id") or row.get("caseId") or "") == case_id
+        ],
+        limit=limit,
+    )
+
+
+def _deep_get(value: Any, *path: str) -> Any:
+    current = value
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
 
 
 def _number(value: Any) -> float | int | None:
@@ -108,6 +303,64 @@ def _trace_id(payload: dict[str, Any], telemetry: dict[str, Any]) -> str | None:
     return trace_eval.get("trace_id") or trace_contract.get("trace_id") or trace_contract.get("eval_trace_id") or tool_trace.get("trace_id")
 
 
+def _case_id(payload: dict[str, Any], telemetry: dict[str, Any]) -> str | None:
+    candidates = [
+        payload.get("caseId"),
+        payload.get("case_id"),
+        payload.get("expected_case_id"),
+        telemetry.get("caseId"),
+        telemetry.get("case_id"),
+        telemetry.get("expected_case_id"),
+        _deep_get(payload, "recommended_action", "matched_case_id"),
+        _deep_get(telemetry, "recommended_action", "matched_case_id"),
+        _deep_get(payload, "policy_reasoning", "primary_case_id"),
+        _deep_get(telemetry, "policy_reasoning", "primary_case_id"),
+        _deep_get(payload, "branchComparison", "caseId"),
+        _deep_get(telemetry, "branchComparison", "caseId"),
+    ]
+    for candidate in candidates:
+        if candidate:
+            return str(candidate)
+    return None
+
+
+def _policy_refs(payload: dict[str, Any], telemetry: dict[str, Any]) -> list[str]:
+    values: list[Any] = []
+    for source in [payload, telemetry, _as_dict(payload.get("governance")), _as_dict(telemetry.get("governance"))]:
+        values.extend(_as_list(source.get("policyRefs") or source.get("policy_refs") or source.get("policyFindings") or source.get("policy_findings")))
+    scorecard = _as_dict(_eval_payload(payload, telemetry).get("scorecard"))
+    values.extend(_as_list(scorecard.get("policy_refs") or scorecard.get("policyRefs") or scorecard.get("policyFindings")))
+    seen: set[str] = set()
+    refs: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text and text not in seen:
+            seen.add(text)
+            refs.append(text)
+    return refs[:12]
+
+
+def _review_session_ids(payload: dict[str, Any], telemetry: dict[str, Any]) -> list[str]:
+    values = [
+        payload.get("reviewSessionId"),
+        payload.get("review_session_id"),
+        payload.get("review_id"),
+        telemetry.get("reviewSessionId"),
+        telemetry.get("review_session_id"),
+        telemetry.get("review_id"),
+    ]
+    values.extend(_as_list(payload.get("reviewSessionIds") or payload.get("review_session_ids")))
+    values.extend(_as_list(telemetry.get("reviewSessionIds") or telemetry.get("review_session_ids")))
+    seen: set[str] = set()
+    ids: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            ids.append(text)
+    return ids[:12]
+
+
 def _memory_id(payload: dict[str, Any], telemetry: dict[str, Any]) -> str | None:
     trace_contract = _as_dict(telemetry.get("trace_contract") or payload.get("trace_contract"))
     memory_write = _as_dict(trace_contract.get("memory_write"))
@@ -149,7 +402,7 @@ def _eval_dimensions(payload: dict[str, Any], telemetry: dict[str, Any]) -> list
     dimensions = _as_dict(eval_payload.get("dimension_scores") or _as_dict(eval_payload.get("hosted_eval")).get("payload_preview", {}).get("dimension_scores"))
     if not dimensions:
         dimensions = _as_dict(_as_dict(eval_payload.get("scorecard")).get("dimensions"))
-    return [{"label": str(label), "value": value} for label, value in list(dimensions.items())[:10]]
+    return [{"label": str(label), "score": _number(value), "detail": str(value)} for label, value in list(dimensions.items())[:10]]
 
 
 def normalize_agent_ops_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -158,6 +411,31 @@ def normalize_agent_ops_record(record: dict[str, Any]) -> dict[str, Any]:
     selected_action = str(row.get("selectedAction") or row.get("selected_action") or "Agent operating action")
     scenario = str(row.get("scenarioName") or row.get("scenario_name") or row.get("scenario_key") or "park operations")
     signature = str(row.get("signature") or _stable_id("sig", {"timestamp": timestamp, "action": selected_action, "scenario": scenario, "eval": row.get("evalScore")}))
+    explicit_policy_refs = [str(item) for item in _as_list(row.get("policyRefs") or row.get("policy_refs"))[:12]]
+    existing_case_id = row.get("caseId") or row.get("case_id")
+    existing_link_source = str(row.get("caseLinkSource") or row.get("case_link_source") or "")
+    explicit_case_id = existing_case_id if existing_case_id and existing_link_source != "doctrine_inferred" else None
+    runtime_binding = {} if explicit_case_id else _runtime_case_binding(row, explicit_policy_refs)
+    inferred_case = {} if explicit_case_id or runtime_binding else _infer_case_from_doctrine(row)
+    final_case_id = explicit_case_id or runtime_binding.get("caseId") or inferred_case.get("caseId")
+    runtime_policy_refs = [str(item) for item in _as_list(runtime_binding.get("policyRefs"))[:12]]
+    inferred_policy_refs = [str(item) for item in _as_list(inferred_case.get("policyRefs"))[:12]]
+    explicit_review_ids = [str(item) for item in _as_list(row.get("reviewSessionIds") or row.get("review_session_ids"))[:12]]
+    outcome_evidence = _as_dict(row.get("outcomeEvidence") or row.get("outcome_evidence"))
+    if not outcome_evidence:
+        episode = _as_dict(row.get("marketEpisode") or row.get("foodDemandEpisode") or row.get("episode"))
+        actual_delta = _as_dict(row.get("actualDelta") or episode.get("actualDelta"))
+        delivery = _as_dict(row.get("delivery") or episode.get("delivery"))
+        response = _as_dict(delivery.get("response"))
+        if actual_delta or response:
+            outcome_evidence = {
+                "status": "measured_delta" if actual_delta else "receiver_response",
+                "actualDelta": actual_delta,
+                "receiverAckCount": row.get("dispatchCount"),
+                "takeRatePct": _pct_from_ratio(response.get("takeRate") or row.get("takeRatePct")),
+                "followThroughPct": _pct_from_ratio(response.get("reactiveFollowThroughRate") or row.get("followThroughPct")),
+                "memoryId": row.get("memoryId"),
+            }
     row.update(
         {
             "id": str(row.get("id") or _stable_id("agent_run", signature)),
@@ -174,6 +452,33 @@ def normalize_agent_ops_record(record: dict[str, Any]) -> dict[str, Any]:
             "followThroughPct": _pct_from_ratio(row.get("followThroughPct")),
             "memoryId": row.get("memoryId"),
             "traceId": row.get("traceId"),
+            "caseId": final_case_id,
+            "case_id": final_case_id,
+            "caseLinkSource": (
+                row.get("caseLinkSource")
+                or row.get("case_link_source")
+                or "explicit_payload"
+                if explicit_case_id
+                else runtime_binding.get("caseLinkSource")
+                or row.get("caseLinkSource")
+                or row.get("case_link_source")
+                or inferred_case.get("caseLinkSource")
+            ),
+            "caseLinkConfidence": (
+                row.get("caseLinkConfidence")
+                or row.get("case_link_confidence")
+                or 1
+                if explicit_case_id
+                else runtime_binding.get("caseLinkConfidence")
+                or row.get("caseLinkConfidence")
+                or row.get("case_link_confidence")
+                or inferred_case.get("caseLinkConfidence")
+            ),
+            "caseLinkEvidence": row.get("caseLinkEvidence") or row.get("case_link_evidence") or runtime_binding.get("caseLinkEvidence"),
+            "policyRefs": _unique_strings([*explicit_policy_refs, *runtime_policy_refs, *inferred_policy_refs], limit=12),
+            "reviewSessionIds": explicit_review_ids,
+            "reviewSessionIdSource": "explicit_payload" if explicit_review_ids else "not_attached",
+            "outcomeEvidence": outcome_evidence,
             "summary": str(row.get("summary") or "Agent action recorded for later trace and eval inspection."),
             "receiverActions": [str(item) for item in _as_list(row.get("receiverActions"))[:12]],
             "toolCalls": [item for item in _as_list(row.get("toolCalls"))[:12] if isinstance(item, dict)],
@@ -229,6 +534,19 @@ def build_ledger_record_from_run(payload: dict[str, Any], *, message: str = "", 
         "followThroughPct": _pct_from_ratio(response.get("reactiveFollowThroughRate")),
         "memoryId": _memory_id(payload, telemetry),
         "traceId": _trace_id(payload, telemetry),
+        "caseId": _case_id(payload, telemetry),
+        "case_id": _case_id(payload, telemetry),
+        "caseLinkSource": "explicit_payload" if _case_id(payload, telemetry) else None,
+        "caseLinkConfidence": 1 if _case_id(payload, telemetry) else None,
+        "policyRefs": _policy_refs(payload, telemetry),
+        "reviewSessionIds": _review_session_ids(payload, telemetry),
+        "outcomeEvidence": {
+            "dispatchStatus": response.get("status") or response.get("state"),
+            "receiverAckCount": dispatch_count,
+            "takeRatePct": _pct_from_ratio(response.get("takeRate")),
+            "followThroughPct": _pct_from_ratio(response.get("reactiveFollowThroughRate")),
+            "memoryId": _memory_id(payload, telemetry),
+        },
         "summary": payload.get("run_result") or _as_dict(telemetry.get("outcome")).get("state_impact", {}).get("headline") or message or "Agent action recorded for later trace and eval inspection.",
         "receiverActions": receiver_actions,
         "toolCalls": _tool_calls(payload, telemetry),

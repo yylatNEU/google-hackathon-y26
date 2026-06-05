@@ -31,6 +31,7 @@ BACKEND_EXCLUDED_PARTS = {
 
 BACKEND_COVERAGE_OMITS = [
     "lazy_dev_server.py",
+    "* 2.py",
 ]
 
 FRONTEND_COVERAGE_SUMMARIES = [
@@ -183,6 +184,11 @@ def excluded_backend_path(path: Path) -> bool:
     return bool(set(path.relative_to(REPO_ROOT).parts) & BACKEND_EXCLUDED_PARTS)
 
 
+def duplicate_copy_test_path(path: Path) -> bool:
+    """Ignore local Finder-style duplicate test copies such as ``test_foo 2.py``."""
+    return path.suffix == ".py" and path.stem.endswith(" 2")
+
+
 def discover_pytest_nodes(path: Path) -> list[str]:
     try:
         tree = ast.parse(path.read_text())
@@ -203,6 +209,8 @@ def discover_backend_tests() -> list[str]:
             continue
         for path in sorted(root.rglob("*.py")):
             if excluded_backend_path(path):
+                continue
+            if duplicate_copy_test_path(path):
                 continue
             if path.name.startswith("test_") or path.name.endswith("_test.py"):
                 test_files.append(path)

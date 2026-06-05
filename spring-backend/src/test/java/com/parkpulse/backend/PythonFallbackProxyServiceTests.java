@@ -129,6 +129,13 @@ class PythonFallbackProxyServiceTests {
         assertThat(new String(adapterStatusResponse.getBody(), StandardCharsets.UTF_8))
             .contains("GET /api/park/delivery/gcp-adapters/status");
 
+        MockHttpServletRequest stateLiteRequest = new MockHttpServletRequest("GET", "/api/park/state-lite");
+        ResponseEntity<byte[]> stateLiteResponse = service.forward(stateLiteRequest, new byte[0]);
+
+        assertThat(stateLiteResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(stateLiteResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/state-lite");
+
         MockHttpServletRequest partnerRetryRequest = new MockHttpServletRequest("POST", "/api/park/delivery/partner-retries/run");
         ResponseEntity<byte[]> partnerRetryResponse = service.forward(partnerRetryRequest, "{}".getBytes(StandardCharsets.UTF_8));
 
