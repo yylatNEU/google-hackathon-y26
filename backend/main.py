@@ -62,7 +62,7 @@ from agent_handshake import (
 )
 from accessibility_journey import build_accessibility_journey, build_accessibility_scope
 from customer_park_knowledge import build_customer_public_data_feed, customer_venue_export_template, validate_customer_venue_export
-from experience_studio import build_experience_studio_conversation_plan, build_experience_studio_payload, create_experience_studio_handoff, experience_studio_readiness, get_experience_studio_draft, list_experience_studio_drafts, list_experience_studio_handoffs, list_experience_studio_learning_rules, list_experience_studio_memory, promote_experience_studio_learning_rule, save_experience_studio_draft, studio_layer_contract, update_experience_studio_draft_content, update_experience_studio_draft_status, update_experience_studio_handoff_status, update_experience_studio_learning_rule
+from experience_studio import build_experience_studio_conversation_plan, build_experience_studio_payload, create_experience_studio_handoff, experience_studio_readiness, get_experience_studio_draft, list_experience_studio_drafts, list_experience_studio_handoffs, list_experience_studio_learning_rules, list_experience_studio_memory, promote_experience_studio_learning_rule, revise_experience_studio_section, save_experience_studio_draft, studio_layer_contract, update_experience_studio_draft_content, update_experience_studio_draft_status, update_experience_studio_handoff_status, update_experience_studio_learning_rule
 from venue_experience_data import activate_synthetic_venue_export, build_venue_experience_data, import_venue_experience_export, validate_venue_experience_export
 from venue_profile import activate_synthetic_venue_profile, approved_synthetic_venue_profile_export, build_venue_profile, import_venue_profile_export, preview_venue_profile_import, validate_venue_profile_export
 from park_ops_mcp import (
@@ -432,6 +432,7 @@ def _api_capability_registry() -> dict[str, Any]:
                     "/api/park/accessibility/journey",
                     "/api/park/experience-studio/conversation-plan",
                     "/api/park/experience-studio/draft",
+                    "/api/park/experience-studio/section-revision",
                     "/api/park/experience-studio/layer-contract",
                     "/api/park/experience-studio/venue-data",
                     "/api/park/experience-studio/venue-data/import",
@@ -7438,6 +7439,41 @@ def _monitor_trace_url(trace_id: Any) -> str | None:
     return None
 
 
+def _monitor_file_signature(path: Path) -> dict[str, Any]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"path": str(path), "exists": False, "size": 0, "mtime_ns": 0}
+    return {"path": str(path), "exists": True, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _monitor_policy_source_paths() -> list[Path]:
+    base_dir = Path(__file__).resolve().parent
+    paths = [base_dir / "policy_book.json"]
+    policy_dir = base_dir / "policy_books"
+    if policy_dir.exists():
+        paths.extend(sorted(policy_dir.glob("*.json")))
+    return paths
+
+
+def _monitor_source_watermark() -> dict[str, Any]:
+    runtime_dir = Path(os.getenv("PARKPULSE_RUNTIME_DIR", "/tmp/parkpulse"))
+    source_paths = [
+        Path(os.getenv("PARKPULSE_AGENT_OPS_LEDGER") or runtime_dir / "agent_ops_ledger.jsonl"),
+        Path(os.getenv("PARKPULSE_REVIEW_LEDGER_LOG_PATH") or runtime_dir / "review_ledger.jsonl"),
+        Path(os.getenv("PARKPULSE_LIVE_FEED_EVENT_LOG_PATH") or runtime_dir / "live_feed_events.jsonl"),
+        *_monitor_policy_source_paths(),
+    ]
+    files = [_monitor_file_signature(path) for path in source_paths]
+    fingerprint = hashlib.sha1(json.dumps(files, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+    return {
+        "fingerprint": fingerprint,
+        "files": files,
+        "policy_file_count": sum(1 for item in files if str(item.get("path", "")).endswith(".json") and item.get("exists")),
+        "ledger_file_count": sum(1 for item in files if str(item.get("path", "")).endswith(".jsonl") and item.get("exists")),
+    }
+
+
 def _monitor_policy_case_for(case_row: dict[str, Any], policy_cases: list[dict[str, Any]], terms: set[str]) -> dict[str, Any]:
     case_id = str(case_row.get("id") or "")
     exact = next((item for item in policy_cases if isinstance(item, dict) and str(item.get("id") or "") == case_id), None)
@@ -7820,6 +7856,7 @@ async def _monitor_evidence_graph(case_id: str | None = None, *, limit: int = 30
         },
         "cases": graph_cases,
         "source_status": {"case_index": index.get("status"), "agent_ops_ledger": ledger.get("status"), "review_ledger": reviews.get("status"), "policy_doctrine": policy.get("status", "ready" if policy else "unavailable")},
+        "source_watermark": _monitor_source_watermark(),
     }
 
 
@@ -7887,6 +7924,8 @@ def _monitor_evidence_filter_case(payload: dict[str, Any], case_id: str | None) 
 def _monitor_evidence_with_cache_metadata(payload: dict[str, Any], *, key: str, expires_at: float, created_at: float, state: str) -> dict[str, Any]:
     graph = _monitor_evidence_copy(payload)
     now = time.monotonic()
+    current_watermark = _monitor_source_watermark()
+    graph_watermark = _monitor_dict(graph.get("source_watermark"))
     graph["evidence_cache"] = {
         "key": key,
         "state": state,
@@ -7895,11 +7934,14 @@ def _monitor_evidence_with_cache_metadata(payload: dict[str, Any], *, key: str, 
         "refreshing": key in _monitor_evidence_refreshing,
         "mode": "backend_snapshot_stale_while_revalidate",
         "snapshot_path": str(_monitor_evidence_snapshot_path(int(str(key).rsplit("-", 1)[-1]) if str(key).rsplit("-", 1)[-1].isdigit() else 30)),
+        "source_fingerprint": graph_watermark.get("fingerprint"),
+        "current_source_fingerprint": current_watermark.get("fingerprint"),
+        "source_current": graph_watermark.get("fingerprint") == current_watermark.get("fingerprint"),
     }
     return graph
 
 
-def _read_monitor_evidence_snapshot(limit: int) -> tuple[float, float, dict[str, Any]] | None:
+def _read_monitor_evidence_snapshot(limit: int, current_watermark: dict[str, Any] | None = None) -> tuple[float, float, dict[str, Any]] | None:
     path = _monitor_evidence_snapshot_path(limit)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -7907,6 +7949,8 @@ def _read_monitor_evidence_snapshot(limit: int) -> tuple[float, float, dict[str,
         return None
     graph = _monitor_dict(payload.get("graph"))
     if not graph:
+        return None
+    if current_watermark and _monitor_dict(graph.get("source_watermark")).get("fingerprint") != current_watermark.get("fingerprint"):
         return None
     created_at = _safe_float(payload.get("created_monotonic"), 0)
     if created_at <= 0:
@@ -7968,23 +8012,29 @@ async def _monitor_evidence_graph_cached(case_id: str | None = None, *, limit: i
     bounded_limit = max(1, min(limit, 80))
     key = _monitor_evidence_cache_key(bounded_limit)
     now = time.monotonic()
+    current_watermark = _monitor_source_watermark()
     if not force_refresh:
         with _monitor_evidence_lock:
             cached = _monitor_evidence_cache.get(key)
         if cached:
             expires_at, created_at, graph = cached
-            state = "fresh" if expires_at > now else "stale"
-            if expires_at <= now:
-                _trigger_monitor_evidence_refresh(bounded_limit, key)
-            return _monitor_evidence_with_cache_metadata(
-                _monitor_evidence_filter_case(graph, case_id),
-                key=key,
-                expires_at=expires_at,
-                created_at=created_at,
-                state=state,
-            )
+            graph_watermark = _monitor_dict(graph.get("source_watermark"))
+            if graph_watermark.get("fingerprint") != current_watermark.get("fingerprint"):
+                with _monitor_evidence_lock:
+                    _monitor_evidence_cache.pop(key, None)
+            else:
+                state = "fresh" if expires_at > now else "stale"
+                if expires_at <= now:
+                    _trigger_monitor_evidence_refresh(bounded_limit, key)
+                return _monitor_evidence_with_cache_metadata(
+                    _monitor_evidence_filter_case(graph, case_id),
+                    key=key,
+                    expires_at=expires_at,
+                    created_at=created_at,
+                    state=state,
+                )
 
-        snapshot = _read_monitor_evidence_snapshot(bounded_limit)
+        snapshot = _read_monitor_evidence_snapshot(bounded_limit, current_watermark)
         if snapshot:
             expires_at, created_at, graph = snapshot
             with _monitor_evidence_lock:
@@ -17376,6 +17426,14 @@ async def app(scope, receive, send):
             return
         state = await _fast_park_state() if payload.get("useRealParkContext") is True else None
         await _send_json(send, 200, await build_experience_studio_payload(payload, state))
+        return
+
+    if method == "POST" and path == "/api/park/experience-studio/section-revision":
+        payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "use_experience_studio", "experience_studio_section_revision", payload):
+            return
+        result = revise_experience_studio_section(payload)
+        await _send_json(send, 200 if result.get("status") == "revised" else 400, result)
         return
 
     if method == "GET" and path == "/api/park/experience-studio/layer-contract":

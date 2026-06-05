@@ -2,11 +2,13 @@ package com.parkpulse.backend;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.endsWith;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.sun.net.httpserver.HttpServer;
@@ -77,7 +79,10 @@ class ParkPulseSpringBackendApplicationTests {
 		mockMvc.perform(get("/api/park/platform-store").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.status", equalTo("ok")))
-			.andExpect(jsonPath("$.registered_stores", notNullValue()));
+			.andExpect(jsonPath("$.registered_stores", notNullValue()))
+			.andExpect(content().string(containsString("\"store_key\":\"monitor_evidence_snapshot\"")))
+			.andExpect(content().string(containsString("\"data_model\":\"derived_snapshot\"")))
+			.andExpect(content().string(containsString("\"source_of_truth\":false")));
 	}
 
 	@Test

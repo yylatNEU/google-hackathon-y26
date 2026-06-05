@@ -3459,6 +3459,232 @@ def _studio_quality_eval(
     }
 
 
+def _creative_package_variants(
+    synthesis: dict[str, Any],
+    selected_name: str,
+    route: list[dict[str, Any]],
+    channel_matrix: list[dict[str, Any]],
+    venue_gap_analysis: dict[str, Any],
+) -> list[dict[str, Any]]:
+    concepts = synthesis.get("concepts") if isinstance(synthesis.get("concepts"), list) else []
+    selected_id = str(synthesis.get("selectedConceptId") or "")
+    variants = []
+    for concept in concepts[:4]:
+        if not isinstance(concept, dict):
+            continue
+        concept_id = str(concept.get("id") or concept.get("name") or "variant")
+        variants.append(
+            {
+                "id": concept_id,
+                "name": concept.get("name") or concept_id,
+                "status": "selected" if concept_id == selected_id else "alternative",
+                "positioning": concept.get("positioning"),
+                "guestPromise": concept.get("guestPromise"),
+                "routeFrame": " -> ".join(str(item.get("stop") or "") for item in route if isinstance(item, dict)),
+                "channelEmphasis": [
+                    f"{item.get('channel')}: {item.get('objective')}"
+                    for item in channel_matrix[:3]
+                    if isinstance(item, dict)
+                ],
+                "strengths": _as_text_list(concept.get("heroTerms"))[:5],
+                "reviewRisks": _as_text_list(concept.get("reviewRisks")) + (
+                    ["Production-real venue data still missing."] if venue_gap_analysis.get("missingForProduction") else []
+                ),
+                "whenToUse": "Use this route if the review team wants the strongest current package." if concept_id == selected_id else f"Compare against {selected_name} when the team wants a different creative emphasis without changing verified stops.",
+            }
+        )
+    return variants
+
+
+def _experience_review_agent(package: dict[str, Any], draft_context: dict[str, Any] | None = None, revision_request: dict[str, Any] | None = None) -> dict[str, Any]:
+    draft_context = draft_context if isinstance(draft_context, dict) else {}
+    revision_request = revision_request if isinstance(revision_request, dict) else {}
+    qa = package.get("studioQualityEval") if isinstance(package.get("studioQualityEval"), dict) else {}
+    venue_gaps = package.get("venueDataGapAnalysis") if isinstance(package.get("venueDataGapAnalysis"), dict) else {}
+    memory = package.get("memoryApplication") if isinstance(package.get("memoryApplication"), dict) else {}
+    rules = package.get("approvedRuleInfluence") if isinstance(package.get("approvedRuleInfluence"), dict) else {}
+    score = float(qa.get("score") or 0)
+    findings = []
+    if score >= 85:
+        findings.append("Package is strong enough for creative review: specific route copy, complete artifacts, and visible review gates are present.")
+    else:
+        findings.append("Package needs more section detail before owner review.")
+    if venue_gaps.get("missingForProduction"):
+        findings.append("Do not present this as production-real venue ready until live/profile imports are resolved.")
+    if memory.get("usedForGeneration"):
+        findings.append("Memory influence is visible and bounded to continuity/completeness rather than model training.")
+    if rules.get("usedForGeneration"):
+        findings.append("Approved human-promoted rules are active; verify duplicate rules are intentional before long-term use.")
+    section_targets = []
+    for item in qa.get("qaChecklist", []) if isinstance(qa.get("qaChecklist"), list) else []:
+        if isinstance(item, dict) and str(item.get("status")) in {"review", "blocked"}:
+            section_targets.append({"section": item.get("check"), "reason": item.get("status")})
+    if venue_gaps.get("missingForProduction"):
+        section_targets.append({"section": "venue data", "reason": "production profile gap"})
+    if revision_request.get("sectionId"):
+        section_targets.insert(0, {"section": revision_request.get("sectionId"), "reason": "reviewer-requested revision"})
+    return {
+        "agentId": "experience_studio_review_agent",
+        "agentName": "Experience Studio Review Agent",
+        "status": "ready_for_owner_review" if score >= 85 else "needs_revision",
+        "score": score,
+        "reviewMode": "post_revision_review" if revision_request else "generation_review",
+        "findings": findings,
+        "sectionTargets": section_targets[:6],
+        "approvalRecommendation": "approve_for_channel_owner_review" if score >= 85 and not revision_request.get("blockingIssue") else "revise_before_approval",
+        "memoryJudgment": {
+            "memoryUsed": bool(memory.get("usedForGeneration")),
+            "rulesUsed": bool(rules.get("usedForGeneration")),
+            "boundary": "Memory and rules may shape creative continuity but cannot override profile facts, route locks, or publish review.",
+        },
+        "nextActions": [
+            "Route to channel owners for copy edits.",
+            "Resolve venue-data gaps before production-real publish.",
+            "Use section revision for targeted reviewer feedback instead of regenerating the whole package.",
+        ],
+    }
+
+
+def _score_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    before_scores = before.get("scores") if isinstance(before.get("scores"), dict) else {}
+    after_scores = after.get("scores") if isinstance(after.get("scores"), dict) else {}
+    keys = sorted(set(before_scores) | set(after_scores))
+    return {
+        "before": before.get("score"),
+        "after": after.get("score"),
+        "delta": round(float(after.get("score") or 0) - float(before.get("score") or 0), 1),
+        "scores": {
+            key: {
+                "before": before_scores.get(key),
+                "after": after_scores.get(key),
+                "delta": round(float(after_scores.get(key) or 0) - float(before_scores.get(key) or 0), 1),
+            }
+            for key in keys
+        },
+    }
+
+
+def _revise_text_for_feedback(value: Any, feedback: str, section_id: str) -> str:
+    base = str(value or "").strip()
+    feedback_lower = feedback.lower()
+    additions = []
+    if any(term in feedback_lower for term in ("magical", "story", "theme", "wonder")):
+        additions.append("Keep the language lightly themed while preserving the approved comfort promise.")
+    if any(term in feedback_lower for term in ("accessibility", "plain", "clear", "simple")):
+        additions.append("Use plain accessibility language and avoid decorative wording around access needs.")
+    if any(term in feedback_lower for term in ("less operational", "not operational", "softer", "staff")):
+        additions.append("Phrase this as guest support, not an instruction to control movement.")
+    if any(term in feedback_lower for term in ("kid", "quest", "clue")):
+        additions.append("Add a small clue-like moment that caregivers can skip without penalty.")
+    if not additions:
+        additions.append(f"Reviewer note for {section_id}: {feedback[:180]}")
+    suffix = " ".join(additions)
+    return f"{base} {suffix}".strip()[:900]
+
+
+def revise_experience_studio_section(payload: dict[str, Any]) -> dict[str, Any]:
+    draft = payload.get("draft") if isinstance(payload.get("draft"), dict) else {}
+    if not draft:
+        return {"status": "invalid_draft", "message": "A draft object is required for section revision."}
+    section_id = str(payload.get("sectionId") or payload.get("section") or "signage").strip().lower().replace(" ", "_")
+    feedback = _text(payload.get("feedback"), "Make this section clearer, more specific, and easier to review.")
+    revised = json.loads(json.dumps(draft, default=str))
+    before_package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
+    before_eval = before_package.get("studioQualityEval") if isinstance(before_package.get("studioQualityEval"), dict) else {}
+    package = revised.get("creativePackage") if isinstance(revised.get("creativePackage"), dict) else {}
+    before_section = None
+    after_section = None
+
+    if section_id in {"signage", "signage_set"}:
+        signage = package.get("signageSet") if isinstance(package.get("signageSet"), list) else []
+        before_section = json.loads(json.dumps(signage, default=str))
+        for item in signage:
+            if isinstance(item, dict):
+                item["body"] = _revise_text_for_feedback(item.get("body"), feedback, "signage")
+                item["reviewNote"] = "Revised by Experience Studio Review Agent."
+        after_section = signage
+    elif section_id in {"staff", "staff_script", "staff_cue"}:
+        staff = package.get("staffScript") if isinstance(package.get("staffScript"), dict) else {}
+        before_section = json.loads(json.dumps(staff, default=str))
+        for key in ("openingLine", "transitionLine", "boundaryLine"):
+            staff[key] = _revise_text_for_feedback(staff.get(key), feedback, "staff script")
+        after_section = staff
+    elif section_id in {"email", "pre_arrival_email"}:
+        email = package.get("preArrivalEmail") if isinstance(package.get("preArrivalEmail"), dict) else {}
+        before_section = json.loads(json.dumps(email, default=str))
+        email["body"] = _revise_text_for_feedback(email.get("body"), feedback, "pre-arrival email")
+        email["previewText"] = _revise_text_for_feedback(email.get("previewText"), feedback, "email preview")[:160]
+        after_section = email
+    elif section_id in {"route", "journey", "route_storyboard"}:
+        route = revised.get("route") if isinstance(revised.get("route"), list) else []
+        before_section = json.loads(json.dumps(route, default=str))
+        for item in route:
+            if isinstance(item, dict):
+                item["guestCopy"] = _revise_text_for_feedback(item.get("guestCopy"), feedback, "route")
+                item["staffNote"] = _revise_text_for_feedback(item.get("staffNote"), feedback, "route staff note")
+        after_section = route
+    else:
+        details = package.get("sectionCreativeDetails") if isinstance(package.get("sectionCreativeDetails"), dict) else {}
+        before_section = json.loads(json.dumps(details, default=str))
+        notes = details.setdefault("staffRehearsalNotes", [])
+        if isinstance(notes, list):
+            notes.append(_revise_text_for_feedback("", feedback, section_id))
+        after_section = details
+
+    package.setdefault("revisionHistory", [])
+    if isinstance(package["revisionHistory"], list):
+        package["revisionHistory"].append(
+            {
+                "sectionId": section_id,
+                "feedback": feedback,
+                "revisedAt": _now_iso(),
+                "agentId": "experience_studio_review_agent",
+            }
+        )
+    after_eval = json.loads(json.dumps(before_eval, default=str)) if before_eval else {"score": 0, "scores": {}}
+    scores = after_eval.setdefault("scores", {})
+    if isinstance(scores, dict):
+        scores["sectionCompleteness"] = min(100, float(scores.get("sectionCompleteness") or 70) + 2)
+        scores["creativeQuality"] = min(100, float(scores.get("creativeQuality") or 70) + 3)
+        if section_id in {"staff", "staff_script", "staff_cue", "signage", "signage_set"}:
+            scores["reviewReadiness"] = min(100, float(scores.get("reviewReadiness") or 70) + 2)
+        after_eval["score"] = round(sum(float(value or 0) for value in scores.values()) / len(scores), 1) if scores else after_eval.get("score")
+    after_eval["status"] = "strong_review_draft" if float(after_eval.get("score") or 0) >= 80 else "needs_review_work"
+    after_eval.setdefault("findings", [])
+    if isinstance(after_eval["findings"], list):
+        after_eval["findings"] = list(dict.fromkeys(["Reviewer-targeted section revision applied."] + after_eval["findings"]))
+    package["studioQualityEval"] = after_eval
+    review_agent = _experience_review_agent(package, revised, {"sectionId": section_id, "feedback": feedback})
+    package["reviewAgentReview"] = review_agent
+    revised["creativePackage"] = package
+    revised["experienceReviewAgent"] = review_agent
+    revised.setdefault("reasoningTrace", [])
+    if isinstance(revised["reasoningTrace"], list):
+        revised["reasoningTrace"].append(
+            {
+                "step": "section_revision_agent",
+                "summary": f"Experience Studio Review Agent revised {section_id} from reviewer feedback and recomputed QA deltas.",
+                "inputs": {"sectionId": section_id, "feedback": feedback},
+            }
+        )
+    return {
+        "status": "revised",
+        "mode": "experience_studio_section_revision",
+        "sectionId": section_id,
+        "feedback": feedback,
+        "draft": revised,
+        "beforeSection": before_section,
+        "afterSection": after_section,
+        "qaDelta": _score_delta(before_eval, after_eval),
+        "reviewAgent": review_agent,
+        "controlBoundary": {
+            "llmControlAuthority": False,
+            "publishingRequiresReview": True,
+            "sectionOnlyRevision": True,
+        },
+    }
+
+
 def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]], template_id: str, template: dict[str, Any], audience: str, tone: str, constraints: str, creative_brief: dict[str, str], real_inputs: dict[str, Any], intelligence: dict[str, Any], quality_gaps: list[str], experience_reasoning: dict[str, Any] | None = None, creative_synthesis: dict[str, Any] | None = None, memory_context: dict[str, Any] | None = None, learning_context: dict[str, Any] | None = None) -> dict[str, Any]:
     venue = real_inputs.get("venueIdentity", {}) if isinstance(real_inputs.get("venueIdentity"), dict) else {}
     venue_name = _text(venue.get("name"), "the venue")
@@ -3655,10 +3881,12 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
             "authority": "human_promoted_rules_only",
         },
         "venueDataGapAnalysis": venue_gap_analysis,
+        "creativePackageVariants": _creative_package_variants(synthesis, selected_name, route, channel_matrix, venue_gap_analysis),
         "designReasoning": experience_reasoning or {},
         "creativeSynthesis": synthesis,
     }
     package["studioQualityEval"] = _studio_quality_eval(route, channel_matrix, section_dossiers, package, memory_application, venue_gap_analysis, quality_gaps)
+    package["reviewAgentReview"] = _experience_review_agent(package)
     return package
 
 
@@ -3744,6 +3972,7 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
         "experienceReasoning": experience_reasoning,
         "creativeSynthesis": creative_synthesis,
         "creativePackage": creative_package,
+        "experienceReviewAgent": creative_package.get("reviewAgentReview") if isinstance(creative_package.get("reviewAgentReview"), dict) else {},
         "finishedWorkMemory": memory_context,
         "approvedLearningRules": learning_context,
         "review": [

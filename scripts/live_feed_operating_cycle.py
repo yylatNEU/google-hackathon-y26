@@ -301,6 +301,72 @@ ISSUE_ACTION_EXPECTATIONS = {
         "sources": {"guest_flow", "operator_signal", "ride_ops"},
         "reason": "Parade conflicts should be resolved by operations/security/safety routing authority.",
     },
+    "ride_failure": {
+        "departments": {"operations", "maintenance", "safety"},
+        "tools": {"create_ops_alert", "create_work_order", "recommend_route_change", "require_human_approval"},
+        "sources": {"ride_ops", "operator_signal", "guest_flow"},
+        "reason": "Ride failures should produce operations containment, maintenance work-order review, and safety gates.",
+    },
+    "demand_spike": {
+        "departments": {"operations", "guest_experience", "food_retail", "marketing"},
+        "tools": {"create_ops_alert", "draft_guest_message", "inventory_alert", "pause_launch_promo", "redirect_offer"},
+        "sources": {"guest_flow", "ride_ops", "operator_signal", "food_ops"},
+        "reason": "Demand spikes should negotiate crowd relief, guest communications, and commerce capacity controls.",
+    },
+    "show_dump": {
+        "departments": {"operations", "guest_experience", "security"},
+        "tools": {"create_ops_alert", "recommend_route_change", "draft_guest_message", "zone_control_recommendation"},
+        "sources": {"guest_flow", "operator_signal", "ride_ops"},
+        "reason": "Show dumps should be handled as crowd-flow pulses with public-message and security gates held.",
+    },
+    "staff_callout": {
+        "departments": {"hr_labor", "operations", "safety"},
+        "tools": {"shift_adjustment_recommendation", "create_ops_alert", "require_human_approval"},
+        "sources": {"staffing", "operator_signal", "ride_ops"},
+        "reason": "Staffing failures should prioritize certified labor moves, fatigue rules, and operations awareness.",
+    },
+    "food_spike": {
+        "departments": {"food_retail", "operations", "guest_experience"},
+        "tools": {"inventory_alert", "pause_launch_promo", "create_ops_alert", "draft_guest_message"},
+        "sources": {"food_ops", "guest_flow", "operator_signal"},
+        "reason": "Food demand spikes should produce inventory/promo control and guest-flow awareness.",
+    },
+    "inventory_stockout": {
+        "departments": {"food_retail", "guest_experience", "finance"},
+        "tools": {"inventory_alert", "pause_launch_promo", "draft_guest_message", "revenue_impact_report"},
+        "sources": {"food_ops", "guest_flow", "operator_signal"},
+        "reason": "Stockouts should drive inventory action, guest communication review, and revenue impact tracking.",
+    },
+    "mobile_order_outage": {
+        "departments": {"food_retail", "guest_experience", "operations"},
+        "tools": {"inventory_alert", "pause_launch_promo", "draft_guest_message", "create_ops_alert"},
+        "sources": {"food_ops", "guest_flow", "operator_signal"},
+        "reason": "Mobile-order outages should shift food operations and hold guest-facing messages for review.",
+    },
+    "payment_outage": {
+        "departments": {"food_retail", "finance", "guest_experience"},
+        "tools": {"pause_launch_promo", "revenue_impact_report", "draft_guest_message", "create_ops_alert"},
+        "sources": {"food_ops", "operator_signal", "guest_flow"},
+        "reason": "Payment outages should preserve payment integrity and avoid unsupported compensation promises.",
+    },
+    "heat_index_spike": {
+        "departments": {"safety", "operations", "hr_labor", "guest_experience"},
+        "tools": {"require_human_approval", "create_ops_alert", "shift_adjustment_recommendation", "draft_guest_message"},
+        "sources": {"weather", "guest_flow", "staffing", "operator_signal"},
+        "reason": "Heat spikes should put safety, staffing fatigue, and guest guidance into the tradeoff.",
+    },
+    "storm_risk": {
+        "departments": {"safety", "operations", "guest_experience"},
+        "tools": {"require_human_approval", "create_ops_alert", "draft_guest_message", "recommend_route_change"},
+        "sources": {"weather", "operator_signal", "guest_flow"},
+        "reason": "Storm risk should keep weather safety and guest movement under approval gates.",
+    },
+    "lightning_delay": {
+        "departments": {"safety", "operations", "guest_experience"},
+        "tools": {"require_human_approval", "create_ops_alert", "draft_guest_message", "recommend_route_change"},
+        "sources": {"weather", "operator_signal", "ride_ops"},
+        "reason": "Lightning delays should hold safety-sensitive movement and reopening decisions.",
+    },
 }
 
 

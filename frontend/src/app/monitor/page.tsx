@@ -257,6 +257,9 @@ type MonitorEvidenceGraph = {
     refreshing?: boolean;
     mode?: string;
     snapshot_path?: string;
+    source_current?: boolean;
+    source_fingerprint?: string;
+    current_source_fingerprint?: string;
   };
 };
 
@@ -727,7 +730,7 @@ export default function MonitorPage() {
   const reviewAccessBlocked = reviewLedger?.status === "blocked" || Boolean(reviewLedger?.readiness_issues?.length);
   const openReviewCount = reviewLedger?.summary?.open_count ?? reviewRows.filter((item) => item?.status !== "closed").length;
   const reviewSummaryValue = reviewAccessBlocked ? "auth gated" : String(monitorEvidence?.summary?.linked_review_session_count ?? monitorEvidence?.summary?.review_session_count ?? (openReviewCount || visibleGovernanceReviews.length || 0));
-  const cacheState = monitorEvidence?.evidence_cache?.state ?? "not loaded";
+  const cacheState = monitorEvidence?.evidence_cache?.source_current === false ? "source stale" : monitorEvidence?.evidence_cache?.state ?? "not loaded";
   const sourceStatus = monitorEvidence?.source_status ?? {};
 
   return (
@@ -790,7 +793,7 @@ export default function MonitorPage() {
             ["Age", typeof monitorEvidence?.evidence_cache?.age_seconds === "number" ? `${Math.round(monitorEvidence.evidence_cache.age_seconds)}s` : "--"],
             ["Cases source", fmt(sourceStatus.case_index)],
             ["Trace source", fmt(sourceStatus.agent_ops_ledger)],
-            ["Policy source", fmt(sourceStatus.policy_doctrine)],
+            ["Source current", fmt(monitorEvidence?.evidence_cache?.source_current)],
           ].map(([label, value]) => (
             <div key={label} className="rounded border border-slate-800 bg-slate-950 px-3 py-2">
               <div className="text-[9px] font-black uppercase tracking-widest text-slate-500">{label}</div>

@@ -61,6 +61,22 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
     )
     draft = generated.get("draft") if isinstance(generated.get("draft"), dict) else {}
     creative_package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
+    initial_draft = draft
+    section_revision = _request(
+        base_url,
+        "POST",
+        "/api/park/experience-studio/section-revision",
+        {
+            "draft": draft,
+            "sectionId": "staff_script",
+            "feedback": "Make the staff script less operational, more magical, and keep accessibility language plain.",
+            "actor": "demo_verifier",
+        },
+        timeout=20,
+    )
+    if isinstance(section_revision.get("draft"), dict):
+        draft = section_revision["draft"]
+        creative_package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
     saved = _request(
         base_url,
         "POST",
@@ -174,10 +190,15 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "promotedRuleStatus": promoted_rule.get("status"),
             "postRuleGenerationUsesApprovedRules": (post_rule_package.get("approvedRuleInfluence") or {}).get("usedForGeneration") is True,
             "mongoConnected": connection.get("connected") is True and connection.get("primary") == "mongodb",
+            "reviewAgentStatus": (draft.get("experienceReviewAgent") or {}).get("status"),
+            "creativeVariantCount": len(creative_package.get("creativePackageVariants") or []),
+            "sectionRevisionStatus": section_revision.get("status"),
+            "sectionRevisionDelta": (section_revision.get("qaDelta") or {}).get("delta"),
         },
         "statuses": {
             "conversationPlan": conversation_plan.get("status"),
             "generate": generated.get("status"),
+            "sectionRevision": section_revision.get("status"),
             "save": saved.get("status"),
             "update": updated.get("status"),
             "approve": approved.get("status"),
@@ -210,6 +231,22 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "sourceIntegrity": draft.get("sourceIntegrity", {}),
             "reasoningTrace": draft.get("reasoningTrace", []),
             "profileIntelligence": draft.get("profileIntelligence", {}),
+            "experienceReviewAgent": draft.get("experienceReviewAgent", {}),
+            "sectionRevision": {
+                "status": section_revision.get("status"),
+                "sectionId": section_revision.get("sectionId"),
+                "feedback": section_revision.get("feedback"),
+                "qaDelta": section_revision.get("qaDelta", {}),
+                "reviewAgent": section_revision.get("reviewAgent", {}),
+                "beforeSection": section_revision.get("beforeSection"),
+                "afterSection": section_revision.get("afterSection"),
+                "controlBoundary": section_revision.get("controlBoundary", {}),
+            },
+            "initialGeneratedResult": {
+                "title": initial_draft.get("title") if isinstance(initial_draft, dict) else None,
+                "creativePackage": initial_draft.get("creativePackage", {}) if isinstance(initial_draft, dict) else {},
+                "experienceReviewAgent": initial_draft.get("experienceReviewAgent", {}) if isinstance(initial_draft, dict) else {},
+            },
             "handoff": handoff.get("handoff", {}),
         },
         "approvedRuleLifecycle": {
@@ -236,6 +273,10 @@ def _render_html(report: dict[str, Any]) -> str:
         ("Mongo connected", report.get("contracts", {}).get("mongoConnected")),
         ("No feedback loop", report.get("contracts", {}).get("noFeedbackLoop")),
         ("Studio Core", report.get("contracts", {}).get("studioCoreId")),
+        ("Review Agent", report.get("contracts", {}).get("reviewAgentStatus")),
+        ("Creative variants", report.get("contracts", {}).get("creativeVariantCount")),
+        ("Section revision", report.get("contracts", {}).get("sectionRevisionStatus")),
+        ("Revision QA delta", report.get("contracts", {}).get("sectionRevisionDelta")),
         ("Conversation plan ID", report.get("created", {}).get("conversationPlanId")),
         ("Conversation template", report.get("contracts", {}).get("conversationTemplateId")),
         ("Generation memory ID", report.get("created", {}).get("generationMemoryId")),
@@ -353,6 +394,8 @@ def _render_html(report: dict[str, Any]) -> str:
   const designReasoning = result.experienceReasoning || pkg.designReasoning || {{}};
   const profileIntel = result.profileIntelligence || {{}};
   const profileReady = profileIntel.readiness || {{}};
+  const reviewAgent = result.experienceReviewAgent || pkg.reviewAgentReview || {{}};
+  const sectionRevision = result.sectionRevision || {{}};
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({{ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }}[char]));
   const list = (items) => (Array.isArray(items) && items.length ? `<ul>${{items.map((item) => `<li>${{esc(typeof item === "string" ? item : JSON.stringify(item))}}</li>`).join("")}}</ul>` : "<p>None.</p>");
   const jsonText = (value) => JSON.stringify(value, null, 2);
@@ -362,7 +405,12 @@ def _render_html(report: dict[str, Any]) -> str:
     metric("Channel artifacts", (result.messages || []).length, "App, signage, email, staff cue"),
     metric("Ready", result.sourceIntegrity?.readyForHandoff ? "yes" : "review", "Source-integrity gate"),
     metric("Profile intel", profileReady.status || result.sourceIntegrity?.profileIntelligenceStatus || "unknown", result.sourceIntegrity?.realVenueReady ? "Real-venue-ready" : "Creative-ready, review gated"),
-    metric("Approved rules", postRule.approvedRuleInfluence?.usedForGeneration ? "active" : "inactive", `${{postRule.approvedRuleInfluence?.ruleCount || 0}} rule context`)
+    metric("Approved rules", postRule.approvedRuleInfluence?.usedForGeneration ? "active" : "inactive", `${{postRule.approvedRuleInfluence?.ruleCount || 0}} rule context`),
+    metric("QA score", pkg.studioQualityEval?.score ?? "n/a", pkg.studioQualityEval?.status || "not scored"),
+    metric("Review agent", reviewAgent.status || "unknown", reviewAgent.approvalRecommendation || "no recommendation"),
+    metric("Variants", (pkg.creativePackageVariants || []).length, "Selected plus alternatives"),
+    metric("Revision delta", sectionRevision.qaDelta?.delta ?? "n/a", sectionRevision.sectionId || "no targeted revision"),
+    metric("Venue gaps", (pkg.venueDataGapAnalysis?.missingForProduction || []).length, pkg.venueDataGapAnalysis?.productionRealVenueReady ? "production ready" : "review required")
   ].join("");
   document.getElementById("planner").innerHTML = `
     <div class="grid4">
@@ -396,14 +444,27 @@ def _render_html(report: dict[str, Any]) -> str:
       <div class="card"><h3>Signage set</h3>${{list((pkg.signageSet || []).map((item) => `${{item.placement}} - ${{item.headline}}: ${{item.body}}`))}}</div>
     </div>
     <div class="grid2">
+      <div class="card"><h3>Experience Review Agent</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(reviewAgent.status || "unknown")}}</div></div><div><div class="label">Score</div><div class="value">${{esc(reviewAgent.score ?? "n/a")}}</div></div><div><div class="label">Recommendation</div><div class="value">${{esc(reviewAgent.approvalRecommendation || "n/a")}}</div></div></div><div class="label">Findings</div>${{list(reviewAgent.findings || [])}}<div class="label">Revision targets</div>${{list((reviewAgent.sectionTargets || []).map((item) => `${{item.section}}: ${{item.reason}}`))}}<div class="label">Memory judgment</div><pre>${{esc(jsonText(reviewAgent.memoryJudgment || {{}}))}}</pre></div>
+      <div class="card"><h3>Section Revision Result</h3><div class="grid3"><div><div class="label">Section</div><div class="value">${{esc(sectionRevision.sectionId || "n/a")}}</div></div><div><div class="label">Status</div><div class="value">${{esc(sectionRevision.status || "unknown")}}</div></div><div><div class="label">QA delta</div><div class="value">${{esc(sectionRevision.qaDelta?.delta ?? "n/a")}}</div></div></div><div class="label">Feedback</div><div class="value">${{esc(sectionRevision.feedback || "")}}</div><div class="label">Before</div><pre>${{esc(jsonText(sectionRevision.beforeSection || {{}}))}}</pre><div class="label">After</div><pre>${{esc(jsonText(sectionRevision.afterSection || {{}}))}}</pre></div>
+    </div>
+    <div class="card"><h3>Creative Alternatives</h3><div class="grid3">${{(pkg.creativePackageVariants || []).map((variant) => `<div class="card"><h3>${{esc(variant.name || variant.id)}} ${{variant.status === "selected" ? "(selected)" : ""}}</h3><p>${{esc(variant.positioning || "")}}</p><div class="label">Guest promise</div><div class="value">${{esc(variant.guestPromise || "")}}</div><div class="label">When to use</div><div class="value">${{esc(variant.whenToUse || "")}}</div><div class="label">Review risks</div>${{list(variant.reviewRisks || [])}}</div>`).join("") || "<p>No creative alternatives returned.</p>"}}</div></div>
+    <div class="grid2">
       <div class="card"><h3>Section dossiers</h3>${{list((pkg.sectionDossiers || []).map((item) => `${{item.section}}: ${{item.purpose}} Review: ${{item.reviewGate}}`))}}</div>
       <div class="card"><h3>Route blueprint</h3>${{list((pkg.routeBlueprint || []).map((item) => `${{item.order}}. ${{item.stop}} / ${{item.storyBeat}} / ${{item.guestAction}}`))}}</div>
       <div class="card"><h3>Channel matrix</h3>${{list((pkg.channelMatrix || []).map((item) => `${{item.channel}} / ${{item.owner}}: ${{item.objective}}`))}}</div>
       <div class="card"><h3>Staff run-of-show</h3>${{list((pkg.staffRunOfShow || []).map((item) => `${{item.phase}} / ${{item.who}}: ${{item.detail}}`))}}</div>
     </div>
     <div class="grid2">
+      <div class="card"><h3>Section-Level Authoring</h3><div class="label">Concept board</div><pre>${{esc(jsonText(pkg.sectionCreativeDetails?.conceptBoard || {{}}))}}</pre><div class="label">Route story cards</div>${{list((pkg.sectionCreativeDetails?.routeStoryCards || []).map((item) => `${{item.order}}. ${{item.stop}} / ${{item.beat}} / ${{item.choiceArchitecture}}`))}}<div class="label">Staff rehearsal</div>${{list(pkg.sectionCreativeDetails?.staffRehearsalNotes || [])}}</div>
+      <div class="card"><h3>Studio QA Eval</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(pkg.studioQualityEval?.status || "unknown")}}</div></div><div><div class="label">Score</div><div class="value">${{esc(pkg.studioQualityEval?.score ?? "n/a")}}</div></div><div><div class="label">Checks</div><div class="value">${{esc((pkg.studioQualityEval?.qaChecklist || []).length)}}</div></div></div><div class="label">Scores</div><pre>${{esc(jsonText(pkg.studioQualityEval?.scores || {{}}))}}</pre><div class="label">Findings</div>${{list(pkg.studioQualityEval?.findings || [])}}<div class="label">Next actions</div>${{list(pkg.studioQualityEval?.recommendedNextActions || [])}}</div>
+    </div>
+    <div class="grid2">
       <div class="card"><h3>Production detail</h3><div class="label">Guest choice model</div>${{list(pkg.productionDetail?.guestChoiceModel || [])}}<div class="label">Checklist</div>${{list(pkg.productionDetail?.contentCompletenessChecklist || [])}}<div class="label">Measurement</div>${{list((pkg.productionDetail?.measurementPlan || []).map((item) => `${{item.metric}}: ${{item.signal}} / ${{item.learningUse}}`))}}</div>
       <div class="card"><h3>Finished-work memory</h3><div class="label">Status</div><div class="value">${{esc(pkg.memoryInfluence?.status || "unknown")}}</div><div class="label">Used</div><div class="value">${{esc(pkg.memoryInfluence?.usedForGeneration ? "yes" : "no")}}</div><div class="label">Reusable patterns</div>${{list(pkg.memoryInfluence?.reusablePatterns || [])}}<div class="label">Matched examples</div>${{list((pkg.memoryInfluence?.matchedExamples || []).map((item) => `${{item.status}} / ${{item.selectedConceptName}} / ${{item.draftId}}`))}}</div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>Memory Application</h3><div class="label">Status</div><div class="value">${{esc(pkg.memoryApplication?.status || "unknown")}}</div><div class="label">Visible changes</div>${{list(pkg.memoryApplication?.visibleChanges || [])}}<div class="label">Preserved patterns</div>${{list(pkg.memoryApplication?.preservedPatterns || [])}}<div class="label">Avoided patterns</div>${{list(pkg.memoryApplication?.avoidedPatterns || [])}}</div>
+      <div class="card"><h3>Venue Data Gap Analysis</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(pkg.venueDataGapAnalysis?.status || "unknown")}}</div></div><div><div class="label">Profile</div><div class="value">${{esc(pkg.venueDataGapAnalysis?.profileType || "unknown")}}</div></div><div><div class="label">Production real venue</div><div class="value">${{esc(pkg.venueDataGapAnalysis?.productionRealVenueReady ? "ready" : "not ready")}}</div></div></div><div class="label">Missing for production</div>${{list(pkg.venueDataGapAnalysis?.missingForProduction || [])}}<div class="label">Next profile imports</div>${{list(pkg.venueDataGapAnalysis?.nextProfileImports || [])}}</div>
     </div>
     <div class="card"><h3>Approved-rule effect on next generation</h3>
       <div class="grid3">

@@ -3,6 +3,9 @@ const defaultRequestTimeoutMs = 12000;
 const transientTransportAttempts = 2;
 const roleSessionTokenStorageKey = "parkpulse.roleSessionToken";
 export const longRunningRequestTimeoutMs = 30000;
+const apiUrlBackoffMs = 60_000;
+const apiUrlBackoff = new Map<string, number>();
+const localApiHostnames = new Set(["127.0.0.1", "localhost", "::1"]);
 
 type ParkPulseRequestInit = RequestInit & {
   timeoutMs?: number;
@@ -73,7 +76,7 @@ export function getApiUrls(): string[] {
     typeof globalThis.location !== "undefined"
       ? new URLSearchParams(globalThis.location.search).get("api") || undefined
       : undefined;
-  if (urlOverride) return Array.from(new Set([urlOverride, ...localApiUrls]));
+  if (urlOverride) return [urlOverride];
   const viteEnv = import.meta.env as Record<string, string | undefined> | undefined;
   const configured = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.NEXT_PUBLIC_API_URL;
   const sameOrigin = typeof globalThis.location !== "undefined" ? globalThis.location.origin : undefined;
@@ -82,7 +85,7 @@ export function getApiUrls(): string[] {
     if (!sameOrigin) return false;
     try {
       const url = new URL(sameOrigin);
-      if (!["127.0.0.1", "localhost", "::1"].includes(url.hostname)) return false;
+      if (!localApiHostnames.has(url.hostname)) return false;
       return !["8010", "8000", "8017"].includes(url.port);
     } catch {
       return false;
@@ -91,6 +94,32 @@ export function getApiUrls(): string[] {
   if (localDevSameOrigin && sameOrigin) return Array.from(new Set([...localApiUrls, sameOrigin]));
   const fallbacks = [...localApiUrls, sameOrigin];
   return Array.from(new Set([...configuredUrls, ...fallbacks].filter(Boolean) as string[]));
+}
+
+function availableApiUrls() {
+  const now = Date.now();
+  return getApiUrls().filter((url) => {
+    const blockedUntil = apiUrlBackoff.get(url) ?? 0;
+    if (blockedUntil <= now) {
+      apiUrlBackoff.delete(url);
+      return true;
+    }
+    return false;
+  });
+}
+
+function markApiUrlBackoff(apiUrl: string) {
+  if (isLocalApiUrl(apiUrl)) return;
+  apiUrlBackoff.set(apiUrl, Date.now() + apiUrlBackoffMs);
+}
+
+function isLocalApiUrl(apiUrl: string) {
+  try {
+    const url = new URL(apiUrl);
+    return localApiHostnames.has(url.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function headersToEntries(headers?: HeadersInit): Array<[string, string]> {
@@ -143,7 +172,10 @@ async function getSignedRoleToken(apiUrl: string, role: string, timeoutMs: numbe
 async function getOptionalSignedRoleToken(apiUrl: string, role: string, timeoutMs: number) {
   try {
     return await getSignedRoleToken(apiUrl, role, timeoutMs);
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && /returned (401|403)/.test(error.message)) {
+      markApiUrlBackoff(apiUrl);
+    }
     return undefined;
   }
 }
@@ -234,25 +266,32 @@ function normalizeParkPulseApiError(error: unknown, path: string) {
   return new Error(`Unable to reach ParkPulse API at ${path}`);
 }
 
+function isBrowserPrivateCloudRunAuthFailure(apiUrl: string, response: Response) {
+  if (![401, 403].includes(response.status)) return false;
+  try {
+    const url = new URL(apiUrl);
+    return url.hostname.endsWith(".run.app") || url.hostname.includes("googleapis.com");
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestInit) {
   let lastError: unknown;
   const { timeoutMs = defaultRequestTimeoutMs, ...requestInit } = init ?? {};
   const method = String(requestInit.method ?? "GET").toUpperCase();
   const maxAttempts = method === "GET" || method === "HEAD" ? transientTransportAttempts : 1;
 
-  for (const apiUrl of getApiUrls()) {
+  for (const apiUrl of availableApiUrls()) {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        const localParkBackend =
-          /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(apiUrl) &&
-          (path.startsWith("/api/park/staff-training") || path.startsWith("/api/park/product-learning"));
         const headerEntries = headersToEntries(requestInit.headers);
         const requestedRole = headerValue(headerEntries, "x-parkpulse-role");
         const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
         const hasRoleToken = Boolean(headerValue(headerEntries, "x-parkpulse-role-token"));
         const storedRoleToken = !hasAuthorization && !hasRoleToken && path !== "/api/park/auth/dev-session" ? getParkPulseRoleSessionToken() : "";
         const token =
-          requestedRole && !localParkBackend && !hasAuthorization && !hasRoleToken && !storedRoleToken && path !== "/api/park/auth/dev-session"
+          requestedRole && !hasAuthorization && !hasRoleToken && !storedRoleToken && path !== "/api/park/auth/dev-session"
             ? await getOptionalSignedRoleToken(apiUrl, requestedRole, timeoutMs)
             : undefined;
         const roleToken = storedRoleToken || token || "";
@@ -265,6 +304,11 @@ export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestIni
             break;
           }
           return response;
+        }
+        if (isBrowserPrivateCloudRunAuthFailure(apiUrl, response)) {
+          markApiUrlBackoff(apiUrl);
+          lastError = new Error(`${apiUrl}${path} returned ${response.status}; browser cannot invoke this private Cloud Run URL directly.`);
+          break;
         }
         lastError = new Error(`${apiUrl}${path} returned ${response.status}`);
         break;

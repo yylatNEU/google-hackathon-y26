@@ -2262,6 +2262,208 @@ def _issue_specific_live_feed_proposals(
             0.82,
             "tradeoff",
         )
+    if kind in {"ride_failure"}:
+        add(
+            "ride_ops_agent",
+            f"Create an internal operations containment alert for ride_failure at {target_id}; do not execute guest routing without approval",
+            {
+                "target": "operations",
+                "action": "ops_alert",
+                "zone": target_id,
+                "expected_outcome": "operations receiver has a live-feed containment alert tied to the failed ride",
+                "rollback": "close the alert if ride status and guest-flow pressure normalize",
+            },
+            ops_rows,
+            ["Ops containment alert is internal only.", "Guest rerouting and ride reopen remain approval-gated."],
+            0.87,
+            "action",
+        )
+        add(
+            "facilities_energy_agent",
+            f"Open a bounded maintenance work-order candidate for ride_failure at {target_id}",
+            {
+                "target": "maintenance",
+                "action": "create_work_order",
+                "asset": target_id,
+                "work_order_only": True,
+                "expected_outcome": "maintenance receiver gets an inspection candidate grounded in ride failure evidence",
+                "rollback": "close the candidate if inspection rejects the fault or ride telemetry normalizes",
+            },
+            maintenance_rows,
+            ["Work-order is internal only.", "No reopen or safety clearance is implied."],
+            0.88,
+            "action",
+        )
+        add(
+            "safety_policy_agent",
+            f"Hold reopen and public movement decisions for ride_failure at {target_id} until safety review",
+            {
+                "target": "safety",
+                "action": "require_human_approval",
+                "requires_human_review": True,
+                "expected_outcome": "safety owner receives the approval boundary and ride-failure evidence",
+                "rollback": "remove hold only after safety lead clearance",
+            },
+            safety_rows,
+            ["Safety hold cannot be converted into Tool Executor action.", "Ops alert and work-order do not clear ride operation."],
+            0.93,
+            "gate",
+        )
+    if kind in {"demand_spike", "show_dump"}:
+        add(
+            "ride_ops_agent",
+            f"Create an internal crowd-flow alert for {kind} at {target_id}; keep route change and public message gated",
+            {
+                "target": "operations",
+                "action": "ops_alert",
+                "zone": target_id,
+                "expected_outcome": "operations receiver sees the crowd-flow pulse without executing public routing",
+                "rollback": "close the alert if guest-flow and capacity feeds normalize",
+            },
+            ops_rows,
+            ["Ops alert is internal only.", "No route change or public guest message is executed."],
+            0.85,
+            "action",
+        )
+        add(
+            "guest_flow_agent",
+            f"Draft a non-promissory guest-flow message for {kind} at {target_id}; hold send for Compliance/Executive",
+            {
+                "target": "guest",
+                "action": "message",
+                "zone": target_id,
+                "expected_outcome": "guest message draft exists but is not sent without compliance approval",
+                "rollback": "discard draft if crowd-flow pressure normalizes",
+            },
+            guest_rows,
+            ["Guest-facing send is not executable here.", "Draft cannot include compensation or private data."],
+            0.8,
+            "gate",
+        )
+    if kind in {"food_spike", "inventory_stockout", "mobile_order_outage", "payment_outage"}:
+        add(
+            "food_demand_agent",
+            f"Trigger bounded food/retail capacity control for {kind} at {target_id}",
+            {
+                "target": "food",
+                "action": "inventory_alert",
+                "zone": target_id,
+                "expected_outcome": "food retail receiver gets a capacity or inventory alert grounded in live POS/queue evidence",
+                "rollback": "cancel the alert if food_ops and guest-flow feeds normalize",
+            },
+            _live_feed_rows_for_sources(evidence_rows, {"food_ops", "guest_flow", "operator_signal", "weather"}),
+            ["Food action is internal only.", "No public offer, refund, or unavailable item promise is executed."],
+            0.84,
+            "action",
+        )
+        add(
+            "guest_flow_agent",
+            f"Draft guest-care language for {kind} at {target_id}; hold send until Compliance/Executive approval",
+            {
+                "target": "guest",
+                "action": "message",
+                "zone": target_id,
+                "expected_outcome": "guest-care draft is available for review without public delivery",
+                "rollback": "discard draft if service signals normalize",
+            },
+            guest_rows,
+            ["Guest-facing send is gated.", "No refund, medical, private, or compensation promise is allowed."],
+            0.78,
+            "gate",
+        )
+    if kind in {"staff_callout"}:
+        add(
+            "staffing_agent",
+            f"Recommend a certified staffing adjustment for staff_callout affecting {target_id}",
+            {
+                "target": "staff",
+                "action": "shift_adjustment",
+                "zone": target_id,
+                "expected_outcome": "labor receiver gets a role-compatible staffing adjustment recommendation",
+                "rollback": "withdraw adjustment if attendance and fatigue feeds recover",
+            },
+            _live_feed_rows_for_sources(evidence_rows, {"staffing", "operator_signal", "ride_ops"}),
+            ["Only certified role-compatible moves are allowed.", "Overtime, fatigue, and breaks remain binding constraints."],
+            0.86,
+            "action",
+        )
+        add(
+            "ride_ops_agent",
+            f"Create an internal operations alert for staffing pressure at {target_id}",
+            {
+                "target": "operations",
+                "action": "ops_alert",
+                "zone": target_id,
+                "expected_outcome": "operations receiver sees staffing pressure without changing ride operation",
+                "rollback": "close the alert if staffing coverage normalizes",
+            },
+            ops_rows,
+            ["Ops alert is internal only.", "No safety-critical staffing substitution is executed."],
+            0.79,
+            "action",
+        )
+    if kind in {"heat_index_spike", "storm_risk", "lightning_delay"}:
+        add(
+            "ride_ops_agent",
+            f"Create an internal weather operations alert for {kind} at {target_id}",
+            {
+                "target": "operations",
+                "action": "ops_alert",
+                "zone": target_id,
+                "expected_outcome": "operations receiver sees weather-driven operating risk without public routing",
+                "rollback": "close the alert if weather and operator feeds normalize",
+            },
+            _live_feed_rows_for_sources(evidence_rows, {"weather", "operator_signal", "ride_ops", "guest_flow"}),
+            ["Ops alert is internal only.", "Weather closure, reopening, and public movement stay approval-gated."],
+            0.84,
+            "action",
+        )
+        add(
+            "safety_policy_agent",
+            f"Require safety review before movement, closure, or reopen decisions for {kind} at {target_id}",
+            {
+                "target": "safety",
+                "action": "require_human_approval",
+                "requires_human_review": True,
+                "expected_outcome": "safety owner receives weather risk and live-feed evidence",
+                "rollback": "remove hold only after weather/safety clearance",
+            },
+            safety_rows,
+            ["Safety-sensitive weather decisions are held.", "Ops alert does not authorize closure, reopen, or guest movement."],
+            0.92,
+            "gate",
+        )
+    if kind in {"radio_dead_zone", "security_perimeter"}:
+        add(
+            "ride_ops_agent",
+            f"Create an internal operations awareness alert for {kind} at {target_id}",
+            {
+                "target": "operations",
+                "action": "ops_alert",
+                "zone": target_id,
+                "expected_outcome": "operations receiver sees the continuity/security issue without taking control action",
+                "rollback": "close the alert if operator/security feeds normalize",
+            },
+            ops_rows,
+            ["Ops alert is internal only.", "Security or communications control remains approval-gated."],
+            0.8,
+            "action",
+        )
+        add(
+            "security_agent",
+            f"Review security/control implications for {kind} at {target_id} before any zone-control action",
+            {
+                "target": "security",
+                "action": "zone_control",
+                "zone": target_id,
+                "expected_outcome": "security lead receives a zone-control recommendation with live-feed evidence",
+                "rollback": "stand down if security and operator feeds normalize",
+            },
+            security_rows,
+            ["Security zone control requires authorized human approval.", "Ops alert cannot substitute for security approval."],
+            0.85,
+            "gate",
+        )
     return proposals
 
 

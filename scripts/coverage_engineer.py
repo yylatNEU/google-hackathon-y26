@@ -288,6 +288,7 @@ def backend_coverage(threshold: float, timeout_seconds: int) -> CoverageResult:
     chunk_size = int(os.getenv("COVERAGE_BACKEND_TEST_CHUNK_SIZE", "4") or "4")
     run_results: list[CoverageResult] = []
     chunk_commands: list[list[str]] = []
+    chunk_results: list[dict] = []
     coverage_base = [
         python,
         "-m",
@@ -332,11 +333,21 @@ def backend_coverage(threshold: float, timeout_seconds: int) -> CoverageResult:
             if retry_result.status == "pass":
                 run_result = retry_result
         run_results.append(run_result)
+        chunk_results.append(
+            {
+                "index": index,
+                "status": run_result.status,
+                "duration_seconds": run_result.duration_seconds,
+                "targets": test_chunk,
+                "summary": run_result.summary,
+            }
+        )
         if run_result.status == "fail":
             run_result.name = "Backend coverage"
             run_result.details["test_targets"] = test_files
             run_result.details["failed_chunk"] = test_chunk
             run_result.details["chunk_commands"] = chunk_commands
+            run_result.details["chunk_results"] = chunk_results
             return run_result
 
     combine_result = run_command(
@@ -351,6 +362,7 @@ def backend_coverage(threshold: float, timeout_seconds: int) -> CoverageResult:
         combine_result.name = "Backend coverage"
         combine_result.details["test_targets"] = test_files
         combine_result.details["chunk_commands"] = chunk_commands
+        combine_result.details["chunk_results"] = chunk_results
         return combine_result
 
     json_result = run_command(
@@ -364,6 +376,7 @@ def backend_coverage(threshold: float, timeout_seconds: int) -> CoverageResult:
     if json_result.status == "fail":
         json_result.name = "Backend coverage"
         json_result.details["test_targets"] = test_files
+        json_result.details["chunk_results"] = chunk_results
         return json_result
 
     try:
@@ -396,6 +409,8 @@ def backend_coverage(threshold: float, timeout_seconds: int) -> CoverageResult:
             "chunk_size": chunk_size,
             "chunk_count": len(chunk_commands),
             "chunk_commands": chunk_commands,
+            "chunk_results": chunk_results,
+            "slowest_chunks": sorted(chunk_results, key=lambda row: row["duration_seconds"], reverse=True)[:5],
         },
     )
 

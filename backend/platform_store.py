@@ -10,8 +10,8 @@ from typing import Any
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 1
-MIGRATION_ID = "20260603_0001_platform_store_registry"
+SCHEMA_VERSION = 2
+MIGRATION_ID = "20260605_0002_platform_store_data_boundaries"
 
 
 def _utc_now() -> str:
@@ -94,6 +94,18 @@ def _jsonl_count(path: Path) -> int | None:
         return None
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+    return {str(row[1]) for row in rows}
+
+
+def _monitor_evidence_snapshot_path() -> Path:
+    configured = os.getenv("PARKPULSE_MONITOR_EVIDENCE_SNAPSHOT_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.cwd() / "output" / "monitor-evidence-limit-40.json"
+
+
 def _store_record(
     *,
     store_key: str,
@@ -101,6 +113,8 @@ def _store_record(
     mode: str,
     path: Path,
     data_classification: str,
+    data_model: str,
+    source_of_truth: bool,
     shared_across_instances: bool,
     required_for_core: bool,
     status: str,
@@ -114,6 +128,8 @@ def _store_record(
         "mode": mode,
         "path": str(path),
         "data_classification": data_classification,
+        "data_model": data_model,
+        "source_of_truth": source_of_truth,
         "shared_across_instances": shared_across_instances,
         "required_for_core": required_for_core,
         "status": status,
@@ -140,6 +156,8 @@ def _observed_store_records() -> list[dict[str, Any]]:
             mode="sqlite_wal",
             path=_platform_db_path(),
             data_classification="platform_metadata",
+            data_model="relational_registry",
+            source_of_truth=True,
             shared_across_instances=False,
             required_for_core=True,
             status="ready",
@@ -151,6 +169,8 @@ def _observed_store_records() -> list[dict[str, Any]]:
             mode="sqlite_wal",
             path=replay_path,
             data_classification="operator_action_replay",
+            data_model="relational_event_index",
+            source_of_truth=True,
             shared_across_instances=False,
             required_for_core=True,
             status="ready" if replay_path.exists() else "will_initialize_on_first_write",
@@ -163,6 +183,8 @@ def _observed_store_records() -> list[dict[str, Any]]:
             mode="sqlite_wal",
             path=audit_path,
             data_classification="operational_audit",
+            data_model="relational_audit_log",
+            source_of_truth=True,
             shared_across_instances=False,
             required_for_core=True,
             status="ready" if audit_path.exists() else "will_initialize_on_first_write",
@@ -175,6 +197,8 @@ def _observed_store_records() -> list[dict[str, Any]]:
             mode="sqlite_wal",
             path=trust_path,
             data_classification="identity_authority_metadata",
+            data_model="relational_identity_registry",
+            source_of_truth=True,
             shared_across_instances=False,
             required_for_core=True,
             status="ready" if trust_path.exists() else "will_initialize_on_first_write",
@@ -187,6 +211,8 @@ def _observed_store_records() -> list[dict[str, Any]]:
             mode="jsonl_durable_outbox",
             path=delivery_path,
             data_classification="receiver_dispatch_receipts",
+            data_model="append_event_log",
+            source_of_truth=True,
             shared_across_instances=False,
             required_for_core=True,
             status="ready" if delivery_path.parent.exists() else "directory_missing",
@@ -199,6 +225,8 @@ def _observed_store_records() -> list[dict[str, Any]]:
             mode="jsonl_or_mongodb",
             path=live_feed_path,
             data_classification="observed_operational_signals",
+            data_model="event_log",
+            source_of_truth=True,
             shared_across_instances=os.getenv("PARKPULSE_LIVE_FEED_STORAGE", "").strip().lower() in {"mongo", "mongodb"},
             required_for_core=False,
             status="mongodb_configured" if os.getenv("PARKPULSE_LIVE_FEED_STORAGE", "").strip().lower() in {"mongo", "mongodb"} else "local_jsonl",
@@ -206,11 +234,74 @@ def _observed_store_records() -> list[dict[str, Any]]:
             metadata={"override_env": "PARKPULSE_LIVE_FEED_STORAGE"},
         ),
         _store_record(
+            store_key="monitor_evidence_snapshot",
+            authority="derived_monitor_evidence_graph_cache",
+            mode="json_snapshot_cache",
+            path=_monitor_evidence_snapshot_path(),
+            data_classification="derived_case_trace_review_policy_graph",
+            data_model="derived_snapshot",
+            source_of_truth=False,
+            shared_across_instances=False,
+            required_for_core=False,
+            status="ready" if _monitor_evidence_snapshot_path().exists() else "will_initialize_on_first_read",
+            record_count=None,
+            metadata={
+                "override_env": "PARKPULSE_MONITOR_EVIDENCE_SNAPSHOT_PATH",
+                "derived_from": ["agent_ops_ledger", "review_ledger", "live_feed_events", "policy_books", "case_index"],
+                "cache_invalidation": "source_watermark_fingerprint",
+                "production_target": "shared_mongodb_or_redis_snapshot",
+            },
+        ),
+        _store_record(
+            store_key="agent_ops_ledger",
+            authority="agent_run_receipt_and_eval_ledger",
+            mode="jsonl_receipt_ledger",
+            path=Path(os.getenv("PARKPULSE_AGENT_OPS_LEDGER") or runtime_dir / "agent_ops_ledger.jsonl"),
+            data_classification="agent_decision_trace_receipts",
+            data_model="append_event_log",
+            source_of_truth=True,
+            shared_across_instances=False,
+            required_for_core=False,
+            status="ready" if Path(os.getenv("PARKPULSE_AGENT_OPS_LEDGER") or runtime_dir / "agent_ops_ledger.jsonl").exists() else "will_initialize_on_first_write",
+            record_count=_jsonl_count(Path(os.getenv("PARKPULSE_AGENT_OPS_LEDGER") or runtime_dir / "agent_ops_ledger.jsonl")),
+            metadata={"override_env": "PARKPULSE_AGENT_OPS_LEDGER"},
+        ),
+        _store_record(
+            store_key="review_ledger",
+            authority="human_review_training_ledger",
+            mode="jsonl_or_mongodb",
+            path=Path(os.getenv("PARKPULSE_REVIEW_LEDGER_LOG_PATH") or runtime_dir / "review_ledger.jsonl"),
+            data_classification="human_review_sessions_and_dispositions",
+            data_model="event_log",
+            source_of_truth=True,
+            shared_across_instances=os.getenv("PARKPULSE_LIVE_FEED_STORAGE", "").strip().lower() in {"mongo", "mongodb"},
+            required_for_core=False,
+            status="mongodb_configured" if os.getenv("PARKPULSE_LIVE_FEED_STORAGE", "").strip().lower() in {"mongo", "mongodb"} else "local_jsonl",
+            record_count=_jsonl_count(Path(os.getenv("PARKPULSE_REVIEW_LEDGER_LOG_PATH") or runtime_dir / "review_ledger.jsonl")),
+            metadata={"override_env": "PARKPULSE_REVIEW_LEDGER_LOG_PATH"},
+        ),
+        _store_record(
+            store_key="policy_books",
+            authority="policy_doctrine_source_files",
+            mode="versioned_json_documents",
+            path=Path(__file__).resolve().parent / "policy_books",
+            data_classification="policy_doctrine",
+            data_model="document_store",
+            source_of_truth=True,
+            shared_across_instances=True,
+            required_for_core=True,
+            status="ready" if (Path(__file__).resolve().parent / "policy_books").exists() else "missing",
+            record_count=len(list((Path(__file__).resolve().parent / "policy_books").glob("*.json"))) if (Path(__file__).resolve().parent / "policy_books").exists() else 0,
+            metadata={"legacy_policy_book": str(Path(__file__).resolve().parent / "policy_book.json")},
+        ),
+        _store_record(
             store_key="legacy_repo_park_data_db",
             authority="legacy_artifact_not_current_source_of_truth",
             mode="sqlite_legacy",
             path=legacy_path,
             data_classification="legacy_platform_database",
+            data_model="legacy_relational_database",
+            source_of_truth=False,
             shared_across_instances=False,
             required_for_core=False,
             status="legacy_empty" if legacy_path.exists() and not legacy_tables else "not_present" if not legacy_path.exists() else "legacy_non_empty_preserved",
@@ -240,6 +331,8 @@ def init_platform_store() -> dict[str, Any]:
                 mode TEXT NOT NULL,
                 path TEXT NOT NULL,
                 data_classification TEXT NOT NULL,
+                data_model TEXT NOT NULL DEFAULT 'unspecified',
+                source_of_truth INTEGER NOT NULL DEFAULT 0,
                 shared_across_instances INTEGER NOT NULL,
                 required_for_core INTEGER NOT NULL,
                 status TEXT NOT NULL,
@@ -250,6 +343,11 @@ def init_platform_store() -> dict[str, Any]:
             )
             """
         )
+        columns = _table_columns(conn, "platform_store_registry")
+        if "data_model" not in columns:
+            conn.execute("ALTER TABLE platform_store_registry ADD COLUMN data_model TEXT NOT NULL DEFAULT 'unspecified'")
+        if "source_of_truth" not in columns:
+            conn.execute("ALTER TABLE platform_store_registry ADD COLUMN source_of_truth INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS platform_migration_events (
@@ -269,8 +367,8 @@ def init_platform_store() -> dict[str, Any]:
             (
                 MIGRATION_ID,
                 _utc_now(),
-                _checksum("platform_store_registry:v1"),
-                "Create a non-destructive registry for local SQLite authority and optional operational memory.",
+                _checksum("platform_store_registry:v2:data_boundaries"),
+                "Add explicit data model and source-of-truth boundaries to the platform store registry.",
             ),
         )
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -281,15 +379,17 @@ def _upsert_store_record(conn: sqlite3.Connection, record: dict[str, Any]) -> No
     conn.execute(
         """
         INSERT INTO platform_store_registry (
-            store_key, authority, mode, path, data_classification, shared_across_instances,
+            store_key, authority, mode, path, data_classification, data_model, source_of_truth, shared_across_instances,
             required_for_core, status, record_count, metadata_json, migrated_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(store_key) DO UPDATE SET
             authority = excluded.authority,
             mode = excluded.mode,
             path = excluded.path,
             data_classification = excluded.data_classification,
+            data_model = excluded.data_model,
+            source_of_truth = excluded.source_of_truth,
             shared_across_instances = excluded.shared_across_instances,
             required_for_core = excluded.required_for_core,
             status = excluded.status,
@@ -303,6 +403,8 @@ def _upsert_store_record(conn: sqlite3.Connection, record: dict[str, Any]) -> No
             record["mode"],
             record["path"],
             record["data_classification"],
+            record["data_model"],
+            1 if record["source_of_truth"] else 0,
             1 if record["shared_across_instances"] else 0,
             1 if record["required_for_core"] else 0,
             record["status"],
@@ -352,6 +454,8 @@ def _registry_rows() -> list[dict[str, Any]]:
                 "mode": row["mode"],
                 "path": row["path"],
                 "data_classification": row["data_classification"],
+                "data_model": row["data_model"],
+                "source_of_truth": bool(row["source_of_truth"]),
                 "shared_across_instances": bool(row["shared_across_instances"]),
                 "required_for_core": bool(row["required_for_core"]),
                 "status": row["status"],

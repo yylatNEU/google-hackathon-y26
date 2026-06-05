@@ -324,6 +324,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                 "/api/park/venue-profile",
                 "/api/park/experience-studio/conversation-plan",
                 "/api/park/experience-studio/draft",
+                "/api/park/experience-studio/section-revision",
                 "/api/park/experience-studio/drafts",
                 "/api/park/experience-studio/memory",
                 "/api/park/experience-studio/readiness",
@@ -395,6 +396,12 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                     payload["useRealParkContext"] = False
                     payload["realParkContextDeferred"] = True
                 self._send_direct_json(200, asyncio.run(build_experience_studio_payload(payload, None)))
+                return True
+            if self.command == "POST" and path == "/api/park/experience-studio/section-revision":
+                from experience_studio import revise_experience_studio_section
+
+                result = revise_experience_studio_section(self._json_body(body))
+                self._send_direct_json(200 if result.get("status") == "revised" else 400, result)
                 return True
         except Exception as error:
             self._send_direct_json(500, {"status": "error", "mode": "experience_studio_fast_path", "message": str(error)[:240]})

@@ -922,25 +922,151 @@
     }
 
     .final-result {
-      border: 1px solid rgba(131, 227, 119, .45);
-      background: rgba(131, 227, 119, .08);
+      border: 1px solid rgba(131, 227, 119, .58);
+      background:
+        linear-gradient(135deg, rgba(131, 227, 119, .13), rgba(73, 214, 232, .06)),
+        rgba(11, 18, 16, .9);
       border-radius: 8px;
-      padding: 12px;
-      margin-top: 10px;
+      padding: 16px;
+      margin: 12px 0 10px;
+      box-shadow: 0 16px 32px rgba(0,0,0,.22);
     }
 
-    .final-result strong {
-      display: block;
-      margin-bottom: 5px;
-      font-size: 14px;
+    .final-result.empty {
+      border-color: var(--line);
+      background: rgba(255,255,255,.035);
+      box-shadow: none;
+    }
+
+    .final-result-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+
+    .final-result h4 {
+      margin: 4px 0 6px;
+      font-size: 19px;
+      letter-spacing: 0;
     }
 
     .final-result p {
       margin: 0;
-      color: #d9e8dc;
-      font-size: 12px;
-      line-height: 1.45;
+      color: #d7e8df;
+      font-size: 13px;
+      line-height: 1.5;
       font-weight: 760;
+    }
+
+    .final-plan-list {
+      display: grid;
+      gap: 8px;
+      margin: 12px 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: finalPlan;
+    }
+
+    .final-plan-list li {
+      counter-increment: finalPlan;
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px;
+      padding: 9px;
+      background: rgba(255,255,255,.055);
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 950;
+    }
+
+    .final-plan-list li::before {
+      content: counter(finalPlan);
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 999px;
+      background: rgba(131, 227, 119, .18);
+      color: var(--green);
+      font-size: 12px;
+      font-weight: 1000;
+    }
+
+    .final-result-columns {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .final-result-column {
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px;
+      padding: 10px;
+      background: rgba(255,255,255,.045);
+      min-width: 0;
+    }
+
+    .final-result-column strong,
+    .final-result-receipt strong {
+      display: block;
+      margin-bottom: 7px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+      color: var(--muted);
+    }
+
+    .final-result-column ul {
+      margin: 0;
+      padding-left: 16px;
+      color: #dcebf0;
+      font-size: 12px;
+      line-height: 1.55;
+      font-weight: 850;
+    }
+
+    .final-result-receipt {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .final-result-receipt div {
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 8px;
+      padding: 9px;
+      background: rgba(0,0,0,.14);
+      min-width: 0;
+    }
+
+    .final-result-receipt span {
+      display: block;
+      overflow-wrap: anywhere;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 900;
+      line-height: 1.35;
+    }
+
+    .dialogue-result {
+      border-color: rgba(131, 227, 119, .6);
+      background: rgba(131, 227, 119, .1);
+    }
+
+    .dialogue-result ol {
+      margin: 8px 0 0;
+      padding-left: 18px;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.5;
+      font-weight: 900;
     }
 
     .passport-loop {
@@ -1344,7 +1470,7 @@
       .policy-grid { grid-template-columns: 1fr 1fr; }
       .exchange-body { grid-template-columns: 1fr; }
       .story-grid { grid-template-columns: repeat(2, 1fr); }
-      .passport-flow, .trace-strip, .second-run, .agent-result-grid, .result-strip { grid-template-columns: 1fr; }
+      .passport-flow, .trace-strip, .second-run, .agent-result-grid, .result-strip, .final-result-columns, .final-result-receipt { grid-template-columns: 1fr; }
     }
 
     @media (max-width: 720px) {
@@ -1967,6 +2093,8 @@
 
     async function runExternalAgentDemo() {
       try {
+        const externalScenario = scenarios[state.selectedScenario]?.kind === "guest" ? state.selectedScenario : "visit_planning";
+        if (state.selectedScenario !== externalScenario) configureScenario(externalScenario);
         setRunning("external");
         state.scenarioEval = null;
         state.policyChallenge = null;
@@ -2257,6 +2385,103 @@
         title: `${state.selectedScenario === "visit_planning" ? "John's accepted plan" : "Accepted outcome"}`,
         text: `${planText()}. Receipt: ${receipt}. Blocked: ${blocked}. Allowed: ${allowed}. Handoffs: ${handoffSummary()}.${passportEvolutionText()}`
       };
+    }
+
+    function finalResultData() {
+      const result = externalAgentResult();
+      const accepted = state.receipt?.accepted_plan || {};
+      const plan = Array.isArray(result?.final_plan) && result.final_plan.length
+        ? result.final_plan
+        : Array.isArray(accepted.plan) && accepted.plan.length
+          ? accepted.plan
+          : Array.isArray(state.session?.proposal?.plan) ? state.session.proposal.plan : [];
+      const allowed = Array.isArray(result?.immediate_actions_allowed) && result.immediate_actions_allowed.length
+        ? result.immediate_actions_allowed
+        : actionSummary("allowed").split(", ").filter((item) => item && item !== "none recorded");
+      const approval = Array.isArray(result?.approval_required_actions) && result.approval_required_actions.length
+        ? result.approval_required_actions
+        : actionSummary("blocked").split(", ").filter((item) => item && item !== "none recorded");
+      const handoffs = Array.isArray(result?.handoffs) && result.handoffs.length
+        ? result.handoffs
+        : handoffSummary().split(", ").filter((item) => item && !item.includes("waiting"));
+      const next = result?.next_passport || state.lastPayload?.passport_evolution?.next_passport || {};
+      const represented = result?.represented_subject || state.session?.client_agent?.represents || currentInput().represents;
+      return {
+        ready: Boolean(state.session),
+        title: result?.recipient === "supplier operator" ? "Final supply-chain handoff" : `Final plan for ${represented}`,
+        message: result?.message_to_represented_party || (plan.length ? `Tell ${represented}: your accepted plan is ${plan.join(", ")}.` : "Run the handshake to generate the final handoff."),
+        plan,
+        allowed,
+        approval,
+        doNotDo: Array.isArray(result?.do_not_do) ? result.do_not_do : [],
+        receiptId: result?.receipt_id || state.receipt?.receipt_id || "not issued",
+        verification: result?.verification_status || state.verification?.status || "pending",
+        handoffs,
+        nextPassport: next
+      };
+    }
+
+    function renderFinalResultCard() {
+      const data = finalResultData();
+      if (!data.ready) {
+        $("finalResult").className = "final-result empty";
+        $("finalResult").innerHTML = `
+          <div class="final-result-head">
+            <div>
+              <div class="kicker">Final result</div>
+              <h4>Waiting for negotiated output</h4>
+              <p>Run the handshake. The final answer will appear here as the product-facing handoff, while raw receipt data stays below as evidence.</p>
+            </div>
+            <span class="badge">waiting</span>
+          </div>`;
+        return data;
+      }
+      const plan = passportList(data.plan, "No final plan generated", 8);
+      const allowed = passportList(data.allowed, "none", 8);
+      const approval = passportList(data.approval, "none", 8);
+      const handoffs = passportList(data.handoffs, "none", 6);
+      const nextAllowed = passportList(data.nextPassport?.allowed, "no new actions", 4);
+      $("finalResult").className = "final-result";
+      $("finalResult").innerHTML = `
+        <div class="final-result-head">
+          <div>
+            <div class="kicker">Final result sent to external agent</div>
+            <h4>${safe(data.title)}</h4>
+            <p>${safe(data.message)}</p>
+          </div>
+          <span class="badge good">${safe(data.verification)}</span>
+        </div>
+        <ol class="final-plan-list">
+          ${plan.map((item) => `<li>${safe(item)}</li>`).join("")}
+        </ol>
+        <div class="final-result-columns">
+          <section class="final-result-column">
+            <strong>Agent may do now</strong>
+            <ul>${allowed.map((item) => `<li>${safe(item)}</li>`).join("")}</ul>
+          </section>
+          <section class="final-result-column">
+            <strong>Still requires user approval</strong>
+            <ul>${approval.map((item) => `<li>${safe(item)}</li>`).join("")}</ul>
+          </section>
+        </div>
+        <div class="final-result-receipt">
+          <div><strong>Receipt</strong><span>${safe(data.receiptId)}</span></div>
+          <div><strong>Internal handoffs</strong><span>${safe(handoffs.join(", "))}</span></div>
+          <div><strong>Next Passport</strong><span>Level ${safe(data.nextPassport?.passport_level || "-")}; ${safe(nextAllowed.join(", "))}</span></div>
+        </div>`;
+      return data;
+    }
+
+    function renderDialogueResultBlock(step, data) {
+      if (!data?.ready || String(step?.phase || "").toLowerCase() !== "receipt") return "";
+      const plan = passportList(data.plan, "No final plan generated", 8);
+      const approval = passportList(data.approval, "none", 6);
+      return `<div class="chat-line dialogue-result">
+        <span class="speaker">Final result sent to external agent</span>
+        <p>${safe(data.message)}</p>
+        <ol>${plan.map((item) => `<li>${safe(item)}</li>`).join("")}</ol>
+        <p>Needs user approval: ${safe(approval.join(", "))}. Receipt: ${safe(data.receiptId)} (${safe(data.verification)}).</p>
+      </div>`;
     }
 
     function passportEvolutionText() {
@@ -2592,8 +2817,7 @@
         : "Run the demo, then click any step below to inspect what happened.";
       $("prevStep").disabled = maxIndex === 0;
       $("nextStep").disabled = maxIndex >= steps.length - 1;
-      const finalResult = finalResultSummary();
-      $("finalResult").innerHTML = `<strong>${safe(finalResult.title)}</strong><p>${safe(finalResult.text)}</p>`;
+      const finalResult = renderFinalResultCard();
       renderPassportLoop();
       const step = steps[maxIndex];
       $("liveConversation").innerHTML = step ? `<article class="live-turn visible active conversation-frame">
@@ -2616,6 +2840,7 @@
             <span class="speaker">Final plan</span>
             <p>${safe(step.finalPlan)}</p>
           </div>` : ""}
+          ${renderDialogueResultBlock(step, finalResult)}
           <div class="chat-line narrator">
             <span class="speaker">Narrator</span>
             <p>${safe(step.outcome)}</p>
@@ -2656,6 +2881,13 @@
       return receiptIndex >= 0 ? receiptIndex : Math.max(0, steps.length - 1);
     }
 
+    function scrollFinalResultIntoView() {
+      const card = $("finalResult");
+      if (!card) return;
+      const top = Math.max(0, window.scrollY + card.getBoundingClientRect().top - 310);
+      window.scrollTo({ top, behavior: "smooth" });
+    }
+
     function startLivePlayback() {
       window.clearInterval(liveTimer);
       const steps = buildLiveSteps();
@@ -2667,6 +2899,9 @@
         if (state.liveStep >= stopIndex) {
           state.liveStep = stopIndex;
           window.clearInterval(liveTimer);
+          window.setTimeout(() => {
+            scrollFinalResultIntoView();
+          }, 120);
         }
         renderLiveExchange();
       }, 850);

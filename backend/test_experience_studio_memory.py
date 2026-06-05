@@ -188,6 +188,9 @@ def test_conversation_plan_creates_generator_ready_brief_without_learning_loop(m
     assert package["venueDataGapAnalysis"]["missingForProduction"]
     assert package["studioQualityEval"]["score"] > 0
     assert package["studioQualityEval"]["qaChecklist"]
+    assert package["creativePackageVariants"]
+    assert package["reviewAgentReview"]["agentId"] == "experience_studio_review_agent"
+    assert generated["draft"]["experienceReviewAgent"]["agentId"] == "experience_studio_review_agent"
     route_copy = [stop["guestCopy"] for stop in generated["draft"]["route"]]
     assert any("Start dry" in copy for copy in route_copy)
     assert any("short reset" in copy or "quiet middle beat" in copy for copy in route_copy)
@@ -356,6 +359,40 @@ def test_human_promoted_learning_rule_influences_future_generation(monkeypatch, 
         }
     )
     assert third["approvedLearningRules"]["status"] == "no_approved_rules"
+
+
+def test_section_revision_agent_returns_before_after_and_qa_delta(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+    from venue_experience_data import approved_synthetic_venue_export, build_venue_experience_data_from_export
+
+    venue_data = build_venue_experience_data_from_export(approved_synthetic_venue_export(), loaded_from="approved_profile.json")
+    draft = experience_studio._draft_from_payload(
+        {
+            "templateId": "rainy-day",
+            "audience": "mixed family groups",
+            "tone": "calm, plain, respectful",
+            "constraints": "Use verified venue facts only.",
+            "venueExperienceDataUsed": True,
+            "realInputs": venue_data["realInputs"],
+        }
+    )
+
+    revised = experience_studio.revise_experience_studio_section(
+        {
+            "draft": draft,
+            "sectionId": "staff_script",
+            "feedback": "Make the staff script less operational and keep accessibility language plain.",
+        }
+    )
+
+    assert revised["status"] == "revised"
+    assert revised["sectionId"] == "staff_script"
+    assert revised["beforeSection"]
+    assert revised["afterSection"]
+    assert revised["qaDelta"]["after"] >= revised["qaDelta"]["before"]
+    assert revised["reviewAgent"]["agentId"] == "experience_studio_review_agent"
+    assert revised["draft"]["experienceReviewAgent"]["reviewMode"] == "post_revision_review"
+    assert "less operational" in json.dumps(revised["afterSection"], default=str).lower() or "guest support" in json.dumps(revised["afterSection"], default=str).lower()
 
 
 def test_llm_creative_pass_polishes_selected_synthesis_without_control_authority(monkeypatch, tmp_path):

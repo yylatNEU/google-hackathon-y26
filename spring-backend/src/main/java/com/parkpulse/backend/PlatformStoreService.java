@@ -24,8 +24,8 @@ import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class PlatformStoreService {
-    private static final int SCHEMA_VERSION = 1;
-    private static final String MIGRATION_ID = "20260603_0001_platform_store_registry";
+    private static final int SCHEMA_VERSION = 2;
+    private static final String MIGRATION_ID = "20260605_0002_platform_store_data_boundaries";
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
     private final DataSource dataSource;
@@ -242,6 +242,8 @@ public class PlatformStoreService {
                     mode TEXT NOT NULL,
                     path TEXT NOT NULL,
                     data_classification TEXT NOT NULL,
+                    data_model TEXT NOT NULL DEFAULT 'unspecified',
+                    source_of_truth INTEGER NOT NULL DEFAULT 0,
                     shared_across_instances INTEGER NOT NULL,
                     required_for_core INTEGER NOT NULL,
                     status TEXT NOT NULL,
@@ -263,6 +265,12 @@ public class PlatformStoreService {
                 )
                 """
             );
+            if (!columnExists(connection, "platform_store_registry", "data_model")) {
+                statement.execute("ALTER TABLE platform_store_registry ADD COLUMN data_model TEXT NOT NULL DEFAULT 'unspecified'");
+            }
+            if (!columnExists(connection, "platform_store_registry", "source_of_truth")) {
+                statement.execute("ALTER TABLE platform_store_registry ADD COLUMN source_of_truth INTEGER NOT NULL DEFAULT 0");
+            }
             try (var migration = connection.prepareStatement(
                 """
                 INSERT OR IGNORE INTO platform_schema_migrations (migration_id, applied_at, checksum, description)
@@ -271,8 +279,8 @@ public class PlatformStoreService {
             )) {
                 migration.setString(1, MIGRATION_ID);
                 migration.setString(2, now());
-                migration.setString(3, "platform_store_registry:v1");
-                migration.setString(4, "Create a non-destructive registry for local SQLite authority and optional operational memory.");
+                migration.setString(3, "platform_store_registry:v2:data_boundaries");
+                migration.setString(4, "Add explicit data model and source-of-truth boundaries to the platform store registry.");
                 migration.executeUpdate();
             }
             statement.execute("PRAGMA user_version = " + SCHEMA_VERSION);
@@ -289,6 +297,10 @@ public class PlatformStoreService {
         Path handshakePath = envPath("PARKPULSE_AGENT_HANDSHAKE_DB", runtimeDir.resolve("agent_handshake.db"));
         Path deliveryPath = envPath("PARKPULSE_DELIVERY_OUTBOX", runtimeDir.resolve("delivery_outbox.jsonl"));
         Path liveFeedPath = envPath("PARKPULSE_LIVE_FEED_PATH", runtimeDir.resolve("live_feed_events.jsonl"));
+        Path agentOpsPath = envPath("PARKPULSE_AGENT_OPS_LEDGER", runtimeDir.resolve("agent_ops_ledger.jsonl"));
+        Path reviewPath = envPath("PARKPULSE_REVIEW_LEDGER_LOG_PATH", runtimeDir.resolve("review_ledger.jsonl"));
+        Path monitorEvidencePath = envPath("PARKPULSE_MONITOR_EVIDENCE_SNAPSHOT_PATH", Path.of(System.getProperty("user.dir")).getParent().resolve("output").resolve("monitor-evidence-limit-40.json"));
+        Path policyBooksPath = Path.of(System.getProperty("user.dir")).getParent().resolve("backend").resolve("policy_books");
         Path legacyPath = legacyPlatformDbPath();
         List<String> legacyTables = sqliteTables(legacyPath);
         boolean liveFeedMongo = env("PARKPULSE_LIVE_FEED_STORAGE", "").toLowerCase(Locale.ROOT).matches("mongo|mongodb");
@@ -301,6 +313,15 @@ public class PlatformStoreService {
         records.add(storeRecord("agent_handshake_store", "agent_handshake_session_registry", "sqlite_wal", handshakePath, "agent_session_authority", false, true, Files.exists(handshakePath) ? "ready" : "will_initialize_on_first_write", sqliteCount(handshakePath, List.of("agent_handshake_sessions")), Map.of("override_env", "PARKPULSE_AGENT_HANDSHAKE_DB")));
         records.add(storeRecord("delivery_outbox", "append_first_receiver_dispatch_outbox", "jsonl_durable_outbox", deliveryPath, "receiver_dispatch_receipts", false, true, Files.exists(deliveryPath.getParent()) ? "ready" : "directory_missing", jsonlCount(deliveryPath), Map.of("override_env", "PARKPULSE_DELIVERY_OUTBOX")));
         records.add(storeRecord("live_feed_events", "local_live_feed_event_buffer", "jsonl_or_mongodb", liveFeedPath, "observed_operational_signals", liveFeedMongo, false, liveFeedMongo ? "mongodb_configured" : "local_jsonl", jsonlCount(liveFeedPath), Map.of("override_env", "PARKPULSE_LIVE_FEED_STORAGE")));
+        records.add(storeRecord("agent_ops_ledger", "agent_run_receipt_and_eval_ledger", "jsonl_receipt_ledger", agentOpsPath, "agent_decision_trace_receipts", false, false, Files.exists(agentOpsPath) ? "ready" : "will_initialize_on_first_write", jsonlCount(agentOpsPath), Map.of("override_env", "PARKPULSE_AGENT_OPS_LEDGER")));
+        records.add(storeRecord("review_ledger", "human_review_training_ledger", "jsonl_or_mongodb", reviewPath, "human_review_sessions_and_dispositions", liveFeedMongo, false, liveFeedMongo ? "mongodb_configured" : "local_jsonl", jsonlCount(reviewPath), Map.of("override_env", "PARKPULSE_REVIEW_LEDGER_LOG_PATH")));
+        records.add(storeRecord("policy_books", "policy_doctrine_source_files", "versioned_json_documents", policyBooksPath, "policy_doctrine", true, true, Files.exists(policyBooksPath) ? "ready" : "missing", Files.exists(policyBooksPath) ? jsonFileCount(policyBooksPath) : 0, Map.of("legacy_policy_book", policyBooksPath.getParent().resolve("policy_book.json").toString())));
+        records.add(storeRecord("monitor_evidence_snapshot", "derived_monitor_evidence_graph_cache", "json_snapshot_cache", monitorEvidencePath, "derived_case_trace_review_policy_graph", false, false, Files.exists(monitorEvidencePath) ? "ready" : "will_initialize_on_first_read", null, Map.of(
+            "override_env", "PARKPULSE_MONITOR_EVIDENCE_SNAPSHOT_PATH",
+            "derived_from", List.of("agent_ops_ledger", "review_ledger", "live_feed_events", "policy_books", "case_index"),
+            "cache_invalidation", "source_watermark_fingerprint",
+            "production_target", "shared_mongodb_or_redis_snapshot"
+        )));
         String legacyStatus = !Files.exists(legacyPath) ? "not_present" : legacyTables.isEmpty() ? "legacy_empty" : "legacy_non_empty_preserved";
         records.add(storeRecord("legacy_repo_park_data_db", "legacy_artifact_not_current_source_of_truth", "sqlite_legacy", legacyPath, "legacy_platform_database", false, false, legacyStatus, sqliteCount(legacyPath, legacyTables), Map.of("tables", legacyTables, "safe_migration_action", "preserved_without_copy_or_delete")));
         return records;
@@ -314,6 +335,8 @@ public class PlatformStoreService {
         record.put("mode", mode);
         record.put("path", path.toString());
         record.put("data_classification", classification);
+        record.put("data_model", dataModelFor(key));
+        record.put("source_of_truth", sourceOfTruthFor(key));
         record.put("shared_across_instances", shared);
         record.put("required_for_core", required);
         record.put("status", status);
@@ -328,15 +351,17 @@ public class PlatformStoreService {
         try (var statement = connection.prepareStatement(
             """
             INSERT INTO platform_store_registry (
-                store_key, authority, mode, path, data_classification, shared_across_instances,
+                store_key, authority, mode, path, data_classification, data_model, source_of_truth, shared_across_instances,
                 required_for_core, status, record_count, metadata_json, migrated_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(store_key) DO UPDATE SET
                 authority = excluded.authority,
                 mode = excluded.mode,
                 path = excluded.path,
                 data_classification = excluded.data_classification,
+                data_model = excluded.data_model,
+                source_of_truth = excluded.source_of_truth,
                 shared_across_instances = excluded.shared_across_instances,
                 required_for_core = excluded.required_for_core,
                 status = excluded.status,
@@ -350,17 +375,19 @@ public class PlatformStoreService {
             statement.setString(3, record.get("mode").toString());
             statement.setString(4, record.get("path").toString());
             statement.setString(5, record.get("data_classification").toString());
-            statement.setInt(6, Boolean.TRUE.equals(record.get("shared_across_instances")) ? 1 : 0);
-            statement.setInt(7, Boolean.TRUE.equals(record.get("required_for_core")) ? 1 : 0);
-            statement.setString(8, record.get("status").toString());
+            statement.setString(6, record.get("data_model").toString());
+            statement.setInt(7, Boolean.TRUE.equals(record.get("source_of_truth")) ? 1 : 0);
+            statement.setInt(8, Boolean.TRUE.equals(record.get("shared_across_instances")) ? 1 : 0);
+            statement.setInt(9, Boolean.TRUE.equals(record.get("required_for_core")) ? 1 : 0);
+            statement.setString(10, record.get("status").toString());
             if (record.get("record_count") instanceof Integer count) {
-                statement.setInt(9, count);
+                statement.setInt(11, count);
             } else {
-                statement.setObject(9, null);
+                statement.setObject(11, null);
             }
-            statement.setString(10, json(record.get("metadata")));
-            statement.setString(11, record.get("migrated_at").toString());
-            statement.setString(12, record.get("updated_at").toString());
+            statement.setString(12, json(record.get("metadata")));
+            statement.setString(13, record.get("migrated_at").toString());
+            statement.setString(14, record.get("updated_at").toString());
             statement.executeUpdate();
         }
     }
@@ -377,6 +404,8 @@ public class PlatformStoreService {
                 record.put("mode", rows.getString("mode"));
                 record.put("path", rows.getString("path"));
                 record.put("data_classification", rows.getString("data_classification"));
+                record.put("data_model", rows.getString("data_model"));
+                record.put("source_of_truth", rows.getInt("source_of_truth") == 1);
                 record.put("shared_across_instances", rows.getInt("shared_across_instances") == 1);
                 record.put("required_for_core", rows.getInt("required_for_core") == 1);
                 record.put("status", rows.getString("status"));
@@ -446,6 +475,49 @@ public class PlatformStoreService {
         } catch (Exception error) {
             return null;
         }
+    }
+
+    private Integer jsonFileCount(Path path) {
+        if (!Files.isDirectory(path)) {
+            return 0;
+        }
+        try (var files = Files.list(path)) {
+            return (int) files.filter(file -> file.getFileName().toString().endsWith(".json")).count();
+        } catch (Exception error) {
+            return null;
+        }
+    }
+
+    private boolean columnExists(Connection connection, String tableName, String columnName) throws SQLException {
+        try (var statement = connection.prepareStatement("PRAGMA table_info(" + quoteIdentifier(tableName) + ")");
+             ResultSet rows = statement.executeQuery()) {
+            while (rows.next()) {
+                if (columnName.equals(rows.getString("name"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private String dataModelFor(String key) {
+        return switch (key) {
+            case "platform_registry" -> "relational_registry";
+            case "replay_store" -> "relational_event_index";
+            case "audit_store" -> "relational_audit_log";
+            case "agent_trust_store" -> "relational_identity_registry";
+            case "agent_handshake_store" -> "relational_session_registry";
+            case "delivery_outbox", "agent_ops_ledger" -> "append_event_log";
+            case "live_feed_events", "review_ledger" -> "event_log";
+            case "policy_books" -> "document_store";
+            case "monitor_evidence_snapshot" -> "derived_snapshot";
+            case "legacy_repo_park_data_db" -> "legacy_relational_database";
+            default -> "unspecified";
+        };
+    }
+
+    private boolean sourceOfTruthFor(String key) {
+        return !List.of("monitor_evidence_snapshot", "legacy_repo_park_data_db").contains(key);
     }
 
     private Connection connection() throws SQLException {

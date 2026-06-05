@@ -321,6 +321,18 @@ type ExperienceDraft = {
       avoidClaims?: string[];
       channelRules?: Record<string, string[]>;
     };
+    creativePackageVariants?: Array<{
+      id?: string;
+      name?: string;
+      status?: string;
+      positioning?: string;
+      guestPromise?: string;
+      routeFrame?: string;
+      channelEmphasis?: string[];
+      strengths?: string[];
+      reviewRisks?: string[];
+      whenToUse?: string;
+    }>;
     memoryInfluence?: {
       status?: string;
       mode?: string;
@@ -369,6 +381,7 @@ type ExperienceDraft = {
       qaChecklist?: Array<{ check?: string; status?: string }>;
       recommendedNextActions?: string[];
     };
+    reviewAgentReview?: ExperienceReviewAgent;
     designReasoning?: ExperienceReasoning;
     creativeSynthesis?: CreativeSynthesis;
   };
@@ -413,6 +426,41 @@ type ExperienceDraft = {
     productionRealVenueReady?: boolean;
     missingProductionRealVenueInputs?: string[];
   };
+  experienceReviewAgent?: ExperienceReviewAgent;
+};
+
+type ExperienceReviewAgent = {
+  agentId?: string;
+  agentName?: string;
+  status?: string;
+  score?: number;
+  reviewMode?: string;
+  findings?: string[];
+  sectionTargets?: Array<{ section?: string; reason?: string }>;
+  approvalRecommendation?: string;
+  memoryJudgment?: {
+    memoryUsed?: boolean;
+    rulesUsed?: boolean;
+    boundary?: string;
+  };
+  nextActions?: string[];
+};
+
+type SectionRevisionPayload = {
+  status?: string;
+  mode?: string;
+  sectionId?: string;
+  feedback?: string;
+  draft?: ExperienceDraft;
+  beforeSection?: unknown;
+  afterSection?: unknown;
+  qaDelta?: {
+    before?: number;
+    after?: number;
+    delta?: number;
+    scores?: Record<string, { before?: number; after?: number; delta?: number }>;
+  };
+  reviewAgent?: ExperienceReviewAgent;
 };
 
 type StudioCore = {
@@ -827,6 +875,10 @@ export function ExperienceStudio() {
   const [isWorkflowBusy, setIsWorkflowBusy] = useState(false);
   const [isSendingHandoff, setIsSendingHandoff] = useState(false);
   const [isPromotingRule, setIsPromotingRule] = useState(false);
+  const [isRevisingSection, setIsRevisingSection] = useState(false);
+  const [revisionSection, setRevisionSection] = useState("staff_script");
+  const [revisionFeedback, setRevisionFeedback] = useState("Make this section more magical, but keep accessibility plain and make staff language less operational.");
+  const [latestSectionRevision, setLatestSectionRevision] = useState<SectionRevisionPayload | null>(null);
   const [studioMemory, setStudioMemory] = useState<StudioMemoryPayload | null>(null);
   const [isLoadingMemory, setIsLoadingMemory] = useState(false);
   const [conversationInput, setConversationInput] = useState(
@@ -1319,6 +1371,43 @@ export function ExperienceStudio() {
     }
   };
 
+  const runSectionRevision = async () => {
+    if (!draft) {
+      setMessage("Generate or open a draft before revising a section");
+      return;
+    }
+    const feedback = revisionFeedback.trim();
+    if (!feedback) {
+      setMessage("Add reviewer feedback before running the revision agent");
+      return;
+    }
+    setIsRevisingSection(true);
+    setMessage(null);
+    try {
+      const response = await fetchParkPulseApi("/api/park/experience-studio/section-revision", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          draft,
+          sectionId: revisionSection,
+          feedback,
+          actor: "experience_reviewer",
+        }),
+        timeoutMs: 9000,
+      });
+      const payload = await response.json() as SectionRevisionPayload;
+      if (payload.status !== "revised" || !payload.draft) throw new Error("Section revision failed");
+      setDraftPayload((current) => ({ ...(current ?? { status: "ready", mode: "section_revision" }), status: "ready", mode: "section_revision", draft: payload.draft }));
+      setLatestSectionRevision(payload);
+      setMessage(`Review Agent revised ${formatStatus(payload.sectionId)}`);
+      window.setTimeout(() => draftResultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Section revision failed");
+    } finally {
+      setIsRevisingSection(false);
+    }
+  };
+
   const readinessStatus = readiness?.readiness?.status;
   const venueIdentity = readiness?.venueIdentity ?? null;
   const readinessCounts = readiness?.readiness?.counts ?? {};
@@ -1359,6 +1448,7 @@ export function ExperienceStudio() {
   const draft = draftPayload?.draft;
   const draftMissing = draft?.sourceIntegrity?.missingRealInputs ?? [];
   const creativePackage = draft?.creativePackage;
+  const experienceReviewAgent = draft?.experienceReviewAgent ?? creativePackage?.reviewAgentReview ?? null;
   const experienceReasoning = draft?.experienceReasoning ?? creativePackage?.designReasoning ?? null;
   const creativeSynthesis = draft?.creativeSynthesis ?? creativePackage?.creativeSynthesis ?? null;
   const profileIntelligence = draft?.profileIntelligence ?? readiness?.realInputs?.profileIntelligence ?? null;
@@ -1792,6 +1882,47 @@ export function ExperienceStudio() {
                   {isSavingDraft ? "Saving" : "Save draft"}
                 </button>
               </div>
+              {draft ? (
+                <div className="mt-3 rounded border border-lime-300/25 bg-[#151914] p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Review Agent revision</div>
+                      <div className="mt-1 text-xs leading-relaxed text-slate-500">Revise one section, keep route/profile locks, then show QA delta.</div>
+                    </div>
+                    {latestSectionRevision?.qaDelta ? (
+                      <div className="rounded border border-lime-300/30 bg-lime-950/20 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-lime-100">
+                        QA {latestSectionRevision.qaDelta.before ?? "n/a"} to {latestSectionRevision.qaDelta.after ?? "n/a"} ({latestSectionRevision.qaDelta.delta ?? 0})
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="mt-3 grid gap-2 lg:grid-cols-[12rem_minmax(0,1fr)_12rem]">
+                    <select
+                      value={revisionSection}
+                      onChange={(event) => setRevisionSection(event.target.value)}
+                      className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-bold text-slate-100 outline-none transition focus:border-lime-300"
+                    >
+                      <option value="staff_script">staff script</option>
+                      <option value="signage">signage</option>
+                      <option value="email">pre-arrival email</option>
+                      <option value="route">route storyboard</option>
+                      <option value="section_details">section details</option>
+                    </select>
+                    <input
+                      value={revisionFeedback}
+                      onChange={(event) => setRevisionFeedback(event.target.value)}
+                      className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs text-slate-100 outline-none transition focus:border-lime-300"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void runSectionRevision()}
+                      disabled={isRevisingSection}
+                      className="rounded border border-lime-300 bg-lime-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-lime-200 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-[#0d1115] disabled:text-slate-500"
+                    >
+                      {isRevisingSection ? "Revising" : "Run revision"}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               <div className="mt-4 grid gap-3 xl:grid-cols-3">
                 <div className="rounded border border-slate-800 bg-[#151914] p-3">
                   <div className="text-[10px] font-black uppercase tracking-widest text-lime-200">Brand voice</div>
@@ -1896,6 +2027,50 @@ export function ExperienceStudio() {
                                 <div key={label} className="rounded border border-slate-800 bg-[#0d1115] p-2">
                                   <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{formatStatus(label)}</div>
                                   <div className="mt-1 text-[11px] leading-relaxed text-slate-300">{value}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {experienceReviewAgent ? (
+                          <div className="mt-3 rounded border border-lime-300/25 bg-lime-950/10 p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <div className="text-[10px] font-black uppercase tracking-widest text-lime-100">Experience Review Agent</div>
+                                <div className="mt-1 text-xs font-black text-slate-100">{experienceReviewAgent.agentName ?? "Experience Studio Review Agent"}</div>
+                                <div className="mt-1 text-xs leading-relaxed text-slate-400">{formatStatus(experienceReviewAgent.approvalRecommendation)}</div>
+                              </div>
+                              <div className="rounded border border-lime-300/30 bg-lime-950/20 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-lime-100">
+                                {formatStatus(experienceReviewAgent.status)} / {experienceReviewAgent.score ?? "n/a"}
+                              </div>
+                            </div>
+                            <div className="mt-2 grid gap-2 lg:grid-cols-2">
+                              <div className="rounded border border-slate-800 bg-[#0d1115] p-2">
+                                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Findings</div>
+                                <div className="mt-1 text-[11px] leading-relaxed text-slate-300">{compactList(experienceReviewAgent.findings ?? [], 4)}</div>
+                              </div>
+                              <div className="rounded border border-slate-800 bg-[#0d1115] p-2">
+                                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Revision targets</div>
+                                <div className="mt-1 text-[11px] leading-relaxed text-amber-100">
+                                  {compactList((experienceReviewAgent.sectionTargets ?? []).map((item) => `${item.section}: ${item.reason}`), 4)}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ) : null}
+                        {creativePackage.creativePackageVariants?.length ? (
+                          <div className="mt-3 rounded border border-slate-800 bg-[#151914] p-3">
+                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Creative alternatives</div>
+                            <div className="mt-2 grid gap-2 lg:grid-cols-3">
+                              {creativePackage.creativePackageVariants.slice(0, 3).map((variant) => (
+                                <div key={variant.id ?? variant.name} className={`rounded border p-2 ${variant.status === "selected" ? "border-cyan-300/40 bg-cyan-950/10" : "border-slate-800 bg-[#0d1115]"}`}>
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="text-xs font-black text-slate-100">{variant.name}</div>
+                                    <div className="rounded border border-slate-700 px-2 py-1 text-[9px] font-black uppercase tracking-widest text-slate-400">{variant.status}</div>
+                                  </div>
+                                  <div className="mt-1 text-[11px] leading-relaxed text-slate-400">{variant.positioning}</div>
+                                  <div className="mt-2 text-[11px] leading-relaxed text-slate-300">Use: {variant.whenToUse}</div>
+                                  <div className="mt-1 text-[11px] leading-relaxed text-amber-100">Risk: {compactList(variant.reviewRisks ?? [], 2)}</div>
                                 </div>
                               ))}
                             </div>

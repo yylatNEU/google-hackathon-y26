@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchParkPulseApi, longRunningRequestTimeoutMs } from "@/lib/api";
+import { fetchParkPulseApi } from "@/lib/api";
 import type { GuestFlow, ParkOps, ParkPath, ParkRide, ParkState, ParkZone } from "@/types/park";
 
 type ApiRecord = Record<string, unknown>;
@@ -10,6 +10,7 @@ const LIVE_PARK_POLL_MS = 5000;
 const OFFLINE_RETRY_MS = 15000;
 const STALE_RUNTIME_GRACE_MS = 30000;
 const TRANSIENT_FAILURE_LIMIT = 2;
+const PARK_STATE_REQUEST_TIMEOUT_MS = 5000;
 
 function asRecord(value: unknown): ApiRecord {
   return value && typeof value === "object" ? (value as ApiRecord) : {};
@@ -162,7 +163,7 @@ export function useParkPulseState() {
   const refreshParkState = useCallback(async () => {
     setIsRefreshing(true);
     try {
-      const res = await fetchParkPulseApi("/api/park/state-lite", { timeoutMs: longRunningRequestTimeoutMs });
+      const res = await fetchParkPulseApi("/api/park/state-lite", { timeoutMs: PARK_STATE_REQUEST_TIMEOUT_MS });
       const data = await res.json();
       applyParkState(data);
       return data;
