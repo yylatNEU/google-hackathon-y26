@@ -101,8 +101,12 @@ def test_fast_gcp_training_dry_run_skips_slow_eval_and_training_reads(monkeypatc
     def fail_training_readiness(*args, **kwargs):
         raise AssertionError("fast dry-run should not run deep training readiness")
 
+    def fail_bigquery_status(*args, **kwargs):
+        raise AssertionError("fast dry-run should not create a live BigQuery client")
+
     monkeypatch.setattr(park_actual_training, "_scoped_bqml_eval_gate", fail_eval_lookup)
     monkeypatch.setattr(park_actual_training, "actual_training_status", fail_training_readiness)
+    monkeypatch.setattr(park_actual_training, "bigquery_status", fail_bigquery_status)
 
     payload = park_actual_training.gcp_training_dry_run_readiness(
         fast_readiness=True,
