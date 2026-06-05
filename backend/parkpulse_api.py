@@ -9771,6 +9771,103 @@ def _bounded_reward(value: float) -> float:
     return round(min(1.0, max(0.0, value)), 3)
 
 
+def _live_feed_metric_delta(rows: list[dict[str, Any]], source: str, metric: str) -> float | None:
+    for row in rows:
+        if not isinstance(row, dict) or row.get("source") != source:
+            continue
+        metrics = row.get("metrics", []) if isinstance(row.get("metrics"), list) else []
+        for item in metrics:
+            if isinstance(item, dict) and item.get("metric") == metric:
+                try:
+                    return float(item.get("delta"))
+                except (TypeError, ValueError):
+                    return None
+    return None
+
+
+def _live_feed_positive_delta_score(delta: float | None, *, lower_is_better: bool = True, scale: float = 10.0) -> float:
+    if delta is None:
+        return 0.0
+    signed = -delta if lower_is_better else delta
+    return _bounded_reward(signed / max(1.0, scale))
+
+
+def _commerce_action_attribution(rows: list[dict[str, Any]], receipts: list[dict[str, Any]]) -> dict[str, Any]:
+    executed_tools = {
+        str(row.get("source_tool") or row.get("tool") or "")
+        for row in receipts
+        if isinstance(row, dict)
+        and isinstance(row.get("result"), dict)
+        and row["result"].get("executed") is True
+    }
+    if not executed_tools.intersection({"pause_launch_promo", "redirect_offer", "inventory_alert", "restock_request", "shift_adjustment_recommendation"}):
+        return {"status": "not_applicable", "reason": "No Commerce-related controlled receiver action executed."}
+
+    kitchen_load_delta = _live_feed_metric_delta(rows, "food_ops", "kitchen_load_pct")
+    low_inventory_delta = _live_feed_metric_delta(rows, "food_ops", "low_inventory_items_count")
+    mobile_backlog_delta = _live_feed_metric_delta(rows, "food_ops", "mobile_order_backlog")
+    pickup_eta_delta = _live_feed_metric_delta(rows, "food_ops", "pickup_eta_minutes")
+    satisfaction_delta = _live_feed_metric_delta(rows, "guest_flow", "avg_satisfaction")
+    take_rate_delta = _live_feed_metric_delta(rows, "guest_flow", "routing_take_rate_pct")
+    guard_delta = _live_feed_metric_delta(rows, "staffing", "guard_team_count")
+    health_delta = _live_feed_metric_delta(rows, "staffing", "health_team_count")
+
+    promo_pause_score = _bounded_reward(
+        max(
+            _live_feed_positive_delta_score(kitchen_load_delta, lower_is_better=True, scale=12.0),
+            _live_feed_positive_delta_score(mobile_backlog_delta, lower_is_better=True, scale=40.0),
+            _live_feed_positive_delta_score(pickup_eta_delta, lower_is_better=True, scale=8.0),
+        )
+    )
+    inventory_score = _bounded_reward(_live_feed_positive_delta_score(low_inventory_delta, lower_is_better=True, scale=2.0))
+    demand_redirect_score = _bounded_reward(
+        max(
+            _live_feed_positive_delta_score(satisfaction_delta, lower_is_better=False, scale=8.0),
+            _live_feed_positive_delta_score(take_rate_delta, lower_is_better=False, scale=15.0),
+        )
+    )
+    labor_support_score = _bounded_reward(
+        max(
+            _live_feed_positive_delta_score(guard_delta, lower_is_better=False, scale=3.0),
+            _live_feed_positive_delta_score(health_delta, lower_is_better=False, scale=2.0),
+        )
+    )
+    rows_out = [
+        {
+            "action_family": "promo_pause_or_load_relief",
+            "executed": "pause_launch_promo" in executed_tools,
+            "score": promo_pause_score,
+            "evidence_metrics": {"kitchen_load_pct_delta": kitchen_load_delta, "mobile_order_backlog_delta": mobile_backlog_delta, "pickup_eta_minutes_delta": pickup_eta_delta},
+        },
+        {
+            "action_family": "inventory_or_restock",
+            "executed": bool(executed_tools.intersection({"inventory_alert", "restock_request", "pause_launch_promo"})),
+            "score": inventory_score,
+            "evidence_metrics": {"low_inventory_items_count_delta": low_inventory_delta},
+        },
+        {
+            "action_family": "demand_redirect",
+            "executed": "redirect_offer" in executed_tools,
+            "score": demand_redirect_score,
+            "evidence_metrics": {"avg_satisfaction_delta": satisfaction_delta, "routing_take_rate_pct_delta": take_rate_delta},
+        },
+        {
+            "action_family": "labor_support",
+            "executed": "shift_adjustment_recommendation" in executed_tools,
+            "score": labor_support_score,
+            "evidence_metrics": {"guard_team_count_delta": guard_delta, "health_team_count_delta": health_delta},
+        },
+    ]
+    return {
+        "status": "scored",
+        "mode": "commerce_action_level_outcome_attribution",
+        "executed_tools": sorted(tool for tool in executed_tools if tool),
+        "average_action_score": _bounded_reward(sum(row["score"] for row in rows_out) / len(rows_out)),
+        "rows": rows_out,
+        "boundary": "Action-family scores explain Commerce contribution only; they do not override policy, receiver, or promotion gates.",
+    }
+
+
 def _live_feed_reward_layers(
     payload: dict[str, Any],
     *,
@@ -9810,6 +9907,7 @@ def _live_feed_reward_layers(
     )
     negotiation_rounds = proposals.get("negotiation_rounds", []) if isinstance(proposals.get("negotiation_rounds"), list) else []
     receipts = executor.get("receipts", []) if isinstance(executor.get("receipts"), list) else []
+    commerce_attribution = _commerce_action_attribution(rows, receipts)
     executed_count = int(executor.get("executed_count") or 0)
     held_count = int(executor.get("held_count") or 0)
     held_disposition_count = int(executor.get("held_disposition_count") or 0)
@@ -9907,7 +10005,9 @@ def _live_feed_reward_layers(
             "measurement_source_count": len(rows),
             "memory_prior_count": memory_prior_count,
             "memory_applied_count": memory_applied,
+            "commerce_action_average_score": commerce_attribution.get("average_action_score") if isinstance(commerce_attribution, dict) else None,
         },
+        "commerce_action_attribution": commerce_attribution,
         "promotion_blockers": [
             blocker
             for blocker in [
@@ -14436,8 +14536,6 @@ def _is_copilot_followup(message: str, prior: dict[str, Any] | None) -> bool:
     lowered = message.lower()
     if any(term in lowered for term in ("undo", "revise", "change", "avoid", "instead")):
         return True
-    if _copilot_intent(message).get("asks_action"):
-        return False
     followup_terms = (
         "why",
         "alternative",
@@ -14459,7 +14557,11 @@ def _is_copilot_followup(message: str, prior: dict[str, Any] | None) -> bool:
         "change",
         "avoid",
     )
-    return any(term in lowered for term in followup_terms)
+    if any(term in lowered for term in followup_terms):
+        return True
+    if _copilot_intent(message).get("asks_action"):
+        return False
+    return False
 
 
 def _copilot_followup_answer(message: str, prior: dict[str, Any]) -> str:
@@ -15087,10 +15189,10 @@ async def park_copilot_chat(request: CopilotChatRequest):
     if conversation_intent == "apply_plan":
         requested_turn_mode = "apply"
     elif conversation_intent == "revise_plan":
-        requested_turn_mode = "propose"
+        requested_turn_mode = "answer"
     elif conversation_intent in {"rollback_plan", "explain_plan"}:
         requested_turn_mode = "answer"
-    is_followup = conversation_intent in {"explain_plan", "rollback_plan"} and _is_copilot_followup(message, prior_copilot)
+    is_followup = conversation_intent in {"explain_plan", "rollback_plan", "revise_plan"} and _is_copilot_followup(message, prior_copilot)
     tool_trace = _agent_role_tool_trace_for_api(route)
     if is_followup and prior_copilot:
         prior_map_grounding = prior_copilot.get("map_grounding") if isinstance(prior_copilot.get("map_grounding"), dict) else None

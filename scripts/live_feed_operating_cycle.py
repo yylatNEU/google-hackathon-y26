@@ -48,7 +48,7 @@ def _json_default(value: Any) -> str:
 
 def _scenario_key_from_issue_kind(kind: Any) -> str | None:
     text = str(kind or "").lower()
-    if any(term in text for term in ("food", "inventory", "mobile_order", "payment")):
+    if any(term in text for term in ("food", "inventory", "mobile_order", "payment", "demand_spike")):
         return "food_spike"
     if any(term in text for term in ("staff", "callout", "labor")):
         return "staff_shortage"

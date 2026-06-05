@@ -26,10 +26,11 @@ def _public_ip() -> str | None:
 
 def main() -> int:
     import env_bootstrap
+
+    loaded_env = env_bootstrap.load_backend_env()
     import memory_ops_agent
     import mongo_memory
 
-    loaded_env = env_bootstrap.load_backend_env()
     egress_ip = _public_ip()
     initial_status = mongo_memory.init_operational_memory(force=True)
     connected = bool(initial_status.get("connected"))

@@ -201,6 +201,9 @@ def _build_report(progress: dict[str, Any], case_rows: list[dict[str, Any]], ope
                 "conflict_priority": item.get("conflict_priority"),
                 "reconciled_decision": item.get("reconciled_decision"),
                 "next_action": item.get("next_action"),
+                "active_source_names": item.get("active_source_names", []),
+                "historical_source_names": item.get("historical_source_names", []),
+                "active_evidence_present": bool(item.get("statuses") or item.get("decisions")),
                 "source_summaries": source_summaries,
                 "repair": _repair_hypothesis(scenario_key, source_summaries),
                 "case_bank_evidence": {
@@ -217,6 +220,19 @@ def _build_report(progress: dict[str, Any], case_rows: list[dict[str, Any]], ope
                 "operating_report_evidence": _scenario_curve_from_operating_report(operating_report or {}, scenario_key),
             }
         )
+    active_priority = next(
+        (
+            row.get("scenario_key")
+            for row in drilldowns
+            if row.get("active_conflict")
+            or (row.get("active_evidence_present") and str(row.get("reconciled_decision") or "") != "candidate_consistent_growth")
+        ),
+        None,
+    )
+    historical_priority = next(
+        (row.get("scenario_key") for row in drilldowns if row.get("historical_drift") or not row.get("active_evidence_present")),
+        None,
+    )
     return {
         "created_at": _now_iso(),
         "mode": "source_reconciliation_drilldown",
@@ -226,8 +242,22 @@ def _build_report(progress: dict[str, Any], case_rows: list[dict[str, Any]], ope
         "summary": {
             "conflict_scenarios": [row.get("scenario_key") for row in drilldowns if row.get("active_conflict")],
             "historical_drift_scenarios": [row.get("scenario_key") for row in drilldowns if row.get("historical_drift")],
-            "watch_scenarios": [row.get("scenario_key") for row in drilldowns if not row.get("active_conflict") and str(row.get("reconciled_decision") or "") != "candidate_consistent_growth"],
-            "highest_priority": drilldowns[0].get("scenario_key") if drilldowns else None,
+            "watch_scenarios": [
+                row.get("scenario_key")
+                for row in drilldowns
+                if not row.get("active_conflict")
+                and str(row.get("reconciled_decision") or "") != "candidate_consistent_growth"
+                and bool(row.get("active_evidence_present"))
+            ],
+            "historical_watch_scenarios": [
+                row.get("scenario_key")
+                for row in drilldowns
+                if not row.get("active_conflict")
+                and str(row.get("reconciled_decision") or "") != "candidate_consistent_growth"
+                and not bool(row.get("active_evidence_present"))
+            ],
+            "highest_priority": active_priority,
+            "highest_historical_priority": historical_priority,
             "promotion_boundary": reconciliation.get("promotion_boundary") or "Hold promotion for conflicted slices until row-level evidence and reward formulas agree across current sources.",
         },
         "drilldowns": drilldowns,

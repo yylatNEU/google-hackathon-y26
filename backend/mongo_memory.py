@@ -946,7 +946,7 @@ class OperationalMemory:
         self.incident_vector_index = os.getenv("MONGODB_INCIDENT_VECTOR_INDEX", self.vector_index)
         self.learning_vector_index = os.getenv("MONGODB_LEARNING_VECTOR_INDEX", self.vector_index)
         self.append_decisions = not _truthy(os.getenv("MONGODB_DISABLE_DECISION_WRITES"))
-        self.operation_timeout_ms = _int_env("MONGODB_OPERATION_TIMEOUT_MS", 1500)
+        self.operation_timeout_ms = _int_env("MONGODB_OPERATION_TIMEOUT_MS", 5000)
         self.eager_setup = _truthy(os.getenv("MONGODB_EAGER_SETUP", "false"))
         try:
             self.min_eval_score = int(os.getenv("MONGODB_MIN_USEFUL_EVAL_SCORE", "75"))
@@ -1208,7 +1208,14 @@ class OperationalMemory:
             "errors": self.errors[-3:],
         }
 
-    def upsert_park_state(self, park_state: dict[str, Any], source_state: dict[str, Any] | None = None) -> dict[str, Any]:
+    def upsert_park_state(
+        self,
+        park_state: dict[str, Any],
+        source_state: dict[str, Any] | None = None,
+        *,
+        sync_related_collections: bool = True,
+        refresh_intelligence: bool = True,
+    ) -> dict[str, Any]:
         self._invalidate_dashboard_cache()
         now = _utc_now()
         flow = park_state.get("guestFlow") or park_state.get("passengerFlow") or {}
@@ -1247,9 +1254,18 @@ class OperationalMemory:
             collection.update_one({"_id": "live"}, {"$set": document}, upsert=True)
         else:
             self._fallback["park_state"] = [document]
-        self._sync_operational_collections(document, park_state, now)
-        self._refresh_operational_intelligence(document["scenario"].get("key", "unknown"))
-        return {"status": "stored", "collection": "park_state", "mode": self.mode, "updatedAt": now}
+        if sync_related_collections:
+            self._sync_operational_collections(document, park_state, now)
+        if refresh_intelligence:
+            self._refresh_operational_intelligence(document["scenario"].get("key", "unknown"))
+        return {
+            "status": "stored",
+            "collection": "park_state",
+            "mode": self.mode,
+            "updatedAt": now,
+            "syncedRelatedCollections": bool(sync_related_collections),
+            "refreshedOperationalIntelligence": bool(refresh_intelligence),
+        }
 
     def _sync_operational_collections(self, state_document: dict[str, Any], park_state: dict[str, Any], now: str) -> None:
         guest_flow = park_state.get("guestFlow", {})
@@ -4781,6 +4797,10 @@ def _degrade_memory(error: BaseException) -> None:
     _memory.seed_defaults()
 
 
+def _mongodb_configured() -> bool:
+    return bool((os.getenv("MONGODB_DIRECT_URI") or os.getenv("MONGODB_URI", "")).strip())
+
+
 def _safe_memory_call(name: str, operation, fallback, *, retry_operation_on_fallback: bool = True):
     try:
         if name != "mongo.initialize":
@@ -4816,11 +4836,25 @@ def init_operational_memory(force: bool = False) -> dict[str, Any]:
 
 
 def sync_park_state(park_state: dict[str, Any], source_state: dict[str, Any] | None = None) -> dict[str, Any]:
-    return _safe_memory_call(
-        "mongo.park_state.upsert",
-        lambda: _memory.upsert_park_state(park_state, source_state),
-        lambda error: {"status": "skipped", "collection": "park_state", "mode": _memory.mode, "error": str(error)[:300]},
-    )
+    def operation() -> dict[str, Any]:
+        return _memory.upsert_park_state(
+            park_state,
+            source_state,
+            refresh_intelligence=_truthy(os.getenv("MONGODB_REFRESH_INTELLIGENCE_ON_STATE_SYNC", "false")),
+        )
+
+    def fallback(error: BaseException) -> dict[str, Any]:
+        return {"status": "skipped", "collection": "park_state", "mode": _memory.mode, "error": str(error)[:300]}
+
+    result = _safe_memory_call("mongo.park_state.upsert", operation, fallback, retry_operation_on_fallback=False)
+    if result.get("status") != "skipped" or not _mongodb_configured():
+        return result
+
+    reconnect_status = init_operational_memory(force=True)
+    retry_result = _safe_memory_call("mongo.park_state.upsert.retry", operation, fallback, retry_operation_on_fallback=False)
+    retry_result["reconnectAttempted"] = True
+    retry_result["reconnectConnected"] = bool(reconnect_status.get("connected"))
+    return retry_result
 
 
 def retrieve_operational_context(

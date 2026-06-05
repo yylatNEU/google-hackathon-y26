@@ -114,7 +114,7 @@ def _scenario_from_issue(row: dict[str, Any]) -> str:
     kind = str(issue.get("kind") or "").lower()
     target = str(issue.get("target_id") or issue.get("targetId") or "").lower()
     text = f"{kind} {target}"
-    if any(term in text for term in ("food", "inventory", "mobile_order", "payment")):
+    if any(term in text for term in ("food", "inventory", "mobile_order", "payment", "demand_spike")):
         return "food_spike"
     if any(term in text for term in ("staff", "callout", "labor")):
         return "staff_shortage"
@@ -389,6 +389,10 @@ def _next_action(row: dict[str, Any]) -> str:
     sample_count = _safe_int(row.get("sample_count"))
     minimum = _safe_int(row.get("minimum_sample_count"), 12)
     missing = max(0, minimum - sample_count)
+    if decision == "promote_slice":
+        if key == "food_spike":
+            return "Keep Commerce slice promoted; monitor separate inventory, promo, labor, and demand-redirect action-family scores for rollback."
+        return "Keep as promoted slice, but continue rollback monitoring."
     if key == "ride_down":
         return "Improve ride-down negotiation: compare reopen, route, staffing, and guest-message options against queue pressure and safety gates before approving bounded receiver actions."
     if key == "staff_shortage":
@@ -403,8 +407,6 @@ def _next_action(row: dict[str, Any]) -> str:
         return f"Collect {missing} more outcome rows for this high-potential slice before promotion."
     if decision == "collect_more_evidence" and missing:
         return f"Collect {missing} more measured outcome rows before judging this slice."
-    if decision == "promote_slice":
-        return "Keep as promoted slice, but continue rollback monitoring."
     return "Review slice-specific reward and policy features before adding more generic cases."
 
 
@@ -464,8 +466,35 @@ def _build_record(report: dict[str, Any], case_rows: list[dict[str, Any]], opera
     backlog = _priority_backlog(scenarios)
     reconciliation = _source_reconciliation(report, case_rows)
     conflict_rows = [row for row in reconciliation.get("rows", []) if isinstance(row, dict) and row.get("conflict")]
+    active_backlog = [row for row in backlog if _safe_float(row.get("priority_score")) > 0]
+    active_watch_rows = [
+        row
+        for row in reconciliation.get("rows", [])
+        if isinstance(row, dict)
+        and row.get("active_source_names")
+        and str(row.get("reconciled_decision") or "") not in {"candidate_consistent_growth"}
+        and (row.get("statuses") or row.get("decisions"))
+    ]
     latest_recent = case_curve["recent"][1] if len(case_curve["recent"]) > 1 else (case_curve["recent"][0] if case_curve["recent"] else {})
     cumulative = case_curve["cumulative"][-1] if case_curve["cumulative"] else {}
+    top_priority_slice = (
+        conflict_rows[0].get("scenario_key")
+        if conflict_rows
+        else active_backlog[0].get("scenario_key")
+        if active_backlog
+        else active_watch_rows[0].get("scenario_key")
+        if active_watch_rows
+        else None
+    )
+    top_priority_action = (
+        conflict_rows[0].get("next_action")
+        if conflict_rows
+        else active_backlog[0].get("next_action")
+        if active_backlog
+        else active_watch_rows[0].get("next_action")
+        if active_watch_rows
+        else "No active promotion blocker; continue rollback monitoring and case collection."
+    )
     return {
         "created_at": _now_iso(),
         "mode": "sustainable_growth_improvement_curve_record",
@@ -484,8 +513,8 @@ def _build_record(report: dict[str, Any], case_rows: list[dict[str, Any]], opera
             "promotable_slice_count": sum(1 for row in scenarios if row.get("decision") == "promote_slice"),
             "source_conflict_count": reconciliation.get("conflict_count"),
             "source_consistent_promotion_ready": reconciliation.get("conflict_count") == 0 and sum(1 for row in scenarios if row.get("decision") == "hold_slice") == 0,
-            "top_priority_slice": conflict_rows[0].get("scenario_key") if conflict_rows else backlog[0].get("scenario_key") if backlog else None,
-            "top_priority_action": conflict_rows[0].get("next_action") if conflict_rows else backlog[0].get("next_action") if backlog else None,
+            "top_priority_slice": top_priority_slice,
+            "top_priority_action": top_priority_action,
         },
         "case_bank_curve": case_curve,
         "actual_training_curve": _actual_training_summary(report),
@@ -771,7 +800,19 @@ def main() -> int:
     parser.add_argument("--operating-report", type=Path, default=None, help="Path to live-feed-operating-cycle.json. Defaults to newest operating-cycle report.")
     parser.add_argument("--case-bank", type=Path, default=DEFAULT_CASE_BANK, help="Path to live-feed case-bank index.jsonl.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_PROGRESS_DIR, help="Directory for improvement-curve artifacts.")
-    parser.add_argument("--refresh-actual-training", action="store_true", help="Recompute actual-training diagnostics before recording, without generating a new operating case.")
+    parser.add_argument(
+        "--refresh-actual-training",
+        dest="refresh_actual_training",
+        action="store_true",
+        default=True,
+        help="Recompute actual-training diagnostics before recording, without generating a new operating case. This is the default.",
+    )
+    parser.add_argument(
+        "--no-refresh-actual-training",
+        dest="refresh_actual_training",
+        action="store_false",
+        help="Use the actual-training snapshot embedded in the operating report as the active source.",
+    )
     parser.add_argument("--min-training-rows", type=int, default=50, help="Minimum observed rows for refreshed actual-training diagnostics.")
     parser.add_argument("--training-detail", choices=["readiness", "full"], default="full", help="Actual-training detail level when refreshing diagnostics.")
     args = parser.parse_args()

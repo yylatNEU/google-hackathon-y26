@@ -667,7 +667,7 @@ def _role_auth_secret() -> str:
 
 
 def _signed_role_required() -> bool:
-    return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION"), False)
+    return _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_TOKEN"), False) or _truthy(os.getenv("PARKPULSE_REQUIRE_SIGNED_ROLE_FOR_MUTATION"), False)
 
 
 def _dev_role_issuer_enabled() -> bool:
@@ -809,7 +809,7 @@ async def _authorize_or_send(
     _record_role_authorization(scope, decision)
     if decision.get("allowed"):
         return decision
-    await _send_json(send, 403, _authorization_response(decision))
+    await _send_json(send, 401 if decision.get("status") == "unauthenticated" else 403, _authorization_response(decision))
     return None
 
 

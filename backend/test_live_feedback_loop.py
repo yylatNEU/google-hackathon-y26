@@ -754,9 +754,9 @@ def test_live_feed_outcome_measurement_builds_reward_candidate_from_post_action_
                 "held_count": 1,
                 "held_disposition_count": 1,
                 "receipts": [
-                    {"department": "food_retail", "result": {"status": "executed_controlled"}},
-                    {"department": "hr_labor", "result": {"status": "executed_controlled"}},
-                    {"department": "marketing", "result": {"status": "executed_controlled"}},
+                    {"department": "food_retail", "source_tool": "pause_launch_promo", "result": {"status": "executed_controlled", "executed": True}},
+                    {"department": "hr_labor", "source_tool": "shift_adjustment_recommendation", "result": {"status": "executed_controlled", "executed": True}},
+                    {"department": "marketing", "source_tool": "redirect_offer", "result": {"status": "executed_controlled", "executed": True}},
                     {"department": "safety", "result": {"status": "held"}},
                 ]
             },
@@ -833,6 +833,26 @@ def test_live_feed_outcome_measurement_builds_reward_candidate_from_post_action_
     assert result["source_coverage"] == 1
     assert result["department_coverage"] == 1
     assert {row["source"] for row in result["measurement_rows"]} >= {"food_ops", "guest_flow", "staffing"}
+    commerce = result["reward_layers"]["commerce_action_attribution"]
+    assert commerce["status"] == "scored"
+    assert commerce["mode"] == "commerce_action_level_outcome_attribution"
+    assert commerce["average_action_score"] > 0
+    by_family = {row["action_family"]: row for row in commerce["rows"]}
+    assert by_family["promo_pause_or_load_relief"]["executed"] is True
+    assert by_family["inventory_or_restock"]["score"] > 0
+    assert by_family["demand_redirect"]["executed"] is True
+    assert by_family["labor_support"]["executed"] is True
+
+
+def test_demand_spike_maps_to_food_spike_for_case_bank_and_reports():
+    import park_actual_training
+    from scripts import live_feed_operating_cycle, record_live_feed_improvement_curve
+
+    row = {"issue": {"kind": "demand_spike", "target_id": "mainStreet"}}
+
+    assert park_actual_training._case_bank_issue_scenario(row) == "food_spike"
+    assert record_live_feed_improvement_curve._scenario_from_issue(row) == "food_spike"
+    assert live_feed_operating_cycle._scenario_key_from_issue_kind("demand_spike") == "food_spike"
 
 
 def test_live_feed_memory_priors_enrich_proposals_without_execution_rights():

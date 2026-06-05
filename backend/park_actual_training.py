@@ -722,7 +722,7 @@ def _case_bank_issue_scenario(row: dict[str, Any]) -> str:
     kind = str(issue.get("kind") or "").lower()
     target = str(issue.get("target_id") or issue.get("targetId") or "").lower()
     text = f"{kind} {target}"
-    if any(term in text for term in ("food", "inventory", "mobile_order", "payment")):
+    if any(term in text for term in ("food", "inventory", "mobile_order", "payment", "demand_spike")):
         return "food_spike"
     if any(term in text for term in ("staff", "callout", "labor")):
         return "staff_shortage"

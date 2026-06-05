@@ -19,14 +19,15 @@ def _disable_llm(monkeypatch):
     )
 
 
-def chat(message, prior=None):
+def chat(message, prior=None, *, turn_mode="auto", allow_action=True, messages=None):
     context = {"last_copilot": prior} if prior else {}
     return run(
         parkpulse_api.park_copilot_chat(
             parkpulse_api.CopilotChatRequest(
                 message=message,
-                turn_mode="auto",
-                allow_action=True,
+                messages=messages or [],
+                turn_mode=turn_mode,
+                allow_action=allow_action,
                 selected_map_context=context,
             )
         )
@@ -82,6 +83,16 @@ def test_copilot_clarifies_ambiguous_text_without_action(monkeypatch):
     assert response["object_action_plan"]["overall_gate"] == "read_only"
 
 
+def test_copilot_rejects_apply_without_prior_plan(monkeypatch):
+    _disable_llm(monkeypatch)
+
+    response = chat("do it", turn_mode="apply", allow_action=True)
+    assert_read_only(response, "clarification.none")
+    assert response["conversation_memory"]["conversation_intent"] == "clarification"
+    assert response["recommended_action"]["dispatch_count"] == 0
+    assert response["action_receipt"] is None
+
+
 def test_copilot_only_proposes_for_explicit_operating_problem(monkeypatch):
     _disable_llm(monkeypatch)
 
@@ -97,6 +108,58 @@ def test_copilot_only_proposes_for_explicit_operating_problem(monkeypatch):
     assert response["tool_call_timeline"][1]["tool"] == "policy.interpret_before_action"
     assert response["turn_contract"]["state_mutation"] is False
     assert "Proposed plan" in response["answer"]
+
+
+def test_copilot_followup_reuses_prior_receipt_without_mutation(monkeypatch):
+    _disable_llm(monkeypatch)
+
+    prior = chat("The coaster queue is too long and families are stuck near the parade. What should we do?")
+    followup = chat(
+        "why that plan?",
+        prior=prior,
+        messages=[
+            {"role": "user", "content": "The coaster queue is too long and families are stuck near the parade. What should we do?"},
+            {"role": "assistant", "content": prior["answer"]},
+        ],
+    )
+    assert followup["mode"] == "follow_up"
+    assert followup["conversation_memory"]["followup_of_previous_run"] is True
+    assert followup["turn_contract"]["state_mutation"] is False
+    assert followup["turn_contract"]["dispatch_count"] == 0
+    assert followup["action_receipt"] is None
+    assert followup["recommended_action"]["matched_case_id"] == prior["recommended_action"]["matched_case_id"]
+    assert followup["recommended_action"]["object_action_plan_id"] == prior["recommended_action"]["object_action_plan_id"]
+    assert followup["tool_call_timeline"][-1]["id"] == "answer_operator"
+
+
+def test_copilot_revision_followup_does_not_start_new_action_plan(monkeypatch):
+    _disable_llm(monkeypatch)
+
+    prior = chat("The coaster queue is too long and families are stuck near the parade. What should we do?")
+    followup = chat("change it to avoid the parade crowd", prior=prior)
+
+    assert followup["mode"] == "follow_up"
+    assert followup["conversation_memory"]["followup_of_previous_run"] is True
+    assert followup["turn_contract"]["state_mutation"] is False
+    assert followup["turn_contract"]["dispatch_count"] == 0
+    assert followup["action_receipt"] is None
+    assert followup["recommended_action"]["matched_case_id"] == prior["recommended_action"]["matched_case_id"]
+    assert "prior selected action" in followup["answer"].lower()
+
+
+def test_copilot_apply_turn_requires_explicit_action_permission(monkeypatch):
+    _disable_llm(monkeypatch)
+
+    prior = chat("The coaster queue is too long and families are stuck near the parade. What should we do?")
+    response = chat("apply", prior=prior, turn_mode="apply", allow_action=False)
+    assert response["mode"] == "propose"
+    assert response["conversation_memory"]["conversation_intent"] == "apply_plan"
+    assert response["turn_contract"]["state_mutation"] is False
+    assert response["turn_contract"]["dispatch_count"] == 0
+    assert response["recommended_action"]["gate"] in {"prepared", "approval_required"}
+    assert response["object_action_plan"]["will_execute"] is False
+    assert response["action_receipt"] is None
+    assert response["impact_replay"] is None
 
 
 def test_copilot_does_not_downgrade_action_shaped_problem_to_status(monkeypatch):
