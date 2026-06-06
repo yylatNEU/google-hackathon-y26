@@ -1,3 +1,6 @@
+import sys
+from types import SimpleNamespace
+
 import latency_diagnostics
 from latency_diagnostics import build_latency_diagnostics, latency_history_payload
 
@@ -239,3 +242,93 @@ def test_latency_probe_import_and_persist_edge_cases(monkeypatch):
     skipped = latency_diagnostics.schedule_latency_diagnostics_persist({"status": "ok"}, lambda payload: "unused")
     assert skipped["reason"] == "persist_in_flight"
     latency_diagnostics._PERSIST_FUTURE = None
+
+
+def test_latency_dependency_probe_branches(monkeypatch):
+    monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.delenv("MONGODB_DIRECT_URI", raising=False)
+    assert latency_diagnostics._probe_mongo()["status"] == "disabled"
+    monkeypatch.setenv("MONGODB_URI", "mongodb://unit")
+    monkeypatch.setitem(
+        sys.modules,
+        "mongo_memory",
+        SimpleNamespace(init_operational_memory=lambda: {"connected": False, "mode": "fallback", "errors": ["down", "slow", "extra"]}),
+    )
+    mongo = latency_diagnostics._probe_mongo()
+    assert mongo["status"] == "degraded"
+    assert mongo["errors"] == ["down", "slow"]
+
+    monkeypatch.delenv("PARKPULSE_LIVE_BIGQUERY", raising=False)
+    monkeypatch.delenv("PARKPULSE_COLLABORATION_LIVE_BIGQUERY", raising=False)
+    assert latency_diagnostics._probe_bigquery()["status"] == "disabled"
+    monkeypatch.setenv("PARKPULSE_COLLABORATION_LIVE_BIGQUERY", "true")
+    monkeypatch.setitem(
+        sys.modules,
+        "bigquery_analytics",
+        SimpleNamespace(bigquery_status=lambda: {"ready": True, "mode": "unit", "dataset": "dataset", "readiness_issues": ["a", "b", "c", "d"]}),
+    )
+    bigquery = latency_diagnostics._probe_bigquery()
+    assert bigquery["status"] == "ok"
+    assert bigquery["readiness_issues"] == ["a", "b", "c"]
+
+    monkeypatch.delenv("ENABLE_VERTEX_GENAI_EVAL", raising=False)
+    assert latency_diagnostics._probe_vertex()["status"] == "disabled"
+    monkeypatch.setenv("ENABLE_VERTEX_GENAI_EVAL", "true")
+    monkeypatch.delenv("PARKPULSE_LATENCY_PROBE_VERTEX_LIVE", raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "evaluator_loop",
+        SimpleNamespace(
+            evaluator_loop_status=lambda: {"status": "configured", "provider": "vertex", "hosted_configured": True, "hosted_trigger_enabled": False, "readiness_issues": ["ok"]},
+            run_vertex_hosted_evaluation=lambda payload: {"status": "completed", "transport": "rest", "provider": "vertex"},
+        ),
+    )
+    vertex_status = latency_diagnostics._probe_vertex()
+    assert vertex_status["mode"] == "status_probe"
+    monkeypatch.setenv("PARKPULSE_LATENCY_PROBE_VERTEX_LIVE", "true")
+    vertex_live = latency_diagnostics._probe_vertex()
+    assert vertex_live["status"] == "ok"
+    assert vertex_live["mode"] == "live_evaluate_instances_probe"
+
+
+def test_latency_probe_skip_snapshot_and_gate_edges(monkeypatch):
+    latency_diagnostics._PROBE_CACHE.clear()
+    latency_diagnostics._PROBE_FUTURES.clear()
+    latency_diagnostics._PROBE_FAILURES.clear()
+    latency_diagnostics._PROBE_CIRCUIT_OPENED_AT.clear()
+    monkeypatch.setattr(latency_diagnostics, "_PROBES", {"cached": lambda: {"status": "ok"}})
+    latency_diagnostics._PROBE_CACHE["cached"] = {"probe": "cached", "status": "ok", "finished_epoch": latency_diagnostics.time.time()}
+    assert latency_diagnostics.trigger_latency_probes(probe_names=["cached"])["skipped"]["cached"] == "fresh"
+
+    class RunningFuture:
+        def done(self):
+            return False
+
+    latency_diagnostics._PROBE_CACHE.clear()
+    latency_diagnostics._PROBE_FUTURES["cached"] = RunningFuture()
+    assert latency_diagnostics.trigger_latency_probes(force=True, probe_names=["cached"])["skipped"]["cached"] == "already_running"
+    snapshot = latency_diagnostics.latency_probe_snapshot()
+    assert snapshot["probes"]["cached"]["status"] == "running"
+
+    monkeypatch.setattr(latency_diagnostics, "_IMPORT_PROFILE_FUTURE", RunningFuture())
+    monkeypatch.setattr(latency_diagnostics, "_IMPORT_PROFILE_CACHE", {"status": "running", "started_epoch": latency_diagnostics.time.time()})
+    assert latency_diagnostics.import_profile_snapshot()["status"] == "running"
+    monkeypatch.setattr(latency_diagnostics, "_IMPORT_PROFILE_FUTURE", None)
+
+    diagnostics = {
+        "causes": [{"id": "critical_cause", "severity": "critical"}, {"id": "warn_cause", "severity": "warning"}],
+        "timings": {
+            "full_runtime": {"status": "failed"},
+            "slowest_workflow_stages": [{"stage": "slow", "stage_ms": 5000}],
+            "vertex_sweep_scenarios": [{"scenario_key": "ride_down", "elapsed_ms": 20000}],
+            "dependency_probes": {"mongo": {"status": "failed", "duration_ms": 9000}, "vertex": {"status": "running", "duration_ms": 6000}},
+            "import_profile_detail": {"status": "timeout", "duration_ms": 40000},
+        },
+        "thresholds": {"slow_stage_warning_ms": 2000, "vertex_sweep_warning_ms": 10000},
+    }
+    gate = latency_diagnostics.latency_acceptance_gate(diagnostics, fail_on_warning=True)
+    assert gate["status"] == "blocked"
+    assert "critical:critical_cause" in gate["blockers"]
+    assert "full_runtime:failed" in gate["blockers"]
+    assert any(item.startswith("probe:mongo:failed") for item in gate["blockers"])
+    assert any(item.startswith("stage:slow") for item in gate["warnings"])

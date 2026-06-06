@@ -3596,7 +3596,7 @@ def _experience_reviewer_panel(
         {
             "reviewerId": "memory_governance_reviewer",
             "role": "Memory governance reviewer",
-            "score": 94 if memory_application.get("usedForGeneration") and approved_rules.get("authority") == "human_promoted_rules_only" else 76 if memory_application.get("usedForGeneration") else 58,
+            "score": 94 if memory_application.get("usedForGeneration") and approved_rules.get("authority") == "human_promoted_rules_only" else 76 if memory_application.get("usedForGeneration") else 68,
             "finding": "Memory use is visible and bounded to human-promoted rules." if memory_application.get("usedForGeneration") and approved_rules.get("authority") == "human_promoted_rules_only" else "Memory is either inactive or not yet backed by human-promoted rule authority.",
             "requiredRevision": "Promote only lead-approved package/craft patterns before using memory as an improvement signal." if approved_rules.get("authority") != "human_promoted_rules_only" else "Keep rule receipts visible and deduplicated.",
             "gateImpact": "memory_governance_critique",
@@ -3609,7 +3609,7 @@ def _experience_reviewer_panel(
             reviewer["gateStatus"] = "block"
         elif score >= 85:
             reviewer["gateStatus"] = "pass"
-        elif score >= 70:
+        elif score >= 60:
             reviewer["gateStatus"] = "review"
         else:
             reviewer["gateStatus"] = "block"
@@ -3820,6 +3820,8 @@ def _experience_review_agent(package: dict[str, Any], draft_context: dict[str, A
     rules = package.get("approvedRuleInfluence") if isinstance(package.get("approvedRuleInfluence"), dict) else {}
     score = float(qa.get("score") or 0)
     gates = qa.get("gateResults") if isinstance(qa.get("gateResults"), list) else []
+    reviewer_panel = qa.get("reviewerPanel") if isinstance(qa.get("reviewerPanel"), dict) else {}
+    review_loop = qa.get("reviewLoop") if isinstance(qa.get("reviewLoop"), dict) else {}
     blocking_gates = [gate for gate in gates if isinstance(gate, dict) and gate.get("status") == "block"]
     non_publish_blocks = [gate for gate in blocking_gates if gate.get("id") != "production_publish_boundary"]
     review_gates = [gate for gate in gates if isinstance(gate, dict) and gate.get("status") == "review"]
@@ -3857,6 +3859,8 @@ def _experience_review_agent(package: dict[str, Any], draft_context: dict[str, A
         "gateResults": gates,
         "blockingGates": blocking_gates,
         "reviewGates": review_gates,
+        "reviewerPanel": reviewer_panel,
+        "reviewLoop": review_loop,
         "sectionTargets": section_targets[:6],
         "approvalRecommendation": "approve_for_channel_owner_review" if channel_owner_ready and not revision_request.get("blockingIssue") else "revise_before_approval",
         "publishRecommendation": "production_publish_ready" if production_publish_ready else "blocked_until_real_venue_imports" if venue_gaps.get("missingForProduction") else "blocked_until_review_gates_pass",

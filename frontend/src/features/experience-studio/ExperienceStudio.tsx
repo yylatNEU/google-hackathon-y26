@@ -387,6 +387,19 @@ type ExperienceDraft = {
       scores?: Record<string, number>;
       gateSummary?: { passed?: number; review?: number; blocked?: number };
       gateResults?: Array<{ id?: string; status?: string; severity?: string; evidence?: string }>;
+      reviewerPanel?: {
+        status?: string;
+        consensusScore?: number;
+        summary?: string;
+        reviewers?: Array<{ reviewerId?: string; role?: string; score?: number; gateStatus?: string; finding?: string; requiredRevision?: string }>;
+        revisionQueue?: Array<{ reviewerId?: string; role?: string; status?: string; requiredRevision?: string }>;
+      };
+      reviewLoop?: {
+        status?: string;
+        consensusScore?: number;
+        revisionQueue?: Array<{ reviewerId?: string; role?: string; status?: string; requiredRevision?: string }>;
+        learningUse?: string;
+      };
       findings?: string[];
       qaChecklist?: Array<{ check?: string; status?: string }>;
       recommendedNextActions?: string[];
@@ -2021,6 +2034,13 @@ export function ExperienceStudio() {
                                   <div key={label}>{formatStatus(label)}: {value}</div>
                                 ))}
                               </div>
+                              {creativePackage.studioQualityEval.reviewerPanel ? (
+                                <div className="mt-2 rounded border border-cyan-300/15 bg-[#0d1115] p-2 text-[11px] leading-relaxed text-slate-300">
+                                  <div className="text-[10px] font-black uppercase tracking-widest text-cyan-100">Reviewer loop</div>
+                                  <div className="mt-1">{formatStatus(creativePackage.studioQualityEval.reviewerPanel.status)} / consensus {creativePackage.studioQualityEval.reviewerPanel.consensusScore ?? "n/a"}</div>
+                                  <div className="mt-1 text-slate-400">{compactList((creativePackage.studioQualityEval.reviewerPanel.reviewers ?? []).map((reviewer) => `${reviewer.role}: ${formatStatus(reviewer.gateStatus)} ${reviewer.finding ?? ""}`), 2)}</div>
+                                </div>
+                              ) : null}
                               {creativePackage.studioQualityEval.gateResults?.length ? (
                                 <div className="mt-2 text-[11px] leading-relaxed text-slate-300">
                                   {compactList(creativePackage.studioQualityEval.gateResults.map((gate) => `${formatStatus(gate.status)} / ${formatStatus(gate.id)}: ${gate.evidence ?? ""}`), 3)}
