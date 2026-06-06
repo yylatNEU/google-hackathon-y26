@@ -2530,6 +2530,44 @@ def test_main_market_and_food_demand_episode_routes(monkeypatch):
     assert food["agentOpsLedger"]["status"] == "recorded"
 
 
+def test_main_reliability_qa_and_monitor_evidence_routes(monkeypatch):
+    import prod_reliability_qa_agent
+
+    monkeypatch.setattr(prod_reliability_qa_agent, "reliability_qa_agent_contract", lambda: {"status": "ready", "mode": "qa_contract"})
+
+    async def qa_payload(message, mode, route):
+        return {"status": "ready", "message": message, "mode": mode, "route": route}
+
+    async def monitor_graph(case_id=None, limit=30, force_refresh=False):
+        return {"status": "ready", "case_id": case_id, "limit": limit, "force_refresh": force_refresh}
+
+    async def case_brief(case_id):
+        return {"status": "ready", "case_id": case_id}
+
+    monkeypatch.setattr(main, "route_agent_role", lambda message, mode: {"role": mode, "message": message})
+    monkeypatch.setattr(main, "_qa_role_payload", qa_payload)
+    monkeypatch.setattr(main, "_store_run_receipt", lambda result, message, mode, kind: {**result, "receipt": {"message": message, "mode": mode, "kind": kind}})
+    monkeypatch.setattr(main, "_monitor_evidence_graph_cached", monitor_graph)
+    monkeypatch.setattr(main, "monitor_evidence_storage_status", lambda force_refresh=False: {"status": "ready", "force_refresh": force_refresh})
+    monkeypatch.setattr(main, "_fast_case_brief", case_brief)
+
+    _, contract = run(_asgi_json("GET", "/api/park/reliability-qa-agent"))
+    assert contract == {"status": "ready", "mode": "qa_contract"}
+
+    _, qa = run(_asgi_json("POST", "/api/park/reliability-qa-run", {"message": "review slow QA"}))
+    assert qa["status"] == "ready"
+    assert qa["receipt"]["kind"] == "reliability_qa"
+    assert qa["route"]["role"] == "qa"
+
+    _, graph = run(_asgi_json("GET", "/api/park/monitor-evidence", query_string=b"caseId=case-1&limit=bad&refresh=true"))
+    assert graph == {"status": "ready", "case_id": "case-1", "limit": 30, "force_refresh": True}
+
+    _, storage = run(_asgi_json("GET", "/api/park/monitor-evidence/storage-status", query_string=b"refresh=true"))
+    assert storage == {"status": "ready", "force_refresh": True}
+    _, brief = run(_asgi_json("GET", "/api/park/cases/case%2F1/brief"))
+    assert brief == {"status": "ready", "case_id": "case/1"}
+
+
 def test_api_agent_wrapper_fallback_and_error_branches(monkeypatch):
     async def broken_lite():
         raise RuntimeError("state lite unavailable")
