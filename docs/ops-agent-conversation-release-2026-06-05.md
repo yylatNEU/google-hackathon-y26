@@ -5,7 +5,9 @@ This file defines the deployable release scope for the ParkPulse ops-agent conve
 ## Production Revisions
 
 - Backend service: `parkpulse-private-api`
-- Active backend revision verified during this release: `parkpulse-private-api-00129-xwq`
+- Active backend revision verified during this release: `parkpulse-private-api-00158-fog`
+- No-traffic backend canaries verified during this release: `parkpulse-private-api-00157-wij`, `parkpulse-private-api-00158-fog`
+- No-traffic backend canary tag URL: `https://ops-agent-canary---parkpulse-private-api-xtqfwzeoga-uc.a.run.app`
 - Frontend service: `parkpulse-frontend`
 - Active frontend revision verified during this release: `parkpulse-frontend-00009-5px`
 - Frontend URL: `https://parkpulse-frontend-xtqfwzeoga-uc.a.run.app`
@@ -16,6 +18,8 @@ Backend conversation hot path:
 
 - `backend/main.py`
 - `backend/test_main_lightweight_copilot.py`
+- `patches/ops-agent-copilot-hotpath-2026-06-05.patch`
+- `patches/ops-agent-lightweight-semantic-memory-2026-06-05.patch`
 
 Frontend conversation surface and proxy:
 
@@ -40,6 +44,13 @@ Deployment and verification:
 - The frontend proxy keeps the deployed app on same-origin API calls and reduces repeated identity-token fetches.
 - The copilot endpoint can return through the lightweight local hot path after the full runtime is loaded.
 - Direct production smoke after runtime load returned HTTP 200 with `latency_diagnostics.wrapper.path=lightweight_hot_path_local_only`.
+- The no-traffic backend canary has `PARKPULSE_COPILOT_SEMANTIC_MEMORY=true`, `PARKPULSE_MONGO_MODEL_EMBEDDINGS=true`, and the `MONGODB_MODEL_API_KEY` secret mounted.
+- The first no-traffic backend canary copilot smoke returned `source=gemini_lightweight_copilot`, `latency_diagnostics.wrapper.path=lightweight_hot_path_local_only`, and `semantic_memory_context.status=configured_deferred`.
+- The promoted canary build adds bounded lightweight semantic-memory retrieval before the model response. Expected successful status is `semantic_memory_context.status=ready` with `retrieval_method=mongodb_vector_search_voyage`; timeout/error statuses must still return a complete non-mutating answer.
+- The promoted backend revision `parkpulse-private-api-00158-fog` returned `semantic_memory_context.status=ready`, `retrieval_method=mongodb_vector_search_voyage`, and counts of 3 playbooks, 3 incidents, and 3 learnings on a production copilot smoke.
+- Mongo model embedding backfill repaired 9 playbooks, 7 incidents, and 40 agent learnings; model API readiness is `ready` with 256-dimension `modelEmbedding` coverage.
+- Production traffic was shifted to `parkpulse-private-api-00158-fog` after no-traffic verification; private deploy verification and frontend smoke passed after promotion.
+- Production traffic remained on `parkpulse-private-api-00129-xwq` during canary validation, then shifted to verified revision `parkpulse-private-api-00158-fog`.
 - Focused backend regression test for the lightweight wrapper passed.
 - Frontend lint, typecheck, build, and deployed smoke passed during this release.
 

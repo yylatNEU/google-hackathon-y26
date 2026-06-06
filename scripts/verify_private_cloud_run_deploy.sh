@@ -64,20 +64,29 @@ spec = payload.get("spec") or {}
 latest_ready = status.get("latestReadyRevisionName")
 traffic = status.get("traffic") or []
 spec_traffic = spec.get("traffic") or []
+traffic_targets = [
+    {"percent": int(row.get("percent") or 0), "revisionName": row.get("revisionName"), "latestRevision": bool(row.get("latestRevision"))}
+    for row in traffic
+    if row.get("percent") is not None
+]
+spec_targets = [
+    {"percent": int(row.get("percent") or 0), "revisionName": row.get("revisionName"), "latestRevision": bool(row.get("latestRevision"))}
+    for row in spec_traffic
+    if row.get("percent") is not None
+]
 if not latest_ready:
     raise SystemExit("Cloud Run has no latest ready revision.")
 if expected_revision:
-    expected_status = [{"percent": 100, "revisionName": expected_revision}]
-    expected_spec = [{"percent": 100, "revisionName": expected_revision}]
-    if traffic != expected_status:
+    expected_status = [{"percent": 100, "revisionName": expected_revision, "latestRevision": False}]
+    if traffic_targets != expected_status:
         raise SystemExit(f"Cloud Run traffic is not 100% expected revision: expected={expected_revision}, traffic={traffic}")
-    if spec_traffic != expected_spec:
+    if spec_targets != expected_status:
         raise SystemExit(f"Cloud Run spec is not pinned to expected revision: expected={expected_revision}, spec={spec_traffic}")
     print(f"Traffic: 100% {expected_revision}")
     raise SystemExit(0)
-if traffic != [{"latestRevision": True, "percent": 100, "revisionName": latest_ready}]:
+if traffic_targets != [{"latestRevision": True, "percent": 100, "revisionName": latest_ready}]:
     raise SystemExit(f"Cloud Run traffic is not 100% latest ready revision: latest={latest_ready}, traffic={traffic}")
-if spec_traffic != [{"latestRevision": True, "percent": 100}]:
+if spec_targets != [{"latestRevision": True, "percent": 100, "revisionName": None}]:
     raise SystemExit(f"Cloud Run spec is not configured to track latest revision: {spec_traffic}")
 print(f"Traffic: 100% latest ({latest_ready})")
 PY

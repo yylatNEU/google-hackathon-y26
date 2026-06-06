@@ -200,6 +200,8 @@ _heartbeat_explanation_cache: dict[str, dict[str, Any]] = {}
 _heartbeat_explanation_lock = threading.Lock()
 _hot_endpoint_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _hot_endpoint_refreshing: set[str] = set()
+_lightweight_semantic_memory_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_lightweight_semantic_memory_lock = threading.Lock()
 _mongo_hot_status_cache: tuple[float, dict[str, Any]] | None = None
 _evidence_endpoint_cache: dict[str, tuple[float, float, dict[str, Any]]] = {}
 _evidence_endpoint_refreshing: set[str] = set()
@@ -8897,6 +8899,160 @@ def _lightweight_copilot_options(recommendation: dict[str, Any], route: dict[str
     ]
 
 
+def _lightweight_copilot_semantic_enabled() -> bool:
+    return _truthy_env("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY", True) and (
+        _truthy_env("PARKPULSE_COPILOT_SEMANTIC_MEMORY", False)
+        or _truthy_env("PARKPULSE_MONGO_MODEL_EMBEDDINGS", False)
+    )
+
+
+def _lightweight_copilot_memory_doc_summary(document: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: document.get(key)
+        for key in (
+            "_id",
+            "title",
+            "summary",
+            "incidentType",
+            "scenarioKey",
+            "lesson",
+            "rule",
+            "recommendedAction",
+            "score",
+        )
+        if document.get(key) is not None
+    }
+
+
+def _compact_lightweight_copilot_semantic_memory(memory: dict[str, Any]) -> dict[str, Any]:
+    status = memory.get("status") if isinstance(memory.get("status"), dict) else {}
+    retrieved = memory.get("retrieved") if isinstance(memory.get("retrieved"), dict) else {}
+    playbooks = retrieved.get("playbooks") if isinstance(retrieved.get("playbooks"), list) else []
+    incidents = retrieved.get("incidents") if isinstance(retrieved.get("incidents"), list) else []
+    learnings = retrieved.get("learnings") if isinstance(retrieved.get("learnings"), list) else []
+    retrieval_method = str(retrieved.get("method") or "")
+    model_api = status.get("modelApi") if isinstance(status.get("modelApi"), dict) else {}
+    model_api_enabled = bool(model_api.get("enabled"))
+    counts = {"playbooks": len(playbooks), "incidents": len(incidents), "learnings": len(learnings)}
+    total_count = sum(counts.values())
+    degraded_reasons: list[str] = []
+    if not retrieval_method or retrieval_method in {"degraded_empty", "role_context_cache_miss"}:
+        degraded_reasons.append("Semantic memory returned no usable hot-path context.")
+    if model_api_enabled and not retrieval_method.startswith("mongodb_vector_search"):
+        degraded_reasons.append(f"Model API is enabled but retrieval used {retrieval_method or 'unknown'} instead of vector search.")
+    if total_count <= 0:
+        degraded_reasons.append("No playbooks, incidents, or learnings were retrieved.")
+    return {
+        "status": "ready" if not degraded_reasons else "degraded",
+        "source": "mongo_operational_memory_lightweight",
+        "query": memory.get("query"),
+        "scenario_key": memory.get("scenario_key"),
+        "agent_role": memory.get("agent_role"),
+        "cache_policy": memory.get("cache_policy"),
+        "retrieval_method": retrieval_method,
+        "summary": memory.get("summary"),
+        "model_api": model_api,
+        "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
+        "readiness_issues": degraded_reasons,
+        "counts": counts,
+        "retrieved": {
+            "playbooks": [_lightweight_copilot_memory_doc_summary(row) for row in playbooks[:3] if isinstance(row, dict)],
+            "incidents": [_lightweight_copilot_memory_doc_summary(row) for row in incidents[:3] if isinstance(row, dict)],
+            "learnings": [_lightweight_copilot_memory_doc_summary(row) for row in learnings[:3] if isinstance(row, dict)],
+        },
+    }
+
+
+def _lightweight_retrieve_operational_context(
+    query: str,
+    state: dict[str, Any],
+    limit: int,
+    agent_role: str | None,
+    cache_policy: str,
+) -> dict[str, Any]:
+    from mongo_memory import retrieve_operational_context
+
+    return retrieve_operational_context(query, state, limit, agent_role, cache_policy, False)
+
+
+async def _lightweight_copilot_semantic_memory_context(
+    message: str,
+    state: dict[str, Any],
+    state_summary: dict[str, Any],
+    route: dict[str, Any],
+) -> dict[str, Any]:
+    if not _lightweight_copilot_semantic_enabled():
+        return {"status": "not_requested", "reason": "Lightweight semantic memory is disabled."}
+    started = time.monotonic()
+    selected_role = str(route.get("selected_role") or "scan")
+    cache_policy = os.getenv("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY_CACHE_POLICY", "").strip()
+    if not cache_policy:
+        cache_policy = "fresh_retrieval" if _truthy_env("PARKPULSE_MONGO_MODEL_EMBEDDINGS", False) else os.getenv(
+            "PARKPULSE_COPILOT_SEMANTIC_MEMORY_CACHE_POLICY",
+            "role_cache_only",
+        )
+    cache_key = json.dumps(
+        {
+            "message": message,
+            "role": selected_role,
+            "cache_policy": cache_policy,
+            "state": {
+                "top_ride": state_summary.get("top_ride"),
+                "top_zone": state_summary.get("top_zone"),
+                "top_path": state_summary.get("top_path"),
+                "weather": state_summary.get("weather"),
+            },
+            "model": os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite"),
+            "path": os.getenv("MONGODB_MODEL_EMBEDDING_PATH", "modelEmbedding"),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    ttl = max(0.0, _float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY_CACHE_TTL_SECONDS", 45.0))
+    now = time.monotonic()
+    if ttl > 0:
+        with _lightweight_semantic_memory_lock:
+            cached = _lightweight_semantic_memory_cache.get(cache_key)
+            if cached and cached[0] > now:
+                payload = dict(cached[1])
+                payload["cache_status"] = "hit"
+                payload["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+                return payload
+    try:
+        timeout = max(0.2, _float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY_TIMEOUT_SECONDS", _float_env("PARKPULSE_COPILOT_SEMANTIC_MEMORY_TIMEOUT_SECONDS", 2.0)))
+        memory = await asyncio.wait_for(
+            asyncio.to_thread(
+                _lightweight_retrieve_operational_context,
+                message,
+                state if isinstance(state, dict) else {},
+                3,
+                selected_role,
+                cache_policy,
+            ),
+            timeout=timeout,
+        )
+        payload = _compact_lightweight_copilot_semantic_memory(memory if isinstance(memory, dict) else {})
+        payload["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+        payload["timeout_ms"] = round(timeout * 1000, 2)
+        payload["cache_status"] = "miss"
+        if ttl > 0:
+            with _lightweight_semantic_memory_lock:
+                if len(_lightweight_semantic_memory_cache) >= 128:
+                    oldest_key = min(_lightweight_semantic_memory_cache, key=lambda key: _lightweight_semantic_memory_cache[key][0])
+                    _lightweight_semantic_memory_cache.pop(oldest_key, None)
+                _lightweight_semantic_memory_cache[cache_key] = (now + ttl, dict(payload))
+        return payload
+    except Exception as error:
+        return {
+            "status": "timeout" if isinstance(error, (asyncio.TimeoutError, TimeoutError)) else "error",
+            "source": "mongo_operational_memory_lightweight",
+            "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
+            "cache_policy": cache_policy,
+            "readiness_issues": [_issue_text(error, "Lightweight semantic memory exceeded the hot-path timeout.")],
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+        }
+
+
 async def _lightweight_copilot_model_response(
     *,
     message: str,
@@ -8905,6 +9061,7 @@ async def _lightweight_copilot_model_response(
     state_summary: dict[str, Any],
     recommendation: dict[str, Any],
     options: list[dict[str, Any]],
+    semantic_memory_context: dict[str, Any],
 ) -> dict[str, Any]:
     prompt = {
         "task": (
@@ -8918,6 +9075,14 @@ async def _lightweight_copilot_model_response(
         "route_reason": route.get("why"),
         "policy_gates": route.get("policy_gates", []),
         "state_summary": state_summary,
+        "semantic_memory": {
+            "status": semantic_memory_context.get("status"),
+            "retrieval_method": semantic_memory_context.get("retrieval_method"),
+            "summary": semantic_memory_context.get("summary"),
+            "counts": semantic_memory_context.get("counts"),
+            "retrieved": semantic_memory_context.get("retrieved"),
+            "readiness_issues": semantic_memory_context.get("readiness_issues"),
+        },
         "recommended_action": recommendation,
         "options_considered": options,
         "required_json": {
@@ -8950,11 +9115,7 @@ async def _lightweight_copilot_model_response(
             else [],
             "operator_next": str(parsed.get("operator_next") or "").strip(),
             "confidence": parsed.get("confidence", 0.74),
-            "semantic_memory": {
-                "status": "configured_deferred" if os.getenv("MONGODB_MODEL_API_KEY") else "not_configured",
-                "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
-                "reason": "MongoDB model API retrieval is kept off this hot path until the lightweight retriever is split from pymongo/full runtime imports.",
-            },
+            "semantic_memory": semantic_memory_context,
         }
     except Exception as error:
         evidence = recommendation.get("primary_evidence", {}) if isinstance(recommendation.get("primary_evidence"), dict) else {}
@@ -8978,10 +9139,7 @@ async def _lightweight_copilot_model_response(
             ],
             "operator_next": "Approve a full policy-gated action or ask a narrower follow-up.",
             "confidence": 0.68,
-            "semantic_memory": {
-                "status": "configured_deferred" if os.getenv("MONGODB_MODEL_API_KEY") else "not_configured",
-                "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
-            },
+            "semantic_memory": semantic_memory_context,
         }
 
 
@@ -9031,6 +9189,13 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
     recommendation = _lightweight_copilot_recommendation(message, route, state_summary)
     options = _lightweight_copilot_options(recommendation, route)
     mark("recommendation")
+    semantic_memory_context = await _lightweight_copilot_semantic_memory_context(
+        message,
+        state if isinstance(state, dict) else {},
+        state_summary,
+        route,
+    )
+    mark("semantic_memory")
     conversation_response = await _lightweight_copilot_model_response(
         message=message,
         messages=messages,
@@ -9038,6 +9203,7 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
         state_summary=state_summary,
         recommendation=recommendation,
         options=options,
+        semantic_memory_context=semantic_memory_context,
     )
     mark("conversation_response")
     answer = conversation_response.get("answer") or str(recommendation.get("action") or "")
@@ -9050,7 +9216,18 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
         if requested_turn_mode == "answer" or not any(term in message.lower() for term in ("do", "fix", "reroute", "send", "move", "open", "close", "queue", "stuck"))
         else "propose"
     )
-    semantic_memory_context = conversation_response.get("semantic_memory") if isinstance(conversation_response.get("semantic_memory"), dict) else {}
+    semantic_memory_context = conversation_response.get("semantic_memory") if isinstance(conversation_response.get("semantic_memory"), dict) else semantic_memory_context
+    semantic_memory_tool = (
+        {
+            "id": "semantic_memory",
+            "tool": "memory.retrieve_semantic_context",
+            "label": "Retrieve semantic memory",
+            "status": semantic_memory_context.get("status"),
+            "output": semantic_memory_context.get("retrieval_method") or semantic_memory_context.get("source"),
+        }
+        if isinstance(semantic_memory_context, dict) and semantic_memory_context.get("status") != "not_requested"
+        else None
+    )
     return {
         "status": "complete",
         "mode": response_mode,
@@ -9084,6 +9261,7 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
             "tool_calls": [
                 {"tool": "get_park_state_lite", "status": state_summary.get("status"), "capability": "read", "output": "lightweight state summary"},
                 {"tool": "route_agent_role", "status": "complete", "capability": "reason", "output": route.get("selected_role")},
+                *([{"tool": "memory.retrieve_semantic_context", "status": semantic_memory_context.get("status"), "capability": "read", "output": semantic_memory_context.get("retrieval_method")}] if semantic_memory_tool else []),
                 {"tool": "copilot.respond", "status": "complete", "capability": "reason", "output": conversation_response.get("source")},
             ],
             "summary": {"policy_gate": "propose_only", "state_mutation": False},
@@ -9091,6 +9269,7 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
         "tool_call_timeline": [
             {"id": "state", "tool": "get_park_state_lite", "label": "Read fast park state", "status": state_summary.get("status")},
             {"id": "route", "tool": "route_agent_role", "label": "Select department agent", "status": "complete", "output": route.get("selected_role")},
+            *([semantic_memory_tool] if semantic_memory_tool else []),
             {"id": "answer", "tool": "copilot.respond", "label": "Answer operator", "status": "complete", "output": conversation_response.get("source")},
         ],
         "turn_contract": {
