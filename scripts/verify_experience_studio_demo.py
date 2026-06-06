@@ -252,18 +252,21 @@ def _product_readiness_model(
 ) -> dict[str, Any]:
     package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
     qa = package.get("studioQualityEval") if isinstance(package.get("studioQualityEval"), dict) else {}
+    reviewer_panel = qa.get("reviewerPanel") if isinstance(qa.get("reviewerPanel"), dict) else {}
     craft_samples = ((package.get("craftArtifacts") or {}).get("samples") or []) if isinstance(package.get("craftArtifacts"), dict) else []
     qa_gate_summary = qa.get("gateSummary") if isinstance(qa.get("gateSummary"), dict) else {}
     gate_score = max(0, 100 - int(qa_gate_summary.get("blocked") or 0) * 22 - int(qa_gate_summary.get("review") or 0) * 8)
     craft_rule_score = 100 if one_learning_loop.get("nextGenerationEvidence", {}).get("usesCraftRule") else 60 if one_learning_loop.get("nextGenerationEvidence", {}).get("usesApprovedRules") else 35
+    reviewer_score = float(reviewer_panel.get("consensusScore") or qa.get("scores", {}).get("reviewerConsensus") or 0)
     risk_pass_count = sum(1 for item in demo_risk_assessment.get("risks", []) if item.get("status") == "pass")
     risk_count = len(demo_risk_assessment.get("risks", [])) or 1
     score = round(
-        0.24 * float(qa.get("demoScore") or qa.get("score") or 0)
+        0.20 * float(qa.get("demoScore") or qa.get("score") or 0)
         + 0.12 * float(qa.get("productionScore") or 0)
-        + 0.16 * (100 if demo_risk_assessment.get("status") == "demo_ready" else 65)
-        + 0.16 * craft_rule_score
+        + 0.14 * (100 if demo_risk_assessment.get("status") == "demo_ready" else 65)
+        + 0.14 * craft_rule_score
         + 0.11 * gate_score
+        + 0.12 * reviewer_score
         + 0.08 * min(100, len(craft_samples) * 34)
         + 0.08 * (100 if conversation_refinement.get("status") == "refined" else 55)
         + 0.05 * round((risk_pass_count / risk_count) * 100),
@@ -280,13 +283,17 @@ def _product_readiness_model(
             "demoQaScore": qa.get("demoScore") or qa.get("score"),
             "productionScore": qa.get("productionScore"),
             "gateScore": gate_score,
+            "reviewerConsensus": reviewer_score,
+            "reviewerPanelStatus": reviewer_panel.get("status"),
             "craftRuleScore": craft_rule_score,
             "riskPassRate": round((risk_pass_count / risk_count) * 100),
             "conversationRefined": conversation_refinement.get("status") == "refined",
         },
         "qaGateSummary": qa_gate_summary,
+        "reviewerPanel": reviewer_panel,
         "passes": [
             "Independent simulated stakeholder review is separate from the app Review Agent.",
+            "Backend reviewer panel critiques creative, accessibility, claims, channel, and memory quality.",
             "One conversational refinement turn changes the generator input before generation.",
             "Creative lead samples are visible in generated output.",
             "One bounded learning loop promotes package and craft rules and proves next-generation use.",
@@ -871,6 +878,7 @@ def _render_html(report: dict[str, Any]) -> str:
   const refinement = report.conversationRefinement || {{}};
   const plannerIntel = plan.plannerIntelligence || {{}};
   const pkg = result.creativePackage || {{}};
+  const reviewerPanel = pkg.studioQualityEval?.reviewerPanel || {{}};
   const creativeSynthesis = result.creativeSynthesis || pkg.creativeSynthesis || {{}};
   const designReasoning = result.experienceReasoning || pkg.designReasoning || {{}};
   const profileIntel = result.profileIntelligence || {{}};
@@ -959,6 +967,7 @@ def _render_html(report: dict[str, Any]) -> str:
       <div class="card"><h3>Experience Review Agent</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(reviewAgent.status || "unknown")}}</div></div><div><div class="label">Score</div><div class="value">${{esc(reviewAgent.score ?? "n/a")}}</div></div><div><div class="label">Recommendation</div><div class="value">${{esc(reviewAgent.approvalRecommendation || "n/a")}}</div></div></div><div class="label">Findings</div>${{list(reviewAgent.findings || [])}}<div class="label">Revision targets</div>${{list((reviewAgent.sectionTargets || []).map((item) => `${{item.section}}: ${{item.reason}}`))}}<div class="label">Memory judgment</div><pre>${{esc(jsonText(reviewAgent.memoryJudgment || {{}}))}}</pre></div>
       <div class="card"><h3>Section Revision Result</h3><div class="grid3"><div><div class="label">Section</div><div class="value">${{esc(sectionRevision.sectionId || "n/a")}}</div></div><div><div class="label">Status</div><div class="value">${{esc(sectionRevision.status || "unknown")}}</div></div><div><div class="label">QA delta</div><div class="value">${{esc(sectionRevision.qaDelta?.delta ?? "n/a")}}</div></div></div><div class="label">Feedback</div><div class="value">${{esc(sectionRevision.feedback || "")}}</div><div class="label">Before</div><pre>${{esc(jsonText(sectionRevision.beforeSection || {{}}))}}</pre><div class="label">After</div><pre>${{esc(jsonText(sectionRevision.afterSection || {{}}))}}</pre></div>
     </div>
+    <div class="card"><h3>Internal Reviewer Loop</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(reviewerPanel.status || "unknown")}}</div></div><div><div class="label">Consensus</div><div class="value">${{esc(reviewerPanel.consensusScore ?? "n/a")}}</div></div><div><div class="label">Reviewers</div><div class="value">${{esc(reviewerPanel.reviewerCount ?? ((reviewerPanel.reviewers || []).length || "n/a"))}}</div></div></div><p>${{esc(reviewerPanel.summary || "")}}</p><div class="label">Reviewer critiques</div>${{list((reviewerPanel.reviewers || []).map((item) => `${{item.gateStatus}} / ${{item.role}} / score ${{item.score}} - ${{item.finding}} Revision: ${{item.requiredRevision}}`))}}<div class="label">Revision queue</div>${{list((reviewerPanel.revisionQueue || []).map((item) => `${{item.status}} / ${{item.role}} - ${{item.requiredRevision}}`))}}</div>
     <div class="card"><h3>Internal Codex Simulated Stakeholder</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(stakeholderReview.status || "unknown")}}</div></div><div><div class="label">Production approval</div><div class="value">${{esc(stakeholderReview.wouldApproveForProduction ? "yes" : "no")}}</div></div><div><div class="label">Score</div><div class="value">${{esc(stakeholderReview.score ?? "n/a")}}</div></div></div><p>${{esc(stakeholderReview.summary || "")}}</p><div class="label">Top objections</div>${{list((stakeholderReview.findings || []).map((item) => `${{item.severity}} - ${{item.title}} ${{item.recommendation}}`))}}</div>
     <div class="card"><h3>Creative Alternatives</h3><div class="grid3">${{(pkg.creativePackageVariants || []).map((variant) => `<div class="card"><h3>${{esc(variant.name || variant.id)}} ${{variant.status === "selected" ? "(selected)" : ""}}</h3><p>${{esc(variant.positioning || "")}}</p><div class="label">Guest promise</div><div class="value">${{esc(variant.guestPromise || "")}}</div><div class="label">When to use</div><div class="value">${{esc(variant.whenToUse || "")}}</div><div class="label">Review risks</div>${{list(variant.reviewRisks || [])}}</div>`).join("") || "<p>No creative alternatives returned.</p>"}}</div></div>
     <div class="grid2">
@@ -969,7 +978,7 @@ def _render_html(report: dict[str, Any]) -> str:
     </div>
     <div class="grid2">
       <div class="card"><h3>Section-Level Authoring</h3><div class="label">Concept board</div><pre>${{esc(jsonText(pkg.sectionCreativeDetails?.conceptBoard || {{}}))}}</pre><div class="label">Route story cards</div>${{list((pkg.sectionCreativeDetails?.routeStoryCards || []).map((item) => `${{item.order}}. ${{item.stop}} / ${{item.beat}} / ${{item.choiceArchitecture}}`))}}<div class="label">Staff rehearsal</div>${{list(pkg.sectionCreativeDetails?.staffRehearsalNotes || [])}}</div>
-      <div class="card"><h3>Studio QA Eval</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(pkg.studioQualityEval?.status || "unknown")}}</div></div><div><div class="label">Demo score</div><div class="value">${{esc(pkg.studioQualityEval?.demoScore ?? pkg.studioQualityEval?.score ?? "n/a")}}</div></div><div><div class="label">Production score</div><div class="value">${{esc(pkg.studioQualityEval?.productionScore ?? "n/a")}}</div></div></div><div class="label">Weighted scores</div><pre>${{esc(jsonText(pkg.studioQualityEval?.scores || {{}}))}}</pre><div class="label">Gate summary</div><pre>${{esc(jsonText(pkg.studioQualityEval?.gateSummary || {{}}))}}</pre><div class="label">Gate results</div>${{list((pkg.studioQualityEval?.gateResults || []).map((item) => `${{item.status}} / ${{item.severity}} / ${{item.id}} - ${{item.evidence}}`))}}<div class="label">Findings</div>${{list(pkg.studioQualityEval?.findings || [])}}<div class="label">Next actions</div>${{list(pkg.studioQualityEval?.recommendedNextActions || [])}}</div>
+      <div class="card"><h3>Studio QA Eval</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(pkg.studioQualityEval?.status || "unknown")}}</div></div><div><div class="label">Demo score</div><div class="value">${{esc(pkg.studioQualityEval?.demoScore ?? pkg.studioQualityEval?.score ?? "n/a")}}</div></div><div><div class="label">Production score</div><div class="value">${{esc(pkg.studioQualityEval?.productionScore ?? "n/a")}}</div></div></div><div class="label">Weighted scores</div><pre>${{esc(jsonText(pkg.studioQualityEval?.scores || {{}}))}}</pre><div class="label">Gate summary</div><pre>${{esc(jsonText(pkg.studioQualityEval?.gateSummary || {{}}))}}</pre><div class="label">Reviewer loop</div><pre>${{esc(jsonText(pkg.studioQualityEval?.reviewLoop || {{}}))}}</pre><div class="label">Gate results</div>${{list((pkg.studioQualityEval?.gateResults || []).map((item) => `${{item.status}} / ${{item.severity}} / ${{item.id}} - ${{item.evidence}}`))}}<div class="label">Findings</div>${{list(pkg.studioQualityEval?.findings || [])}}<div class="label">Next actions</div>${{list(pkg.studioQualityEval?.recommendedNextActions || [])}}</div>
     </div>
     <div class="grid2">
       <div class="card"><h3>Production detail</h3><div class="label">Guest choice model</div>${{list(pkg.productionDetail?.guestChoiceModel || [])}}<div class="label">Checklist</div>${{list(pkg.productionDetail?.contentCompletenessChecklist || [])}}<div class="label">Measurement</div>${{list((pkg.productionDetail?.measurementPlan || []).map((item) => `${{item.metric}}: ${{item.signal}} / ${{item.learningUse}}`))}}</div>
