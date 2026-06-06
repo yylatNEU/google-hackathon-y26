@@ -192,7 +192,7 @@ def test_lightweight_copilot_retrieves_semantic_memory_on_hot_path(monkeypatch):
                 }
             },
             "query": query,
-            "scenario_key": "ride_down",
+            "scenario_key": "unknown",
             "agent_role": agent_role,
             "cache_policy": cache_policy,
             "retrieved": {
@@ -279,7 +279,7 @@ def test_scan_semantic_memory_cache_miss_serves_static_fallback(monkeypatch):
         return {
             "status": {"modelApi": {"enabled": True, "provider": "voyage"}},
             "query": query,
-            "scenario_key": "ride_down",
+            "scenario_key": "unknown",
             "agent_role": "scan_agent",
             "cache_policy": cache_policy,
             "retrieved": {

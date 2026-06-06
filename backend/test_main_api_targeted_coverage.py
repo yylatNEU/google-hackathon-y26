@@ -2180,3 +2180,474 @@ def test_main_actual_training_and_gcp_dry_run_routes(monkeypatch):
     _, dry_error = run(_asgi_json("GET", "/api/park/gcp-training-dry-run"))
     assert dry_error["status"] == "error"
     assert dry_error["mode"] == "gcp_training_dry_run_readiness"
+
+
+def test_main_heartbeat_memory_buckets_and_retrieval_quality(tmp_path, monkeypatch):
+    action_records = [
+        {
+            "id": "past-1",
+            "mode": "cached_post_trained_model_heartbeat_controller",
+            "scenario_key": "ride_down_queue",
+            "candidate": {"target": "coaster", "action": "reroute", "score": 91, "learned_q": 0.7, "learned_sample_count": 12},
+            "candidate_scores": [
+                {"target": "coaster", "action": "reroute", "score": 91},
+                {"target": "foodCourt1", "action": "open_standby", "score": 77},
+            ],
+            "active_incidents": [{"kind": "ride_down", "targetId": "coaster", "visibility": "high", "signalReliabilityPct": 88, "intensity": 0.9}],
+            "policy_gate": {"gate_status": "allowed", "allowed": True, "findings": ["bounded reroute"]},
+            "episode_fitness": {
+                "scores": {"fitness": 88, "reward_delta": 5, "actual": 70, "baseline": 65},
+                "pressure": {"reduction_vs_baseline": 8, "reduced_pressure": True},
+            },
+            "status": "executed",
+        },
+        {
+            "id": "past-2",
+            "mode": "cached_post_trained_model_heartbeat_controller",
+            "scenario_key": "ride_down_queue",
+            "candidate": {"target": "coaster", "action": "staff_queue"},
+            "active_incidents": [{"kind": "ride_down", "targetId": "coaster"}],
+            "policy_gate": {"gate_status": "review"},
+            "episode_fitness": {"scores": {"fitness": 71}, "pressure": {"reduction_vs_baseline": 2}},
+            "status": "review",
+        },
+        {"id": "ignored", "scenario_key": "ride_down_queue", "candidate": None},
+    ]
+    buckets = main._observed_scenario_memory_buckets(action_records, current_id="current")
+    assert buckets[0]["count"] == 2
+    assert "ride_down_queue observed pattern count 2" in buckets[0]["summary"]
+
+    action_log = tmp_path / "actions.jsonl"
+    action_log.write_text("\n".join(json.dumps(row) for row in action_records), encoding="utf-8")
+    monkeypatch.setattr(main, "_heartbeat_action_log_path", lambda: str(action_log))
+
+    import mongo_memory
+
+    monkeypatch.setenv("PARKPULSE_HEARTBEAT_EXPLANATION_MONGO_MEMORY", "1")
+    monkeypatch.setenv("PARKPULSE_HEARTBEAT_EXPLANATION_DEEP_MEMORY", "1")
+    monkeypatch.setattr(
+        mongo_memory,
+        "get_latest_memory_documents_fast",
+        lambda collection, limit: [
+            {
+                "_id": f"{collection}-1",
+                "scenarioKey": "ride_down_queue",
+                "lesson": f"{collection} learned coaster reroute reduced queue pressure",
+                "selectedAction": "reroute coaster queue",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        mongo_memory,
+        "get_operational_memory_dashboard",
+        lambda query: {
+            "status": {"mode": "mongo_memory_dashboard", "connected": True, "database": "test", "errors": []},
+            "retrieved": {
+                "learnings": [{"_id": "deep-1", "scenarioKey": "ride_down_queue", "lesson": "deep coaster reroute learning"}],
+                "playbooks": [{"id": "pb"}],
+                "incidents": [{"id": "inc"}],
+            },
+        },
+    )
+    current = {
+        "id": "current",
+        "scenario_key": "ride_down_queue",
+        "candidate": {"target": "coaster", "action": "reroute", "learned_q": 0.9, "learned_sample_count": 20},
+        "candidate_scores": [{"target": "coaster", "action": "reroute", "score": 99}],
+        "active_incidents": [{"kind": "ride_down", "targetId": "coaster", "intensity": "high"}],
+        "policy_gate": {"gate_status": "allowed", "allowed": True, "findings": ["ok"]},
+        "episode_fitness": {"scores": {"fitness": 93, "reward_delta": 7}, "pressure": {"reduction_vs_baseline": 9}},
+    }
+    memory = main._heartbeat_memory_interpretation(current)
+    assert memory["observed_memory_count"] > 0
+    assert memory["memory_status"]["connected"] is True
+    structured = main._heartbeat_structured_explanation(current, memory)
+    assert structured["policy_read"]["allowed"] is True
+    assert structured["why_not_others"]
+
+    explanation_log = tmp_path / "explanations.jsonl"
+    retrieval_log = tmp_path / "retrieval.jsonl"
+    explanation_rows = [
+        {
+            "mode": "heartbeat_explanation_memory_sidecar",
+            "action_id": "current",
+            "action_record": current,
+            "memory_interpretation": {
+                "query": "ride down coaster reroute",
+                "observed_memory_count": 2,
+                "memory_used": [
+                    {"summary": "ride down coaster reroute reduced queue pressure", "match_score": 4},
+                    "skip malformed row",
+                ],
+                "reference_memory_excluded": {"playbooks": 1, "incidents": 1},
+            },
+        },
+        {
+            "mode": "heartbeat_explanation_memory_sidecar",
+            "action_id": "miss",
+            "action_record": {"scenario_key": "food_delay", "candidate": {"target": "foodCourt1", "action": "open_standby"}},
+            "memory_interpretation": {"query": "food delay", "observed_memory_count": 0, "memory_used": []},
+        },
+    ]
+    explanation_log.write_text("\n".join(json.dumps(row) for row in explanation_rows), encoding="utf-8")
+    monkeypatch.setattr(main, "_heartbeat_explanation_log_path", lambda: str(explanation_log))
+    monkeypatch.setattr(main, "_park_retrieval_quality_log_path", lambda: str(retrieval_log))
+
+    quality = main._retrieval_quality_eval_payload(limit=50)
+    assert quality["status"] == "ready"
+    assert quality["summary"]["pass_count"] == 1
+    assert quality["summary"]["miss_count"] == 1
+    pass_rows = [row for row in quality["rows"] if row.get("status") == "pass"]
+    assert pass_rows[0]["relevant_count"] == 1
+
+
+def test_main_generated_sop_routes(monkeypatch):
+    import mongo_memory
+
+    state = compact_state()
+    state["guestFlow"]["zones"][0]["density"] = 92
+    state["guestFlow"]["rides"][0]["waitMins"] = 48
+    state["guestFlow"]["rides"][0]["downtimeRisk"] = 72
+    state["foodInventory"]["locations"][0]["mobileOrderBacklog"] = 33
+    state["foodInventory"]["locations"][0]["pickupEtaMinutes"] = 24
+    state["guestCare"] = {"openCases": 6, "complaintRatePct": 14}
+    state["operatingClock"] = {
+        "eventSchedule": {"nextEvent": {"name": "Parade"}, "eventTrafficRiskPct": 68},
+        "accessFairness": {"publicComplaintRiskPct": 35},
+    }
+
+    class Simulation:
+        async def get_state(self):
+            return state
+
+    monkeypatch.setattr(park_simulation, "park_simulation", Simulation())
+    monkeypatch.setattr(agent_ops_ledger, "build_operational_backlog", lambda current_state: {"issues": [{"domain": "food_ops", "severity": "critical", "title": "Food pickup surge"}]})
+    monkeypatch.setattr(agent_ops_ledger, "read_agent_ops_ledger", lambda limit=8: {"items": [{"id": "trace-1", "mode": "react", "selectedAction": "reroute", "evalScore": 88}]})
+    monkeypatch.setattr(agent_ops_ledger, "record_agent_ops_record", lambda record: {"status": "recorded", "id": record["id"], "traceEvents": record["traceEvents"]})
+    monkeypatch.setattr(park_audit_agent, "build_audit_snapshot", lambda current_state: {"anomalies": [{"domain": "queue_ops", "severity": "high", "title": "Queue spillback"}]})
+    monkeypatch.setattr(park_delivery, "latest_dispatches", lambda limit=8: [{"id": "dispatch-1", "channel": "ops", "status": "sent", "payload": {"title": "Open standby lane"}}])
+    monkeypatch.setattr(mongo_memory, "get_latest_memory_documents_fast", lambda collection, limit: [{"_id": "playbook-1", "title": "Queue playbook", "summary": "Open standby", "score": 0.82}])
+    monkeypatch.setattr(mongo_memory, "record_agent_learning_document", lambda document: "learning-1")
+
+    _, draft = run(_asgi_json("GET", "/api/park/generated-sop"))
+    assert draft["status"] == "draft_ready"
+    assert draft["riskScore"] > 50
+    assert draft["retrievedPlaybooks"][0]["id"] == "playbook-1"
+
+    _, generated = run(_asgi_json("POST", "/api/park/generated-sop/run", {"promote": False}))
+    assert generated["status"] == "generated"
+    assert generated["memoryPersistence"]["status"] == "stored"
+    assert generated["agentOpsLedger"]["status"] == "recorded"
+
+
+def test_main_digital_twin_war_room_routes(monkeypatch):
+    import digital_twin_benchmark
+    import mongo_memory
+
+    state = compact_state()
+    state["guestFlow"]["zones"][0]["density"] = 91
+    state["guestFlow"]["paths"][0]["congestionLevel"] = 83
+    state["guestFlow"]["rides"][0]["waitMins"] = 52
+    state["guestFlow"]["rides"][0]["downtimeRisk"] = 67
+    state["foodInventory"]["locations"][0]["mobileOrderBacklog"] = 31
+    state["foodInventory"]["locations"][0]["pickupEtaMinutes"] = 23
+    state["operatingClock"] = {
+        "eventSchedule": {"nextEvent": {"name": "Parade"}, "eventTrafficRiskPct": 65},
+        "accessFairness": {"publicComplaintRiskPct": 42},
+    }
+    state["guestCare"] = {"openCases": 7, "complaintRatePct": 15}
+
+    class Simulation:
+        async def get_state(self):
+            return state
+
+    monkeypatch.setattr(park_simulation, "park_simulation", Simulation())
+    monkeypatch.setattr(agent_ops_ledger, "read_agent_ops_ledger", lambda limit=10: {"items": [{"id": "trace-1", "mode": "benchmark", "selectedAction": "reroute", "evalScore": 82, "gate": "watch"}]})
+    monkeypatch.setattr(agent_ops_ledger, "record_agent_ops_record", lambda record: {"status": "recorded", "id": record["id"], "record": record})
+    monkeypatch.setattr(park_audit_agent, "build_audit_snapshot", lambda current_state: {"anomalies": [{"id": "a1", "severity": "high", "domain": "food", "title": "Food backup", "recommendedAction": "shape demand"}]})
+    monkeypatch.setattr(park_delivery, "latest_dispatches", lambda limit=10: [{"id": "dispatch-1", "status": "sent"}])
+    monkeypatch.setattr(
+        digital_twin_benchmark,
+        "list_benchmark_scenarios",
+        lambda: {"scenarios": [{"id": "food_staff_crunch", "name": "Food staff crunch", "description": "Backlog stress", "success_threshold": 80, "candidate_count": 3}]},
+    )
+    monkeypatch.setattr(
+        digital_twin_benchmark,
+        "run_digital_twin_benchmark",
+        lambda current_state, scenario_id=None, seed=None, horizon_minutes=30: {
+            "status": "complete",
+            "summary": {"average_score": 78, "failed": 1, "passed": 2, "episodes": 3},
+            "scenario_id": scenario_id,
+            "seed": seed,
+        },
+    )
+
+    async def run_agent_benchmark(current_state, planner, optimizer, context_builder, scenario_id=None, seed=None, horizon_minutes=30):
+        context = context_builder(scenario_id or "food_spike", current_state, {"mode": "noisy"})
+        plan = planner(current_state, scenario_id or "food_spike", context)
+        optimized = optimizer(current_state, scenario_id or "food_spike", context, plan)
+        return {
+            "status": "complete",
+            "summary": {"average_score": 86, "failed": 0, "passed": 3, "episodes": 3},
+            "planner": plan,
+            "optimized": optimized,
+        }
+
+    monkeypatch.setattr(digital_twin_benchmark, "run_parkpulse_agent_benchmark", run_agent_benchmark)
+    monkeypatch.setattr(
+        digital_twin_benchmark,
+        "generate_remediation_playbooks",
+        lambda baseline: [{"_id": "remediation-1", "scenarioKey": "food_spike", "sourceScenarioId": "food_spike", "lesson": "Shape food demand before rerouting."}],
+    )
+    monkeypatch.setattr(
+        digital_twin_benchmark,
+        "attach_learning_comparison",
+        lambda learned, baseline, remediations, memory_write: {
+            **learned,
+            "learned_rerun": {"comparison": {"score_delta": 8, "failed_delta": -1}},
+            "baseline": baseline,
+            "remediations": remediations,
+            "memory_write": memory_write,
+        },
+    )
+    monkeypatch.setattr(mongo_memory, "record_agent_learning_document", lambda document: document.get("_id") or "learning-1")
+
+    _, dashboard = run(_asgi_json("GET", "/api/park/digital-twin-war-room"))
+    assert dashboard["status"] == "ready"
+    assert dashboard["liveSignals"]["topZones"][0]["density"] == 91
+
+    _, exercise = run(_asgi_json("POST", "/api/park/digital-twin-war-room/run", {"scenarioId": "food_staff_crunch", "seed": "unit"}))
+    assert exercise["status"] == "exercise_complete"
+    assert exercise["agentOpsLedger"]["status"] == "recorded"
+
+    _, remediated = run(_asgi_json("POST", "/api/park/digital-twin-war-room/remediate", {"scenarioId": "food_spike", "seed": "unit"}))
+    assert remediated["status"] == "remediation_complete"
+    assert remediated["remediationLoop"]["promotion"]["status"] == "candidate_ready"
+    assert remediated["remediationLoop"]["memoryWrite"]["status"] == "stored"
+
+
+def test_main_market_and_food_demand_episode_routes(monkeypatch):
+    import mongo_memory
+
+    before = compact_state()
+    before["guestFlow"]["avgSatisfaction"] = 67
+    before["guestFlow"]["zones"][0]["density"] = 90
+    before["guestFlow"]["zones"].append({"id": "foodCourt1", "name": "Food Court A", "density": 88, "waitMins": 18})
+    before["guestFlow"]["paths"][0]["congestionLevel"] = 84
+    before["foodInventory"]["locations"][0].update(
+        {
+            "id": "foodCourt1",
+            "name": "Food Court A",
+            "mobileOrderBacklog": 45,
+            "pickupEtaMinutes": 26,
+            "lowInventoryItems": ["chicken_tenders", "fries"],
+            "availableItems": ["salads", "pretzel_bites", "fruit_cups"],
+        }
+    )
+    before["foodInventory"]["locations"].append({"id": "foodCourt2", "name": "Food Court B", "mobileOrderBacklog": 8, "pickupEtaMinutes": 7})
+    before["foodInventory"]["suppressedItems"] = []
+    before["guestCare"] = {"openCases": 9, "complaintRatePct": 16}
+    before["operatingClock"] = {
+        "foodRetailLifecycle": {"mobileOrderBacklogPressurePct": 82},
+        "eventSchedule": {"eventTrafficRiskPct": 62},
+        "accessFairness": {"publicComplaintRiskPct": 43},
+    }
+    after = json.loads(json.dumps(before))
+    after["guestFlow"]["avgSatisfaction"] = 74
+    after["guestFlow"]["zones"][0]["density"] = 78
+    after["guestFlow"]["zones"][-1]["density"] = 71
+    after["guestFlow"]["zones"][-1]["waitMins"] = 9
+    after["guestFlow"]["paths"][0]["congestionLevel"] = 65
+    after["foodInventory"]["locations"][0]["mobileOrderBacklog"] = 18
+    after["foodInventory"]["locations"][0]["pickupEtaMinutes"] = 11
+    after["guestCare"] = {"openCases": 5, "complaintRatePct": 8}
+    after["operatingClock"]["eventSchedule"]["eventTrafficRiskPct"] = 44
+    after["operatingClock"]["accessFairness"]["publicComplaintRiskPct"] = 28
+
+    class Simulation:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_state(self):
+            self.calls += 1
+            return before if self.calls % 2 == 1 else after
+
+        async def apply_delivery_outcomes(self, dispatches, mode):
+            return {"status": "applied", "mode": mode, "dispatch_count": len(dispatches), "message": "Applied unit dispatches."}
+
+    monkeypatch.setattr(park_simulation, "park_simulation", Simulation())
+    market_candidate = {
+        "id": "balanced_split",
+        "label": "Balanced split flow",
+        "action": "bounded_split_flow",
+        "totalScore": 88,
+        "tradeoffSummary": "Best balance of relief and fairness.",
+        "predictedDeltas": {"pathCongestionDelta": -12},
+        "vetoes": [],
+    }
+
+    def backlog(state):
+        return {
+            "unresolvedCount": 1,
+            "agentDecisionMarket": {
+                "businessQuestion": "Which action balances crowd and food pressure?",
+                "operationsFavorite": "ops_broad_reroute",
+                "regretAnalysis": {"lowestRegret": "balanced_split"},
+                "candidates": [market_candidate],
+                "winningCandidate": market_candidate,
+            },
+        }
+
+    dispatch_counter = {"value": 0}
+
+    def dispatch(channel, payload):
+        dispatch_counter["value"] += 1
+        return {"id": f"dispatch-{dispatch_counter['value']}", "channel": channel, "status": "sent", "payload": payload}
+
+    monkeypatch.setattr(agent_ops_ledger, "build_operational_backlog", backlog)
+    monkeypatch.setattr(agent_ops_ledger, "record_agent_ops_record", lambda record: {"status": "recorded", "id": record["id"], "record": record})
+    monkeypatch.setattr(mongo_memory, "record_agent_learning_document", lambda document: document.get("_id") or "learning-1")
+    monkeypatch.setattr(park_delivery, "send_guest_promotion", lambda payload: dispatch("guest_app", payload))
+    monkeypatch.setattr(park_delivery, "send_worker_notification", lambda payload: dispatch("worker_device", payload))
+    monkeypatch.setattr(park_delivery, "send_equipment_command", lambda payload: dispatch("equipment_controller", payload))
+    monkeypatch.setattr(park_delivery, "delivery_summary", lambda dispatches: {"total": len(dispatches), "channels": [item["channel"] for item in dispatches]})
+    monkeypatch.setattr(park_delivery, "response_summary", lambda dispatches: {"takeRate": 0.5, "reactiveFollowThroughRate": 0.6, "signal": "good follow through"})
+
+    _, market = run(_asgi_json("POST", "/api/park/agent-decision-market/run", {"candidateId": "balanced_split"}))
+    assert market["status"] == "completed"
+    assert market["episode"]["selectedCandidate"]["id"] == "balanced_split"
+    assert market["memoryPersistence"]["status"] == "stored"
+    assert market["agentOpsLedger"]["status"] == "recorded"
+
+    _, strategy = run(_asgi_json("GET", "/api/park/food-demand-shaping"))
+    assert strategy["status"] == "ready"
+    assert strategy["selectedStrategy"]["id"] == "bounded_food_demand_shape"
+
+    _, food = run(_asgi_json("POST", "/api/park/food-demand-shaping/run", {}))
+    assert food["status"] == "completed"
+    assert food["episode"]["delivery"]["summary"]["total"] == 3
+    assert food["memoryPersistence"]["status"] == "stored"
+    assert food["agentOpsLedger"]["status"] == "recorded"
+
+
+def test_api_agent_wrapper_fallback_and_error_branches(monkeypatch):
+    async def broken_lite():
+        raise RuntimeError("state lite unavailable")
+
+    class BrokenLiteSimulation:
+        get_state_lite = staticmethod(broken_lite)
+
+    monkeypatch.setattr(parkpulse_api, "park_simulation", BrokenLiteSimulation())
+    monkeypatch.setattr(parkpulse_api, "get_agent_onboarding", lambda agent_id: (_ for _ in ()).throw(KeyError(agent_id)))
+    with pytest.raises(parkpulse_api.HTTPException) as missing_onboarding:
+        run(parkpulse_api.park_agent_onboarding_get("agent-missing"))
+    assert missing_onboarding.value.status_code == 404
+
+    certify_calls = []
+
+    def certify(agent_id, body, park_state=None):
+        certify_calls.append({"agent_id": agent_id, "body": body, "park_state": park_state})
+        return {"status": "certified", "park_state_attached": park_state is not None}
+
+    monkeypatch.setattr(parkpulse_api, "certify_agent_onboarding", certify)
+    certified = run(parkpulse_api.park_agent_onboarding_certify("agent-1", {"scope": "ops"}))
+    assert certified == {"status": "certified", "park_state_attached": False}
+    assert certify_calls[-1]["park_state"] is None
+
+    class GoodLiteSimulation:
+        @staticmethod
+        async def get_state_lite():
+            return {"status": "lite"}
+
+    monkeypatch.setattr(parkpulse_api, "park_simulation", GoodLiteSimulation())
+    monkeypatch.setattr(parkpulse_api, "certify_agent_onboarding", lambda agent_id, body, park_state=None: (_ for _ in ()).throw(KeyError(agent_id)))
+    with pytest.raises(parkpulse_api.HTTPException) as missing_certify:
+        run(parkpulse_api.park_agent_onboarding_certify("agent-missing", {}))
+    assert missing_certify.value.status_code == 404
+    monkeypatch.setattr(parkpulse_api, "park_simulation", BrokenLiteSimulation())
+
+    monkeypatch.setattr(parkpulse_api, "commerce_agent_evaluate", lambda session_id, body: (_ for _ in ()).throw(KeyError(session_id)))
+    with pytest.raises(parkpulse_api.HTTPException) as commerce_missing:
+        run(parkpulse_api.park_commerce_agent_evaluate({"session_id": "missing"}))
+    assert commerce_missing.value.status_code == 404
+    monkeypatch.setattr(parkpulse_api, "commerce_agent_evaluate", lambda session_id, body: (_ for _ in ()).throw(PermissionError("denied")))
+    with pytest.raises(parkpulse_api.HTTPException) as commerce_denied:
+        run(parkpulse_api.park_commerce_agent_evaluate({"sessionId": "denied"}))
+    assert commerce_denied.value.status_code == 403
+
+    queue_calls = []
+
+    def queue_reroute(session_id, body, park_state=None):
+        queue_calls.append({"session_id": session_id, "park_state": park_state})
+        return {"status": "queued", "session_id": session_id, "has_state": park_state is not None}
+
+    monkeypatch.setattr(parkpulse_api, "queue_agent_reroute", queue_reroute)
+    queue = run(parkpulse_api.park_queue_agent_reroute({"sessionId": "queue-1"}))
+    assert queue == {"status": "queued", "session_id": "queue-1", "has_state": False}
+    assert queue_calls[-1]["park_state"] is None
+
+    monkeypatch.setattr(parkpulse_api, "propose_plan", lambda session_id, body, park_state=None: {"status": "proposed", "has_state": park_state is not None})
+    assert run(parkpulse_api.park_agent_propose("session-1", {"goal": "reroute"}))["has_state"] is False
+    monkeypatch.setattr(parkpulse_api, "counter_proposal", lambda session_id, body, park_state=None: {"status": "countered", "has_state": park_state is not None})
+    assert run(parkpulse_api.park_agent_counter("session-1", {"goal": "hold"}))["has_state"] is False
+
+
+def test_api_executive_and_synthetic_routes(monkeypatch):
+    class Simulation:
+        async def get_state(self):
+            return {"guestFlow": {"zones": []}, "status": "ready"}
+
+        async def reset_demo(self):
+            return {"status": "reset"}
+
+        async def inject_synthetic_incident(self, plan):
+            return {"status": "injected", "message": f"injected {plan['id']}", "event": {"id": "event-1"}}
+
+    auth_calls = []
+    async def sync_state(state):
+        return {"status": "synced"}
+
+    monkeypatch.setattr(parkpulse_api, "_require_role_action", lambda request, capability, action, payload=None, default_role=None: auth_calls.append((capability, action, default_role)) or {"identity": {"role": "ml_ops_admin", "subject": "unit"}})
+    monkeypatch.setattr(parkpulse_api, "park_simulation", Simulation())
+    monkeypatch.setattr(parkpulse_api, "sync_park_state_safe", sync_state)
+    monkeypatch.setattr(parkpulse_api, "build_operational_backlog", lambda state: {"issues": [{"id": "issue-1"}]})
+    monkeypatch.setattr(parkpulse_api, "build_audit_snapshot", lambda state: {"summary": {"criticalAnomalies": 0}})
+    monkeypatch.setattr(parkpulse_api, "latest_signals", lambda limit=40: [{"id": "signal-1"}])
+    monkeypatch.setattr(parkpulse_api, "latest_dispatches", lambda limit=40: [{"id": "dispatch-1"}])
+    monkeypatch.setattr(parkpulse_api, "read_agent_ops_ledger", lambda *args, **kwargs: {"items": [{"id": "ledger-1"}]})
+    monkeypatch.setattr(parkpulse_api, "build_incident_analytics", lambda **kwargs: {"status": "incidents", "kwargs": kwargs})
+    monkeypatch.setattr(parkpulse_api, "record_mongo_incident_analytics", lambda analytics: {"status": "stored", "id": "analytics-1"})
+    monkeypatch.setattr(parkpulse_api, "build_executive_experience_evidence", lambda: {"evidence": [{"id": "e1"}]})
+    monkeypatch.setattr(parkpulse_api, "build_executive_experience_intelligence", lambda **kwargs: {"status": "executive", "inputs": sorted(kwargs)})
+    monkeypatch.setattr(parkpulse_api, "import_demo_executive_experience_evidence", lambda: {"status": "imported"})
+    monkeypatch.setattr(parkpulse_api, "simulate_executive_experience_evidence", lambda scenario, months, end_month: {"status": "simulated", "scenario": scenario, "months": months, "end_month": end_month})
+    monkeypatch.setattr(parkpulse_api, "save_monthly_guest_feedback_brief", lambda month=None, requested_by_role="ml_ops_admin": {"status": "saved", "month": month, "role": requested_by_role})
+    monkeypatch.setattr(parkpulse_api, "get_latest_memory_documents", lambda collection, limit: [{"collection": collection, "limit": limit}])
+    monkeypatch.setattr(parkpulse_api, "review_executive_experience_artifact", lambda artifact_id, action, note="", reviewer_role="", reviewer="", allow_demo_approval=False: {"status": "reviewed", "artifact_id": artifact_id, "reviewer_role": reviewer_role, "reviewer": reviewer})
+
+    request = object()
+    intelligence = run(parkpulse_api.get_executive_experience_intelligence(request))
+    assert intelligence["status"] == "executive"
+    assert "state" in intelligence["inputs"]
+    assert run(parkpulse_api.get_executive_experience_intelligence_evidence(request))["evidence"][0]["id"] == "e1"
+    assert run(parkpulse_api.post_executive_experience_intelligence_demo_import(request))["status"] == "imported"
+    simulated = run(parkpulse_api.post_executive_experience_intelligence_simulate(request, {"scenario": "weather", "months": 3, "endMonth": "2026-06"}))
+    assert simulated == {"status": "simulated", "scenario": "weather", "months": 3, "end_month": "2026-06"}
+    brief = run(parkpulse_api.post_executive_experience_intelligence_monthly_brief(request, {"month": "2026-06", "requestedByRole": "gm"}))
+    assert brief == {"status": "saved", "month": "2026-06", "role": "gm"}
+    artifacts = run(parkpulse_api.get_executive_experience_intelligence_artifacts(request, limit=3))
+    assert artifacts["artifacts"][0]["collection"] == "executive_brief_artifacts"
+    review = run(parkpulse_api.post_executive_experience_intelligence_artifact_review(request, "artifact-1", {"action": "approve", "note": "ok"}))
+    assert review["reviewer"] == "unit"
+
+    monkeypatch.setattr(parkpulse_api, "find_synthetic_example", lambda selector: None)
+    not_found = run(parkpulse_api.park_synthetic_scenario_inject(parkpulse_api.SyntheticScenarioInjectRequest(selector="missing")))
+    assert not_found["status"] == "not_found"
+
+    monkeypatch.setattr(parkpulse_api, "find_synthetic_example", lambda selector: {"id": selector, "domain": "ride", "expected_owner": "ops", "expected_case_id": "case-1"})
+    monkeypatch.setattr(parkpulse_api, "injection_plan_for_example", lambda example: {"id": example["id"], "utterance": "ride down"})
+    monkeypatch.setattr(parkpulse_api, "clear_hot_endpoint_cache", lambda: None)
+    injected = run(parkpulse_api.park_synthetic_scenario_inject(parkpulse_api.SyntheticScenarioInjectRequest(selector="synthetic-1", reset_first=True)))
+    assert injected["status"] == "injected"
+    assert injected["example"]["id"] == "synthetic-1"
+    assert injected["state"]["status"] == "ready"

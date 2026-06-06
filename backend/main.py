@@ -9044,10 +9044,13 @@ def _lightweight_copilot_memory_doc_summary(document: dict[str, Any]) -> dict[st
 
 def _lightweight_semantic_scenario_key(state: dict[str, Any], memory: dict[str, Any] | None = None) -> str:
     if isinstance(memory, dict) and memory.get("scenario_key"):
-        return str(memory.get("scenario_key"))
+        candidate = str(memory.get("scenario_key") or "").strip()
+        if candidate and candidate != "unknown":
+            return candidate
     guest_flow = state.get("guestFlow") if isinstance(state.get("guestFlow"), dict) else {}
     active = guest_flow.get("activeScenario") if isinstance(guest_flow.get("activeScenario"), dict) else {}
-    return str(active.get("key") or "ride_down")
+    candidate = str(active.get("key") or "").strip()
+    return candidate if candidate and candidate != "unknown" else "ride_down"
 
 
 def _schedule_lightweight_role_cache_warmup(message: str, state: dict[str, Any], selected_role: str, scenario_key: str) -> dict[str, Any]:

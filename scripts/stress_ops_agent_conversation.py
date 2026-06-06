@@ -92,7 +92,10 @@ def request_json(
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
             body = response.read().decode("utf-8", errors="replace")
-            parsed = json.loads(body) if body else {}
+            try:
+                parsed = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                parsed = {"raw": body[:500], "content_type": response.headers.get("Content-Type")}
             return response.status, parsed if isinstance(parsed, dict) else {"value": parsed}, (time.perf_counter() - started) * 1000
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
