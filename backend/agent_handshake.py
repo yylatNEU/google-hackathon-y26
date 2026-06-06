@@ -4604,9 +4604,10 @@ def demo_supply_chain_handshake(mode: str = "supply_replenishment") -> dict[str,
         trust_context={"trust_tier": "certified_supplier_candidate"},
         adversarial_probes=[],
     )
-    return {
+    demo = {
         "status": "demo_complete",
         "mode": "supply_chain_agent_handshake",
+        "counterparty": "supplier",
         "scenario_mode": scenario_mode,
         "session_id": session_id,
         "steps": [identity, capability, intent, proposal, counter, commitment, monitoring, procurement_gate, receipt],
@@ -4615,3 +4616,4 @@ def demo_supply_chain_handshake(mode: str = "supply_replenishment") -> dict[str,
         "passport_evolution": passport_evolution,
         "session": session,
     }
+    return _attach_external_agent_outputs(demo)

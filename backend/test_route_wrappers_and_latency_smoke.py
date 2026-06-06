@@ -1,8 +1,12 @@
 import asyncio
 import json
+import os
 import sys
 import types
 import urllib.error
+
+os.environ["MONGODB_DISABLE_DRIVER_IMPORT"] = "1"
+os.environ["PARKPULSE_MONGO_MODEL_EMBEDDINGS"] = "false"
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

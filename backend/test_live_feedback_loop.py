@@ -1,10 +1,34 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
+from datetime import UTC, datetime, timedelta
 
 import live_feedback_loop
-from live_feedback_loop import ingest_live_feed_event, live_feed_health, live_feed_storage_status, normalize_live_feed_event, record_review_decision, review_training_ledger
+from live_feedback_loop import (
+    _append_jsonl_many,
+    _feed_event_ready_now,
+    _feed_log_path,
+    _fold_review_state,
+    _int_env,
+    _mongo_collection_name_for_path,
+    _mongo_database_name,
+    _read_jsonl,
+    _read_mongo_documents,
+    _review_disposition_for_event,
+    _review_log_path,
+    _strip_secret,
+    _write_mongo_document,
+    ingest_live_feed_event,
+    ingest_live_feed_events,
+    live_feed_health,
+    live_feed_storage_status,
+    normalize_live_feed_event,
+    record_review_decision,
+    review_training_ledger,
+    warm_live_feed_storage,
+)
 
 
 def test_normalize_live_feed_event_has_stable_contract():
@@ -176,6 +200,181 @@ def test_live_feed_storage_uses_mongo_when_forced(tmp_path, monkeypatch):
     assert live_feed_storage_status()["shared_across_instances"] is True
     assert health["storage"]["mode"] == "mongodb"
     assert any(row["source"] == "operator_signal" and row["status"] == "ready" for row in health["feeds"])
+
+
+def test_live_feed_storage_helpers_cover_mongo_and_jsonl_edges(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_STORAGE", "mongo")
+    monkeypatch.setenv("MONGODB_URI", "'mongodb://example.test/venue_ops'")
+    monkeypatch.delenv("MONGODB_DATABASE", raising=False)
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_EVENT_LOG_PATH", str(tmp_path / "feeds.jsonl"))
+    monkeypatch.setenv("PARKPULSE_REVIEW_LEDGER_LOG_PATH", str(tmp_path / "reviews.jsonl"))
+    monkeypatch.setenv("BAD_INT", "not-a-number")
+
+    assert _strip_secret("'mongodb://example.test/db'") == "mongodb://example.test/db"
+    assert _int_env("BAD_INT", 12) == 12
+    assert _mongo_database_name() == "venue_ops"
+    assert _mongo_collection_name_for_path(_feed_log_path()) == "live_feed_events"
+    assert _mongo_collection_name_for_path(_review_log_path()) == "live_review_ledger"
+    assert _mongo_collection_name_for_path(str(tmp_path / "other.jsonl")) is None
+
+    writes = []
+
+    class FakeCursor:
+        def sort(self, *args):
+            return self
+
+        def limit(self, limit):
+            return [{"_id": "hidden", "id": "row-1"}, "bad"][:limit]
+
+    class FakeCollection:
+        def replace_one(self, query, document, upsert=False):
+            writes.append((query, document, upsert))
+
+        def find(self, *args, **kwargs):
+            return FakeCursor()
+
+    class FakeDb:
+        def __getitem__(self, collection):
+            return FakeCollection()
+
+    class FakeClient:
+        def __getitem__(self, name):
+            assert name == "venue_ops"
+            return FakeDb()
+
+    monkeypatch.setattr(live_feedback_loop, "_mongo_client", lambda: FakeClient())
+    assert _write_mongo_document("live_feed_events", {"id": "row-1"}) is True
+    assert writes[0][0] == {"_id": "row-1"}
+    assert _read_mongo_documents("live_feed_events", limit=0) == [{"id": "row-1"}]
+
+    monkeypatch.setattr(live_feedback_loop, "_write_mongo_document", lambda collection, row: row.get("id") == "ok")
+    _append_jsonl_many(_feed_log_path(), [])
+    _append_jsonl_many(_feed_log_path(), [{"id": "ok"}, {"id": "fallback"}])
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_STORAGE", "jsonl")
+    assert _read_jsonl(_feed_log_path())[0]["id"] == "fallback"
+
+    def broken_open(*args, **kwargs):
+        raise OSError("cannot read")
+
+    monkeypatch.setattr(builtins, "open", broken_open)
+    assert _read_jsonl(_feed_log_path()) == []
+
+
+def test_live_feed_storage_warm_paths(monkeypatch):
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_STORAGE", "jsonl")
+    assert warm_live_feed_storage()["warm"] is False
+
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_STORAGE", "mongodb")
+    monkeypatch.setenv("MONGODB_URI", "mongodb://example.test/parkpulse")
+    monkeypatch.setattr(live_feedback_loop, "_mongo_client", lambda: None)
+    assert warm_live_feed_storage()["readiness_issues"]
+
+    class WarmCollection:
+        def __init__(self, fail=False):
+            self.fail = fail
+
+        def find_one(self, *args, **kwargs):
+            if self.fail:
+                raise RuntimeError("warm failed")
+            return {"_id": "ok"}
+
+    class WarmDb:
+        def __init__(self, fail=False):
+            self.live_feed_events = WarmCollection(fail=fail)
+            self.live_review_ledger = WarmCollection()
+
+    class WarmClient:
+        def __init__(self, fail=False):
+            self.fail = fail
+
+        def __getitem__(self, name):
+            return WarmDb(fail=self.fail)
+
+    monkeypatch.setattr(live_feedback_loop, "_mongo_client", lambda: WarmClient())
+    assert warm_live_feed_storage()["warm"] is True
+    monkeypatch.setattr(live_feedback_loop, "_mongo_client", lambda: WarmClient(fail=True))
+    assert warm_live_feed_storage()["warm"] is False
+
+
+def test_live_feed_batch_and_review_auto_recovery(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_STORAGE", "jsonl")
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_EVENT_LOG_PATH", str(tmp_path / "feeds.jsonl"))
+    monkeypatch.setenv("PARKPULSE_REVIEW_LEDGER_LOG_PATH", str(tmp_path / "reviews.jsonl"))
+
+    assert ingest_live_feed_events([None, "bad"])["status"] == "empty"
+    loaded = ingest_live_feed_events(
+        [
+            {
+                "source": "unknown-feed",
+                "source_event_id": "unknown-1",
+                "observed_at": "bad-time",
+                "received_at": 0,
+                "signal_type": "security",
+                "confidence": "bad",
+                "freshness_seconds": "bad",
+                "value": "security note",
+            },
+            {
+                "source": "ride_status",
+                "source_event_id": "ride-2",
+                "observed_at": datetime.now(UTC).isoformat(),
+                "signal_type": "wait_time",
+                "value": {"wait": 10},
+                "confidence": 0.9,
+                "raw_payload_ref": "unit://ride",
+            },
+        ]
+    )
+    assert loaded["status"] == "loaded"
+    assert loaded["review_case_count"] == 1
+
+    stale_event = normalize_live_feed_event(
+        {
+            "source": "ride_ops",
+            "source_event_id": "old",
+            "observed_at": (datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
+            "received_at": datetime.now(UTC).isoformat(),
+            "signal_type": "wait_time",
+            "confidence": 0.95,
+            "freshness_seconds": 600,
+            "raw_payload_ref": "unit://old",
+        }
+    )
+    stale_case = live_feedback_loop.review_case_for_event(stale_event)
+    fresh_event = normalize_live_feed_event(
+        {
+            "source": "ride_ops",
+            "source_event_id": "new",
+            "observed_at": datetime.now(UTC).isoformat(),
+            "signal_type": "wait_time",
+            "confidence": 0.95,
+            "raw_payload_ref": "unit://new",
+        }
+    )
+
+    assert _feed_event_ready_now(fresh_event) is True
+    assert _feed_event_ready_now(None) is False
+    folded = _fold_review_state([stale_case], {"ride_ops": fresh_event})
+    assert folded["closed_reviews"][0]["disposition"]["decision"] == "auto_closed_fresh_feed_recovered"
+
+    open_state = _review_disposition_for_event(stale_event["id"], [stale_case])
+    assert open_state["status"] == "open_review"
+    approved = _review_disposition_for_event(
+        stale_event["id"],
+        [
+            stale_case,
+            {"review_type": "operator_disposition", "case_id": stale_case["id"], "decision": "approve_for_state"},
+        ],
+    )
+    assert approved["status"] == "approved"
+    rejected = _review_disposition_for_event(
+        stale_event["id"],
+        [
+            stale_case,
+            {"review_type": "operator_disposition", "case_id": stale_case["id"], "decision": "hold_for_review"},
+        ],
+    )
+    assert rejected["status"] == "hold_for_review"
 
 
 def test_full_runtime_refresh_stale_supervisor_loads_missing_operator_signal(tmp_path, monkeypatch):
@@ -524,13 +723,39 @@ def test_actual_training_exports_live_feed_case_bank_reward_vectors(monkeypatch,
                 "decision_id": "decision_test_storm",
                 "created_at": "2026-06-04T17:05:20Z",
                 "issue": {"kind": "lightning_delay", "target_id": "outdoor_park"},
-                "actions": {"executed_count": 2},
+                "actions": {
+                    "executed_count": 2,
+                    "risk_escalation_requested_count": 1,
+                    "risk_escalation_approved_count": 1,
+                    "risk_escalated_executed_count": 1,
+                    "risk_escalation_delivery_status": "proven_escalated",
+                    "risk_escalation_impact_status": "applied",
+                    "risk_escalation_material_state_mutation": True,
+                    "risk_escalation_validation_mode": "normal",
+                },
                 "measurement": {
                     "attribution_confidence": 0.95,
                     "eligible_for_reward": True,
                     "promotion_eligible": True,
                     "reward_label": "operational_lift_with_policy_safe_execution",
-                    "reward_layers": {"operational_reward": 0.577},
+                    "reward_layers": {
+                        "operational_reward": 0.577,
+                        "risk_lift_label": "risk_lift_success",
+                        "branch_rewards": {
+                            "controlled_low_risk": {"reward": 0.74, "executed_count": 2},
+                            "risk_lift": {
+                                "reward": 0.91,
+                                "label": "risk_lift_success",
+                                "requested_count": 1,
+                                "approved_count": 1,
+                                "executed_count": 1,
+                                "delivery_status": "proven_escalated",
+                                "impact_status": "applied",
+                                "material_state_mutation": True,
+                                "effect_score": 0.8,
+                            },
+                        },
+                    },
                     "controlled_effect_projection": {
                         "status": "applied",
                         "executed_tools": ["pause_launch_promo", "shift_adjustment_recommendation"],
@@ -545,8 +770,8 @@ def test_actual_training_exports_live_feed_case_bank_reward_vectors(monkeypatch,
 
     rows = _live_feed_case_bank_training_rows()
 
-    assert len(rows) == 1
-    row = rows[0]
+    assert len(rows) == 2
+    row = next(row for row in rows if row["source"] == "live_feed_case_bank_reward_vectors")
     assert row["row_id"] == "live_feed_case_bank:outcome_test_storm"
     assert row["source"] == "live_feed_case_bank_reward_vectors"
     assert row["scenario_key"] == "storm_response"
@@ -556,6 +781,17 @@ def test_actual_training_exports_live_feed_case_bank_reward_vectors(monkeypatch,
     assert row["follow_through_rate"] == 0.95
     assert row["promotion_eligible"] is True
     assert row["executed_tools"] == ["pause_launch_promo", "shift_adjustment_recommendation"]
+    assert row["reasoning_context"] == "storm_response|controlled_low_risk"
+    assert row["risk_lift_label"] == "risk_lift_success"
+    risk_row = next(row for row in rows if row["source"] == "live_feed_case_bank_risk_lift_reward_vectors")
+    assert risk_row["row_id"] == "live_feed_case_bank_risk_lift:outcome_test_storm"
+    assert risk_row["scenario_key"] == "storm_response"
+    assert risk_row["policy_key"] == "live_feed_risk_lift_approve_lightning_delay"
+    assert risk_row["reward"] == 91.0
+    assert risk_row["reward_label"] == "risk_lift_success"
+    assert risk_row["reasoning_context"] == "storm_response|risk_lift_success"
+    assert {"risk_lift_success", "risk_controls_approved", "risk_lift_executed", "impact:applied"} <= set(risk_row["reasoning_feature_tags"])
+    assert risk_row["reasoning_feature_source"] == "live_feed_case_bank_llm_trace"
 
 
 def test_progress_reconciliation_holds_source_conflicted_slice():
@@ -702,6 +938,256 @@ def test_controlled_live_feed_receiver_delivery_proof_acknowledges_only_executed
     assert dispatch_payloads[0]["department"] == "food_retail"
     assert dispatch_payloads[0]["publicGuestMessage"] is False
     assert any(row["status"] == "not_dispatched_policy_hold" for row in result["receipts"])
+
+
+def _risk_lift_task(**overrides):
+    task = {
+        "task_id": "hard-follow-ops-route",
+        "agent": "ride_ops_agent",
+        "department": "operations",
+        "source_tool": "recommend_route_change",
+        "status": "routed_to_owner",
+        "policy_status": "requires_executive",
+        "next_owner": "ops_lead",
+        "exit_condition": "Congestion returns below threshold or route change is cancelled.",
+        "fallback": "Cancel route recommendation and return to staffed hold points.",
+        "review_inputs": {"live_feed_event_ids": ["event-ride-1", "event-flow-1"]},
+    }
+    task.update(overrides)
+    return task
+
+
+def test_risk_escalation_disabled_keeps_gate_closed():
+    import parkpulse_api
+
+    result = parkpulse_api._build_live_feed_risk_escalation_approval(
+        {"hard_decision_follow_through": {"tasks": [_risk_lift_task()]}},
+        enabled=False,
+    )
+
+    assert result["status"] == "disabled"
+    assert result["stage"] == "gate_closed"
+    assert result["requested_count"] == 0
+    assert result["approved_count"] == 0
+    assert result["approvals"] == []
+
+
+def test_risk_escalation_blocks_missing_controls():
+    import parkpulse_api
+
+    task = _risk_lift_task(exit_condition="", fallback="", review_inputs={"live_feed_event_ids": []})
+    result = parkpulse_api._build_live_feed_risk_escalation_approval(
+        {"decision_id": "decision-risk-test", "hard_decision_follow_through": {"tasks": [task]}},
+        enabled=True,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["requested_count"] == 1
+    assert result["approved_count"] == 0
+    approval = result["approvals"][0]
+    assert approval["status"] == "blocked"
+    assert set(approval["missing_controls"]) == {"live_feed_event_ids", "exit_condition", "rollback"}
+    assert {row["status"] for row in approval["approvers"]} == {"blocked"}
+
+
+def test_risk_escalation_rejects_out_of_scope_action():
+    import parkpulse_api
+
+    result = parkpulse_api._build_live_feed_risk_escalation_approval(
+        {
+            "hard_decision_follow_through": {
+                "tasks": [
+                    _risk_lift_task(
+                        task_id="hard-follow-security",
+                        agent="security_agent",
+                        department="security",
+                        source_tool="zone_control_recommendation",
+                    )
+                ]
+            }
+        },
+        enabled=True,
+    )
+
+    assert result["status"] == "not_requested"
+    assert result["requested_count"] == 0
+    assert result["approved_count"] == 0
+    assert result["approvals"] == []
+
+
+def test_risk_escalated_executor_requires_approval(monkeypatch):
+    import parkpulse_api
+
+    calls = []
+    monkeypatch.setattr(
+        parkpulse_api,
+        "run_agent_tool",
+        lambda *args, **kwargs: calls.append(args) or {"status": "should_not_execute"},
+    )
+
+    result = parkpulse_api._risk_escalated_live_feed_tool_executor_run(
+        {
+            "risk_escalation_approval": {
+                "status": "blocked",
+                "approvals": [
+                    {
+                        "status": "blocked",
+                        "department": "operations",
+                        "source_tool": "recommend_route_change",
+                        "approval_id": "risk_lift_blocked",
+                    }
+                ],
+            }
+        },
+        execute=True,
+    )
+
+    assert result["status"] == "not_executed"
+    assert result["executed_count"] == 0
+    assert result["receipts"] == []
+    assert calls == []
+
+
+def test_risk_lift_reward_is_separate_from_controlled_reward():
+    import parkpulse_api
+
+    result = parkpulse_api._live_feed_reward_layers(
+        {
+            "role_agent_proposals": {
+                "negotiation_rounds": [{"round": 1}, {"round": 2}, {"round": 3}, {"round": 4}],
+                "proposals": [
+                    {
+                        "proposal_envelope": {"policy_check": "passed"},
+                        "department_reasoning": {"evidence_argument": "event-flow supports route relief"},
+                    }
+                ],
+            },
+            "tool_executor_live_test": {
+                "executed_count": 1,
+                "held_count": 1,
+                "held_disposition_count": 1,
+                "receipts": [
+                    {"department": "food_retail", "source_tool": "pause_launch_promo", "result": {"status": "executed_controlled"}},
+                    {"department": "operations", "source_tool": "recommend_route_change", "result": {"status": "held"}},
+                ],
+            },
+            "live_feed_receiver_delivery": {
+                "status": "proven_controlled",
+                "delivered_count": 1,
+                "acknowledged_count": 1,
+                "public_guest_messages_sent": 0,
+                "material_state_mutation": False,
+            },
+            "hard_decision_follow_through": {"status": "routed", "unresolved_without_owner_count": 0},
+            "risk_escalation_approval": {"status": "approved", "requested_count": 1, "approved_count": 1},
+            "risk_escalated_tool_executor": {"status": "executed", "executed_count": 1},
+            "risk_escalation_receiver_delivery": {
+                "status": "proven_escalated",
+                "delivered_count": 1,
+                "acknowledged_count": 1,
+            },
+            "risk_escalation_simulated_ops_impact": {
+                "status": "applied",
+                "material_state_mutation": True,
+                "state_impact": {"congestion_delta": -30, "queued_guest_delta": -120},
+                "episode_fitness": {"fitness": 70},
+            },
+        },
+        rows=[],
+        executed_departments={"food_retail"},
+        receiver_delivery_proven=True,
+        measurement_available=True,
+        source_coverage=1,
+        department_coverage=1,
+        attribution_confidence=0.9,
+        improvement_points=2,
+        regression_points=0,
+        stable_points=1,
+    )
+
+    branch_rewards = result["branch_rewards"]
+    assert result["risk_lift_label"] == "risk_lift_success"
+    assert branch_rewards["controlled_low_risk"]["reward"] > 0
+    assert branch_rewards["risk_lift"]["reward"] > 0
+    assert branch_rewards["risk_lift"]["executed_count"] == 1
+    assert branch_rewards["risk_lift"]["material_state_mutation"] is True
+    assert result["metrics"]["risk_escalation_effect_score"] > 0
+    assert branch_rewards["risk_lift"]["reward"] != branch_rewards["controlled_low_risk"]["reward"]
+
+
+def test_risk_lift_regression_is_not_promoted_by_process_completion():
+    import parkpulse_api
+
+    result = parkpulse_api._live_feed_reward_layers(
+        {
+            "role_agent_proposals": {
+                "negotiation_rounds": [{"round": 1}, {"round": 2}, {"round": 3}, {"round": 4}],
+                "proposals": [
+                    {
+                        "proposal_envelope": {"policy_check": "passed"},
+                        "department_reasoning": {"evidence_argument": "event-flow supports route relief"},
+                    }
+                ],
+            },
+            "tool_executor_live_test": {
+                "executed_count": 1,
+                "held_count": 1,
+                "held_disposition_count": 1,
+                "receipts": [
+                    {"department": "food_retail", "source_tool": "pause_launch_promo", "result": {"status": "executed_controlled"}},
+                    {"department": "operations", "source_tool": "recommend_route_change", "result": {"status": "held"}},
+                ],
+            },
+            "live_feed_receiver_delivery": {
+                "status": "proven_controlled",
+                "delivered_count": 1,
+                "acknowledged_count": 1,
+                "public_guest_messages_sent": 0,
+                "material_state_mutation": False,
+            },
+            "hard_decision_follow_through": {"status": "routed", "unresolved_without_owner_count": 0},
+            "risk_escalation_approval": {"status": "approved", "requested_count": 1, "approved_count": 1},
+            "risk_escalated_tool_executor": {"status": "executed", "executed_count": 1},
+            "risk_escalation_receiver_delivery": {
+                "status": "proven_escalated",
+                "delivered_count": 1,
+                "acknowledged_count": 1,
+            },
+            "risk_escalation_simulated_ops_impact": {
+                "status": "applied",
+                "material_state_mutation": True,
+                "state_impact": {"congestion_delta": 24, "queued_guest_delta": 90},
+                "episode_fitness": {"fitness": 0},
+            },
+        },
+        rows=[],
+        executed_departments={"food_retail"},
+        receiver_delivery_proven=True,
+        measurement_available=True,
+        source_coverage=1,
+        department_coverage=1,
+        attribution_confidence=0.9,
+        improvement_points=2,
+        regression_points=0,
+        stable_points=1,
+    )
+
+    assert result["risk_lift_label"] == "risk_lift_regression"
+    assert result["risk_lift_reward"] <= 0.45
+    assert result["branch_rewards"]["risk_lift"]["label"] == "risk_lift_regression"
+    assert "risk_lift_regression_detected" in result["promotion_blockers"]
+
+
+def test_risk_escalation_validation_mode_removes_required_controls():
+    import parkpulse_api
+
+    payload = {"hard_decision_follow_through": {"tasks": [_risk_lift_task()]}}
+    result = parkpulse_api._apply_risk_escalation_validation_mode(payload, "missing_controls")
+    approval = parkpulse_api._build_live_feed_risk_escalation_approval(result, enabled=True)
+
+    assert result["risk_escalation_validation_fault"]["mutated_task_count"] == 1
+    assert approval["status"] == "blocked"
+    assert set(approval["approvals"][0]["missing_controls"]) == {"live_feed_event_ids", "exit_condition", "rollback"}
 
 
 def test_live_feed_outcome_measurement_builds_reward_candidate_from_post_action_snapshot():
@@ -1475,6 +1961,15 @@ def test_live_feed_controlled_outcome_memory_records_existing_memory_shape(monke
                     }
                 ],
             },
+            "risk_escalation_approval": {
+                "status": "disabled",
+                "stage": "gate_closed",
+                "requested_count": 0,
+                "approved_count": 0,
+            },
+            "risk_escalated_tool_executor": {"status": "not_executed", "executed_count": 0, "preview_count": 0},
+            "risk_escalation_receiver_delivery": {"status": "not_dispatched", "delivered_count": 0, "acknowledged_count": 0},
+            "risk_escalation_simulated_ops_impact": {"status": "not_applied", "material_state_mutation": False},
             "live_feed_outcome_measurement": {
                 "status": "measured",
                 "measurement_id": "measurement-proof",
@@ -1489,6 +1984,11 @@ def test_live_feed_controlled_outcome_memory_records_existing_memory_shape(monke
                     "operational_reward": 0.82,
                     "learning_reward": 0.6,
                     "composite_reward": 0.85,
+                    "risk_lift_label": "risk_lift_blocked",
+                    "branch_rewards": {
+                        "controlled_low_risk": {"reward": 0.72},
+                        "risk_lift": {"reward": 0.0, "label": "risk_lift_blocked", "executed_count": 0},
+                    },
                     "promotion_eligible": True,
                 },
                 "promotion_eligible": True,
@@ -1514,6 +2014,8 @@ def test_live_feed_controlled_outcome_memory_records_existing_memory_shape(monke
     assert recorded["outcome"]["state_impact"]["hard_decision_follow_through_status"] == "routed"
     assert recorded["outcome"]["state_impact"]["active_follow_up_count"] == 1
     assert recorded["outcome"]["state_impact"]["hard_decision_follow_through_tasks"][0]["task_id"] == "hard-follow-safety"
+    assert recorded["outcome"]["state_impact"]["risk_escalation_approval"]["status"] == "disabled"
+    assert recorded["outcome"]["state_impact"]["risk_escalated_tool_executor"]["executed_count"] == 0
     assert recorded["outcome"]["state_impact"]["receiver_delivery_proof_id"] == "receiver-proof"
     assert recorded["outcome"]["state_impact"]["post_action_measurement_id"] == "measurement-proof"
     assert recorded["outcome"]["state_impact"]["ml_policy_evidence"]["scenario_key"] == "food_spike"
@@ -1523,6 +2025,10 @@ def test_live_feed_controlled_outcome_memory_records_existing_memory_shape(monke
     assert recorded["outcome"]["scorecard"]["post_action_measurement"] == 100
     assert recorded["outcome"]["learning"]["eligible_for_reward"] is True
     assert recorded["outcome"]["learning"]["reward_layers"]["operational_reward"] == 0.82
+    assert recorded["outcome"]["learning"]["branch_rewards"]["risk_lift"]["label"] == "risk_lift_blocked"
+    assert recorded["outcome"]["learning"]["risk_lift_label"] == "risk_lift_blocked"
+    assert {"controlled_low_risk", "risk_lift_blocked", "risk_gate_disabled"} <= set(recorded["outcome"]["learning"]["training_tags"])
+    assert recorded["outcome"]["learning"]["risk_lift_learning_context"]["status"] == "disabled"
     assert recorded["outcome"]["learning"]["promotion_eligible"] is True
     assert recorded["outcome"]["learning"]["ml_policy_learning_context"]["slice_decision"] == "promote_slice"
     assert recorded["outcome"]["learning"]["ml_policy_learning_context"]["accepted_low_risk_count"] == 1

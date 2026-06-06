@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ParkPulse Product Learning Loop Result</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #071014;
+      --panel: #0d171b;
+      --panel-2: #101f24;
+      --line: #23343b;
+      --text: #e6f1f4;
+      --muted: #8ca0a8;
+      --teal: #5eead4;
+      --amber: #fcd34d;
+      --green: #86efac;
+      --rose: #fda4af;
+      --cyan: #67e8f9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0 48px;
+    }
+    header {
+      border: 1px solid rgba(94, 234, 212, .35);
+      background: var(--panel);
+      padding: 24px;
+      border-radius: 10px;
+    }
+    .eyebrow {
+      color: var(--teal);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3 { margin: 0; line-height: 1.1; }
+    h1 { margin-top: 10px; font-size: clamp(32px, 5vw, 54px); letter-spacing: 0; }
+    h2 { font-size: 20px; }
+    h3 { font-size: 15px; }
+    p { color: var(--muted); margin: 10px 0 0; }
+    section { margin-top: 18px; }
+    .grid {
+      display: grid;
+      gap: 12px;
+    }
+    .metrics { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .metric strong {
+      display: block;
+      font-size: 28px;
+      line-height: 1;
+      margin-top: 8px;
+    }
+    .metric span, .tag {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    .tag {
+      display: inline-flex;
+      border: 1px solid var(--line);
+      background: #071014;
+      border-radius: 999px;
+      padding: 5px 8px;
+      margin: 8px 6px 0 0;
+    }
+    .ok { color: var(--green); }
+    .warn { color: var(--amber); }
+    .info { color: var(--cyan); }
+    .risk { color: var(--rose); }
+    ol, ul { margin: 10px 0 0; padding-left: 20px; color: var(--muted); }
+    li { margin: 6px 0; }
+    code {
+      color: var(--cyan);
+      background: #071014;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 1px 5px;
+      font-size: 12px;
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(120px, 1fr));
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+    .step {
+      min-height: 84px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .step b { display: block; font-size: 13px; }
+    .step small { display: block; color: var(--muted); margin-top: 6px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 13px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    .footer {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 22px;
+    }
+    @media (max-width: 900px) {
+      .metrics, .three, .two { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">ParkPulse Staff Roleplay Trainer</div>
+      <h1>Product Learning Loop Result</h1>
+      <p>
+        The system now connects live issue signals, roleplay training gaps, governed auto-learning,
+        human exception review, durable version promotion, runtime consumption, outcome measurement,
+        and rollback into one auditable loop.
+      </p>
+      <div>
+        <span class="tag ok">Backend running on 8017</span>
+        <span class="tag ok">Frontend running on 3004</span>
+        <span class="tag ok">45 backend tests passed</span>
+        <span class="tag ok">Frontend typecheck passed</span>
+      </div>
+    </header>
+
+    <section class="grid metrics">
+      <div class="card metric"><span>SQLite events</span><strong>73</strong></div>
+      <div class="card metric"><span>Review resolutions</span><strong>1</strong></div>
+      <div class="card metric"><span>Promotion-ready</span><strong>2</strong></div>
+      <div class="card metric"><span>Active versions</span><strong>0</strong></div>
+      <div class="card metric"><span>Rolled back</span><strong>1</strong></div>
+      <div class="card metric"><span>Active ops checklists</span><strong>0</strong></div>
+    </section>
+
+    <section class="card">
+      <h2>End-to-End Loop</h2>
+      <div class="flow" aria-label="Product learning loop flow">
+        <div class="step"><b>1. Live tickets</b><small>Guest, employee, dynamic park, place risk, and seeded incidents.</small></div>
+        <div class="step"><b>2. Dedupe lifecycle</b><small>Tickets become deduped lifecycle items with review ownership.</small></div>
+        <div class="step"><b>3. Learning signals</b><small>Repeated tickets and training gaps become product-learning signals.</small></div>
+        <div class="step"><b>4. Auto draft</b><small>Low-risk changes become versioned training or checklist drafts.</small></div>
+        <div class="step"><b>5. Promotion</b><small>Safe versions promote into training/checklist registries only.</small></div>
+        <div class="step"><b>6. Runtime use</b><small>Training consumes active staff-training versions; backlog consumes ops-checklist versions.</small></div>
+        <div class="step"><b>7. Outcomes</b><small>Scores and gaps are measured; regression can auto-rollback.</small></div>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="card">
+        <h2>Built Capabilities</h2>
+        <ul>
+          <li>Backend-generated live issue tickets from operational backlog, place risk, and random incident rules.</li>
+          <li>Named human review places for safety, accessibility, refund, first aid, security, ride safety, and ops command.</li>
+          <li>Safe auto-learning for low-risk scopes with shadow metrics and rollback guards.</li>
+          <li>Durable version registry with promotion, active, rolled-back, and outcome states.</li>
+          <li>Staff roleplay sessions attach active training versions and record outcome metrics.</li>
+          <li>Operational backlog is augmented by active ops-checklist guidance when a matching version exists.</li>
+          <li>SQLite event store with JSONL compatibility and query indexes.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h2>Guardrails</h2>
+        <ul>
+          <li>LLM guest simulator never controls score.</li>
+          <li>Training gaps never create live issue tickets.</li>
+          <li>Auto-promotion cannot dispatch, refund, alter safety policy, or mutate live operations.</li>
+          <li>Human review approval applies only to training/checklist learning changes.</li>
+          <li>Rollback only rolls back generated learning versions, not live operations.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Implemented Product Surfaces</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Surface</th>
+            <th>Status</th>
+            <th>Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Staff training runtime</td>
+            <td class="ok">Implemented</td>
+            <td>Active staff-training versions attach to matching roleplay sessions and appear in scenario guidance.</td>
+          </tr>
+          <tr>
+            <td>Ops checklist runtime</td>
+            <td class="ok">Implemented</td>
+            <td>Active ops-checklist versions augment operational backlog issue guidance when issue type matches.</td>
+          </tr>
+          <tr>
+            <td>Human review workflow</td>
+            <td class="ok">Implemented</td>
+            <td>Review queues support approve, hold, and reject decisions with persisted resolution events.</td>
+          </tr>
+          <tr>
+            <td>Outcome visibility</td>
+            <td class="ok">Implemented</td>
+            <td>Manager UI shows session count, average score, score delta, rollback status, and event-store counts.</td>
+          </tr>
+          <tr>
+            <td>Persistence</td>
+            <td class="ok">Implemented</td>
+            <td>Product-learning events are stored in SQLite with indexes and JSONL compatibility migration.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="grid three">
+      <div class="card">
+        <h3>Key API Routes</h3>
+        <ul>
+          <li><code>GET /api/park/product-learning/loop</code></li>
+          <li><code>POST /api/park/product-learning/promote-version</code></li>
+          <li><code>POST /api/park/product-learning/rollback-version</code></li>
+          <li><code>POST /api/park/product-learning/review-place-resolution</code></li>
+          <li><code>GET /api/park/product-learning/event-store</code></li>
+          <li><code>GET /api/park/operational-backlog</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Event Store Indexes</h3>
+        <ul>
+          <li><code>event_type</code></li>
+          <li><code>scenario_id</code></li>
+          <li><code>issue_type</code></li>
+          <li><code>version_id</code></li>
+          <li><code>target_surface</code></li>
+          <li><code>created_at</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Current Note</h3>
+        <p>
+          Live status has no active ops-checklist version right now, so no live backlog issue is currently augmented.
+          The backend test validates the overlay when a matching active ops-checklist version exists.
+        </p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Validation</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Check</th>
+            <th>Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Backend tests</td><td class="ok">45 passed</td></tr>
+          <tr><td>Frontend typecheck</td><td class="ok">Passed</td></tr>
+          <tr><td>Browser manager panel</td><td class="ok">Human review actions, ops checklist consumption, and event store panels mounted</td></tr>
+          <tr><td>Live event store</td><td class="ok">73 SQLite events</td></tr>
+          <tr><td>Live review resolution smoke test</td><td class="ok">Recorded hold decision</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <p class="footer">
+      Generated for ParkPulse on the local workspace. Open the app at
+      <code>http://127.0.0.1:3004/staff-training?api=http://127.0.0.1:8017&amp;v=ops-review-store</code>.
+    </p>
+  </main>
+</body>
+</html>

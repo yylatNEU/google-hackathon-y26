@@ -1,0 +1,25 @@
+diff --git a/backend/main.py b/backend/main.py
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -12467,6 +12467,21 @@ async def _build_copilot_payload_with_runtime(request_payload: dict[str, Any]) -
+         }
+
+     try:
++        if _truthy_env("PARKPULSE_COPILOT_HOT_PATH_LOCAL_ONLY", False) and _truthy_env("PARKPULSE_COPILOT_LIGHTWEIGHT_PATH", True):
++            mark("lightweight_hot_path")
++            payload = await _build_lightweight_copilot_payload(request_payload)
++            payload.setdefault("latency_diagnostics", {})
++            if isinstance(payload["latency_diagnostics"], dict):
++                payload["latency_diagnostics"]["wrapper"] = {
++                    "mode": "main_asgi_copilot_wrapper",
++                    "path": "lightweight_hot_path_local_only",
++                    "total_ms": round((time.monotonic() - started) * 1000, 2),
++                    "stages": stages,
++                    "load_timeout_seconds": load_timeout,
++                    "run_timeout_seconds": run_timeout,
++                    "full_runtime": _full_runtime_status(),
++                }
++            return payload
+         if _parkpulse_app is None:
+             if _truthy_env("PARKPULSE_COPILOT_LIGHTWEIGHT_PATH", True):
+                 mark("lightweight_path")

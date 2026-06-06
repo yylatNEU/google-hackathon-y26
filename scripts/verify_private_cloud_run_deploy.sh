@@ -6,6 +6,9 @@ REGION="${2:-${GOOGLE_CLOUD_LOCATION:-us-central1}}"
 SERVICE="${3:-${PARKPULSE_CLOUD_RUN_SERVICE:-parkpulse-private-api}}"
 ROLE_AUTH_RESOURCE_NAME="${PARKPULSE_ROLE_AUTH_SECRET_NAME:-parkpulse-role-auth-secret}"
 EXPECTED_REVISION="${PARKPULSE_EXPECTED_REVISION:-}"
+VERIFY_URL="${PARKPULSE_PRIVATE_VERIFY_URL:-${PARKPULSE_CLOUD_RUN_URL:-}}"
+SKIP_TRAFFIC_CHECK="${PARKPULSE_SKIP_TRAFFIC_CHECK:-false}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z "$PROJECT_ID" ]]; then
   echo "Usage: scripts/verify_private_cloud_run_deploy.sh <gcp-project-id> [region] [service]" >&2
@@ -15,7 +18,17 @@ fi
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/parkpulse-deploy-verify.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-SERVICE_URL="$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')"
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+SERVICE_URL="$VERIFY_URL"
+if [[ -z "$SERVICE_URL" ]]; then
+  SERVICE_URL="$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')"
+fi
 GOOGLE_IDENTITY="$(gcloud auth print-identity-token)"
 
 curl_json() {
@@ -31,13 +44,16 @@ curl_json() {
     "${SERVICE_URL}${path}" > "$output"
 }
 
-if [[ -n "$EXPECTED_REVISION" ]]; then
-  echo "Verifying Cloud Run traffic targets ${EXPECTED_REVISION}..."
+if truthy "$SKIP_TRAFFIC_CHECK"; then
+  echo "Skipping Cloud Run traffic assertion; verifying URL ${SERVICE_URL}"
 else
-  echo "Verifying Cloud Run traffic targets latest ready revision..."
-fi
-gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format=json > "$TMP_DIR/service.json"
-python3 - "$TMP_DIR/service.json" "$EXPECTED_REVISION" <<'PY'
+  if [[ -n "$EXPECTED_REVISION" ]]; then
+    echo "Verifying Cloud Run traffic targets ${EXPECTED_REVISION}..."
+  else
+    echo "Verifying Cloud Run traffic targets latest ready revision..."
+  fi
+  gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format=json > "$TMP_DIR/service.json"
+  python3 - "$TMP_DIR/service.json" "$EXPECTED_REVISION" <<'PY'
 import json
 import sys
 
@@ -65,6 +81,7 @@ if spec_traffic != [{"latestRevision": True, "percent": 100}]:
     raise SystemExit(f"Cloud Run spec is not configured to track latest revision: {spec_traffic}")
 print(f"Traffic: 100% latest ({latest_ready})")
 PY
+fi
 
 echo "Verifying readiness and MongoDB dependency..."
 curl_json GET /readyz "$TMP_DIR/readyz.json"
@@ -92,7 +109,7 @@ PY
 
 echo "Verifying signed-role auth contract..."
 ROLE_SIGNING_VALUE="$(gcloud secrets versions access latest --secret "$ROLE_AUTH_RESOURCE_NAME" --project "$PROJECT_ID")"
-PYTHONPATH="backend" python3 - "$ROLE_SIGNING_VALUE" > "$TMP_DIR/signed-header.txt" <<'PY'
+PYTHONPATH="${ROOT_DIR}/backend" python3 - "$ROLE_SIGNING_VALUE" > "$TMP_DIR/signed-header.txt" <<'PY'
 import sys
 
 from park_role_access import sign_role_session

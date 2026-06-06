@@ -21,6 +21,8 @@ public class ParkPulseMigrationController {
     private final AuthorizationAuditService authorizationAuditService;
     private final ReliabilityDiagnosticsService reliabilityDiagnosticsService;
     private final LiveFeedLedgerService liveFeedLedgerService;
+    private final ProductLearningService productLearningService;
+    private final StaffTrainingService staffTrainingService;
     private final Instant startedAt = Instant.now();
 
     public ParkPulseMigrationController(
@@ -29,7 +31,9 @@ public class ParkPulseMigrationController {
         RoleContractService roleContractService,
         AuthorizationAuditService authorizationAuditService,
         ReliabilityDiagnosticsService reliabilityDiagnosticsService,
-        LiveFeedLedgerService liveFeedLedgerService
+        LiveFeedLedgerService liveFeedLedgerService,
+        ProductLearningService productLearningService,
+        StaffTrainingService staffTrainingService
     ) {
         this.platformStoreService = platformStoreService;
         this.roleAuthService = roleAuthService;
@@ -37,6 +41,8 @@ public class ParkPulseMigrationController {
         this.authorizationAuditService = authorizationAuditService;
         this.reliabilityDiagnosticsService = reliabilityDiagnosticsService;
         this.liveFeedLedgerService = liveFeedLedgerService;
+        this.productLearningService = productLearningService;
+        this.staffTrainingService = staffTrainingService;
     }
 
     @GetMapping(value = {"/", "/healthz"}, produces = MediaType.APPLICATION_JSON_VALUE)
@@ -538,6 +544,114 @@ public class ParkPulseMigrationController {
         return liveFeedLedgerService.recordReviewDecision(body);
     }
 
+    @GetMapping(value = "/api/park/product-learning/loop", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> productLearningLoop(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_product_learning");
+        return productLearningService.loopStatus(limit == null ? 500 : limit);
+    }
+
+    @PostMapping(value = "/api/park/product-learning/issue-ticket", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> createProductLearningIssueTicket(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "create_park_issue_ticket");
+        return productLearningService.createParkIssueTicket(body);
+    }
+
+    @PostMapping(value = "/api/park/product-learning/training-gap-ticket", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> createProductLearningTrainingGapTicket(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "create_training_gap_ticket");
+        return productLearningService.createTrainingGapTicket(body);
+    }
+
+    @GetMapping(value = "/api/park/staff-training/scenarios", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> staffTrainingScenarios(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_staff_training");
+        return staffTrainingService.scenarios();
+    }
+
+    @GetMapping(value = "/api/park/staff-training/policy-pack", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> staffTrainingPolicyPack(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.policyPack();
+    }
+
+    @GetMapping(value = "/api/park/staff-training/assignments", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> staffTrainingAssignments(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.assignments(limit == null ? 200 : limit);
+    }
+
+    @PostMapping(value = "/api/park/staff-training/assignments", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> createStaffTrainingAssignment(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.createAssignment(body);
+    }
+
+    @GetMapping(value = "/api/park/staff-training/readiness", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> staffTrainingReadiness(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.readiness(limit == null ? 500 : limit);
+    }
+
+    @GetMapping(value = "/api/park/staff-training/receipts", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> staffTrainingReceipts(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.receipts(limit == null ? 80 : limit);
+    }
+
+    @GetMapping(value = "/api/park/staff-training/certification-packet", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> staffTrainingCertificationPacket(
+        HttpServletRequest request,
+        @RequestParam(name = "assignment_id", required = false) String assignmentId,
+        @RequestParam(name = "assignmentId", required = false) String assignmentIdCamel,
+        @RequestParam(name = "trainee_name", required = false) String traineeName,
+        @RequestParam(name = "traineeName", required = false) String traineeNameCamel
+    ) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.certificationPacket(firstNonBlank(assignmentId, assignmentIdCamel), firstNonBlank(traineeName, traineeNameCamel));
+    }
+
+    @PostMapping(value = "/api/park/staff-training/receipt-review", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> reviewStaffTrainingReceipt(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.reviewReceipt(body);
+    }
+
+    @PostMapping(value = "/api/park/staff-training/demo-seed", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> seedStaffTrainingDemo(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.seedDemoData();
+    }
+
+    @GetMapping(value = "/api/park/staff-training/golden-eval", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> staffTrainingGoldenEval(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.goldenEval();
+    }
+
+    @PostMapping(value = "/api/park/staff-training/sessions", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> startStaffTrainingSession(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_staff_training");
+        return staffTrainingService.startSession(body);
+    }
+
+    @PostMapping(value = "/api/park/staff-training/turn", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> advanceStaffTrainingTurn(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_staff_training");
+        return staffTrainingService.advanceTurn(body);
+    }
+
+    @PostMapping(value = "/api/park/staff-training/finish", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> finishStaffTrainingSession(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_staff_training");
+        return staffTrainingService.finishSession(body);
+    }
+
+    @GetMapping(value = "/api/park/staff-training/analytics", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> staffTrainingAnalytics(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.analytics(limit == null ? 200 : limit);
+    }
+
     private Map<String, Object> liveFeedSummary(List<Map<String, Object>> feeds, int openReviewCount) {
         long readyCount = feeds.stream().filter(item -> "ready".equals(String.valueOf(item.get("status")))).count();
         Map<String, Object> payload = orderedMap();
@@ -991,5 +1105,14 @@ public class ParkPulseMigrationController {
 
     private static String stringOrNull(Object value) {
         return value == null ? null : String.valueOf(value);
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
     }
 }

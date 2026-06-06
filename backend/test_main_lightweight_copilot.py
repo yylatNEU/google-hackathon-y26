@@ -65,3 +65,32 @@ def test_lightweight_copilot_returns_complete_contract(monkeypatch):
     assert payload["recommended_action"]["dispatch_count"] == 0
     assert payload["turn_contract"]["state_mutation"] is False
     assert payload["latency_diagnostics"]["status"] == "complete"
+
+
+def test_copilot_wrapper_uses_lightweight_hot_path_when_full_runtime_loaded(monkeypatch):
+    async def fake_lightweight(request_payload):
+        return {
+            "status": "complete",
+            "mode": "answer",
+            "message": request_payload.get("message"),
+            "answer": "Fast hot-path answer.",
+            "turn_contract": {"state_mutation": False, "dispatch_count": 0},
+            "latency_diagnostics": {"status": "complete", "stages": []},
+        }
+
+    async def fail_full_module(timeout=None):
+        raise AssertionError("full runtime should not be called on the copilot hot path")
+
+    monkeypatch.setenv("PARKPULSE_COPILOT_HOT_PATH_LOCAL_ONLY", "true")
+    monkeypatch.setenv("PARKPULSE_COPILOT_LIGHTWEIGHT_PATH", "true")
+    monkeypatch.setattr(main, "_parkpulse_app", object())
+    monkeypatch.setattr(main, "_parkpulse_module", object())
+    monkeypatch.setattr(main, "_build_lightweight_copilot_payload", fake_lightweight)
+    monkeypatch.setattr(main, "_get_full_module_for_first_response", fail_full_module)
+
+    payload = run(main._build_copilot_payload_with_runtime({"message": "What is the biggest risk?", "mode": "auto"}))
+
+    assert payload["status"] == "complete"
+    assert payload["answer"] == "Fast hot-path answer."
+    assert payload["turn_contract"]["state_mutation"] is False
+    assert payload["latency_diagnostics"]["wrapper"]["path"] == "lightweight_hot_path_local_only"

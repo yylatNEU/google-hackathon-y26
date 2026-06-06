@@ -82,6 +82,30 @@
         "review_status": "venue_approved",
         "last_verified_at": "2026-06-05T00:00:00Z",
         "max_age_seconds": 604800
+      },
+      "synthetic_live_status_snapshot": {
+        "label": "Approved synthetic live status and current options snapshot",
+        "source_type": "synthetic_venue_export.experience_operations.current_status_snapshot",
+        "confidence": 0.91,
+        "review_status": "venue_approved",
+        "last_verified_at": "2026-06-05T00:00:00Z",
+        "max_age_seconds": 900
+      },
+      "synthetic_signage_inventory": {
+        "label": "Approved synthetic signage placement inventory",
+        "source_type": "synthetic_venue_export.experience_operations.signage_inventory",
+        "confidence": 0.92,
+        "review_status": "venue_approved",
+        "last_verified_at": "2026-06-05T00:00:00Z",
+        "max_age_seconds": 604800
+      },
+      "synthetic_channel_templates": {
+        "label": "Approved synthetic CRM, app, signage, and staff templates",
+        "source_type": "synthetic_venue_export.experience_operations.channel_templates",
+        "confidence": 0.92,
+        "review_status": "venue_approved",
+        "last_verified_at": "2026-06-05T00:00:00Z",
+        "max_age_seconds": 604800
       }
     },
     "field_sources": {
@@ -95,7 +119,13 @@
       "copy_variants": ["synthetic_guest_copy"],
       "guest_segments": ["synthetic_experience_design_intelligence"],
       "experience_rules": ["synthetic_experience_design_intelligence"],
-      "brand_bible": ["synthetic_guest_copy", "synthetic_experience_design_intelligence"]
+      "brand_bible": ["synthetic_guest_copy", "synthetic_experience_design_intelligence"],
+      "live_status_snapshot": ["synthetic_live_status_snapshot"],
+      "current_options": ["synthetic_live_status_snapshot"],
+      "path_status": ["synthetic_live_status_snapshot", "synthetic_public_map"],
+      "signage_inventory": ["synthetic_signage_inventory", "synthetic_public_map"],
+      "channel_templates": ["synthetic_channel_templates", "synthetic_guest_copy"],
+      "weather_policy": ["synthetic_live_status_snapshot", "synthetic_experience_design_intelligence"]
     },
     "review_queue": [],
     "publish_gates": [
@@ -792,6 +822,104 @@
         {"profileField": "experienceRules.lowSensoryAnchors", "liveFeed": "weather.heatIndexF", "use": "rank cooling and reset breaks"}
       ],
       "missingBindingsPolicy": "If a live feed cannot be matched, Experience Studio may draft but must mark current availability and movement claims for owner confirmation."
+    }
+  },
+  "experience_operations": {
+    "source": "synthetic_live_status_snapshot",
+    "status": "approved_synthetic_operating_context",
+    "snapshot_local_date": "2026-06-05",
+    "snapshot_time_local": "13:30",
+    "current_status_snapshot": {
+      "weather": {
+        "condition": "light_rain",
+        "precipitationBand": "intermittent",
+        "heatIndexF": 76,
+        "windBand": "low",
+        "guestMessagingPolicy": "Use rainy-day comfort language, but do not promise full shelter or unchanged attraction availability."
+      },
+      "attractions": [
+        {"name": "Indoor Launch", "status": "open", "currentOptions": ["standard queue", "app reminder", "nearby indoor reset"], "guestFacingCaveat": "Check the app for current queue and boarding options."},
+        {"name": "Arcade Zone", "status": "open", "currentOptions": ["walk-in play", "short reset"], "guestFacingCaveat": "Capacity may vary by time of day."},
+        {"name": "Theater B", "status": "open_between_showtimes", "currentOptions": ["11:00 cooling show", "14:00 cooling show", "quiet reset between pulses"], "guestFacingCaveat": "Theater seating and quietness change around showtimes."},
+        {"name": "Storybook Boats", "status": "weather_review", "currentOptions": ["photo clue nearby", "covered alternate via Lagoon Lanterns"], "guestFacingCaveat": "Outdoor ride availability must be confirmed in the app."},
+        {"name": "Dragon Coaster", "status": "weather_review", "currentOptions": ["photo stop", "indoor alternate"], "guestFacingCaveat": "Do not promise outdoor ride availability during rain."}
+      ],
+      "facilityStatus": [
+        {"name": "Food Court A", "status": "open", "seatingBand": "moderate", "restroomNearby": true, "mobileOrder": true},
+        {"name": "Food Court B", "status": "open", "seatingBand": "low_to_moderate", "restroomNearby": true, "mobileOrder": false},
+        {"name": "Care Lagoon Family Room", "status": "open", "seatingBand": "low", "restroomNearby": true, "staffConfirmationRequired": true},
+        {"name": "Guest Services", "status": "open", "handoffUse": ["accessibility route questions", "lost party", "weather alternate"]}
+      ]
+    },
+    "path_status": {
+      "source": "synthetic_public_map + synthetic_live_status_snapshot",
+      "routeSegments": [
+        {"from": "Indoor Launch", "to": "Arcade Zone", "status": "open", "stepFree": true, "covered": true, "lighting": "standard", "guestClaimAllowed": ["covered", "step-free"], "blockedClaims": ["ADA compliant"]},
+        {"from": "Arcade Zone", "to": "Theater B", "status": "open", "stepFree": true, "covered": true, "lighting": "standard", "guestClaimAllowed": ["covered", "step-free"], "blockedClaims": ["quiet guarantee"]},
+        {"from": "Theater B", "to": "Food Court A", "status": "open_review_weather", "stepFree": true, "covered": false, "lighting": "standard", "guestClaimAllowed": ["step-free"], "blockedClaims": ["fully covered route"]},
+        {"from": "Food Court A", "to": "Food Court B", "status": "open", "stepFree": true, "covered": true, "lighting": "standard", "guestClaimAllowed": ["covered", "step-free"], "blockedClaims": ["no wait", "ADA compliant"]}
+      ],
+      "blockedPathStatus": [
+        {"segmentId": "coaster_plaza_parade_crossing", "status": "blocked_during_blackout", "blackoutWindowId": "main_parade_setup", "alternate": "Covered Plaza to Indoor Hub path"},
+        {"segmentId": "sky_pier_exposed_ramp", "status": "avoid_in_rain", "alternate": "Indoor Hub to Theater B path"}
+      ]
+    },
+    "signage_inventory": {
+      "source": "synthetic_signage_inventory",
+      "placements": [
+        {"id": "sign_front_gate_rain_route", "location": "Front Gate", "zoneId": "entrancePlaza", "format": "A-frame", "approvedUse": ["rainy-day route start", "app handoff"], "owner": "Park Experience Content Owner", "reviewStatus": "approved_for_demo"},
+        {"id": "sign_indoor_hub_choice", "location": "Indoor Launch", "zoneId": "indoorHub", "format": "digital totem", "approvedUse": ["choice point", "current-options cue"], "owner": "Digital Experience Owner", "reviewStatus": "approved_for_demo"},
+        {"id": "sign_theater_reset", "location": "Theater B", "zoneId": "indoorHub", "format": "wall placard", "approvedUse": ["seated reset", "lower-stimulus cue"], "owner": "Park Experience Content Owner", "reviewStatus": "approved_for_demo"},
+        {"id": "sign_food_court_close", "location": "Food Court B", "zoneId": "foodCourt2", "format": "counter card", "approvedUse": ["route close", "current next options"], "owner": "CRM Journey Owner", "reviewStatus": "approved_for_demo"}
+      ],
+      "placementRules": [
+        "Use one route-start sign, one choice-point sign, and one closing sign for rainy-day packages.",
+        "Do not place low-sensory copy inside Arcade Zone without a named immediate reset option.",
+        "Every sign must include current-options or team-member confirmation language when availability can change."
+      ]
+    },
+    "channel_templates": {
+      "source": "synthetic_channel_templates",
+      "owners": {
+        "guest_app": "Digital Experience Owner",
+        "signage": "Park Experience Content Owner",
+        "email": "CRM Journey Owner",
+        "staff_cue": "Guest Experience Training Owner"
+      },
+      "templates": {
+        "guest_app": {"maxHeadlineChars": 48, "maxBodyChars": 180, "requiredClauses": ["optional route", "check current options"], "bannedClauses": ["guaranteed", "no wait"]},
+        "signage": {"maxHeadlineChars": 42, "maxBodyChars": 110, "requiredClauses": ["ask a team member", "next visible marker"], "bannedClauses": ["fully covered", "always available"]},
+        "email": {"subjectMaxChars": 58, "previewMaxChars": 90, "requiredClauses": ["before you arrive", "app for current options"], "bannedClauses": ["guaranteed route"]},
+        "staff_cue": {"maxBulletCount": 5, "requiredClauses": ["offer the opt-out", "confirm current path status"], "bannedClauses": ["promise staffing", "promise immediate access"]}
+      },
+      "approvalWorkflow": [
+        {"output": "guest_app", "owner": "Digital Experience Owner", "requiredBeforePublish": true},
+        {"output": "signage", "owner": "Park Experience Content Owner", "requiredBeforePublish": true},
+        {"output": "email", "owner": "CRM Journey Owner", "requiredBeforePublish": true},
+        {"output": "staff_cue", "owner": "Guest Experience Training Owner", "requiredBeforePublish": true}
+      ]
+    },
+    "operating_calendar": {
+      "source": "synthetic_event_schedule.certified_daily_operating_calendar",
+      "parkHours": {"opensAtLocal": "10:00", "closesAtLocal": "20:00"},
+      "eventWindows": [
+        {"id": "rainy_day_family_window", "startsAtLocal": "10:30", "endsAtLocal": "17:30", "recommendedUse": ["rainy-day journey", "kid quest"]},
+        {"id": "evening_lantern_window", "startsAtLocal": "18:00", "endsAtLocal": "19:15", "recommendedUse": ["VIP close", "Halloween family route"]}
+      ],
+      "blackoutPolicy": "Avoid routing through parade crossings, show exit pulses, or weather-review outdoor attractions without an app-confirmed alternate."
+    },
+    "weather_policy": {
+      "source": "synthetic_live_status_snapshot",
+      "rain": {
+        "preferredZones": ["indoorHub", "arcadeZone", "coveredPlaza", "foodCourt1", "foodCourt2"],
+        "requiredCopy": ["check the app for current options", "optional route", "ask a team member for the approved route information"],
+        "blockedClaims": ["fully covered route", "weather guarantee", "outdoor attraction open"]
+      },
+      "heat": {
+        "preferredZones": ["indoorHub", "Theater B", "Shade Garden", "Care Lagoon Family Room"],
+        "requiredCopy": ["pause when you need to", "choose the cooler reset"],
+        "blockedClaims": ["medical advice", "guaranteed cooling capacity"]
+      }
     }
   },
   "copy_variants": {

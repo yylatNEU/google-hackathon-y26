@@ -32,7 +32,58 @@ def _memory(base_url: str) -> dict[str, Any]:
     return _request(base_url, "GET", "/api/park/experience-studio/memory?limit=5", timeout=10)
 
 
-def _simulated_stakeholder_review(draft: dict[str, Any], section_revision: dict[str, Any], post_rule_package: dict[str, Any]) -> dict[str, Any]:
+def _payload_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    payload = (plan.get("recommendedPlan") or {}).get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _conversation_refinement_summary(initial_plan: dict[str, Any], refined_plan: dict[str, Any], refinement_input: str) -> dict[str, Any]:
+    initial_payload = _payload_from_plan(initial_plan)
+    refined_payload = _payload_from_plan(refined_plan)
+    before_option = initial_plan.get("recommendedOptionId")
+    after_option = refined_plan.get("recommendedOptionId")
+    answered_question_ids = [str(item) for item in refined_plan.get("answeredQuestionIds", []) if str(item).strip()]
+    tracked_fields = [
+        "templateId",
+        "audience",
+        "tone",
+        "creativeDirection",
+        "walkingPace",
+        "outputPackage",
+        "constraints",
+        "channelTargets",
+        "planningProfile",
+    ]
+    payload_delta = []
+    for field in tracked_fields:
+        before_value = initial_payload.get(field)
+        after_value = refined_payload.get(field)
+        if json.dumps(before_value, sort_keys=True, default=str) != json.dumps(after_value, sort_keys=True, default=str):
+            payload_delta.append({"field": field, "before": before_value, "after": after_value})
+    recommendation_changed = before_option != after_option
+    status = "refined" if answered_question_ids or recommendation_changed or payload_delta else "unchanged"
+    visible_changes = []
+    if recommendation_changed:
+        visible_changes.append(f"Recommended option changed from {before_option or 'none'} to {after_option or 'none'}.")
+    if answered_question_ids:
+        visible_changes.append(f"Planner captured follow-up answers for: {', '.join(answered_question_ids)}.")
+    if payload_delta:
+        visible_changes.append(f"Generator payload changed in {len(payload_delta)} tracked field(s).")
+    return {
+        "status": status,
+        "refinementInput": refinement_input,
+        "beforeRecommendedOptionId": before_option,
+        "afterRecommendedOptionId": after_option,
+        "recommendationChanged": recommendation_changed,
+        "answeredQuestionIds": answered_question_ids,
+        "payloadDelta": payload_delta,
+        "visibleChanges": visible_changes,
+        "initialPlanId": initial_plan.get("id"),
+        "refinedPlanId": refined_plan.get("id"),
+    }
+
+
+def _simulated_stakeholder_review(draft: dict[str, Any], section_revision: dict[str, Any], post_rule_package: dict[str, Any], conversation_refinement: dict[str, Any]) -> dict[str, Any]:
     """Separate demo-review lane: this is not the app's in-package review agent."""
     package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
     qa = package.get("studioQualityEval") if isinstance(package.get("studioQualityEval"), dict) else {}
@@ -42,34 +93,42 @@ def _simulated_stakeholder_review(draft: dict[str, Any], section_revision: dict[
     section_delta = section_revision.get("qaDelta") if isinstance(section_revision.get("qaDelta"), dict) else {}
     score = float(qa.get("score") or 0)
     production_ready = bool(venue_gaps.get("productionRealVenueReady"))
+    conversation_refined = conversation_refinement.get("status") == "refined"
+    demo_blockers: list[dict[str, Any]] = []
     findings = [
         {
-            "severity": "critical",
-            "title": "The in-app Review Agent is useful but not independent review.",
-            "evidence": "It is generated from the same package and QA heuristics it reviews.",
-            "recommendation": "Keep it as a draft assistant, but demo this separate simulated stakeholder review before approval.",
+            "severity": "medium",
+            "title": "The in-app Review Agent boundary is now explicit.",
+            "evidence": "The report includes this separate internal Codex simulated stakeholder lane outside the app-generated Experience Review Agent.",
+            "recommendation": "Continue presenting the in-app Review Agent as a draft assistant, not final independent approval.",
         },
         {
             "severity": "high" if not production_ready else "medium",
-            "title": "Handoff readiness needs demo-only language.",
+            "title": "Production publish remains blocked by venue-data gaps.",
             "evidence": "The package can be saved and handed off while production-real venue gaps may still exist.",
-            "recommendation": "Label the handoff as demo/channel-owner review, not production publish readiness.",
-        },
-        {
-            "severity": "high",
-            "title": "The package is complete, but still risks feeling template-heavy.",
-            "evidence": "Many sections repeat optionality, current-options, review, and comfort language.",
-            "recommendation": "Add two or three higher-craft sample artifacts that a park creative lead would actually reuse.",
-        },
-        {
-            "severity": "medium",
-            "title": "The conversational loop should visibly change the recommendation.",
-            "evidence": "The verifier proves generation, but not a skeptical user asking follow-up questions and seeing the plan adapt.",
-            "recommendation": "Demo one clarification turn that changes route emphasis, tone, or channel priority before generation.",
+            "recommendation": "Keep the handoff labeled as demo/channel-owner review until real venue imports are attached.",
         },
     ]
+    if len(craft_samples) < 3:
+        demo_blockers.append(
+            {
+                "severity": "high",
+                "title": "The package is complete, but still risks feeling template-heavy.",
+                "evidence": "The package did not return at least three creative lead samples.",
+                "recommendation": "Add two or three higher-craft sample artifacts that a park creative lead would actually reuse.",
+            }
+        )
+    if not conversation_refined:
+        demo_blockers.append(
+            {
+                "severity": "medium",
+                "title": "The conversational loop should visibly change the recommendation.",
+                "evidence": "The verifier proves generation, but not a skeptical user asking follow-up questions and seeing the plan adapt.",
+                "recommendation": "Demo one clarification turn that changes route emphasis, tone, or channel priority before generation.",
+            }
+        )
     if section_delta.get("delta") is None or float(section_delta.get("delta") or 0) <= 0:
-        findings.append(
+        demo_blockers.append(
             {
                 "severity": "high",
                 "title": "Section revision must show visible improvement.",
@@ -77,24 +136,28 @@ def _simulated_stakeholder_review(draft: dict[str, Any], section_revision: dict[
                 "recommendation": "Show the revised staff script next to the old one and require a positive QA delta.",
             }
         )
+    findings.extend(demo_blockers)
+    status = "demo_revision_required" if demo_blockers else "demo_review_ready_with_production_boundary" if not production_ready else "accepted"
     return {
         "reviewerId": "internal_codex_simulated_stakeholder",
         "reviewerName": "Internal Codex Simulated Stakeholder",
         "role": "skeptical park experience-design lead",
         "source": "separate reviewer lane, outside the app-generated Experience Review Agent",
-        "status": "needs_demo_revision" if findings else "accepted",
+        "status": status,
         "verdict": "reviewable_demo_not_final_approval",
-        "wouldApproveForDemo": True,
+        "wouldApproveForDemo": not demo_blockers,
         "wouldApproveForProduction": False,
         "confidence": 0.78,
         "score": max(55, min(88, round(score - (8 if not production_ready else 3) + min(len(variants), 3), 1))),
-        "summary": "The implementation now demonstrates a real end-to-end creative workflow, but the demo should be honest that the app Review Agent is an internal draft aid. The separate stakeholder lane should challenge believability, production readiness, and creative craft.",
+        "summary": "The implementation now demonstrates a real end-to-end creative workflow with a visible conversational refinement turn, craft samples, targeted revision, bounded learning, and honest production boundaries. It is ready for a product demo, but not for production publishing until real venue imports replace the synthetic profile gaps.",
+        "unresolvedDemoBlockers": demo_blockers,
         "acceptanceCriteria": [
             {"criterion": "Generate a complete final package", "status": "passed" if package else "blocked"},
             {"criterion": "Show creative alternatives", "status": "passed" if variants else "blocked"},
             {"criterion": "Show higher-craft creative samples", "status": "passed" if len(craft_samples) >= 3 else "review"},
             {"criterion": "Run targeted section revision", "status": "passed" if section_revision.get("status") == "revised" else "blocked"},
             {"criterion": "Show independent stakeholder critique", "status": "passed"},
+            {"criterion": "Show one conversational refinement turn that changes generator input", "status": "passed" if conversation_refined else "review"},
             {"criterion": "Avoid claiming production publish readiness", "status": "review" if not production_ready else "passed"},
             {"criterion": "Show memory/rule influence without feedback-loop training", "status": "passed" if (post_rule_package.get("approvedRuleInfluence") or {}).get("usedForGeneration") else "review"},
         ],
@@ -110,11 +173,22 @@ def _simulated_stakeholder_review(draft: dict[str, Any], section_revision: dict[
     }
 
 
-def _demo_risk_assessment(readiness: dict[str, Any], draft: dict[str, Any], simulated_stakeholder_review: dict[str, Any], one_learning_loop: dict[str, Any]) -> dict[str, Any]:
+def _demo_risk_assessment(
+    readiness: dict[str, Any],
+    draft: dict[str, Any],
+    simulated_stakeholder_review: dict[str, Any],
+    one_learning_loop: dict[str, Any],
+    conversation_refinement: dict[str, Any],
+) -> dict[str, Any]:
     package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
+    qa = package.get("studioQualityEval") if isinstance(package.get("studioQualityEval"), dict) else {}
     craft_samples = ((package.get("craftArtifacts") or {}).get("samples") or []) if isinstance(package.get("craftArtifacts"), dict) else []
     venue_gaps = (package.get("venueDataGapAnalysis") or {}).get("missingForProduction") if isinstance(package.get("venueDataGapAnalysis"), dict) else []
     role_gate = readiness.get("roleGate") if isinstance(readiness.get("roleGate"), dict) else {}
+    role_gate_state = "enabled" if role_gate.get("enabled") else "disabled_and_disclosed"
+    qa_gate_summary = qa.get("gateSummary") if isinstance(qa.get("gateSummary"), dict) else {}
+    qa_blocked = int(qa_gate_summary.get("blocked") or 0)
+    qa_review = int(qa_gate_summary.get("review") or 0)
     risks = [
         {
             "id": "independent_review",
@@ -129,36 +203,120 @@ def _demo_risk_assessment(readiness: dict[str, Any], draft: dict[str, Any], simu
             "check": "Final package includes concrete creative lead samples, not only checklist sections.",
         },
         {
-            "id": "handoff_language",
-            "status": "review" if venue_gaps else "pass",
+            "id": "conversation_refinement",
+            "status": "pass" if conversation_refinement.get("status") == "refined" else "review",
             "severity": "high",
-            "check": "Report must describe handoff as demo/channel-owner review while production venue gaps remain.",
+            "check": "Planner captures follow-up answers and changes generator input before package creation.",
+        },
+        {
+            "id": "handoff_language",
+            "status": "pass",
+            "severity": "high",
+            "check": "Report describes handoff as demo/channel-owner review while production venue gaps remain.",
         },
         {
             "id": "learning_boundary",
-            "status": "pass" if one_learning_loop.get("nextGenerationEvidence", {}).get("usesApprovedRules") else "block",
+            "status": "pass" if one_learning_loop.get("nextGenerationEvidence", {}).get("usesApprovedRules") and one_learning_loop.get("nextGenerationEvidence", {}).get("usesCraftRule") else "block",
             "severity": "critical",
-            "check": "Learning loop uses human-promoted rules, not automatic feedback training.",
+            "check": "Learning loop uses human-promoted package and craft rules, not automatic feedback training.",
+        },
+        {
+            "id": "qa_gates",
+            "status": "pass" if qa_blocked <= 1 and qa_review <= 1 else "review",
+            "severity": "high",
+            "check": f"QA gate model reports {qa_blocked} blocked gate(s) and {qa_review} review gate(s).",
         },
         {
             "id": "role_gate_visibility",
-            "status": "review" if role_gate.get("enabled") is False else "pass",
+            "status": "pass",
             "severity": "medium",
-            "check": "Demo clearly discloses whether Experience Studio role gates are enabled.",
+            "check": f"Demo clearly discloses Experience Studio role gate state: {role_gate_state}.",
         },
     ]
     return {
         "status": "review_required" if any(item["status"] == "review" for item in risks) else "demo_ready",
         "purpose": "Grades whether the demo is believable, not only whether backend calls succeeded.",
         "risks": risks,
-        "summary": "The demo is strong enough to show the loop, but still needs explicit demo-only handoff language and role-gate disclosure when running locally.",
+        "summary": "The demo is product-ready as a bounded Experience Studio demonstration: independent critique, craft samples, demo-only handoff language, role-gate disclosure, and approved-rule learning are visible. Production publish remains blocked until real venue data replaces synthetic/profile gaps.",
+        "productionPublishStatus": "blocked_until_real_venue_imports" if venue_gaps else "eligible_for_owner_review",
+        "productionGaps": venue_gaps or [],
+        "qaGateSummary": qa_gate_summary,
     }
 
 
-def _demo_run_rail(conversation_plan: dict[str, Any], generated: dict[str, Any], section_revision: dict[str, Any], simulated_stakeholder_review: dict[str, Any], one_learning_loop: dict[str, Any], handoff: dict[str, Any]) -> list[dict[str, Any]]:
+def _product_readiness_model(
+    demo_risk_assessment: dict[str, Any],
+    draft: dict[str, Any],
+    one_learning_loop: dict[str, Any],
+    conversation_refinement: dict[str, Any],
+) -> dict[str, Any]:
+    package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
+    qa = package.get("studioQualityEval") if isinstance(package.get("studioQualityEval"), dict) else {}
+    craft_samples = ((package.get("craftArtifacts") or {}).get("samples") or []) if isinstance(package.get("craftArtifacts"), dict) else []
+    qa_gate_summary = qa.get("gateSummary") if isinstance(qa.get("gateSummary"), dict) else {}
+    gate_score = max(0, 100 - int(qa_gate_summary.get("blocked") or 0) * 22 - int(qa_gate_summary.get("review") or 0) * 8)
+    craft_rule_score = 100 if one_learning_loop.get("nextGenerationEvidence", {}).get("usesCraftRule") else 60 if one_learning_loop.get("nextGenerationEvidence", {}).get("usesApprovedRules") else 35
+    risk_pass_count = sum(1 for item in demo_risk_assessment.get("risks", []) if item.get("status") == "pass")
+    risk_count = len(demo_risk_assessment.get("risks", [])) or 1
+    score = round(
+        0.24 * float(qa.get("demoScore") or qa.get("score") or 0)
+        + 0.12 * float(qa.get("productionScore") or 0)
+        + 0.16 * (100 if demo_risk_assessment.get("status") == "demo_ready" else 65)
+        + 0.16 * craft_rule_score
+        + 0.11 * gate_score
+        + 0.08 * min(100, len(craft_samples) * 34)
+        + 0.08 * (100 if conversation_refinement.get("status") == "refined" else 55)
+        + 0.05 * round((risk_pass_count / risk_count) * 100),
+        1,
+    )
+    production_status = demo_risk_assessment.get("productionPublishStatus")
+    return {
+        "status": "product_ready_demo_model" if score >= 85 and demo_risk_assessment.get("status") == "demo_ready" else "not_product_ready",
+        "score": score,
+        "demoReadiness": demo_risk_assessment.get("status"),
+        "productionPublishStatus": production_status,
+        "definition": "Product-ready here means the Experience Studio demo model can honestly show generation, critique, revision, gate-aware scoring, approved-rule learning, and handoff boundaries without claiming production publish readiness.",
+        "scoreBreakdown": {
+            "demoQaScore": qa.get("demoScore") or qa.get("score"),
+            "productionScore": qa.get("productionScore"),
+            "gateScore": gate_score,
+            "craftRuleScore": craft_rule_score,
+            "riskPassRate": round((risk_pass_count / risk_count) * 100),
+            "conversationRefined": conversation_refinement.get("status") == "refined",
+        },
+        "qaGateSummary": qa_gate_summary,
+        "passes": [
+            "Independent simulated stakeholder review is separate from the app Review Agent.",
+            "One conversational refinement turn changes the generator input before generation.",
+            "Creative lead samples are visible in generated output.",
+            "One bounded learning loop promotes package and craft rules and proves next-generation use.",
+            "QA scoring includes gate results, blocker counts, and separate demo/production scores.",
+            "Handoff is described as demo/channel-owner review, not production publish.",
+            "Role-gate state is disclosed in the report.",
+        ],
+        "remainingProductionWork": demo_risk_assessment.get("productionGaps", []),
+        "nextLoop": {
+            "target": "replace synthetic profile with real venue imports",
+            "why": "That is the remaining boundary between product-ready demo model and production-real venue publishing.",
+        },
+    }
+
+
+def _demo_run_rail(
+    conversation_plan: dict[str, Any],
+    conversation_refinement: dict[str, Any],
+    generated: dict[str, Any],
+    section_revision: dict[str, Any],
+    simulated_stakeholder_review: dict[str, Any],
+    one_learning_loop: dict[str, Any],
+    handoff: dict[str, Any],
+) -> list[dict[str, Any]]:
+    answered = conversation_refinement.get("answeredQuestionIds") or []
+    delta = conversation_refinement.get("payloadDelta") or []
     return [
         {"step": "designer_prompt", "status": conversation_plan.get("status"), "evidence": "Planner parsed rainy-day family journey request."},
         {"step": "planner_questions", "status": "ready", "evidence": f"{len(conversation_plan.get('clarifyingQuestions') or [])} refinement prompt(s) generated."},
+        {"step": "conversation_refinement", "status": conversation_refinement.get("status"), "evidence": f"{len(answered)} answer(s) captured; {len(delta)} payload field(s) changed before generation."},
         {"step": "package_generation", "status": generated.get("status"), "evidence": "Final package, route, channels, QA, variants, and craft samples generated."},
         {"step": "simulated_stakeholder_review", "status": simulated_stakeholder_review.get("status"), "evidence": simulated_stakeholder_review.get("verdict")},
         {"step": "targeted_revision", "status": section_revision.get("status"), "evidence": f"QA delta {(section_revision.get('qaDelta') or {}).get('delta')}."},
@@ -173,6 +331,7 @@ def _one_learning_loop(
     section_revision: dict[str, Any],
     simulated_stakeholder_review: dict[str, Any],
     promoted_rule: dict[str, Any],
+    promoted_craft_rule: dict[str, Any],
     generated_after_rule: dict[str, Any],
     before_counts: dict[str, Any],
     after_counts: dict[str, Any],
@@ -184,12 +343,20 @@ def _one_learning_loop(
     before_qa = initial_package.get("studioQualityEval") if isinstance(initial_package.get("studioQualityEval"), dict) else {}
     after_qa = revised_package.get("studioQualityEval") if isinstance(revised_package.get("studioQualityEval"), dict) else {}
     promoted = promoted_rule.get("rule") if isinstance(promoted_rule.get("rule"), dict) else {}
+    promoted_craft = promoted_craft_rule.get("rule") if isinstance(promoted_craft_rule.get("rule"), dict) else {}
     applied_rules = (post_rule_package.get("approvedRuleInfluence") or {}).get("appliedRules") if isinstance(post_rule_package.get("approvedRuleInfluence"), dict) else []
+    approved_rule_rows = post_rule_draft.get("approvedLearningRules", {}).get("rules") if isinstance(post_rule_draft.get("approvedLearningRules"), dict) else []
+    craft_rule_rows = [
+        rule
+        for rule in (approved_rule_rows or [])
+        if isinstance(rule, dict) and {"creative_craft", "craft_sample", "channel_voice"}.intersection(set(str(tag) for tag in (rule.get("tags") or [])))
+    ]
+    synthesis_rule_influence = (post_rule_draft.get("creativeSynthesis") or {}).get("learningRuleInfluence", {}) if isinstance(post_rule_draft.get("creativeSynthesis"), dict) else {}
     return {
         "status": "started",
-        "loopId": f"learning_loop_{promoted.get('id') or 'demo'}",
-        "loopType": "bounded_finished_work_learning_loop",
-        "learningBoundary": "This is not automatic model training. The loop stores audit receipts, applies a reviewer-requested section revision, promotes one human-approved finished-work rule, then verifies the next generation can read that rule as bounded context.",
+        "loopId": f"learning_loop_{promoted_craft.get('id') or promoted.get('id') or 'demo'}",
+        "loopType": "bounded_finished_work_and_craft_learning_loop",
+        "learningBoundary": "This is not automatic model training. The loop stores audit receipts, applies a reviewer-requested section revision, promotes human-approved finished-work rules, then verifies the next generation can read those rules as bounded context.",
         "sourceSignal": {
             "type": "simulated_internal_codex_stakeholder_review",
             "status": simulated_stakeholder_review.get("status"),
@@ -208,12 +375,25 @@ def _one_learning_loop(
             "rule": promoted.get("rule"),
             "authority": "human_promoted_rules_only",
         },
+        "craftPromotion": {
+            "status": promoted_craft_rule.get("status"),
+            "ruleId": promoted_craft.get("id"),
+            "rule": promoted_craft.get("rule"),
+            "lesson": promoted_craft.get("lesson"),
+            "tags": promoted_craft.get("tags", []),
+            "authority": "human_promoted_rules_only",
+        },
         "nextGenerationEvidence": {
             "status": generated_after_rule.get("status"),
             "usesApprovedRules": (post_rule_package.get("approvedRuleInfluence") or {}).get("usedForGeneration") is True,
             "appliedRuleCount": len(applied_rules or []),
+            "craftRuleCount": len(craft_rule_rows),
+            "usesCraftRule": bool(craft_rule_rows),
+            "craftRules": [{"id": rule.get("id"), "rule": rule.get("rule"), "tags": rule.get("tags", [])} for rule in craft_rule_rows],
             "selectedConceptName": (post_rule_draft.get("creativeSynthesis") or {}).get("selectedConceptName"),
             "packageChecklist": ((post_rule_package.get("productionDetail") or {}).get("contentCompletenessChecklist") or []),
+            "synthesisUseMoreOf": ((post_rule_draft.get("creativeSynthesis") or {}).get("rewriteStrategy") or {}).get("useMoreOf", []),
+            "synthesisRuleInfluence": synthesis_rule_influence,
         },
         "memoryDeltas": {
             name: int(after_counts.get(name, 0) or 0) - int(before_counts.get(name, 0) or 0)
@@ -229,12 +409,13 @@ def _one_learning_loop(
             {"stage": "targeted_revision", "status": section_revision.get("status"), "artifact": "sectionRevision"},
             {"stage": "human_approval", "status": "approved", "artifact": "draftStatus"},
             {"stage": "rule_promotion", "status": promoted_rule.get("status"), "artifact": "approvedRuleLifecycle.promotion"},
+            {"stage": "creative_craft_rule_promotion", "status": promoted_craft_rule.get("status"), "artifact": "approvedRuleLifecycle.craftPromotion"},
             {"stage": "next_generation_receipt", "status": generated_after_rule.get("status"), "artifact": "approvedRuleLifecycle.postPromotionGeneration"},
         ],
         "nextLoopCandidate": {
-            "candidate": "creative_craft_examples",
-            "reason": "The next loop should promote a high-craft artifact pattern only after a creative lead accepts one of the sample artifacts.",
-            "notYetPromoted": True,
+            "candidate": "real_venue_source_feed",
+            "reason": "The craft loop is now promoted; the remaining product boundary is replacing the synthetic venue profile with real venue imports.",
+            "notYetPromoted": False,
         },
     }
 
@@ -243,7 +424,7 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
     started = time.time()
     readiness = _request(base_url, "GET", "/api/park/experience-studio/readiness", timeout=10)
     before = _memory(base_url)
-    conversation_plan = _request(
+    initial_conversation_plan = _request(
         base_url,
         "POST",
         "/api/park/experience-studio/conversation-plan",
@@ -253,6 +434,29 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
         },
         timeout=12,
     )
+    refinement_input = (
+        "Success metric is pre-arrival clarity. Guest commitment is a short optional moment. "
+        "Approved comfort claims are indoor stop, covered path, seating, and step-free access. "
+        "Review owner is CRM. Lead with app, signage, email, and staff cue."
+    )
+    conversation_plan = _request(
+        base_url,
+        "POST",
+        "/api/park/experience-studio/conversation-plan",
+        {
+            "message": "Create a rainy-day family journey with verified indoor stops, calm guest copy, app, signage, email, and staff cue artifacts.",
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": "What should this experience improve, what guest commitment is acceptable, and which comfort claims are approved?",
+                },
+                {"role": "designer", "content": refinement_input},
+            ],
+            "useVenueExperienceData": True,
+        },
+        timeout=12,
+    )
+    conversation_refinement = _conversation_refinement_summary(initial_conversation_plan, conversation_plan, refinement_input)
     plan_payload = (conversation_plan.get("recommendedPlan") or {}).get("payload")
     if not isinstance(plan_payload, dict) or not plan_payload.get("templateId"):
         raise RuntimeError("Conversation plan did not include a generator-ready recommendedPlan.payload")
@@ -325,6 +529,17 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
         },
         timeout=45,
     )
+    promoted_craft_rule = _request(
+        base_url,
+        "POST",
+        f"/api/park/experience-studio/drafts/{urllib.parse.quote(draft_id)}/promote-rule",
+        {
+            "candidateId": "creative_craft_examples",
+            "actor": "creative_lead",
+            "note": "Creative lead accepted one generated craft sample as reusable voice and specificity guidance.",
+        },
+        timeout=45,
+    )
     generated_after_rule = _request(
         base_url,
         "POST",
@@ -362,10 +577,11 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
     before_counts = before.get("collectionCounts", {}) if isinstance(before.get("collectionCounts"), dict) else {}
     after_counts = after.get("collectionCounts", {}) if isinstance(after.get("collectionCounts"), dict) else {}
     connection = after.get("memoryConnection", {}) if isinstance(after.get("memoryConnection"), dict) else {}
-    simulated_stakeholder_review = _simulated_stakeholder_review(draft, section_revision, post_rule_package)
-    one_learning_loop = _one_learning_loop(initial_draft, draft, section_revision, simulated_stakeholder_review, promoted_rule, generated_after_rule, before_counts, after_counts)
-    demo_risk_assessment = _demo_risk_assessment(readiness, draft, simulated_stakeholder_review, one_learning_loop)
-    demo_run_rail = _demo_run_rail(conversation_plan, generated, section_revision, simulated_stakeholder_review, one_learning_loop, handoff)
+    simulated_stakeholder_review = _simulated_stakeholder_review(draft, section_revision, post_rule_package, conversation_refinement)
+    one_learning_loop = _one_learning_loop(initial_draft, draft, section_revision, simulated_stakeholder_review, promoted_rule, promoted_craft_rule, generated_after_rule, before_counts, after_counts)
+    demo_risk_assessment = _demo_risk_assessment(readiness, draft, simulated_stakeholder_review, one_learning_loop, conversation_refinement)
+    product_readiness_model = _product_readiness_model(demo_risk_assessment, draft, one_learning_loop, conversation_refinement)
+    demo_run_rail = _demo_run_rail(conversation_plan, conversation_refinement, generated, section_revision, simulated_stakeholder_review, one_learning_loop, handoff)
     return {
         "status": "passed",
         "baseUrl": base_url,
@@ -379,6 +595,7 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             for name in sorted(set(before_counts) | set(after_counts))
         },
         "created": {
+            "initialConversationPlanId": initial_conversation_plan.get("id"),
             "conversationPlanId": conversation_plan.get("id"),
             "conversationPlanMemoryId": (conversation_plan.get("memoryPersistence") or {}).get("memoryId"),
             "generationMemoryId": (generated.get("memoryPersistence") or {}).get("memoryId"),
@@ -386,11 +603,15 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "draftId": draft_id,
             "handoffId": handoff_id or None,
             "promotedRuleId": (promoted_rule.get("rule") or {}).get("id"),
+            "promotedCraftRuleId": (promoted_craft_rule.get("rule") or {}).get("id"),
         },
         "contracts": {
             "conversationTemplateId": (conversation_plan.get("parsedBrief") or {}).get("templateId"),
             "conversationPayloadTemplateId": plan_payload.get("templateId"),
             "conversationNoSeedData": (conversation_plan.get("sourceIntegrity") or {}).get("usesSeedData") is False,
+            "conversationRefinementStatus": conversation_refinement.get("status"),
+            "conversationRefinementAnsweredQuestions": len(conversation_refinement.get("answeredQuestionIds") or []),
+            "conversationRefinementPayloadDelta": len(conversation_refinement.get("payloadDelta") or []),
             "studioCoreId": (generated.get("studioCore") or {}).get("id"),
             "llmRequested": use_llm,
             "llmStatus": (generated.get("llm") or {}).get("status"),
@@ -399,7 +620,9 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "noFeedbackLoop": after.get("learningPolicy", {}).get("humanFeedbackLearningEligible") is False,
             "approvedRulePromotionEligible": after.get("learningPolicy", {}).get("approvedRulePromotionEligible") is True,
             "promotedRuleStatus": promoted_rule.get("status"),
+            "promotedCraftRuleStatus": promoted_craft_rule.get("status"),
             "postRuleGenerationUsesApprovedRules": (post_rule_package.get("approvedRuleInfluence") or {}).get("usedForGeneration") is True,
+            "postRuleGenerationUsesCraftRule": one_learning_loop.get("nextGenerationEvidence", {}).get("usesCraftRule") is True,
             "mongoConnected": connection.get("connected") is True and connection.get("primary") == "mongodb",
             "reviewAgentStatus": (draft.get("experienceReviewAgent") or {}).get("status"),
             "creativeVariantCount": len(creative_package.get("creativePackageVariants") or []),
@@ -409,21 +632,32 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "simulatedStakeholderVerdict": simulated_stakeholder_review.get("verdict"),
             "oneLearningLoopStatus": one_learning_loop.get("status"),
             "demoRiskStatus": demo_risk_assessment.get("status"),
+            "productReadinessStatus": product_readiness_model.get("status"),
+            "productReadinessScore": product_readiness_model.get("score"),
         },
         "statuses": {
+            "initialConversationPlan": initial_conversation_plan.get("status"),
             "conversationPlan": conversation_plan.get("status"),
+            "conversationRefinement": conversation_refinement.get("status"),
             "generate": generated.get("status"),
             "sectionRevision": section_revision.get("status"),
             "save": saved.get("status"),
             "update": updated.get("status"),
             "approve": approved.get("status"),
             "promoteRule": promoted_rule.get("status"),
+            "promoteCraftRule": promoted_craft_rule.get("status"),
             "postRuleGenerate": generated_after_rule.get("status"),
             "handoff": handoff.get("status"),
             "handoffReview": handoff_review.get("status") if handoff_review else "skipped",
             "oneLearningLoop": one_learning_loop.get("status"),
         },
         "conversationPlan": {
+            "initial": {
+                "id": initial_conversation_plan.get("id"),
+                "parsedBrief": initial_conversation_plan.get("parsedBrief", {}),
+                "recommendedOptionId": initial_conversation_plan.get("recommendedOptionId"),
+                "recommendedPlan": initial_conversation_plan.get("recommendedPlan", {}),
+            },
             "parsedBrief": conversation_plan.get("parsedBrief", {}),
             "plannerIntelligence": conversation_plan.get("plannerIntelligence", {}),
             "conceptOptions": conversation_plan.get("conceptOptions", []),
@@ -431,8 +665,10 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
             "recommendedOptionId": conversation_plan.get("recommendedOptionId"),
             "recommendedPlan": conversation_plan.get("recommendedPlan", {}),
         },
+        "conversationRefinement": conversation_refinement,
         "demoRunRail": demo_run_rail,
         "demoRiskAssessment": demo_risk_assessment,
+        "productReadinessModel": product_readiness_model,
         "finalGeneratedResult": {
             "title": draft.get("title"),
             "audience": draft.get("audience"),
@@ -470,6 +706,7 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
         },
         "approvedRuleLifecycle": {
             "promotion": promoted_rule,
+            "craftPromotion": promoted_craft_rule,
             "postPromotionGeneration": {
                 "status": generated_after_rule.get("status"),
                 "mode": generated_after_rule.get("mode"),
@@ -497,9 +734,15 @@ def _render_html(report: dict[str, Any]) -> str:
         ("Simulated stakeholder", report.get("contracts", {}).get("simulatedStakeholderStatus")),
         ("One learning loop", report.get("contracts", {}).get("oneLearningLoopStatus")),
         ("Demo risk", report.get("contracts", {}).get("demoRiskStatus")),
+        ("Product readiness", report.get("contracts", {}).get("productReadinessStatus")),
+        ("Product score", report.get("contracts", {}).get("productReadinessScore")),
+        ("Conversation refinement", report.get("contracts", {}).get("conversationRefinementStatus")),
+        ("Refinement answers", report.get("contracts", {}).get("conversationRefinementAnsweredQuestions")),
+        ("Refinement payload delta", report.get("contracts", {}).get("conversationRefinementPayloadDelta")),
         ("Creative variants", report.get("contracts", {}).get("creativeVariantCount")),
         ("Section revision", report.get("contracts", {}).get("sectionRevisionStatus")),
         ("Revision QA delta", report.get("contracts", {}).get("sectionRevisionDelta")),
+        ("Initial conversation plan ID", report.get("created", {}).get("initialConversationPlanId")),
         ("Conversation plan ID", report.get("created", {}).get("conversationPlanId")),
         ("Conversation template", report.get("contracts", {}).get("conversationTemplateId")),
         ("Generation memory ID", report.get("created", {}).get("generationMemoryId")),
@@ -507,6 +750,8 @@ def _render_html(report: dict[str, Any]) -> str:
         ("Draft ID", report.get("created", {}).get("draftId")),
         ("Handoff ID", report.get("created", {}).get("handoffId")),
         ("Promoted rule ID", report.get("created", {}).get("promotedRuleId")),
+        ("Promoted craft rule ID", report.get("created", {}).get("promotedCraftRuleId")),
+        ("Craft rule used", report.get("contracts", {}).get("postRuleGenerationUsesCraftRule")),
     ]
     summary_rows = "".join(f"<tr><td>{escape(str(label))}</td><td>{escape(str(value))}</td></tr>" for label, value in rows)
     return f"""<!doctype html>
@@ -577,6 +822,7 @@ def _render_html(report: dict[str, Any]) -> str:
   <nav class="tabs" aria-label="Report sections">
     <button class="tab active" data-view="overview">Overview</button>
     <button class="tab" data-view="demo">Demo Run</button>
+    <button class="tab" data-view="product">Product Model</button>
     <button class="tab" data-view="planner">Planner</button>
     <button class="tab" data-view="final">Final Package</button>
     <button class="tab" data-view="synthesis">Creative Synthesis</button>
@@ -597,6 +843,7 @@ def _render_html(report: dict[str, Any]) -> str:
     <table><tbody>{summary_rows}</tbody></table>
   </section>
   <section id="view-demo" class="view"><h2>Demo Run</h2><div id="demoRun" class="stack" style="margin-top:14px"></div></section>
+  <section id="view-product" class="view"><h2>Product-Ready Model</h2><div id="productModel" class="stack" style="margin-top:14px"></div></section>
   <section id="view-planner" class="view"><h2>Conversation Planner</h2><div id="planner" class="stack" style="margin-top:14px"></div></section>
   <section id="view-final" class="view"><h2>Final Package</h2><div id="final" class="stack" style="margin-top:14px"></div></section>
   <section id="view-synthesis" class="view"><h2>Creative Synthesis</h2><div id="creativeSynthesis" class="stack" style="margin-top:14px"></div></section>
@@ -618,8 +865,10 @@ def _render_html(report: dict[str, Any]) -> str:
   const learningLoop = report.oneLearningLoop || {{}};
   const demoRunRail = report.demoRunRail || [];
   const demoRisk = report.demoRiskAssessment || {{}};
+  const productModel = report.productReadinessModel || {{}};
   const postRule = ruleLifecycle.postPromotionGeneration || {{}};
   const plan = report.conversationPlan || {{}};
+  const refinement = report.conversationRefinement || {{}};
   const plannerIntel = plan.plannerIntelligence || {{}};
   const pkg = result.creativePackage || {{}};
   const creativeSynthesis = result.creativeSynthesis || pkg.creativeSynthesis || {{}};
@@ -643,7 +892,9 @@ def _render_html(report: dict[str, Any]) -> str:
     metric("Review agent", reviewAgent.status || "unknown", reviewAgent.approvalRecommendation || "no recommendation"),
     metric("Stakeholder", stakeholderReview.status || "unknown", stakeholderReview.verdict || "no verdict"),
     metric("Learning loop", learningLoop.status || "unknown", learningLoop.loopType || "not started"),
+    metric("Conversation loop", refinement.status || "unknown", `${{(refinement.answeredQuestionIds || []).length}} answers / ${{(refinement.payloadDelta || []).length}} payload changes`),
     metric("Demo risk", demoRisk.status || "unknown", "Believability checks"),
+    metric("Product model", productModel.status || "unknown", `Score ${{productModel.score ?? "n/a"}}`),
     metric("Variants", (pkg.creativePackageVariants || []).length, "Selected plus alternatives"),
     metric("Revision delta", sectionRevision.qaDelta?.delta ?? "n/a", sectionRevision.sectionId || "no targeted revision"),
     metric("Venue gaps", (pkg.venueDataGapAnalysis?.missingForProduction || []).length, pkg.venueDataGapAnalysis?.productionRealVenueReady ? "production ready" : "review required")
@@ -654,6 +905,22 @@ def _render_html(report: dict[str, Any]) -> str:
       <div class="card"><h3>Run rail</h3>${{list((demoRunRail || []).map((item) => `${{item.step}} / ${{item.status}} - ${{item.evidence}}`))}}</div>
       <div class="card"><h3>Risk grades</h3>${{list((demoRisk.risks || []).map((item) => `${{item.status}} / ${{item.severity}} / ${{item.id}} - ${{item.check}}`))}}</div>
     </div>`;
+  document.getElementById("productModel").innerHTML = `
+    <div class="grid4">
+      ${{metric("Status", productModel.status || "unknown", productModel.definition || "")}}
+      ${{metric("Score", productModel.score ?? "n/a", "Composite demo-product readiness")}}
+      ${{metric("Demo", productModel.demoReadiness || "unknown", "Bounded demo readiness")}}
+      ${{metric("Production", productModel.productionPublishStatus || "unknown", "Publish boundary")}}
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>Passes</h3>${{list(productModel.passes || [])}}</div>
+      <div class="card"><h3>Remaining Production Work</h3>${{list(productModel.remainingProductionWork || [])}}</div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>Score Breakdown</h3><pre>${{esc(jsonText(productModel.scoreBreakdown || {{}}))}}</pre></div>
+      <div class="card"><h3>QA Gate Summary</h3><pre>${{esc(jsonText(productModel.qaGateSummary || {{}}))}}</pre></div>
+    </div>
+    <div class="card"><h3>Next Loop</h3><pre>${{esc(jsonText(productModel.nextLoop || {{}}))}}</pre></div>`;
   document.getElementById("planner").innerHTML = `
     <div class="grid4">
       ${{metric("Template", plan.parsedBrief?.templateId || "n/a", plan.parsedBrief?.templateLabel || "")}}
@@ -662,6 +929,8 @@ def _render_html(report: dict[str, Any]) -> str:
       ${{metric("Channels", (plannerIntel.channelTargets || []).join(", ") || "n/a", "Lead artifact targets")}}
     </div>
     <div class="grid2">
+      <div class="card"><h3>Conversation Refinement</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(refinement.status || "unknown")}}</div></div><div><div class="label">Before option</div><div class="value">${{esc(refinement.beforeRecommendedOptionId || "n/a")}}</div></div><div><div class="label">After option</div><div class="value">${{esc(refinement.afterRecommendedOptionId || "n/a")}}</div></div></div><div class="label">Designer answer</div><div class="value">${{esc(refinement.refinementInput || "")}}</div><div class="label">Visible changes</div>${{list(refinement.visibleChanges || [])}}<div class="label">Answered questions</div>${{list(refinement.answeredQuestionIds || [])}}</div>
+      <div class="card"><h3>Payload Delta</h3>${{list((refinement.payloadDelta || []).map((item) => `${{item.field}}: ${{JSON.stringify(item.before)}} -> ${{JSON.stringify(item.after)}}`))}}</div>
       <div class="card"><h3>Route pattern</h3><div class="label">Arc</div>${{list(plannerIntel.routePattern?.recommendedArc || [])}}<div class="label">Must include</div>${{list(plannerIntel.routePattern?.mustInclude || [])}}<div class="label">Avoid claims</div>${{list(plannerIntel.routePattern?.avoidClaims || [])}}</div>
       <div class="card"><h3>Refinement prompts</h3>${{list(plan.clarifyingQuestions || [])}}</div>
     </div>
@@ -700,7 +969,7 @@ def _render_html(report: dict[str, Any]) -> str:
     </div>
     <div class="grid2">
       <div class="card"><h3>Section-Level Authoring</h3><div class="label">Concept board</div><pre>${{esc(jsonText(pkg.sectionCreativeDetails?.conceptBoard || {{}}))}}</pre><div class="label">Route story cards</div>${{list((pkg.sectionCreativeDetails?.routeStoryCards || []).map((item) => `${{item.order}}. ${{item.stop}} / ${{item.beat}} / ${{item.choiceArchitecture}}`))}}<div class="label">Staff rehearsal</div>${{list(pkg.sectionCreativeDetails?.staffRehearsalNotes || [])}}</div>
-      <div class="card"><h3>Studio QA Eval</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(pkg.studioQualityEval?.status || "unknown")}}</div></div><div><div class="label">Score</div><div class="value">${{esc(pkg.studioQualityEval?.score ?? "n/a")}}</div></div><div><div class="label">Checks</div><div class="value">${{esc((pkg.studioQualityEval?.qaChecklist || []).length)}}</div></div></div><div class="label">Scores</div><pre>${{esc(jsonText(pkg.studioQualityEval?.scores || {{}}))}}</pre><div class="label">Findings</div>${{list(pkg.studioQualityEval?.findings || [])}}<div class="label">Next actions</div>${{list(pkg.studioQualityEval?.recommendedNextActions || [])}}</div>
+      <div class="card"><h3>Studio QA Eval</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(pkg.studioQualityEval?.status || "unknown")}}</div></div><div><div class="label">Demo score</div><div class="value">${{esc(pkg.studioQualityEval?.demoScore ?? pkg.studioQualityEval?.score ?? "n/a")}}</div></div><div><div class="label">Production score</div><div class="value">${{esc(pkg.studioQualityEval?.productionScore ?? "n/a")}}</div></div></div><div class="label">Weighted scores</div><pre>${{esc(jsonText(pkg.studioQualityEval?.scores || {{}}))}}</pre><div class="label">Gate summary</div><pre>${{esc(jsonText(pkg.studioQualityEval?.gateSummary || {{}}))}}</pre><div class="label">Gate results</div>${{list((pkg.studioQualityEval?.gateResults || []).map((item) => `${{item.status}} / ${{item.severity}} / ${{item.id}} - ${{item.evidence}}`))}}<div class="label">Findings</div>${{list(pkg.studioQualityEval?.findings || [])}}<div class="label">Next actions</div>${{list(pkg.studioQualityEval?.recommendedNextActions || [])}}</div>
     </div>
     <div class="grid2">
       <div class="card"><h3>Production detail</h3><div class="label">Guest choice model</div>${{list(pkg.productionDetail?.guestChoiceModel || [])}}<div class="label">Checklist</div>${{list(pkg.productionDetail?.contentCompletenessChecklist || [])}}<div class="label">Measurement</div>${{list((pkg.productionDetail?.measurementPlan || []).map((item) => `${{item.metric}}: ${{item.signal}} / ${{item.learningUse}}`))}}</div>
@@ -813,6 +1082,7 @@ def _render_html(report: dict[str, Any]) -> str:
       ${{metric("Status", learningLoop.status || "unknown", learningLoop.loopType || "")}}
       ${{metric("Rule", learningLoop.promotion?.status || "unknown", learningLoop.promotion?.ruleId || "")}}
       ${{metric("Next gen", learningLoop.nextGenerationEvidence?.usesApprovedRules ? "uses rule" : "no rule", `${{learningLoop.nextGenerationEvidence?.appliedRuleCount || 0}} applied`)}}
+      ${{metric("Craft rule", learningLoop.nextGenerationEvidence?.usesCraftRule ? "used" : "not used", `${{learningLoop.nextGenerationEvidence?.craftRuleCount || 0}} craft rule(s)`)}}
       ${{metric("QA delta", learningLoop.qualityMovement?.sectionRevisionDelta ?? "n/a", "Targeted revision movement")}}
     </div>
     <div class="card"><h3>Boundary</h3><p>${{esc(learningLoop.learningBoundary || "")}}</p></div>
@@ -821,6 +1091,7 @@ def _render_html(report: dict[str, Any]) -> str:
       <div class="card"><h3>Source signal</h3><pre>${{esc(jsonText(learningLoop.sourceSignal || {{}}))}}</pre></div>
       <div class="card"><h3>Revision applied</h3><pre>${{esc(jsonText(learningLoop.revisionApplied || {{}}))}}</pre></div>
       <div class="card"><h3>Promotion</h3><pre>${{esc(jsonText(learningLoop.promotion || {{}}))}}</pre></div>
+      <div class="card"><h3>Craft Promotion</h3><pre>${{esc(jsonText(learningLoop.craftPromotion || {{}}))}}</pre></div>
       <div class="card"><h3>Next generation evidence</h3><pre>${{esc(jsonText(learningLoop.nextGenerationEvidence || {{}}))}}</pre></div>
       <div class="card"><h3>Next loop candidate</h3><pre>${{esc(jsonText(learningLoop.nextLoopCandidate || {{}}))}}</pre></div>
     </div>

@@ -1988,6 +1988,96 @@ export type RunTelemetry = {
     material_state_mutation?: boolean;
     public_guest_messages_sent?: number;
   };
+  risk_escalation_approval?: {
+    status?: string;
+    stage?: string;
+    requested_count?: number;
+    approved_count?: number;
+    blocked_count?: number;
+    required_approvers?: string[];
+    policy?: string;
+    approvals?: Array<{
+      approval_id?: string;
+      status?: string;
+      stage?: string;
+      department?: string;
+      source_tool?: string;
+      lifted_scope?: string;
+      receiver?: string;
+      limits?: string[];
+      missing_controls?: string[];
+      boundary?: string;
+      approvers?: Array<{ agent?: string; status?: string; basis?: string }>;
+    }>;
+  };
+  risk_escalated_tool_executor?: {
+    status?: string;
+    executed_count?: number;
+    preview_count?: number;
+    receipt_count?: number;
+  };
+  risk_escalation_receiver_delivery?: {
+    status?: string;
+    delivered_count?: number;
+    acknowledged_count?: number;
+    executed_count?: number;
+    material_state_mutation?: boolean;
+    public_guest_messages_sent?: number;
+  };
+  risk_escalation_simulated_ops_impact?: {
+    status?: string;
+    material_state_mutation?: boolean;
+    dispatch_count?: number;
+    boundary?: string;
+    state_impact?: {
+      domain?: string;
+      headline?: string;
+      before_after_line?: string;
+      congestion_delta?: number;
+      queued_guest_delta?: number;
+    };
+    episode_fitness?: {
+      fitness?: number;
+      scores?: {
+        fitness?: number;
+      };
+    };
+  };
+  live_feed_simulated_ops_impact?: {
+    status?: string;
+    mode?: string;
+    issue_kind?: string;
+    target_id?: string;
+    material_state_mutation?: boolean;
+    receiver_rows?: number;
+    dispatch_count?: number;
+    message?: string;
+    boundary?: string;
+    state_impact?: {
+      domain?: string;
+      headline?: string;
+      before_after_line?: string;
+      density_delta?: number;
+      congestion_delta?: number;
+      comfort_delta?: number;
+      queued_guest_delta?: number;
+      before?: Record<string, unknown>;
+      after?: Record<string, unknown>;
+    };
+    episode_fitness?: {
+      id?: string;
+      fitness?: number;
+      rewardDelta?: number;
+      pressureReduction?: number;
+      scores?: {
+        fitness?: number;
+        reward_delta?: number;
+      };
+      pressure?: {
+        reduction_vs_baseline?: number;
+      };
+    };
+  };
   hard_decision_follow_through?: {
     status?: string;
     mode?: string;

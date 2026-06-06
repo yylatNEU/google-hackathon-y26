@@ -497,11 +497,13 @@ def _augment_rows_with_reasoning_features(rows: list[dict[str, Any]], audits: li
             enriched["reasoning_reward_audit_question_count"] = len(audit.get("reward_metric_audit_questions", []) if isinstance(audit.get("reward_metric_audit_questions"), list) else [])
             enriched["reasoning_feature_backlog_count"] = len(audit.get("feature_backlog", []) if isinstance(audit.get("feature_backlog"), list) else [])
         else:
-            enriched["reasoning_context"] = enriched.get("scenario_key") or "unknown"
-            enriched["reasoning_feature_tags"] = []
-            enriched["reasoning_feature_source"] = "none"
-            enriched["reasoning_reward_audit_question_count"] = 0
-            enriched["reasoning_feature_backlog_count"] = 0
+            existing_source = str(enriched.get("reasoning_feature_source") or "")
+            existing_tags = enriched.get("reasoning_feature_tags", [])
+            enriched["reasoning_context"] = enriched.get("reasoning_context") or enriched.get("scenario_key") or "unknown"
+            enriched["reasoning_feature_tags"] = [str(tag) for tag in existing_tags if tag][:10] if isinstance(existing_tags, list) else []
+            enriched["reasoning_feature_source"] = existing_source if existing_source and existing_source != "none" else "none"
+            enriched["reasoning_reward_audit_question_count"] = int(_float(enriched.get("reasoning_reward_audit_question_count")))
+            enriched["reasoning_feature_backlog_count"] = int(_float(enriched.get("reasoning_feature_backlog_count")))
         causal_memory = _causal_memory_for_row(enriched, causal_memories)
         if causal_memory:
             feature_view = causal_memory.get("training_feature_view", {}) if isinstance(causal_memory.get("training_feature_view"), dict) else {}
@@ -530,10 +532,13 @@ def _augment_rows_with_reasoning_features(rows: list[dict[str, Any]], audits: li
 
 
 def _reasoning_feature_audit_summary(audits: list[dict[str, Any]], rows: list[dict[str, Any]], export: dict[str, Any]) -> dict[str, Any]:
-    matched_rows = [row for row in rows if row.get("reasoning_feature_source") == "grounded_llm_audit"]
+    matched_rows = [row for row in rows if str(row.get("reasoning_feature_source") or "none") != "none"]
     contexts = sorted({str(row.get("reasoning_context")) for row in matched_rows if row.get("reasoning_context")})
     tags: dict[str, int] = {}
+    sources: dict[str, int] = {}
     for row in matched_rows:
+        source = str(row.get("reasoning_feature_source") or "unknown")
+        sources[source] = sources.get(source, 0) + 1
         for tag in row.get("reasoning_feature_tags", []) if isinstance(row.get("reasoning_feature_tags"), list) else []:
             tags[str(tag)] = tags.get(str(tag), 0) + 1
     return {
@@ -542,9 +547,10 @@ def _reasoning_feature_audit_summary(audits: list[dict[str, Any]], rows: list[di
         "audit_count": len(audits),
         "matched_training_rows": len(matched_rows),
         "llm_used_for_reward_or_label": False,
-        "feature_source": "grounded heartbeat LLM audit logs",
+        "feature_source": "grounded heartbeat LLM audit logs plus live-feed case-bank reasoning traces",
         "accepted_effect": "offline categorical feature context only",
         "excluded_from": ["reward", "training_label", "promotion_gate", "live_action"],
+        "source_counts": sorted(sources.items(), key=lambda item: item[1], reverse=True),
         "top_tags": sorted(tags.items(), key=lambda item: item[1], reverse=True)[:8],
         "contexts": contexts[:12],
         "bigquery_export": export,
@@ -763,6 +769,70 @@ def _case_bank_executed_tools(row: dict[str, Any]) -> list[str]:
     return [str(tool) for tool in tools if tool][:12] if isinstance(tools, list) else []
 
 
+def _case_bank_risk_lift_branch(row: dict[str, Any]) -> dict[str, Any]:
+    measurement = row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}
+    layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
+    branches = layers.get("branch_rewards", {}) if isinstance(layers.get("branch_rewards"), dict) else {}
+    risk_branch = branches.get("risk_lift", {}) if isinstance(branches.get("risk_lift"), dict) else {}
+    actions = row.get("actions", {}) if isinstance(row.get("actions"), dict) else {}
+    label = str(risk_branch.get("label") or layers.get("risk_lift_label") or "risk_lift_not_requested")
+    reward = risk_branch.get("reward", layers.get("risk_lift_reward"))
+    if reward in {None, ""}:
+        reward = 0.0
+    return {
+        "label": label,
+        "reward": max(0.0, min(1.0, _float(reward))),
+        "requested_count": int(_float(risk_branch.get("requested_count", actions.get("risk_escalation_requested_count")))),
+        "approved_count": int(_float(risk_branch.get("approved_count", actions.get("risk_escalation_approved_count")))),
+        "executed_count": int(_float(risk_branch.get("executed_count", actions.get("risk_escalated_executed_count")))),
+        "delivery_status": risk_branch.get("delivery_status") or actions.get("risk_escalation_delivery_status"),
+        "impact_status": risk_branch.get("impact_status") or actions.get("risk_escalation_impact_status"),
+        "material_state_mutation": bool(risk_branch.get("material_state_mutation") or actions.get("risk_escalation_material_state_mutation")),
+        "effect_score": max(0.0, min(1.0, _float(risk_branch.get("effect_score")))),
+        "validation_mode": str(actions.get("risk_escalation_validation_mode") or "normal"),
+        "validation_fault": actions.get("risk_escalation_validation_fault"),
+    }
+
+
+def _case_bank_risk_policy_key(row: dict[str, Any], risk_branch: dict[str, Any]) -> str:
+    issue = row.get("issue", {}) if isinstance(row.get("issue"), dict) else {}
+    kind = str(issue.get("kind") or "live_feed_case").lower()
+    label = str(risk_branch.get("label") or "risk_lift_not_requested").lower()
+    if label == "risk_lift_success":
+        decision = "approve"
+    elif label == "risk_lift_regression":
+        decision = "block_after_regression"
+    elif label == "risk_lift_pending_measurement":
+        decision = "hold_until_measured"
+    elif str(risk_branch.get("validation_mode")) == "missing_controls":
+        decision = "block_missing_controls"
+    elif str(risk_branch.get("validation_mode")) == "disabled":
+        decision = "gate_closed"
+    else:
+        decision = "block"
+    return f"live_feed_risk_lift_{decision}_{kind}"[:90]
+
+
+def _case_bank_reasoning_tags(row: dict[str, Any], risk_branch: dict[str, Any]) -> list[str]:
+    tags = [
+        str(risk_branch.get("label") or "risk_lift_not_requested"),
+        f"risk_mode:{risk_branch.get('validation_mode') or 'normal'}",
+    ]
+    if int(_float(risk_branch.get("approved_count"))) > 0:
+        tags.append("risk_controls_approved")
+    if int(_float(risk_branch.get("executed_count"))) > 0:
+        tags.append("risk_lift_executed")
+    if risk_branch.get("impact_status"):
+        tags.append(f"impact:{risk_branch.get('impact_status')}")
+    if risk_branch.get("material_state_mutation"):
+        tags.append("material_state_mutation")
+    measurement = row.get("measurement", {}) if isinstance(row.get("measurement"), dict) else {}
+    layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
+    blockers = layers.get("promotion_blockers", []) if isinstance(layers.get("promotion_blockers"), list) else []
+    tags.extend(f"blocker:{item}" for item in blockers[:4])
+    return [tag for tag in tags if tag][:12]
+
+
 def _live_feed_case_bank_training_rows(limit: int | None = None) -> list[dict[str, Any]]:
     path = _live_feed_case_bank_path()
     if not path.exists():
@@ -782,6 +852,9 @@ def _live_feed_case_bank_training_rows(limit: int | None = None) -> list[dict[st
         if reward <= 0:
             continue
         measurement = case.get("measurement", {}) if isinstance(case.get("measurement"), dict) else {}
+        scenario_key = _case_bank_issue_scenario(case)
+        risk_branch = _case_bank_risk_lift_branch(case)
+        risk_tags = _case_bank_reasoning_tags(case, risk_branch)
         reward_100 = round(reward * 100, 2)
         promotion_eligible = measurement.get("promotion_eligible") is True
         eligible_for_reward = measurement.get("eligible_for_reward") is True
@@ -791,7 +864,7 @@ def _live_feed_case_bank_training_rows(limit: int | None = None) -> list[dict[st
                 "row_id": f"live_feed_case_bank:{case.get('outcome_id') or case.get('case_id')}",
                 "decision_id": case.get("decision_id") or case.get("decisionId"),
                 "source": "live_feed_case_bank_reward_vectors",
-                "scenario_key": _case_bank_issue_scenario(case),
+                "scenario_key": scenario_key,
                 "policy_key": _case_bank_policy_key(case),
                 "reward": reward_100,
                 "overall": reward_100,
@@ -811,10 +884,56 @@ def _live_feed_case_bank_training_rows(limit: int | None = None) -> list[dict[st
                     else None
                 ),
                 "executed_tools": _case_bank_executed_tools(case),
+                "reasoning_context": f"{scenario_key}|controlled_low_risk",
+                "reasoning_feature_tags": ["controlled_low_risk", *risk_tags[:6]],
+                "reasoning_feature_source": "live_feed_case_bank_llm_trace",
+                "risk_lift_label": risk_branch.get("label"),
+                "risk_lift_reward": round(_float(risk_branch.get("reward")), 3),
+                "risk_escalation_validation_mode": risk_branch.get("validation_mode"),
                 "llm_used_for_reward_or_label": False,
                 "labels_or_reward_changed": False,
             }
         )
+        if risk_branch.get("label") and risk_branch.get("label") != "risk_lift_not_requested":
+            risk_reward_100 = round(_float(risk_branch.get("reward")) * 100, 2)
+            rows.append(
+                {
+                    "row_id": f"live_feed_case_bank_risk_lift:{case.get('outcome_id') or case.get('case_id')}",
+                    "decision_id": case.get("decision_id") or case.get("decisionId"),
+                    "source": "live_feed_case_bank_risk_lift_reward_vectors",
+                    "scenario_key": scenario_key,
+                    "policy_key": _case_bank_risk_policy_key(case, risk_branch),
+                    "reward": risk_reward_100,
+                    "overall": risk_reward_100,
+                    "response_score": risk_reward_100,
+                    "take_rate": 1.0 if risk_branch.get("label") == "risk_lift_success" else 0.0,
+                    "follow_through_rate": attribution_confidence if risk_branch.get("impact_status") not in {None, "skipped"} else 0.0,
+                    "created_at": case.get("created_at"),
+                    "normalized_from": "risk_lift_branch_reward_0_1_to_training_0_100",
+                    "original_operational_reward": reward,
+                    "original_risk_lift_reward": risk_branch.get("reward"),
+                    "case_bank_outcome_id": case.get("outcome_id"),
+                    "promotion_eligible": bool(risk_branch.get("label") == "risk_lift_success" and promotion_eligible),
+                    "eligible_for_reward": eligible_for_reward,
+                    "reward_label": risk_branch.get("label"),
+                    "reasoning_context": f"{scenario_key}|{risk_branch.get('label')}",
+                    "reasoning_feature_tags": risk_tags,
+                    "reasoning_feature_source": "live_feed_case_bank_llm_trace",
+                    "risk_lift_label": risk_branch.get("label"),
+                    "risk_lift_reward": round(_float(risk_branch.get("reward")), 3),
+                    "risk_lift_requested_count": risk_branch.get("requested_count"),
+                    "risk_lift_approved_count": risk_branch.get("approved_count"),
+                    "risk_lift_executed_count": risk_branch.get("executed_count"),
+                    "risk_lift_delivery_status": risk_branch.get("delivery_status"),
+                    "risk_lift_impact_status": risk_branch.get("impact_status"),
+                    "risk_lift_effect_score": risk_branch.get("effect_score"),
+                    "risk_lift_material_state_mutation": risk_branch.get("material_state_mutation"),
+                    "risk_escalation_validation_mode": risk_branch.get("validation_mode"),
+                    "risk_escalation_validation_fault": risk_branch.get("validation_fault"),
+                    "llm_used_for_reward_or_label": False,
+                    "labels_or_reward_changed": False,
+                }
+            )
     return rows
 
 
@@ -924,7 +1043,7 @@ def _train_contextual_bandit(rows: list[dict[str, Any]]) -> dict[str, Any]:
     context_values.sort(key=lambda item: item["context"])
     reasoning_context_values = []
     for context, values_by_policy in by_reasoning_context.items():
-        if context in by_context and not any(row.get("reasoning_feature_source") == "grounded_llm_audit" for policy_rows in by_policy.values() for row in policy_rows if str(row.get("reasoning_context") or "") == context):
+        if context in by_context and not any(str(row.get("reasoning_feature_source") or "none") != "none" for policy_rows in by_policy.values() for row in policy_rows if str(row.get("reasoning_context") or "") == context):
             continue
         ranked = sorted(
             (
@@ -940,7 +1059,7 @@ def _train_contextual_bandit(rows: list[dict[str, Any]]) -> dict[str, Any]:
         )
         reasoning_context_values.append({"context": context, "ranked_policies": ranked})
     reasoning_context_values.sort(key=lambda item: item["context"])
-    reasoning_matched_rows = sum(1 for row in rows if row.get("reasoning_feature_source") == "grounded_llm_audit")
+    reasoning_matched_rows = sum(1 for row in rows if str(row.get("reasoning_feature_source") or "none") != "none")
     causal_context_values = []
     for context, values_by_policy in by_causal_context.items():
         if not any(row.get("causal_feature_source") == "deterministic_causal_reasoning_memory" for policy_rows in by_policy.values() for row in policy_rows if str(row.get("causal_context") or "") == context):
@@ -972,7 +1091,7 @@ def _train_contextual_bandit(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "enabled": reasoning_matched_rows > 0,
             "matched_rows": reasoning_matched_rows,
             "llm_used_for_reward_or_label": False,
-            "source": "grounded_llm_reasoning_feature_audit",
+            "source": "grounded_llm_reasoning_feature_audit+live_feed_case_bank_llm_trace",
         },
         "causal_feature_policy": {
             "enabled": causal_matched_rows > 0,

@@ -6,7 +6,7 @@ import json
 import os
 import time
 from contextlib import asynccontextmanager, nullcontext
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -571,6 +571,8 @@ class LiveFeedAgentRunRequest(BaseModel):
     refresh_stale: bool = Field(default=True)
     execute: bool = Field(default=False)
     controlled_executor_execute: bool = Field(default=False)
+    allow_risk_escalation: bool = Field(default=False)
+    risk_escalation_validation_mode: str | None = Field(default=None)
     measure_post_action: bool = Field(default=True)
     min_ready_feeds: int = Field(default=4, ge=1, le=6)
     require_persisted_events: bool = Field(default=True)
@@ -1648,6 +1650,30 @@ def _build_agent_bigquery_priors(scenario_key: str, dashboard: dict[str, Any]) -
         return build_bigquery_agent_priors(scenario_key, dashboard)
 
 
+def _empty_role_quality_priors(scenario_key: str | None, reason: str) -> dict[str, Any]:
+    return {
+        "mode": "role_quality_priors",
+        "status": "skipped",
+        "scenario_key": scenario_key or "all",
+        "sample_count": 0,
+        "priors": [],
+        "by_agent": {},
+        "readiness_issues": [reason],
+    }
+
+
+def _role_quality_priors_latency_safe(scenario_key: str | None) -> dict[str, Any]:
+    if _truthy(os.getenv("MONGODB_DISABLE_DRIVER_IMPORT")):
+        return _empty_role_quality_priors(
+            scenario_key,
+            "MongoDB driver import is disabled; skipped optional role quality priors on the hot path.",
+        )
+    try:
+        return get_role_quality_priors(scenario_key)
+    except Exception as error:
+        return _empty_role_quality_priors(scenario_key, str(error)[:240])
+
+
 def _compact_operational_memory_dashboard(query: str, state: dict[str, Any], *, agent_role: str) -> dict[str, Any]:
     context = _retrieve_operational_context(
         query,
@@ -1677,7 +1703,7 @@ def _collaboration_context(
         dashboard = memory_dashboard or get_operational_memory_dashboard(f"{scenario_key} take rate follow through")
         bigquery_priors = _build_agent_bigquery_priors(scenario_key, dashboard)
     enriched["bigquery_priors"] = bigquery_priors
-    enriched["role_quality_priors"] = get_role_quality_priors(scenario_key)
+    enriched["role_quality_priors"] = _role_quality_priors_latency_safe(scenario_key)
     enriched["relational_context"] = replay_collaboration_context(8)
     freshness_gate = enriched.get("freshness_gate", {}) if isinstance(enriched.get("freshness_gate"), dict) else {}
     cache_accuracy = enriched.get("cache_accuracy", {}) if isinstance(enriched.get("cache_accuracy"), dict) else {}
@@ -9581,6 +9607,248 @@ def _build_live_feed_hard_decision_follow_through(payload: dict[str, Any]) -> di
     }
 
 
+def _risk_escalation_policy(tool: str, department: str) -> dict[str, Any]:
+    policies = {
+        ("operations", "recommend_route_change"): {
+            "lifted_scope": "simulated_managed_route_recommendation",
+            "receiver": "ops_console",
+            "limits": [
+                "simulate route recommendation only",
+                "do not issue autonomous public routing command",
+                "keep safety and accessibility watch active",
+            ],
+        },
+        ("guest_experience", "draft_guest_message"): {
+            "lifted_scope": "approved_guest_message_draft_internal",
+            "receiver": "guest_experience_console",
+            "limits": [
+                "draft and stage approved copy only",
+                "do not send public emergency or compensation promise",
+                "Compliance owns privacy and promise review",
+            ],
+        },
+        ("maintenance", "create_work_order"): {
+            "lifted_scope": "maintenance_work_order_without_reopen_authority",
+            "receiver": "maintenance_console",
+            "limits": [
+                "create work-order task only",
+                "do not reopen ride or clear inspection",
+                "Safety owns reopen clearance",
+            ],
+        },
+        ("marketing", "redirect_offer"): {
+            "lifted_scope": "capacity_capped_redirect_offer",
+            "receiver": "marketing_ops_console",
+            "limits": [
+                "redirect only away from constrained area",
+                "cap overloaded indoor and spillback targets",
+                "pause if crowd pressure worsens",
+            ],
+        },
+    }
+    return policies.get((department, tool), {})
+
+
+def _build_live_feed_risk_escalation_approval(payload: dict[str, Any], *, enabled: bool) -> dict[str, Any]:
+    follow = payload.get("hard_decision_follow_through", {}) if isinstance(payload.get("hard_decision_follow_through"), dict) else {}
+    tasks = follow.get("tasks", []) if isinstance(follow.get("tasks"), list) else []
+    if not enabled:
+        return {
+            "mode": "risk_escalation_approval",
+            "status": "disabled",
+            "stage": "gate_closed",
+            "requested_count": 0,
+            "approved_count": 0,
+            "blocked_count": 0,
+            "policy": "Riskier actions remain held unless allow_risk_escalation is explicitly enabled for this run.",
+            "approvals": [],
+        }
+    approvals: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict) or task.get("status") != "routed_to_owner":
+            continue
+        department = str(task.get("department") or "")
+        tool = str(task.get("source_tool") or "")
+        policy = _risk_escalation_policy(tool, department)
+        if not policy:
+            continue
+        review_inputs = task.get("review_inputs", {}) if isinstance(task.get("review_inputs"), dict) else {}
+        live_feed_event_ids = [str(row) for row in review_inputs.get("live_feed_event_ids", []) if row] if isinstance(review_inputs.get("live_feed_event_ids"), list) else []
+        missing: list[str] = []
+        if not live_feed_event_ids:
+            missing.append("live_feed_event_ids")
+        if not task.get("exit_condition"):
+            missing.append("exit_condition")
+        if not task.get("fallback"):
+            missing.append("rollback")
+        approver_rows = [
+            {
+                "agent": "safety_agent",
+                "status": "approved" if not missing else "blocked",
+                "basis": "No autonomous safety clearance; route, work-order, and message effects stay simulated and monitored.",
+            },
+            {
+                "agent": "compliance_agent",
+                "status": "approved" if not missing else "blocked",
+                "basis": "Approval is scoped, expires after this run, records policy basis, and preserves privacy/public-message boundaries.",
+            },
+            {
+                "agent": "executive_agent",
+                "status": "approved" if not missing else "blocked",
+                "basis": "Executive accepts the tradeoff only for the named action, receiver, rollback, and live-feed evidence IDs.",
+            },
+        ]
+        approved = not missing and all(row["status"] == "approved" for row in approver_rows)
+        approval_basis = {
+            "decision_id": payload.get("decision_id"),
+            "task_id": task.get("task_id"),
+            "department": department,
+            "tool": tool,
+            "scope": policy.get("lifted_scope"),
+        }
+        approvals.append(
+            {
+                "approval_id": f"risk_lift_{hashlib.sha1(json.dumps(approval_basis, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:12]}",
+                "status": "approved" if approved else "blocked",
+                "stage": "approved_for_escalated_executor" if approved else "missing_required_controls",
+                "agent": task.get("agent"),
+                "department": department,
+                "source_tool": tool,
+                "task_id": task.get("task_id"),
+                "policy_status": task.get("policy_status"),
+                "lifted_scope": policy.get("lifted_scope"),
+                "receiver": policy.get("receiver"),
+                "limits": policy.get("limits", []),
+                "approvers": approver_rows,
+                "missing_controls": missing,
+                "live_feed_event_ids": live_feed_event_ids,
+                "rollback": task.get("fallback"),
+                "exit_condition": task.get("exit_condition"),
+                "expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+                "boundary": "This lifts only the named action into simulated receiver execution. It does not grant ride reopen, safety clearance, security control, evacuation, medical dispatch, or public emergency messaging authority.",
+            }
+        )
+    approved_count = sum(1 for row in approvals if row.get("status") == "approved")
+    return {
+        "mode": "risk_escalation_approval",
+        "status": "approved" if approved_count else "blocked" if approvals else "not_requested",
+        "stage": "approved_for_escalated_executor" if approved_count else "no_eligible_approval",
+        "requested_count": len(approvals),
+        "approved_count": approved_count,
+        "blocked_count": len(approvals) - approved_count,
+        "required_approvers": ["safety_agent", "compliance_agent", "executive_agent"],
+        "policy": "Default gate stays closed; only eligible held actions with Safety, Compliance, and Executive approval can enter simulated escalated execution.",
+        "approvals": approvals,
+    }
+
+
+def _apply_risk_escalation_validation_mode(payload: dict[str, Any], mode: str | None) -> dict[str, Any]:
+    normalized = str(mode or "normal").strip().lower()
+    payload["risk_escalation_validation_mode"] = normalized
+    if normalized != "missing_controls":
+        return payload
+    follow = payload.get("hard_decision_follow_through", {}) if isinstance(payload.get("hard_decision_follow_through"), dict) else {}
+    tasks = follow.get("tasks", []) if isinstance(follow.get("tasks"), list) else []
+    mutated = 0
+    for task in tasks:
+        if not isinstance(task, dict) or task.get("status") != "routed_to_owner":
+            continue
+        if not _risk_escalation_policy(str(task.get("source_tool") or ""), str(task.get("department") or "")):
+            continue
+        review_inputs = task.get("review_inputs", {}) if isinstance(task.get("review_inputs"), dict) else {}
+        review_inputs["live_feed_event_ids"] = []
+        task["review_inputs"] = review_inputs
+        task["exit_condition"] = ""
+        task["fallback"] = ""
+        task["validation_fault"] = "missing_controls_for_risk_escalation_gate"
+        mutated += 1
+    payload["risk_escalation_validation_fault"] = {
+        "mode": normalized,
+        "mutated_task_count": mutated,
+        "purpose": "QA-only mixed escalation batch: prove missing controls block lifted execution.",
+    }
+    return payload
+
+
+def _risk_escalated_live_feed_tool_executor_run(payload: dict[str, Any], *, execute: bool) -> dict[str, Any]:
+    approval = payload.get("risk_escalation_approval", {}) if isinstance(payload.get("risk_escalation_approval"), dict) else {}
+    approvals = approval.get("approvals", []) if isinstance(approval.get("approvals"), list) else []
+    receipts: list[dict[str, Any]] = []
+    for row in approvals:
+        if not isinstance(row, dict) or row.get("status") != "approved":
+            continue
+        context = {
+            "department": row.get("department"),
+            "tool": "execute_approved_action",
+            "intent": f"Escalated simulated execution for held {row.get('source_tool')}",
+            "evidence": row.get("live_feed_event_ids") or [],
+            "risk_level": "elevated",
+            "policy_check": "safety_compliance_executive_escalation_approved",
+            "expected_outcome": f"Receiver acknowledges scoped {row.get('lifted_scope')} without crossing blocked authorities.",
+            "rollback": row.get("rollback"),
+            "policy_gate_checked": True,
+            "policyGateStatus": "approved_escalated_simulated",
+            "decision_id": payload.get("decision_id"),
+            "risk_escalation_approval": row,
+            "live_feed_event_ids": row.get("live_feed_event_ids") or [],
+        }
+        result = run_agent_tool(
+            "tool_executor_agent",
+            "execute_approved_action",
+            context,
+            lambda row=row: {
+                "status": "executed_escalated_simulated" if execute else "preview_escalated_simulated",
+                "mode": "risk_escalated_live_feed_tool_executor",
+                "executed": bool(execute),
+                "source_agent": row.get("agent"),
+                "source_department": row.get("department"),
+                "source_tool": row.get("source_tool"),
+                "approval_id": row.get("approval_id"),
+                "lifted_scope": row.get("lifted_scope"),
+                "idempotency_key": hashlib.sha1(
+                    json.dumps(
+                        {
+                            "decision_id": payload.get("decision_id"),
+                            "approval_id": row.get("approval_id"),
+                            "tool": row.get("source_tool"),
+                            "events": row.get("live_feed_event_ids") or [],
+                        },
+                        sort_keys=True,
+                        default=str,
+                    ).encode("utf-8")
+                ).hexdigest()[:16],
+                "rollback": row.get("rollback"),
+            },
+        )
+        receipts.append(
+            {
+                "agent": row.get("agent"),
+                "department": row.get("department"),
+                "source_tool": row.get("source_tool"),
+                "policy_check": "safety_compliance_executive_escalation_approved",
+                "policy_status": "approved_escalated_simulated",
+                "executor_status": "ready_for_escalated_executor",
+                "approval_id": row.get("approval_id"),
+                "risk_escalation_approval": row,
+                "live_feed_event_ids": row.get("live_feed_event_ids") or [],
+                "result": result,
+            }
+        )
+    executed_count = sum(1 for row in receipts if (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "executed_escalated_simulated")
+    preview_count = sum(1 for row in receipts if (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "preview_escalated_simulated")
+    return {
+        "mode": "risk_escalated_live_feed_tool_executor",
+        "status": "executed" if executed_count else "preview" if preview_count else "not_executed",
+        "execute_requested": bool(execute),
+        "receipt_count": len(receipts),
+        "executed_count": executed_count,
+        "preview_count": preview_count,
+        "executor_agent": "tool_executor_agent",
+        "contract": "Escalated executor accepts only named approval artifacts with Safety, Compliance, and Executive approval; it executes simulated receiver actions only.",
+        "receipts": receipts,
+    }
+
+
 def _controlled_live_feed_receiver_delivery_proof(payload: dict[str, Any]) -> dict[str, Any]:
     executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
     live_case = payload.get("live_feed_case", {}) if isinstance(payload.get("live_feed_case"), dict) else {}
@@ -9714,6 +9982,403 @@ def _controlled_live_feed_receiver_delivery_proof(payload: dict[str, Any]) -> di
         "contract": "Only controlled low-risk executor receipts are delivered to bounded internal receivers; held or approval-gated actions are not dispatched.",
         "outbox_status": delivery_outbox_status(),
         "receipts": proof_rows,
+    }
+
+
+def _risk_escalation_receiver_delivery_proof(payload: dict[str, Any]) -> dict[str, Any]:
+    executor = payload.get("risk_escalated_tool_executor", {}) if isinstance(payload.get("risk_escalated_tool_executor"), dict) else {}
+    live_case = payload.get("live_feed_case", {}) if isinstance(payload.get("live_feed_case"), dict) else {}
+    receipts = executor.get("receipts", []) if isinstance(executor.get("receipts"), list) else []
+    proof_rows: list[dict[str, Any]] = []
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            continue
+        result = receipt.get("result", {}) if isinstance(receipt.get("result"), dict) else {}
+        executed = result.get("status") == "executed_escalated_simulated"
+        approval = receipt.get("risk_escalation_approval", {}) if isinstance(receipt.get("risk_escalation_approval"), dict) else {}
+        receiver = str(approval.get("receiver") or "")
+        if not executed:
+            proof_rows.append(
+                {
+                    "agent": receipt.get("agent"),
+                    "department": receipt.get("department"),
+                    "source_tool": receipt.get("source_tool"),
+                    "approval_id": receipt.get("approval_id"),
+                    "status": "not_dispatched_escalation_preview",
+                    "delivered": False,
+                    "acknowledged": False,
+                    "reason": "Escalated executor did not execute this approval.",
+                }
+            )
+            continue
+        if not receiver:
+            proof_rows.append(
+                {
+                    "agent": receipt.get("agent"),
+                    "department": receipt.get("department"),
+                    "source_tool": receipt.get("source_tool"),
+                    "approval_id": receipt.get("approval_id"),
+                    "status": "receiver_not_configured",
+                    "delivered": False,
+                    "acknowledged": False,
+                    "reason": "Risk escalation approval did not name a bounded receiver.",
+                }
+            )
+            continue
+        dispatch_payload = {
+            "scenarioKey": "live_feed_risk_escalation",
+            "decisionId": payload.get("decision_id"),
+            "agentId": receipt.get("agent"),
+            "executorAgentId": "tool_executor_agent",
+            "department": receipt.get("department"),
+            "targetReceiver": receiver,
+            "sourceTool": receipt.get("source_tool"),
+            "intent": f"Deliver approved simulated risk escalation for {receipt.get('source_tool')}",
+            "evidence": receipt.get("live_feed_event_ids") or live_case.get("live_feed_event_ids") or [],
+            "riskLevel": "elevated",
+            "policyCheck": receipt.get("policy_check"),
+            "policyGateStatus": receipt.get("policy_status"),
+            "policyGateChecked": True,
+            "expectedOutcome": f"Receiver acknowledges scoped escalation: {approval.get('lifted_scope')}",
+            "rollback": (result.get("rollback") if isinstance(result, dict) else None) or approval.get("rollback"),
+            "liveFeedEventIds": receipt.get("live_feed_event_ids") or live_case.get("live_feed_event_ids") or [],
+            "controlledExecutorReceiptId": result.get("idempotency_key"),
+            "approvalId": receipt.get("approval_id"),
+            "publicGuestMessage": False,
+            "materialStateMutation": False,
+        }
+        try:
+            dispatch = send_worker_notification(dispatch_payload)
+            acknowledged = {}
+            if dispatch.get("status") in {"delivered", "acknowledged"}:
+                acknowledged = acknowledge_dispatch(
+                    str(dispatch.get("id")),
+                    actor=f"{receiver}:risk_escalation_system",
+                    choice="received_escalated_simulated_action",
+                    channel=str(dispatch.get("channel") or "worker_device"),
+                )
+            delivered = dispatch.get("status") in {"delivered", "acknowledged"} or acknowledged.get("status") == "acknowledged"
+            acked = acknowledged.get("status") == "acknowledged" or dispatch.get("status") == "acknowledged"
+            proof_rows.append(
+                {
+                    "agent": receipt.get("agent"),
+                    "department": receipt.get("department"),
+                    "source_tool": receipt.get("source_tool"),
+                    "approval_id": receipt.get("approval_id"),
+                    "lifted_scope": approval.get("lifted_scope"),
+                    "status": "delivered_and_acknowledged" if delivered and acked else "dispatch_recorded_without_ack",
+                    "receiver": receiver,
+                    "channel": dispatch.get("channel"),
+                    "dispatch_id": dispatch.get("id"),
+                    "dispatch_status": dispatch.get("status"),
+                    "dispatch_durable": dispatch.get("durable"),
+                    "ack_status": acknowledged.get("status"),
+                    "acknowledged_by": (acknowledged.get("lastAcknowledgement", {}) if isinstance(acknowledged.get("lastAcknowledgement"), dict) else {}).get("actor"),
+                    "idempotency_key": dispatch.get("idempotencyKey") or result.get("idempotency_key"),
+                    "delivered": bool(delivered),
+                    "acknowledged": bool(acked),
+                    "material_state_mutation": False,
+                }
+            )
+        except Exception as error:
+            proof_rows.append(
+                {
+                    "agent": receipt.get("agent"),
+                    "department": receipt.get("department"),
+                    "source_tool": receipt.get("source_tool"),
+                    "approval_id": receipt.get("approval_id"),
+                    "status": "delivery_error",
+                    "receiver": receiver,
+                    "delivered": False,
+                    "acknowledged": False,
+                    "error": str(error)[:300],
+                    "material_state_mutation": False,
+                }
+            )
+    executed_count = sum(1 for row in receipts if isinstance(row, dict) and (row.get("result", {}) if isinstance(row.get("result"), dict) else {}).get("status") == "executed_escalated_simulated")
+    delivered_count = sum(1 for row in proof_rows if row.get("delivered"))
+    acknowledged_count = sum(1 for row in proof_rows if row.get("acknowledged"))
+    proof_id = f"risk_receiver_proof_{hashlib.sha1(json.dumps({'decision_id': payload.get('decision_id'), 'rows': proof_rows}, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:12]}"
+    return {
+        "mode": "risk_escalation_receiver_delivery_proof",
+        "proof_id": proof_id,
+        "status": "proven_escalated" if executed_count and delivered_count == executed_count and acknowledged_count == executed_count else "incomplete" if receipts else "not_requested",
+        "execution_mode": "escalated_simulated_receiver_handoff",
+        "executor_agent": "tool_executor_agent",
+        "delivery_agent": "delivery_proof_agent",
+        "executed_count": executed_count,
+        "delivered_count": delivered_count,
+        "acknowledged_count": acknowledged_count,
+        "public_guest_messages_sent": 0,
+        "material_state_mutation": False,
+        "contract": "Escalated receiver delivery is simulated and scoped; receiver acknowledgement is required before simulated park-state impact is applied.",
+        "outbox_status": delivery_outbox_status(),
+        "receipts": proof_rows,
+    }
+
+
+def _live_feed_controlled_impact_text(issue_kind: str, department: str, tool: str, target_id: str) -> str:
+    issue_text = issue_kind.replace("_", " ")
+    target_text = target_id.replace("_", " ")
+    if department == "food_retail" or tool in {"inventory_alert", "pause_launch_promo", "restock_request"}:
+        return f"food court mobile order inventory kitchen pickup queue control for {issue_text} at {target_text}"
+    if department == "hr_labor" or tool == "shift_adjustment_recommendation":
+        return f"staff worker break callout labor coverage support for {issue_text} at {target_text}"
+    if department == "maintenance" or tool == "create_work_order":
+        if issue_kind in {"energy_spike", "storm_risk", "heat_index_spike", "lightning_delay"}:
+            return f"hvac energy equipment maintenance work order for {issue_text} at {target_text}"
+        return f"ride coaster maintenance inspection work order queue containment for {issue_text} at {target_text}"
+    if department == "operations" or tool == "create_ops_alert":
+        if issue_kind in {"energy_spike", "storm_risk", "heat_index_spike", "lightning_delay"}:
+            return f"hvac weather operations alert shelter comfort energy for {issue_text} at {target_text}"
+        if issue_kind in {"access_lane_block", "parade_route_conflict", "ticketing_gate_surge", "parking_arrival_wave", "radio_dead_zone", "security_perimeter"}:
+            return f"crowd security access lane congestion operations alert for {issue_text} at {target_text}"
+        if issue_kind in {"demand_spike", "show_dump", "ride_failure"}:
+            return f"ride coaster queue crowd flow operations alert for {issue_text} at {target_text}"
+    if department == "marketing" or tool == "redirect_offer":
+        return f"food guest demand redirect offer queue relief for {issue_text} at {target_text}"
+    return f"operations controlled internal receiver impact for {issue_text} at {target_text}"
+
+
+def _live_feed_escalated_impact_text(issue_kind: str, department: str, tool: str, target_id: str) -> str:
+    issue_text = issue_kind.replace("_", " ")
+    target_text = target_id.replace("_", " ")
+    if tool == "recommend_route_change":
+        return f"crowd congestion calm route crowd safety route recommendation for {issue_text} at {target_text}"
+    if tool == "draft_guest_message":
+        return f"guest care cases calm guidance guest message queue uncertainty for {issue_text} at {target_text}"
+    if tool == "create_work_order":
+        return f"ride coaster maintenance work order inspection queue containment for {issue_text} at {target_text}"
+    if tool == "redirect_offer":
+        return f"food guest demand redirect offer capacity cap crowd relief for {issue_text} at {target_text}"
+    return f"crowd controlled simulated escalation for {issue_text} at {target_text}"
+
+
+async def _apply_controlled_live_feed_simulated_ops_impact(payload: dict[str, Any]) -> dict[str, Any]:
+    receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
+    if receiver_delivery.get("status") != "proven_controlled":
+        return {
+            "status": "skipped",
+            "mode": "controlled_live_feed_simulated_ops_impact",
+            "reason": "Receiver delivery is not fully proven; simulated park state was not mutated.",
+            "material_state_mutation": False,
+        }
+    proof_rows = receiver_delivery.get("receipts", []) if isinstance(receiver_delivery.get("receipts"), list) else []
+    delivered = [
+        row
+        for row in proof_rows
+        if isinstance(row, dict) and row.get("delivered") is True and row.get("acknowledged") is True
+    ]
+    if not delivered:
+        return {
+            "status": "skipped",
+            "mode": "controlled_live_feed_simulated_ops_impact",
+            "reason": "No acknowledged controlled receiver rows were available for simulated ops impact.",
+            "material_state_mutation": False,
+        }
+    live_case = payload.get("live_feed_case", {}) if isinstance(payload.get("live_feed_case"), dict) else {}
+    generated_issue = live_case.get("generated_issue", {}) if isinstance(live_case.get("generated_issue"), dict) else {}
+    issue_kind = str(generated_issue.get("kind") or live_case.get("issue_kind") or live_case.get("scenario_key") or "live_feed_issue")
+    target_id = str(generated_issue.get("target_id") or generated_issue.get("targetId") or live_case.get("issue_target_id") or "affected_area")
+    dispatches = []
+    for row in delivered:
+        department = str(row.get("department") or "")
+        tool = str(row.get("source_tool") or "")
+        impact_text = _live_feed_controlled_impact_text(issue_kind, department, tool, target_id)
+        acknowledged_count = 2 if department == "hr_labor" else 1
+        dispatches.append(
+            {
+                "id": row.get("dispatch_id") or row.get("idempotency_key"),
+                "channel": "worker_device",
+                "target": row.get("receiver") or department,
+                "status": "acknowledged",
+                "payload": {
+                    "title": f"Controlled live-feed impact: {tool}",
+                    "message": impact_text,
+                    "department": department,
+                    "sourceTool": tool,
+                    "issueKind": issue_kind,
+                    "targetId": target_id,
+                    "policyBoundary": "simulated low-risk ops mutation only; no public message, route command, reopen, safety clearance, or security control",
+                },
+                "response": {
+                    "state": "acknowledged",
+                    "acknowledgedCount": acknowledged_count,
+                    "followThroughCount": 0,
+                    "applied": True,
+                },
+            }
+        )
+    try:
+        impact = await park_simulation.apply_delivery_outcomes(
+            dispatches,
+            reason=f"live_feed_controlled_ops_impact:{issue_kind}",
+        )
+    except Exception as error:
+        return {
+            "status": "error",
+            "mode": "controlled_live_feed_simulated_ops_impact",
+            "error": str(error)[:300],
+            "material_state_mutation": False,
+            "receiver_rows": len(delivered),
+        }
+    material_state_mutation = impact.get("status") == "success"
+    if material_state_mutation:
+        clear_hot_endpoint_cache()
+    state_impact = impact.get("stateImpact", {}) if isinstance(impact.get("stateImpact"), dict) else {}
+    episode_fitness = impact.get("episode_fitness") if isinstance(impact.get("episode_fitness"), dict) else {}
+    if isinstance(episode_fitness.get("scores"), dict):
+        episode_fitness = {
+            **episode_fitness,
+            "fitness": episode_fitness.get("fitness", episode_fitness["scores"].get("fitness")),
+            "rewardDelta": episode_fitness.get("rewardDelta", episode_fitness["scores"].get("reward_delta")),
+        }
+    if isinstance(episode_fitness.get("pressure"), dict):
+        episode_fitness = {
+            **episode_fitness,
+            "pressureReduction": episode_fitness.get("pressureReduction", episode_fitness["pressure"].get("reduction_vs_baseline")),
+        }
+    return {
+        "status": "applied" if material_state_mutation else impact.get("status", "skipped"),
+        "mode": "controlled_live_feed_simulated_ops_impact",
+        "issue_kind": issue_kind,
+        "target_id": target_id,
+        "material_state_mutation": material_state_mutation,
+        "receiver_rows": len(delivered),
+        "dispatch_count": len(dispatches),
+        "message": impact.get("message"),
+        "state_impact": state_impact,
+        "episode_fitness": episode_fitness,
+        "boundary": "Only policy-passed low-risk internal receiver acknowledgements can mutate simulated ops state. Public guest messaging, security control, route changes, ride reopen, and safety clearance remain blocked.",
+    }
+
+
+async def _apply_risk_escalation_simulated_ops_impact(payload: dict[str, Any]) -> dict[str, Any]:
+    receiver_delivery = payload.get("risk_escalation_receiver_delivery", {}) if isinstance(payload.get("risk_escalation_receiver_delivery"), dict) else {}
+    if receiver_delivery.get("status") != "proven_escalated":
+        return {
+            "status": "skipped",
+            "mode": "risk_escalation_simulated_ops_impact",
+            "reason": "Escalated receiver delivery is not fully proven; simulated park state was not mutated by lifted action.",
+            "material_state_mutation": False,
+        }
+    proof_rows = receiver_delivery.get("receipts", []) if isinstance(receiver_delivery.get("receipts"), list) else []
+    delivered = [
+        row
+        for row in proof_rows
+        if isinstance(row, dict) and row.get("delivered") is True and row.get("acknowledged") is True
+    ]
+    if not delivered:
+        return {
+            "status": "skipped",
+            "mode": "risk_escalation_simulated_ops_impact",
+            "reason": "No acknowledged escalated receiver rows were available for simulated ops impact.",
+            "material_state_mutation": False,
+        }
+    live_case = payload.get("live_feed_case", {}) if isinstance(payload.get("live_feed_case"), dict) else {}
+    generated_issue = live_case.get("generated_issue", {}) if isinstance(live_case.get("generated_issue"), dict) else {}
+    issue_kind = str(generated_issue.get("kind") or live_case.get("issue_kind") or live_case.get("scenario_key") or "live_feed_issue")
+    target_id = str(generated_issue.get("target_id") or generated_issue.get("targetId") or live_case.get("issue_target_id") or "affected_area")
+    dispatches = []
+    for row in delivered:
+        department = str(row.get("department") or "")
+        tool = str(row.get("source_tool") or "")
+        dispatches.append(
+            {
+                "id": row.get("dispatch_id") or row.get("idempotency_key"),
+                "channel": "worker_device",
+                "target": row.get("receiver") or department,
+                "status": "acknowledged",
+                "payload": {
+                    "title": f"Escalated simulated impact: {tool}",
+                    "message": _live_feed_escalated_impact_text(issue_kind, department, tool, target_id),
+                    "department": department,
+                    "sourceTool": tool,
+                    "issueKind": issue_kind,
+                    "targetId": target_id,
+                    "approvalId": row.get("approval_id"),
+                    "policyBoundary": "simulated risk-lift only; no ride reopen, security control, evacuation, medical dispatch, or public emergency message",
+                },
+                "response": {
+                    "state": "acknowledged",
+                    "acknowledgedCount": 2,
+                    "followThroughCount": 1,
+                    "applied": True,
+                },
+            }
+        )
+    try:
+        impact = await park_simulation.apply_delivery_outcomes(
+            dispatches,
+            reason=f"live_feed_risk_escalation:{issue_kind}",
+        )
+    except Exception as error:
+        return {
+            "status": "error",
+            "mode": "risk_escalation_simulated_ops_impact",
+            "error": str(error)[:300],
+            "material_state_mutation": False,
+            "receiver_rows": len(delivered),
+        }
+    material_state_mutation = impact.get("status") == "success"
+    if material_state_mutation:
+        clear_hot_endpoint_cache()
+    state_impact = impact.get("stateImpact", {}) if isinstance(impact.get("stateImpact"), dict) else {}
+    episode_fitness = impact.get("episode_fitness") if isinstance(impact.get("episode_fitness"), dict) else {}
+    if isinstance(episode_fitness.get("scores"), dict):
+        episode_fitness = {
+            **episode_fitness,
+            "fitness": episode_fitness.get("fitness", episode_fitness["scores"].get("fitness")),
+            "rewardDelta": episode_fitness.get("rewardDelta", episode_fitness["scores"].get("reward_delta")),
+        }
+    if isinstance(episode_fitness.get("pressure"), dict):
+        episode_fitness = {
+            **episode_fitness,
+            "pressureReduction": episode_fitness.get("pressureReduction", episode_fitness["pressure"].get("reduction_vs_baseline")),
+        }
+    validation_mode = str(payload.get("risk_escalation_validation_mode") or "normal").strip().lower()
+    if validation_mode == "pending_measurement":
+        return {
+            "status": "pending_measurement",
+            "mode": "risk_escalation_simulated_ops_impact",
+            "issue_kind": issue_kind,
+            "target_id": target_id,
+            "material_state_mutation": False,
+            "receiver_rows": len(delivered),
+            "dispatch_count": len(dispatches),
+            "message": "Escalated action was delivered, but post-action measurement is intentionally withheld for QA validation.",
+            "state_impact": {},
+            "episode_fitness": {},
+            "validation_fault": validation_mode,
+            "boundary": "QA-only validation fault; no reward promotion until measurement exists.",
+        }
+    if validation_mode == "impact_regression":
+        state_impact = {
+            **state_impact,
+            "headline": "QA validation adverse effect: lifted action increased congestion in the simulated measurement.",
+            "before_after_line": "Risk-lift validation forced an adverse post-action measurement.",
+            "congestion_delta": abs(float(state_impact.get("congestion_delta") or 18)),
+            "queued_guest_delta": abs(float(state_impact.get("queued_guest_delta") or state_impact.get("queue_delta") or 80)),
+        }
+        episode_fitness = {
+            **episode_fitness,
+            "fitness": 0,
+            "rewardDelta": -1,
+            "pressureReduction": 0,
+        }
+    return {
+        "status": "applied" if material_state_mutation else impact.get("status", "skipped"),
+        "mode": "risk_escalation_simulated_ops_impact",
+        "issue_kind": issue_kind,
+        "target_id": target_id,
+        "material_state_mutation": material_state_mutation,
+        "receiver_rows": len(delivered),
+        "dispatch_count": len(dispatches),
+        "message": impact.get("message"),
+        "state_impact": state_impact,
+        "episode_fitness": episode_fitness,
+        "validation_fault": validation_mode if validation_mode in {"impact_regression"} else None,
+        "boundary": "Only approval-scoped lifted actions mutate simulated ops state. Real public messaging, route commands, security control, ride reopen, evacuation, and medical dispatch remain blocked.",
     }
 
 
@@ -10237,6 +10902,10 @@ def _live_feed_reward_layers(
     executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
     follow_through = payload.get("hard_decision_follow_through", {}) if isinstance(payload.get("hard_decision_follow_through"), dict) else {}
     receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
+    risk_escalation = payload.get("risk_escalation_approval", {}) if isinstance(payload.get("risk_escalation_approval"), dict) else {}
+    risk_executor = payload.get("risk_escalated_tool_executor", {}) if isinstance(payload.get("risk_escalated_tool_executor"), dict) else {}
+    risk_delivery = payload.get("risk_escalation_receiver_delivery", {}) if isinstance(payload.get("risk_escalation_receiver_delivery"), dict) else {}
+    risk_impact = payload.get("risk_escalation_simulated_ops_impact", {}) if isinstance(payload.get("risk_escalation_simulated_ops_impact"), dict) else {}
     memory_priors = payload.get("live_feed_memory_priors", {}) if isinstance(payload.get("live_feed_memory_priors"), dict) else {}
     memory_prior_use = proposals.get("memory_prior_use", {}) if isinstance(proposals.get("memory_prior_use"), dict) else {}
     alternative_negotiation = proposals.get("alternative_action_negotiation", {}) if isinstance(proposals.get("alternative_action_negotiation"), dict) else payload.get("alternative_action_negotiation", {}) if isinstance(payload.get("alternative_action_negotiation"), dict) else {}
@@ -10280,6 +10949,16 @@ def _live_feed_reward_layers(
     material_mutation = bool(receiver_delivery.get("material_state_mutation"))
     delivered_count = int(receiver_delivery.get("delivered_count") or 0)
     acknowledged_count = int(receiver_delivery.get("acknowledged_count") or 0)
+    risk_requested_count = int(risk_escalation.get("requested_count") or 0)
+    risk_approved_count = int(risk_escalation.get("approved_count") or 0)
+    risk_executed_count = int(risk_executor.get("executed_count") or 0)
+    risk_delivered_count = int(risk_delivery.get("delivered_count") or 0)
+    risk_acknowledged_count = int(risk_delivery.get("acknowledged_count") or 0)
+    risk_impact_applied = risk_impact.get("status") == "applied" and bool(risk_impact.get("material_state_mutation"))
+    risk_state_impact = risk_impact.get("state_impact", {}) if isinstance(risk_impact.get("state_impact"), dict) else {}
+    risk_congestion_delta = risk_state_impact.get("congestion_delta")
+    risk_queue_delta = risk_state_impact.get("queued_guest_delta")
+    risk_fitness = (risk_impact.get("episode_fitness", {}) if isinstance(risk_impact.get("episode_fitness"), dict) else {}).get("fitness")
 
     trace_components = [
         1.0 if proposal_count and evidence_argument_count == proposal_count else evidence_argument_count / max(1, proposal_count),
@@ -10321,6 +11000,47 @@ def _live_feed_reward_layers(
         + (0.05 * (actionable_stable / actionable_total))
         + ((0.08 * commerce_action_quality) if semantic_action_parameter_count > 0 else 0.0)
     )
+    controlled_low_risk_reward = _bounded_reward(
+        (0.25 if receiver_delivery_proven else 0.0)
+        + (0.2 if executed_count > 0 else 0.0)
+        + (0.2 if delivered_count == executed_count and acknowledged_count == executed_count and executed_count > 0 else 0.0)
+        + (0.35 * operational_reward)
+    )
+    risk_lift_effect_score = 0.0
+    try:
+        if risk_congestion_delta is not None:
+            risk_lift_effect_score = max(risk_lift_effect_score, _live_feed_positive_delta_score(float(risk_congestion_delta), lower_is_better=True, scale=50.0))
+        if risk_queue_delta is not None:
+            risk_lift_effect_score = max(risk_lift_effect_score, _live_feed_positive_delta_score(float(risk_queue_delta), lower_is_better=True, scale=200.0))
+        if risk_fitness is not None:
+            risk_lift_effect_score = max(risk_lift_effect_score, _bounded_reward(float(risk_fitness) / 100.0))
+    except (TypeError, ValueError):
+        risk_lift_effect_score = 0.0
+    risk_lift_process_score = _bounded_reward(
+        (0.2 if risk_requested_count > 0 else 0.0)
+        + (0.2 if risk_requested_count > 0 and risk_approved_count == risk_requested_count else 0.0)
+        + (0.2 if risk_executed_count > 0 and risk_executed_count == risk_approved_count else 0.0)
+        + (0.15 if risk_delivery.get("status") == "proven_escalated" and risk_acknowledged_count == risk_executed_count and risk_executed_count > 0 else 0.0)
+    )
+    risk_lift_measured_regression = bool(risk_impact.get("status") == "applied" and risk_executed_count > 0 and risk_lift_effect_score <= 0)
+    if risk_lift_measured_regression:
+        risk_lift_reward = min(risk_lift_process_score, 0.45)
+    elif risk_impact_applied:
+        risk_lift_reward = _bounded_reward(risk_lift_process_score + (0.25 * risk_lift_effect_score))
+    elif risk_executed_count > 0:
+        risk_lift_reward = min(risk_lift_process_score, 0.55)
+    else:
+        risk_lift_reward = risk_lift_process_score
+    risk_lift_label = (
+        "risk_lift_regression"
+        if risk_lift_measured_regression
+        else
+        "risk_lift_success"
+        if risk_lift_reward >= 0.65 and risk_impact_applied
+        else "risk_lift_blocked"
+        if risk_requested_count == 0 or risk_approved_count == 0
+        else "risk_lift_pending_measurement"
+    )
 
     memory_applied = int(memory_prior_use.get("applied_count") or 0)
     memory_prior_count = int(memory_priors.get("prior_count") or 0)
@@ -10354,6 +11074,9 @@ def _live_feed_reward_layers(
         "policy_reward": policy_reward,
         "execution_reward": execution_reward,
         "operational_reward": operational_reward,
+        "controlled_low_risk_reward": controlled_low_risk_reward,
+        "risk_lift_reward": risk_lift_reward,
+        "risk_lift_label": risk_lift_label,
         "learning_reward": learning_reward,
         "composite_reward": composite_reward,
         "promotion_eligible": promotion_eligible,
@@ -10395,6 +11118,35 @@ def _live_feed_reward_layers(
             "substitute_executed_branch_count": substitute_attribution.get("executed_branch_count"),
             "substitute_average_score": substitute_attribution.get("average_substitute_score"),
             "substitute_average_lift_vs_monitor": substitute_attribution.get("average_lift_vs_monitor"),
+            "risk_escalation_requested_count": risk_requested_count,
+            "risk_escalation_approved_count": risk_approved_count,
+            "risk_escalated_executed_count": risk_executed_count,
+            "risk_escalation_delivered_count": risk_delivered_count,
+            "risk_escalation_acknowledged_count": risk_acknowledged_count,
+            "risk_escalation_impact_applied": risk_impact_applied,
+            "risk_escalation_effect_score": risk_lift_effect_score,
+            "risk_lift_process_score": risk_lift_process_score,
+            "risk_lift_measured_regression": risk_lift_measured_regression,
+        },
+        "branch_rewards": {
+            "controlled_low_risk": {
+                "reward": controlled_low_risk_reward,
+                "executed_count": executed_count,
+                "receiver_status": receiver_delivery.get("status"),
+                "policy": "Credits policy-passed controlled receiver actions only.",
+            },
+            "risk_lift": {
+                "reward": risk_lift_reward,
+                "label": risk_lift_label,
+                "requested_count": risk_requested_count,
+                "approved_count": risk_approved_count,
+                "executed_count": risk_executed_count,
+                "delivery_status": risk_delivery.get("status"),
+                "impact_status": risk_impact.get("status"),
+                "material_state_mutation": risk_impact.get("material_state_mutation"),
+                "effect_score": risk_lift_effect_score,
+                "policy": "Credits only approval-scoped lifted actions that execute, receive acknowledgement, and produce measured simulated impact.",
+            },
         },
         "commerce_action_attribution": commerce_attribution,
         "substitute_outcome_attribution": substitute_attribution,
@@ -10406,6 +11158,7 @@ def _live_feed_reward_layers(
                 None if attribution_confidence >= 0.7 else "low_attribution_confidence",
                 None if operational_reward >= 0.55 else "operational_reward_below_promotion_threshold",
                 None if regression_points == 0 else "operational_regression_detected",
+                None if risk_lift_label not in {"risk_lift_regression"} else "risk_lift_regression_detected",
             ]
             if blocker
         ],
@@ -11775,6 +12528,10 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
     ml_policy_evidence = payload.get("live_feed_ml_policy_evidence", {}) if isinstance(payload.get("live_feed_ml_policy_evidence"), dict) else {}
     ml_policy_use = proposals.get("ml_policy_evidence_use", {}) if isinstance(proposals.get("ml_policy_evidence_use"), dict) else {}
     follow_through = payload.get("hard_decision_follow_through", {}) if isinstance(payload.get("hard_decision_follow_through"), dict) else {}
+    risk_escalation = payload.get("risk_escalation_approval", {}) if isinstance(payload.get("risk_escalation_approval"), dict) else {}
+    risk_executor = payload.get("risk_escalated_tool_executor", {}) if isinstance(payload.get("risk_escalated_tool_executor"), dict) else {}
+    risk_delivery = payload.get("risk_escalation_receiver_delivery", {}) if isinstance(payload.get("risk_escalation_receiver_delivery"), dict) else {}
+    risk_impact = payload.get("risk_escalation_simulated_ops_impact", {}) if isinstance(payload.get("risk_escalation_simulated_ops_impact"), dict) else {}
     alternative_negotiation = proposals.get("alternative_action_negotiation", {}) if isinstance(proposals.get("alternative_action_negotiation"), dict) else payload.get("alternative_action_negotiation", {}) if isinstance(payload.get("alternative_action_negotiation"), dict) else {}
     substitute_attribution = outcome_measurement.get("substitute_outcome_attribution", {}) if isinstance(outcome_measurement.get("substitute_outcome_attribution"), dict) else (outcome_measurement.get("reward_layers", {}) if isinstance(outcome_measurement.get("reward_layers"), dict) else {}).get("substitute_outcome_attribution", {}) if isinstance((outcome_measurement.get("reward_layers", {}) if isinstance(outcome_measurement.get("reward_layers"), dict) else {}).get("substitute_outcome_attribution"), dict) else {}
     park_profile_summary = payload.get("park_profile_summary") or proposals.get("park_profile_summary") or {}
@@ -11792,6 +12549,19 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
     measured_outcome_available = bool(outcome_measurement.get("measured_outcome_available"))
     eligible_for_reward = bool(outcome_measurement.get("eligible_for_reward"))
     reward_layers = outcome_measurement.get("reward_layers", {}) if isinstance(outcome_measurement.get("reward_layers"), dict) else {}
+    branch_rewards = reward_layers.get("branch_rewards", {}) if isinstance(reward_layers.get("branch_rewards"), dict) else {}
+    risk_lift_branch = branch_rewards.get("risk_lift", {}) if isinstance(branch_rewards.get("risk_lift"), dict) else {}
+    risk_lift_label = str(reward_layers.get("risk_lift_label") or risk_lift_branch.get("label") or "risk_lift_not_requested")
+    risk_training_tags = [
+        "controlled_low_risk",
+        risk_lift_label,
+    ]
+    if int(risk_lift_branch.get("executed_count") or risk_executor.get("executed_count") or 0) > 0:
+        risk_training_tags.append("risk_lift_executed")
+    if risk_impact.get("status") == "applied" and bool(risk_impact.get("material_state_mutation")):
+        risk_training_tags.append("risk_lift_impact_applied")
+    if risk_escalation.get("status") in {"disabled", "blocked", "not_requested"}:
+        risk_training_tags.append(f"risk_gate_{risk_escalation.get('status')}")
     decision_basis = {
         "mode": "live_feed_controlled_executor_decision",
         "lead_source": live_case.get("lead_source"),
@@ -11816,6 +12586,10 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
             {"phase": "alternative_action_negotiation", "status": alternative_negotiation.get("status") or "missing", "substitute_count": alternative_negotiation.get("substitute_count"), "unresolved_without_safe_substitute_count": alternative_negotiation.get("unresolved_without_safe_substitute_count")},
             {"phase": "controlled_executor", "status": executor.get("status"), "executed_count": executor.get("executed_count"), "held_count": executor.get("held_count")},
             {"phase": "hard_decision_follow_through", "status": follow_through.get("status") or "missing", "task_count": follow_through.get("task_count"), "active_follow_up_count": follow_through.get("active_follow_up_count")},
+            {"phase": "risk_escalation_approval", "status": risk_escalation.get("status") or "missing", "stage": risk_escalation.get("stage"), "requested_count": risk_escalation.get("requested_count"), "approved_count": risk_escalation.get("approved_count")},
+            {"phase": "risk_escalated_executor", "status": risk_executor.get("status") or "missing", "executed_count": risk_executor.get("executed_count"), "preview_count": risk_executor.get("preview_count")},
+            {"phase": "risk_escalation_receiver_delivery", "status": risk_delivery.get("status") or "missing", "delivered_count": risk_delivery.get("delivered_count"), "acknowledged_count": risk_delivery.get("acknowledged_count")},
+            {"phase": "risk_escalation_impact", "status": risk_impact.get("status") or "missing", "material_state_mutation": risk_impact.get("material_state_mutation"), "episode_fitness": (risk_impact.get("episode_fitness", {}) if isinstance(risk_impact.get("episode_fitness"), dict) else {}).get("fitness")},
             {"phase": "receiver_delivery", "status": receiver_delivery.get("status") or "missing", "delivered_count": receiver_delivery.get("delivered_count"), "acknowledged_count": receiver_delivery.get("acknowledged_count")},
             {"phase": "post_action_measurement", "status": outcome_measurement.get("status") or "missing", "attribution_confidence": outcome_measurement.get("attribution_confidence"), "eligible_for_reward": eligible_for_reward},
             {"phase": "substitute_outcome_attribution", "status": substitute_attribution.get("status") or "missing", "executed_branch_count": substitute_attribution.get("executed_branch_count"), "average_lift_vs_monitor": substitute_attribution.get("average_lift_vs_monitor")},
@@ -11828,6 +12602,8 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
             "attributionConfidence": outcome_measurement.get("attribution_confidence"),
             "rewardValue": outcome_measurement.get("reward_value"),
             "rewardLayers": reward_layers,
+            "branchRewards": branch_rewards,
+            "riskLiftLabel": risk_lift_label,
             "promotionEligible": outcome_measurement.get("promotion_eligible"),
         },
         "state_impact": {
@@ -11853,6 +12629,10 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
             "hard_decision_follow_through_status": follow_through.get("status"),
             "hard_decision_follow_through_tasks": follow_through.get("tasks", []),
             "active_follow_up_count": follow_through.get("active_follow_up_count"),
+            "risk_escalation_approval": risk_escalation,
+            "risk_escalated_tool_executor": risk_executor,
+            "risk_escalation_receiver_delivery": risk_delivery,
+            "risk_escalation_simulated_ops_impact": risk_impact,
             "receiver_delivery_proof_id": receiver_delivery.get("proof_id"),
             "receiver_delivery_status": receiver_delivery.get("status"),
             "receiver_delivery_receipts": receiver_delivery.get("receipts", []),
@@ -11881,6 +12661,9 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
             "reward_label": outcome_measurement.get("reward_label"),
             "reward_value": outcome_measurement.get("reward_value"),
             "reward_layers": reward_layers,
+            "branch_rewards": branch_rewards,
+            "risk_lift_label": risk_lift_label,
+            "training_tags": risk_training_tags,
             "promotion_eligible": outcome_measurement.get("promotion_eligible"),
             "profile_learning_context": {
                 "profile_version": proposals.get("profile_version") or park_profile_summary.get("profile_version"),
@@ -11912,6 +12695,18 @@ def _record_live_feed_controlled_outcome_memory(payload: dict[str, Any]) -> dict
                 "average_substitute_score": substitute_attribution.get("average_substitute_score"),
                 "average_lift_vs_monitor": substitute_attribution.get("average_lift_vs_monitor"),
                 "bundle": substitute_attribution.get("bundle", {}),
+            },
+            "risk_lift_learning_context": {
+                "status": risk_escalation.get("status"),
+                "stage": risk_escalation.get("stage"),
+                "requested_count": risk_escalation.get("requested_count"),
+                "approved_count": risk_escalation.get("approved_count"),
+                "executed_count": risk_executor.get("executed_count"),
+                "delivery_status": risk_delivery.get("status"),
+                "impact_status": risk_impact.get("status"),
+                "material_state_mutation": risk_impact.get("material_state_mutation"),
+                "branch_reward": risk_lift_branch,
+                "training_rule": "Use this branch to learn escalation quality separately from low-risk controlled execution.",
             },
             "next_gap": "Resolve active hard-decision follow-up tasks and attribute longer-horizon operational lift." if follow_through.get("active_follow_up_count") else "Attribute longer-horizon operational lift after receiver action." if eligible_for_reward else "Record post-action state measurements before reward training.",
         },
@@ -12016,7 +12811,19 @@ async def park_live_feed_agent_run(request: LiveFeedAgentRunRequest):
             execute=request.controlled_executor_execute,
         )
         payload["hard_decision_follow_through"] = _build_live_feed_hard_decision_follow_through(payload)
+        payload = _apply_risk_escalation_validation_mode(payload, request.risk_escalation_validation_mode)
+        payload["risk_escalation_approval"] = _build_live_feed_risk_escalation_approval(
+            payload,
+            enabled=request.allow_risk_escalation,
+        )
+        payload["risk_escalated_tool_executor"] = _risk_escalated_live_feed_tool_executor_run(
+            payload,
+            execute=request.controlled_executor_execute,
+        )
         payload["live_feed_receiver_delivery"] = _controlled_live_feed_receiver_delivery_proof(payload)
+        payload["risk_escalation_receiver_delivery"] = _risk_escalation_receiver_delivery_proof(payload)
+        payload["live_feed_simulated_ops_impact"] = await _apply_controlled_live_feed_simulated_ops_impact(payload)
+        payload["risk_escalation_simulated_ops_impact"] = await _apply_risk_escalation_simulated_ops_impact(payload)
         if request.measure_post_action:
             payload["live_feed_post_action_refresh"] = await _refresh_due_live_feeds_payload(
                 {

@@ -4,7 +4,7 @@ PERF_CONCURRENCY ?= 50
 PERF_TARGET_P95_MS ?= 250
 TEST_PYTHON ?= /tmp/parkpulse_backend_venv/bin/python
 
-.PHONY: qa qa-fast qa-release qa-live qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate loop-resilience loop-resilience-monitor live-agents-smoke live-feed-agent-smoke live-feed-training-closure live-feed-agent-report live-feed-learning-loop-validation experience-studio-dev experience-studio-demo-verify test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-judge-smoke gcp-judge-smoke-strict gcp-deploy-private gcp-deploy-private-diagnostics gcp-deploy-frontend gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private gcp-verify-agent-roles gcp-preflight-mongo-model gcp-schedule-loop-resilience
+.PHONY: qa qa-fast qa-release qa-live qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate loop-resilience loop-resilience-monitor live-agents-smoke live-feed-agent-smoke live-feed-training-closure live-feed-agent-report live-feed-learning-loop-validation experience-studio-dev experience-studio-demo-verify test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-judge-smoke gcp-judge-smoke-strict gcp-build-ops-agent-release gcp-deploy-private gcp-deploy-private-diagnostics gcp-deploy-frontend gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private gcp-verify-agent-roles gcp-preflight-mongo-model gcp-schedule-loop-resilience
 
 qa:
 	python3 scripts/qa_agent.py
@@ -89,6 +89,9 @@ gcp-judge-smoke:
 
 gcp-judge-smoke-strict:
 	ENABLE_GCP_CLOUD_TRACE_EXPORT=$${ENABLE_GCP_CLOUD_TRACE_EXPORT:-true} PARKPULSE_ENABLE_OTEL_SPANS=$${PARKPULSE_ENABLE_OTEL_SPANS:-true} PARKPULSE_LIVE_BIGQUERY=$${PARKPULSE_LIVE_BIGQUERY:-true} PYTHONPATH=backend python3 scripts/gcp_judge_smoke.py --strict --blocking-hosted-eval
+
+gcp-build-ops-agent-release:
+	scripts/build_ops_agent_backend_release_source.sh
 
 gcp-deploy-private:
 	scripts/deploy_private_cloud_run.sh

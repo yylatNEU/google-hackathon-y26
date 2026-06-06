@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_ID="${1:-${GOOGLE_CLOUD_PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}}"
 REGION="${2:-${GOOGLE_CLOUD_LOCATION:-us-central1}}"
 SERVICE="${PARKPULSE_CLOUD_RUN_SERVICE:-parkpulse-private-api}"
@@ -15,28 +16,51 @@ ROLE_ISSUER_RESOURCE_NAME="${PARKPULSE_ROLE_ISSUER_KEY_SECRET:-parkpulse-role-is
 NO_TRAFFIC_DEPLOY="${PARKPULSE_DEPLOY_NO_TRAFFIC:-false}"
 DEPLOY_TAG="${PARKPULSE_DEPLOY_TAG:-}"
 RESTORE_NO_TRAFFIC_BASELINE="${PARKPULSE_RESTORE_NO_TRAFFIC_BASELINE:-true}"
+PRODUCTION_TRAFFIC_SERVICE="${PARKPULSE_PRODUCTION_CLOUD_RUN_SERVICE:-parkpulse-private-api}"
+ALLOW_PRODUCTION_TRAFFIC_UPDATE="${PARKPULSE_ALLOW_PRODUCTION_TRAFFIC_UPDATE:-false}"
+DEPLOY_AUDIT_DIR="${PARKPULSE_DEPLOY_AUDIT_DIR:-${ROOT_DIR}/output/deploy}"
 
 if [[ -z "$PROJECT_ID" ]]; then
   echo "Usage: scripts/deploy_private_cloud_run.sh <gcp-project-id> [region]" >&2
   exit 2
 fi
 
-scripts/preflight_private_cloud_run_source.sh
-scripts/gcp_bootstrap_private.sh "$PROJECT_ID" "$REGION"
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [[ "$SERVICE" == "$PRODUCTION_TRAFFIC_SERVICE" ]] && ! truthy "$NO_TRAFFIC_DEPLOY" && ! truthy "$ALLOW_PRODUCTION_TRAFFIC_UPDATE"; then
+  cat >&2 <<EOF
+Refusing to shift production Cloud Run traffic for ${SERVICE}.
+
+Run a no-traffic deploy instead:
+  PARKPULSE_DEPLOY_NO_TRAFFIC=true scripts/deploy_private_cloud_run.sh ${PROJECT_ID} ${REGION}
+
+Or explicitly acknowledge a production traffic update:
+  PARKPULSE_ALLOW_PRODUCTION_TRAFFIC_UPDATE=true scripts/deploy_private_cloud_run.sh ${PROJECT_ID} ${REGION}
+EOF
+  exit 3
+fi
+
+"${ROOT_DIR}/scripts/preflight_private_cloud_run_source.sh"
+"${ROOT_DIR}/scripts/gcp_bootstrap_private.sh" "$PROJECT_ID" "$REGION"
 
 BASELINE_TRAFFIC_FILE="$(mktemp "${TMPDIR:-/tmp}/parkpulse-cloud-run-traffic.XXXXXX")"
 BASELINE_TRAFFIC_CAPTURED="false"
-if [[ "$NO_TRAFFIC_DEPLOY" == "true" && "$RESTORE_NO_TRAFFIC_BASELINE" == "true" ]]; then
-  if gcloud run services describe "$SERVICE" \
-    --project "$PROJECT_ID" \
-    --region "$REGION" \
-    --format=json > "$BASELINE_TRAFFIC_FILE" 2>/dev/null; then
-    BASELINE_TRAFFIC_CAPTURED="true"
-  fi
+mkdir -p "$DEPLOY_AUDIT_DIR"
+if gcloud run services describe "$SERVICE" \
+  --project "$PROJECT_ID" \
+  --region "$REGION" \
+  --format=json > "$BASELINE_TRAFFIC_FILE" 2>/dev/null; then
+  BASELINE_TRAFFIC_CAPTURED="true"
+  cp "$BASELINE_TRAFFIC_FILE" "${DEPLOY_AUDIT_DIR}/${SERVICE}-traffic-before.json"
 fi
 
 restore_no_traffic_baseline() {
-  if [[ "$NO_TRAFFIC_DEPLOY" != "true" || "$RESTORE_NO_TRAFFIC_BASELINE" != "true" || "$BASELINE_TRAFFIC_CAPTURED" != "true" ]]; then
+  if ! truthy "$NO_TRAFFIC_DEPLOY" || ! truthy "$RESTORE_NO_TRAFFIC_BASELINE" || [[ "$BASELINE_TRAFFIC_CAPTURED" != "true" ]]; then
     return 0
   fi
   local baseline_revisions
@@ -97,7 +121,7 @@ if gcloud secrets describe "$ROLE_ISSUER_RESOURCE_NAME" --project "$PROJECT_ID" 
 fi
 
 TRAFFIC_ARGS=()
-if [[ "$NO_TRAFFIC_DEPLOY" == "true" ]]; then
+if truthy "$NO_TRAFFIC_DEPLOY"; then
   TRAFFIC_ARGS+=(--no-traffic)
 fi
 if [[ -n "$DEPLOY_TAG" ]]; then
@@ -108,7 +132,7 @@ deploy_service() {
   gcloud run deploy "$SERVICE" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
-  --source backend \
+  --source "${ROOT_DIR}/backend" \
   --quiet \
   --service-account "$SERVICE_ACCOUNT_EMAIL" \
   --no-allow-unauthenticated \
@@ -128,7 +152,7 @@ else
   deploy_service "${DEPLOY_ARGS[@]}"
 fi
 
-if [[ "$NO_TRAFFIC_DEPLOY" != "true" ]]; then
+if ! truthy "$NO_TRAFFIC_DEPLOY"; then
   gcloud run services update-traffic "$SERVICE" \
     --project "$PROJECT_ID" \
     --region "$REGION" \
@@ -139,6 +163,10 @@ else
 fi
 
 SERVICE_URL="$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')"
+gcloud run services describe "$SERVICE" \
+  --project "$PROJECT_ID" \
+  --region "$REGION" \
+  --format=json > "${DEPLOY_AUDIT_DIR}/${SERVICE}-traffic-after.json" 2>/dev/null || true
 ACTIVE_ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -1 || true)"
 if [[ -n "$ACTIVE_ACCOUNT" ]]; then
   gcloud run services add-iam-policy-binding "$SERVICE" \
@@ -149,16 +177,16 @@ if [[ -n "$ACTIVE_ACCOUNT" ]]; then
     --quiet >/dev/null
 fi
 
-if [[ "$NO_TRAFFIC_DEPLOY" != "true" && "${PARKPULSE_SKIP_DEPLOY_VERIFY:-false}" != "true" ]]; then
-  scripts/verify_private_cloud_run_deploy.sh "$PROJECT_ID" "$REGION" "$SERVICE"
-  scripts/verify_private_cloud_run_agent_roles.sh "$PROJECT_ID" "$REGION" "$SERVICE"
+if ! truthy "$NO_TRAFFIC_DEPLOY" && ! truthy "${PARKPULSE_SKIP_DEPLOY_VERIFY:-false}"; then
+  "${ROOT_DIR}/scripts/verify_private_cloud_run_deploy.sh" "$PROJECT_ID" "$REGION" "$SERVICE"
+  "${ROOT_DIR}/scripts/verify_private_cloud_run_agent_roles.sh" "$PROJECT_ID" "$REGION" "$SERVICE"
 fi
 
 echo "Private Cloud Run service deployed:"
 echo "$SERVICE_URL"
-if [[ "$NO_TRAFFIC_DEPLOY" == "true" ]]; then
+if truthy "$NO_TRAFFIC_DEPLOY"; then
   echo "No production traffic was changed."
-  if [[ "$RESTORE_NO_TRAFFIC_BASELINE" == "true" && "$BASELINE_TRAFFIC_CAPTURED" == "true" ]]; then
+  if truthy "$RESTORE_NO_TRAFFIC_BASELINE" && [[ "$BASELINE_TRAFFIC_CAPTURED" == "true" ]]; then
     echo "Baseline traffic split was restored after no-traffic deploy."
   fi
   if [[ -n "$DEPLOY_TAG" ]]; then

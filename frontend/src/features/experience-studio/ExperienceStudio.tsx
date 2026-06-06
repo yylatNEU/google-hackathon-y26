@@ -382,7 +382,11 @@ type ExperienceDraft = {
     studioQualityEval?: {
       status?: string;
       score?: number;
+      demoScore?: number;
+      productionScore?: number;
       scores?: Record<string, number>;
+      gateSummary?: { passed?: number; review?: number; blocked?: number };
+      gateResults?: Array<{ id?: string; status?: string; severity?: string; evidence?: string }>;
       findings?: string[];
       qaChecklist?: Array<{ check?: string; status?: string }>;
       recommendedNextActions?: string[];
@@ -2003,7 +2007,13 @@ export function ExperienceStudio() {
                                   <div className="mt-1 text-xs leading-relaxed text-slate-300">{formatStatus(creativePackage.studioQualityEval.status)}</div>
                                 </div>
                                 <div className="rounded border border-cyan-300/30 bg-cyan-950/20 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-cyan-100">
-                                  {creativePackage.studioQualityEval.score ?? "n/a"}
+                                  {creativePackage.studioQualityEval.demoScore ?? creativePackage.studioQualityEval.score ?? "n/a"}
+                                </div>
+                              </div>
+                              <div className="mt-2 grid gap-2 text-[11px] leading-relaxed text-slate-300 sm:grid-cols-2">
+                                <div className="rounded border border-cyan-300/15 bg-[#0d1115] p-2">Production score: {creativePackage.studioQualityEval.productionScore ?? "n/a"}</div>
+                                <div className="rounded border border-cyan-300/15 bg-[#0d1115] p-2">
+                                  Gates: {creativePackage.studioQualityEval.gateSummary?.passed ?? 0} pass / {creativePackage.studioQualityEval.gateSummary?.review ?? 0} review / {creativePackage.studioQualityEval.gateSummary?.blocked ?? 0} blocked
                                 </div>
                               </div>
                               <div className="mt-2 grid gap-1 text-[11px] leading-relaxed text-slate-300">
@@ -2011,6 +2021,11 @@ export function ExperienceStudio() {
                                   <div key={label}>{formatStatus(label)}: {value}</div>
                                 ))}
                               </div>
+                              {creativePackage.studioQualityEval.gateResults?.length ? (
+                                <div className="mt-2 text-[11px] leading-relaxed text-slate-300">
+                                  {compactList(creativePackage.studioQualityEval.gateResults.map((gate) => `${formatStatus(gate.status)} / ${formatStatus(gate.id)}: ${gate.evidence ?? ""}`), 3)}
+                                </div>
+                              ) : null}
                               <div className="mt-2 text-[11px] leading-relaxed text-amber-100">{compactList(creativePackage.studioQualityEval.findings ?? [], 2)}</div>
                             </div>
                           ) : (

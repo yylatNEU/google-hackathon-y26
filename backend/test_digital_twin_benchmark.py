@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 
 from digital_twin_benchmark import (
     attach_learning_comparison,
@@ -17,8 +18,14 @@ from digital_twin_benchmark import (
 from park_simulation import ParkSimulation
 
 
+_CACHED_STATE = None
+
+
 def _state():
-    return asyncio.run(ParkSimulation().get_state())
+    global _CACHED_STATE
+    if _CACHED_STATE is None:
+        _CACHED_STATE = asyncio.run(ParkSimulation().get_state())
+    return deepcopy(_CACHED_STATE)
 
 
 def test_benchmark_lists_adversarial_scenarios():
@@ -74,12 +81,12 @@ def test_benchmark_runs_full_suite_and_unknown_scenario_path():
 def test_benchmark_regression_history_records_matching_runs(tmp_path):
     history_path = tmp_path / "benchmark-history.json"
 
-    first = run_digital_twin_benchmark(_state(), seed="history-a", horizon_minutes=30)
+    first = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="history-a", horizon_minutes=30)
     recorded_first = record_benchmark_result(first, history_path=history_path)
     assert recorded_first["regression"]["previous"] is None
-    assert recorded_first["regression"]["current"]["episodes"] >= 5
+    assert recorded_first["regression"]["current"]["episodes"] == 1
 
-    second = run_digital_twin_benchmark(_state(), seed="history-b", horizon_minutes=30)
+    second = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="history-b", horizon_minutes=30)
     recorded_second = record_benchmark_result(second, history_path=history_path)
     assert recorded_second["regression"]["previous"]["seed"] == "history-a"
     assert "average_score" in recorded_second["regression"]["delta"]
@@ -87,7 +94,7 @@ def test_benchmark_regression_history_records_matching_runs(tmp_path):
 
 
 def test_benchmark_generates_remediation_playbooks_and_learning_comparison():
-    baseline = run_digital_twin_benchmark(_state(), seed="remediation-a", horizon_minutes=30)
+    baseline = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="remediation-a", horizon_minutes=30)
     baseline["episodes"][0]["passed"] = False
     baseline["episodes"][0]["failure_modes"] = ["regret versus benchmark selector", "secondary risk remains high"]
     remediations = generate_remediation_playbooks(baseline)
@@ -97,7 +104,7 @@ def test_benchmark_generates_remediation_playbooks_and_learning_comparison():
     assert remediations[0]["adjustment"]["requireEquipmentOrStaffAction"] is True
     assert "digital_twin" in remediations[0]["tags"]
 
-    learned = run_digital_twin_benchmark(_state(), seed="remediation-b", horizon_minutes=30)
+    learned = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="remediation-b", horizon_minutes=30)
     compared = attach_learning_comparison(
         learned,
         baseline,
@@ -109,7 +116,7 @@ def test_benchmark_generates_remediation_playbooks_and_learning_comparison():
 
 
 def test_benchmark_report_artifact_and_gate(tmp_path):
-    result = run_digital_twin_benchmark(_state(), seed="report-a", horizon_minutes=30)
+    result = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="report-a", horizon_minutes=30)
     report = build_benchmark_report(result)
 
     assert report["mode"] == "digital_twin_benchmark_report"

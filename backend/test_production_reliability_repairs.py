@@ -6,7 +6,8 @@ import os
 import sys
 import types
 
-os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
+os.environ["MONGODB_DISABLE_DRIVER_IMPORT"] = "1"
+os.environ["PARKPULSE_MONGO_MODEL_EMBEDDINGS"] = "false"
 
 import main
 import gcp_operations
@@ -93,6 +94,7 @@ def test_approval_delivery_keeps_local_proof_envelope_when_live_publish_fails(tm
     monkeypatch.setenv("PARKPULSE_DELIVERY_OUTBOX", str(outbox))
     monkeypatch.setenv("ENABLE_PARKPULSE_FIRESTORE", "true")
     park_delivery._outbox.clear()
+    monkeypatch.setattr(gcp_operations, "enrich_delivery_dispatch", lambda dispatch: {"mode": "test_local_dispatch_envelope", "pubsub": {"status": "skipped"}})
     monkeypatch.setattr(gcp_operations, "publish_approval_decision", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("pubsub down")))
 
     gated = park_delivery.send_equipment_command(
@@ -111,10 +113,11 @@ def test_approval_delivery_keeps_local_proof_envelope_when_live_publish_fails(tm
     assert approved["approvalDelivery"]["live_error"] == "pubsub down"
 
 
-def test_lazy_operator_fallback_receipt_has_observability_and_idempotency(monkeypatch):
+def test_lazy_operator_fallback_receipt_has_observability_and_idempotency(monkeypatch, tmp_path):
     async def unavailable_full_module():
         raise RuntimeError("full runtime unavailable")
 
+    monkeypatch.setenv("PARKPULSE_AGENT_OPS_LEDGER", str(tmp_path / "agent-ops.jsonl"))
     monkeypatch.setattr(main, "_get_full_module", unavailable_full_module)
     payload = asyncio.run(
         main._build_operator_payload_with_runtime(
@@ -141,6 +144,7 @@ def test_readyz_reports_degraded_dependencies():
     assert response["status"] in {"ok", "degraded", "not_ready"}
     assert "dependency_status" in response
     assert {"gemini", "mongo", "bigquery", "delivery_outbox"}.issubset(response["dependency_status"])
+    assert "monitor_evidence_snapshot" in response["dependency_status"]
 
 
 def test_readyz_platform_store_uses_fast_contract_by_default(monkeypatch):
@@ -186,10 +190,11 @@ def test_live_feed_refresh_worker_is_opt_in_for_hot_runtime(monkeypatch):
     assert main._live_feed_refresh_worker_enabled() is False
 
 
-def test_run_receipt_endpoint_returns_stored_final_payload(monkeypatch):
+def test_run_receipt_endpoint_returns_stored_final_payload(monkeypatch, tmp_path):
     async def unavailable_full_module():
         raise RuntimeError("full runtime unavailable")
 
+    monkeypatch.setenv("PARKPULSE_AGENT_OPS_LEDGER", str(tmp_path / "agent-ops.jsonl"))
     monkeypatch.setattr(main, "_get_full_module", unavailable_full_module)
     payload = asyncio.run(
         main._build_operator_payload_with_runtime(

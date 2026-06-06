@@ -47,7 +47,6 @@ def test_autodream_run_is_retired_without_cache_replay(monkeypatch, tmp_path):
 
     memory = mongo_memory.OperationalMemory()
     monkeypatch.setattr(mongo_memory, "_memory", memory)
-    monkeypatch.setattr(park_autodream_agent, "export_analytics_rows", lambda rows: {"status": "preview", "row_counts": {key: len(value) for key, value in rows.items()}})
     mongo_memory.init_operational_memory()
 
     result = park_autodream_agent.run_autodream("ride_down", max_cases=1, persist=False)
@@ -68,7 +67,6 @@ def test_autodream_promotion_is_retired(monkeypatch, tmp_path):
 
     memory = mongo_memory.OperationalMemory()
     monkeypatch.setattr(mongo_memory, "_memory", memory)
-    monkeypatch.setattr(park_autodream_agent, "export_analytics_rows", lambda rows: {"status": "preview", "row_counts": {key: len(value) for key, value in rows.items()}})
     mongo_memory.init_operational_memory()
 
     promoted = park_autodream_agent.promote_autodream_learning("dream-retired")
@@ -92,7 +90,6 @@ def test_autodream_review_and_status_are_retired(monkeypatch, tmp_path):
 
     memory = mongo_memory.OperationalMemory()
     monkeypatch.setattr(mongo_memory, "_memory", memory)
-    monkeypatch.setattr(park_autodream_agent, "export_analytics_rows", lambda rows: {"status": "preview", "row_counts": {key: len(value) for key, value in rows.items()}})
     mongo_memory.init_operational_memory()
 
     review = park_autodream_agent.review_autodream_learning("dream-retired", "approved", reviewer="qa")

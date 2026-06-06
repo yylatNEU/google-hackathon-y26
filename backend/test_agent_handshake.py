@@ -396,6 +396,11 @@ def test_dedicated_supply_chain_handshake_demo_uses_supplier_scopes_and_signed_r
     assert evolution["memory_scope"]["represented_subject"] == "supplier_vendor_cold_chain_42"
     assert evolution["memory_scope"]["counterparty"] == "supplier"
     assert evolution["trace"]["receipt_id"] == receipt["receipt_id"]
+    assert demo["external_agent_result"]["artifact_type"] == "external_agent_useful_result"
+    assert demo["external_agent_result"]["recipient"] == "supplier operator"
+    assert demo["external_agent_result"]["final_plan"] == receipt["accepted_plan"]["plan"]
+    assert demo["external_agent_result"]["message_to_represented_party"]
+    assert any(turn["phase"] == "Receipt" and "Deliver to external agent" in turn.get("final_plan", "") for turn in demo["agent_dialogue"])
     assert evolution["eval"]["authority_respected"] is True
     assert "cold_chain_status" in evolution["next_passport"]["allowed"]
     assert {"purchase_order", "vendor_payment_release", "bypass_food_safety"}.issubset(set(evolution["next_passport"]["requires_approval"]))

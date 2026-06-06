@@ -321,6 +321,17 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
     [];
   const executorProof = props.runTelemetry?.tool_executor_live_test;
   const receiverProof = props.runTelemetry?.live_feed_receiver_delivery;
+  const simulatedOpsImpact = props.runTelemetry?.live_feed_simulated_ops_impact;
+  const riskEscalation = props.runTelemetry?.risk_escalation_approval;
+  const riskEscalatedExecutor = props.runTelemetry?.risk_escalated_tool_executor;
+  const riskEscalationDelivery = props.runTelemetry?.risk_escalation_receiver_delivery;
+  const riskEscalationImpact = props.runTelemetry?.risk_escalation_simulated_ops_impact;
+  const simulatedOpsFitness =
+    simulatedOpsImpact?.episode_fitness?.fitness ??
+    simulatedOpsImpact?.episode_fitness?.scores?.fitness;
+  const riskEscalationFitness =
+    riskEscalationImpact?.episode_fitness?.fitness ??
+    riskEscalationImpact?.episode_fitness?.scores?.fitness;
   const followThrough = props.runTelemetry?.hard_decision_follow_through;
   const outcomeMeasurement = props.runTelemetry?.live_feed_outcome_measurement;
   const outcomeMemory = props.runTelemetry?.live_feed_outcome_memory;
@@ -796,26 +807,84 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
             </div>
           </div>
 
+          <div className="rounded border border-amber-300/25 bg-slate-950 p-3">
+            <div className="text-[10px] font-black uppercase tracking-widest text-amber-200">Risk escalation gate</div>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              {[
+                { label: "Stage", value: riskEscalation?.stage ?? riskEscalation?.status },
+                { label: "Approved", value: riskEscalation?.approved_count },
+                { label: "Executed", value: riskEscalatedExecutor?.executed_count },
+                { label: "Impact", value: riskEscalationImpact?.material_state_mutation },
+              ].map((metric) => (
+                <div key={metric.label} className="rounded bg-slate-900 px-2 py-2 text-center">
+                  <div className="text-[9px] font-black uppercase text-slate-500">{metric.label}</div>
+                  <div className="text-sm font-black text-slate-100">{compactValue(metric.value)}</div>
+                </div>
+              ))}
+            </div>
+            <p className="mt-3 text-xs leading-relaxed text-slate-400">
+              {riskEscalation?.policy ?? "Riskier actions remain held until Safety, Compliance, and Executive approve a scoped lift."}
+            </p>
+            {(riskEscalation?.approvals ?? []).slice(0, 2).map((approval) => (
+              <div key={approval.approval_id ?? `${approval.department}-${approval.source_tool}`} className="mt-2 rounded border border-amber-300/20 bg-amber-950/15 px-3 py-2">
+                <div className="text-xs font-black text-amber-100">{humanize(approval.department)} / {humanize(approval.source_tool)}</div>
+                <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-amber-100/75">{humanize(approval.status)}: {humanize(approval.lifted_scope)}</p>
+              </div>
+            ))}
+            {riskEscalationImpact?.state_impact && (
+              <div className="mt-3 rounded border border-amber-300/20 bg-slate-900 px-3 py-2">
+                <div className="text-xs font-black text-amber-100">{riskEscalationImpact.state_impact.headline ?? humanize(riskEscalationImpact.status)}</div>
+                <p className="mt-1 text-xs leading-relaxed text-slate-400">{riskEscalationImpact.state_impact.before_after_line ?? "Impact measured."}</p>
+                <div className="mt-2 text-[10px] font-black uppercase text-amber-200">
+                  Delivery {humanize(riskEscalationDelivery?.status)} / Fitness {compactValue(riskEscalationFitness)}
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="rounded border border-slate-800 bg-slate-950 p-3">
             <div className="text-[10px] font-black uppercase tracking-widest text-emerald-200">Action disposition</div>
             <div className="mt-2 grid grid-cols-2 gap-2">
               {[
-                ["Delivered", receiverProof?.delivered_count],
-                ["Acked", receiverProof?.acknowledged_count],
-                ["Receiver exec", receiverProof?.executed_count],
-                ["Public msgs", receiverProof?.public_guest_messages_sent],
-              ].map(([label, value]) => (
-                <div key={label} className="rounded bg-slate-900 px-2 py-2 text-center">
-                  <div className="text-[9px] font-black uppercase text-slate-500">{label}</div>
-                  <div className="text-sm font-black text-slate-100">{compactValue(value)}</div>
+                { label: "Delivered", value: receiverProof?.delivered_count },
+                { label: "Acked", value: receiverProof?.acknowledged_count },
+                { label: "Receiver exec", value: receiverProof?.executed_count },
+                { label: "Ops impact", value: simulatedOpsImpact?.material_state_mutation },
+              ].map((metric) => (
+                <div key={metric.label} className="rounded bg-slate-900 px-2 py-2 text-center">
+                  <div className="text-[9px] font-black uppercase text-slate-500">{metric.label}</div>
+                  <div className="text-sm font-black text-slate-100">{compactValue(metric.value)}</div>
                 </div>
               ))}
             </div>
             <p className="mt-3 text-xs leading-relaxed text-slate-400">
               {receiverProof?.status
-                ? `${humanize(receiverProof.status)}. Material mutation: ${compactValue(receiverProof.material_state_mutation)}.`
+                ? `${humanize(receiverProof.status)}. Receiver handoff mutation: ${compactValue(receiverProof.material_state_mutation)}.`
                 : "Receiver delivery proof appears after Tool Executor produces receipts."}
             </p>
+            {simulatedOpsImpact && (
+              <div className="mt-3 rounded border border-emerald-300/20 bg-emerald-950/20 p-3">
+                <div className="text-[10px] font-black uppercase tracking-widest text-emerald-200">Simulated park impact</div>
+                <div className="mt-1 text-sm font-black text-emerald-50">{simulatedOpsImpact.state_impact?.headline ?? humanize(simulatedOpsImpact.status ?? "pending")}</div>
+                <p className="mt-2 text-xs leading-relaxed text-emerald-100/80">
+                  {simulatedOpsImpact.state_impact?.before_after_line ?? simulatedOpsImpact.message ?? "No simulated ops mutation has been applied yet."}
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  {[
+                    ["Domain", simulatedOpsImpact.state_impact?.domain],
+                    ["Queue delta", simulatedOpsImpact.state_impact?.queued_guest_delta],
+                    ["Congestion", simulatedOpsImpact.state_impact?.congestion_delta],
+                    ["Fitness", simulatedOpsFitness],
+                  ].map(([label, value]) => (
+                    <div key={label} className="rounded bg-slate-950 px-2 py-2 text-center">
+                      <div className="text-[9px] font-black uppercase text-slate-500">{label}</div>
+                      <div className="text-sm font-black text-slate-100">{compactValue(value)}</div>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-2 line-clamp-2 text-[11px] leading-relaxed text-slate-400">{simulatedOpsImpact.boundary}</p>
+              </div>
+            )}
           </div>
 
           <div className="rounded border border-slate-800 bg-slate-950 p-3">

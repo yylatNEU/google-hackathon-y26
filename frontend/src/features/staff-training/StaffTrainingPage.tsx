@@ -83,6 +83,10 @@ type ProductLearningTicket = {
   status?: string;
   live_ops_authority?: boolean;
   requires_human_ack?: boolean;
+  human_review_place?: string | null;
+  human_review_required?: boolean;
+  auto_evolve_allowed?: boolean;
+  dynamic_park_issue_id?: string | null;
   boundary?: string;
 };
 
@@ -117,6 +121,95 @@ type AutoLearningCandidate = {
     content_summary?: string;
     activation?: string;
   };
+};
+
+type TicketLifecycle = {
+  dedupe_key?: string;
+  lifecycle_status?: string;
+  learning_state?: string;
+  representative_ticket_id?: string;
+  issue_type?: string;
+  source?: string;
+  sources?: string[];
+  summary?: string;
+  highest_severity?: string;
+  human_review_place?: string | null;
+  human_review_required?: boolean;
+  auto_evolve_allowed?: boolean;
+  open_ticket_count?: number;
+  dedupe_window_minutes?: number;
+};
+
+type ReviewPlaceQueue = {
+  review_place?: string;
+  queue_status?: string;
+  queue_count?: number;
+  issue_types?: string[];
+  highest_severity?: string;
+  required_action?: string;
+  auto_evolve_blocked?: boolean;
+  review_resolution?: {
+    decision?: string;
+    reviewer?: string;
+    notes?: string;
+    created_at?: string;
+  } | null;
+};
+
+type AutoDraftRegistryItem = {
+  version_id?: string;
+  scenario_id?: string;
+  target_surface?: string;
+  draft_title?: string;
+  registry_status?: string;
+  promotion_status?: string;
+  active?: boolean;
+  rolled_back?: boolean;
+  activated_at?: string;
+  rolled_back_at?: string;
+  rollback_reason?: string;
+  content_summary?: string;
+  outcome_metrics?: {
+    measurement_status?: string;
+    monitor_window_days?: number;
+    session_count?: number;
+    average_overall?: number | null;
+    staff_score_delta?: number | null;
+    critical_miss_rate?: number | null;
+    training_gap_rate?: number | null;
+  };
+};
+
+type ActiveOpsChecklistGuidance = {
+  issue_id?: string;
+  issue_type?: string;
+  version_ids?: string[];
+  guidance?: string[];
+};
+
+type ProductLearningEventStore = {
+  mode?: string;
+  sqlite_event_count?: number;
+  indexes?: string[];
+  event_type_counts?: Record<string, number>;
+};
+
+type ShadowMetric = {
+  version_id?: string;
+  scenario_id?: string;
+  metric_status?: string;
+  promotion_eligible?: boolean;
+  evidence_count?: number;
+  confidence?: number;
+};
+
+type PromotionQueueItem = {
+  version_id?: string;
+  scenario_id?: string;
+  target_surface?: string;
+  promotion_status?: string;
+  worker_action?: string;
+  can_promote_live_ops?: boolean;
 };
 
 type TrainingSession = {
@@ -238,11 +331,32 @@ type ProductLearningLoop = {
   auto_learning_candidate_count?: number;
   shadow_ready_candidate_count?: number;
   human_exception_candidate_count?: number;
+  deduped_park_issue_ticket_count?: number;
+  review_place_queue_count?: number;
+  auto_draft_count?: number;
+  promotion_ready_count?: number;
+  rollback_watch_count?: number;
+  learning_version_count?: number;
+  active_learning_version_count?: number;
+  active_ops_checklist_version_count?: number;
+  rolled_back_learning_version_count?: number;
   park_issue_tickets?: ProductLearningTicket[];
+  ticket_lifecycle?: TicketLifecycle[];
+  deduped_park_issue_tickets?: TicketLifecycle[];
+  review_place_queues?: ReviewPlaceQueue[];
   training_gap_tickets?: ProductLearningTicket[];
   auto_learning_candidates?: AutoLearningCandidate[];
   shadow_deployment_candidates?: AutoLearningCandidate[];
   human_exception_queue?: AutoLearningCandidate[];
+  auto_draft_registry?: AutoDraftRegistryItem[];
+  learning_version_registry?: AutoDraftRegistryItem[];
+  active_learning_versions?: AutoDraftRegistryItem[];
+  active_ops_checklist_versions?: AutoDraftRegistryItem[];
+  active_ops_checklist_guidance?: ActiveOpsChecklistGuidance[];
+  human_review_resolutions?: Array<{ review_place?: string; decision?: string; reviewer?: string; notes?: string }>;
+  event_store?: ProductLearningEventStore;
+  shadow_metrics?: ShadowMetric[];
+  promotion_queue?: PromotionQueueItem[];
   product_learning_signals?: Array<{
     id?: string;
     source?: string;
@@ -259,6 +373,10 @@ type ProductLearningLoop = {
     training_gaps_help_ops?: string;
     training_gaps_create_live_issues?: boolean;
     low_risk_auto_learning?: string;
+    dedupe_window_minutes?: number;
+    auto_promotion_scope?: string;
+    durable_version_registry?: boolean;
+    live_ops_auto_promotion?: boolean;
     human_on_exception?: boolean;
     llm_guest_controls_score?: boolean;
     simulated_data_feeds_reward_model?: boolean;
@@ -704,6 +822,90 @@ export function StaffTrainingPage() {
     }
   }
 
+  async function promoteLearningVersion(versionId?: string) {
+    if (!versionId) return;
+    setIsLoading(true);
+    setError("");
+    setStatus("");
+    try {
+      const response = await fetchParkPulseApi("/api/park/product-learning/promote-version", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
+        body: JSON.stringify({ versionId, promotedBy: "Training manager" }),
+        timeoutMs: 10000,
+      });
+      const payload = (await response.json()) as { status?: string; readiness_issues?: string[]; version?: { version_id?: string; scenario_id?: string } };
+      if (payload.readiness_issues?.length) {
+        setError(payload.readiness_issues.join(" "));
+      } else {
+        setStatus(payload.status === "promoted" ? `Learning version promoted: ${payload.version?.scenario_id ?? versionId}.` : `Learning version status: ${label(payload.status)}.`);
+      }
+      await loadProductLearningLoop();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Unable to promote learning version.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function rollbackLearningVersion(versionId?: string) {
+    if (!versionId) return;
+    setIsLoading(true);
+    setError("");
+    setStatus("");
+    try {
+      const response = await fetchParkPulseApi("/api/park/product-learning/rollback-version", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
+        body: JSON.stringify({ versionId, reason: "Manager rollback from product learning panel." }),
+        timeoutMs: 8000,
+      });
+      const payload = (await response.json()) as { status?: string; readiness_issues?: string[]; version?: { version_id?: string; scenario_id?: string } };
+      if (payload.readiness_issues?.length) {
+        setError(payload.readiness_issues.join(" "));
+      } else {
+        setStatus(payload.status === "rolled_back" ? `Learning version rolled back: ${payload.version?.scenario_id ?? versionId}.` : `Rollback status: ${label(payload.status)}.`);
+      }
+      await loadProductLearningLoop();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Unable to roll back learning version.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function resolveReviewPlace(queue: ReviewPlaceQueue, decision: "approve" | "reject" | "hold") {
+    if (!queue.review_place) return;
+    setIsLoading(true);
+    setError("");
+    setStatus("");
+    try {
+      const response = await fetchParkPulseApi("/api/park/product-learning/review-place-resolution", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
+        body: JSON.stringify({
+          reviewPlace: queue.review_place,
+          decision,
+          issueTypes: queue.issue_types ?? [],
+          reviewer: "Training manager",
+          notes: decision === "approve" ? "Approved for reviewed training/checklist learning only." : decision === "reject" ? "Rejected for product learning activation." : "Held for named owner review.",
+        }),
+        timeoutMs: 8000,
+      });
+      const payload = (await response.json()) as { status?: string; readiness_issues?: string[]; resolution?: { review_place?: string; decision?: string } };
+      if (payload.readiness_issues?.length) {
+        setError(payload.readiness_issues.join(" "));
+      } else {
+        setStatus(`Review place ${label(payload.resolution?.review_place ?? queue.review_place)} ${label(payload.resolution?.decision ?? decision)}.`);
+      }
+      await loadProductLearningLoop();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Unable to resolve review queue.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   async function seedDemoData() {
     setIsLoading(true);
     setError("");
@@ -983,7 +1185,7 @@ export function StaffTrainingPage() {
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Live issue tickets</div>
                 <div className="mt-2 text-2xl font-black text-slate-50">{productLearning?.park_issue_ticket_count ?? 0}</div>
                 <div className="mt-1 text-xs font-bold text-slate-500">
-                  {productLearning?.operational_backlog_issue_ticket_count ?? productLearning?.dynamic_park_issue_ticket_count ?? 0} backlog / {productLearning?.place_risk_issue_ticket_count ?? 0} place / {productLearning?.random_incident_issue_ticket_count ?? 0} incident.
+                  {productLearning?.deduped_park_issue_ticket_count ?? productLearning?.park_issue_ticket_count ?? 0} deduped / {productLearning?.operational_backlog_issue_ticket_count ?? productLearning?.dynamic_park_issue_ticket_count ?? 0} backlog / {productLearning?.place_risk_issue_ticket_count ?? 0} place / {productLearning?.random_incident_issue_ticket_count ?? 0} incident.
                 </div>
               </div>
               <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
@@ -999,7 +1201,7 @@ export function StaffTrainingPage() {
               <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
                 <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Auto governance</div>
                 <div className="mt-2 text-2xl font-black text-slate-50">{productLearning?.auto_learning_candidate_count ?? 0}</div>
-                <div className="mt-1 text-xs font-bold text-slate-500">{productLearning?.shadow_ready_candidate_count ?? 0} shadow-ready / {productLearning?.human_exception_candidate_count ?? 0} exceptions.</div>
+                <div className="mt-1 text-xs font-bold text-slate-500">{productLearning?.shadow_ready_candidate_count ?? 0} shadow-ready / {productLearning?.human_exception_candidate_count ?? 0} exceptions / {productLearning?.promotion_ready_count ?? 0} promotion-ready.</div>
               </div>
             </div>
 
@@ -1068,6 +1270,232 @@ export function StaffTrainingPage() {
                 >
                   Create training gap
                 </button>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 xl:grid-cols-3">
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Ticket lifecycle</div>
+                  <span className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[10px] font-black text-slate-300">
+                    {productLearning?.deduped_park_issue_ticket_count ?? 0} deduped
+                  </span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {(productLearning?.ticket_lifecycle ?? []).slice(0, 4).map((item) => (
+                    <div key={item.dedupe_key ?? item.representative_ticket_id} className="rounded border border-slate-800 bg-slate-950 p-2 text-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="truncate font-black text-slate-100">{label(item.issue_type)}</div>
+                          <div className="mt-1 text-slate-500">{item.summary ?? label(item.source)}</div>
+                        </div>
+                        <span className="shrink-0 rounded border border-cyan-300/30 bg-cyan-300/10 px-2 py-1 text-[10px] font-black text-cyan-100">{item.open_ticket_count ?? 0}x</span>
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                        <span>{label(item.lifecycle_status)}</span>
+                        <span>{label(item.learning_state)}</span>
+                        <span>{label(item.highest_severity)}</span>
+                      </div>
+                    </div>
+                  ))}
+                  {!(productLearning?.ticket_lifecycle ?? []).length && (
+                    <div className="rounded border border-dashed border-slate-700 bg-slate-950 p-3 text-sm font-bold text-slate-500">No live ticket lifecycle yet.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-amber-300">Human review places</div>
+                  <span className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[10px] font-black text-slate-300">
+                    {productLearning?.review_place_queue_count ?? 0} queues
+                  </span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {(productLearning?.review_place_queues ?? []).slice(0, 4).map((queue) => (
+                    <div key={queue.review_place} className="rounded border border-amber-300/20 bg-amber-300/5 p-2 text-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="font-black text-slate-100">{label(queue.review_place)}</div>
+                        <span className="shrink-0 rounded border border-amber-300/40 bg-amber-300/10 px-2 py-1 text-[10px] font-black text-amber-100">{queue.queue_count ?? 0}</span>
+                      </div>
+                      <div className="mt-1 text-slate-500">{queue.required_action}</div>
+                      <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest text-amber-200">
+                        <span>{label(queue.queue_status)}</span>
+                        <span>{(queue.issue_types ?? []).map(label).join(", ")}</span>
+                      </div>
+                      {queue.review_resolution?.notes && <div className="mt-2 rounded border border-slate-800 bg-slate-950 p-2 text-[11px] font-semibold text-slate-400">{queue.review_resolution.notes}</div>}
+                      <div className="mt-2 grid grid-cols-3 gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void resolveReviewPlace(queue, "approve")}
+                          disabled={isLoading || queue.queue_status === "resolved_approve"}
+                          className="rounded border border-emerald-300/50 bg-emerald-300/10 px-2 py-1 text-[10px] font-black text-emerald-100 transition hover:bg-emerald-300/20 disabled:opacity-40"
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void resolveReviewPlace(queue, "hold")}
+                          disabled={isLoading || queue.queue_status === "held_for_review"}
+                          className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[10px] font-black text-slate-200 transition hover:border-slate-500 disabled:opacity-40"
+                        >
+                          Hold
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void resolveReviewPlace(queue, "reject")}
+                          disabled={isLoading || queue.queue_status === "resolved_reject"}
+                          className="rounded border border-rose-300/50 bg-rose-300/10 px-2 py-1 text-[10px] font-black text-rose-100 transition hover:bg-rose-300/20 disabled:opacity-40"
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {!(productLearning?.review_place_queues ?? []).length && (
+                    <div className="rounded border border-dashed border-slate-700 bg-slate-950 p-3 text-sm font-bold text-slate-500">No human review queue is blocking auto learning.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-emerald-300">Promotion worker</div>
+                  <span className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[10px] font-black text-slate-300">
+                    {productLearning?.promotion_ready_count ?? 0} ready / {productLearning?.active_learning_version_count ?? 0} active
+                  </span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {(productLearning?.promotion_queue ?? []).slice(0, 4).map((item) => (
+                    <div key={item.version_id} className="rounded border border-emerald-300/20 bg-emerald-300/5 p-2 text-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-black text-slate-100">{label(item.scenario_id)}</div>
+                          <div className="mt-1 text-slate-500">{label(item.worker_action)}</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void promoteLearningVersion(item.version_id)}
+                          disabled={isLoading || !item.version_id}
+                          className="shrink-0 rounded border border-emerald-300 bg-emerald-300 px-2 py-1 text-[10px] font-black text-slate-950 transition hover:bg-emerald-200 disabled:opacity-40"
+                        >
+                          Promote
+                        </button>
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest text-emerald-200">
+                        <span>{label(item.target_surface)}</span>
+                        <span>{label(item.promotion_status)}</span>
+                        <span>Live ops {item.can_promote_live_ops ? "yes" : "no"}</span>
+                      </div>
+                    </div>
+                  ))}
+                  {(productLearning?.active_learning_versions ?? []).slice(0, 3).map((item) => (
+                    <div key={item.version_id} className="rounded border border-cyan-300/20 bg-cyan-300/5 p-2 text-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-black text-slate-100">{label(item.scenario_id)}</div>
+                          <div className="mt-1 text-slate-500">{item.draft_title ?? label(item.target_surface)}</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void rollbackLearningVersion(item.version_id)}
+                          disabled={isLoading || !item.version_id}
+                          className="shrink-0 rounded border border-rose-300/60 bg-rose-300/10 px-2 py-1 text-[10px] font-black text-rose-100 transition hover:bg-rose-300/20 disabled:opacity-40"
+                        >
+                          Rollback
+                        </button>
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest text-cyan-200">
+                        <span>{label(item.registry_status)}</span>
+                        <span>{label(item.target_surface)}</span>
+                        <span>{label(item.outcome_metrics?.measurement_status ?? "metrics pending")}</span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-3 gap-1 text-center text-[10px] font-black uppercase tracking-widest text-slate-500">
+                        <div className="rounded border border-slate-800 bg-slate-950 p-1">
+                          <div className="text-slate-200">{item.outcome_metrics?.session_count ?? 0}</div>
+                          <div>Sessions</div>
+                        </div>
+                        <div className="rounded border border-slate-800 bg-slate-950 p-1">
+                          <div className="text-slate-200">{item.outcome_metrics?.average_overall ?? "--"}</div>
+                          <div>Avg</div>
+                        </div>
+                        <div className="rounded border border-slate-800 bg-slate-950 p-1">
+                          <div className="text-slate-200">{item.outcome_metrics?.staff_score_delta ?? "--"}</div>
+                          <div>Delta</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {(productLearning?.learning_version_registry ?? [])
+                    .filter((item) => item.rolled_back)
+                    .slice(0, 2)
+                    .map((item) => (
+                      <div key={item.version_id} className="rounded border border-slate-700 bg-slate-950 p-2 text-xs">
+                        <div className="font-black text-slate-100">{label(item.scenario_id)}</div>
+                        <div className="mt-1 text-slate-500">{item.rollback_reason ?? "Rolled back learning version."}</div>
+                        <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                          <span>{label(item.target_surface)}</span>
+                          <span>Rolled back</span>
+                          <span>{label(item.outcome_metrics?.measurement_status)}</span>
+                          <span>{item.outcome_metrics?.session_count ?? 0} sessions</span>
+                          <span>delta {item.outcome_metrics?.staff_score_delta ?? "--"}</span>
+                        </div>
+                      </div>
+                    ))}
+                  {!(productLearning?.promotion_queue ?? []).length && !(productLearning?.active_learning_versions ?? []).length && !(productLearning?.learning_version_registry ?? []).some((item) => item.rolled_back) && (
+                    <div className="rounded border border-dashed border-slate-700 bg-slate-950 p-3 text-sm font-bold text-slate-500">No shadow version is promotion-ready yet.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-lime-300">Ops checklist consumption</div>
+                  <span className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[10px] font-black text-slate-300">
+                    {productLearning?.active_ops_checklist_version_count ?? 0} active
+                  </span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {(productLearning?.active_ops_checklist_guidance ?? []).slice(0, 4).map((item) => (
+                    <div key={`${item.issue_id}-${item.issue_type}`} className="rounded border border-lime-300/20 bg-lime-300/5 p-2 text-xs">
+                      <div className="font-black text-slate-100">{label(item.issue_type)}</div>
+                      <div className="mt-1 text-slate-500">{(item.guidance ?? []).join(" ")}</div>
+                      <div className="mt-2 text-[10px] font-black uppercase tracking-widest text-lime-200">{(item.version_ids ?? []).join(", ")}</div>
+                    </div>
+                  ))}
+                  {!(productLearning?.active_ops_checklist_guidance ?? []).length && (
+                    <div className="rounded border border-dashed border-slate-700 bg-slate-950 p-3 text-sm font-bold text-slate-500">
+                      No active ops checklist version is currently applied to operational backlog issues.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded border border-slate-800 bg-[#0d171b] p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Event store</div>
+                  <span className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[10px] font-black text-slate-300">
+                    {productLearning?.event_store?.sqlite_event_count ?? 0} SQLite events
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {Object.entries(productLearning?.event_store?.event_type_counts ?? {}).slice(0, 6).map(([eventType, count]) => (
+                    <div key={eventType} className="rounded border border-slate-800 bg-slate-950 p-2 text-xs">
+                      <div className="font-black text-slate-100">{label(eventType)}</div>
+                      <div className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-500">{count} events</div>
+                    </div>
+                  ))}
+                  {!Object.keys(productLearning?.event_store?.event_type_counts ?? {}).length && (
+                    <div className="rounded border border-dashed border-slate-700 bg-slate-950 p-3 text-sm font-bold text-slate-500 sm:col-span-2">
+                      Event store has no indexed product-learning events yet.
+                    </div>
+                  )}
+                </div>
+                <div className="mt-3 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  Indexes: {(productLearning?.event_store?.indexes ?? []).join(", ") || "not reported"}
+                </div>
               </div>
             </div>
 

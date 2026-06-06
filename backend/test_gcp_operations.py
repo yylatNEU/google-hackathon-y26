@@ -171,6 +171,39 @@ def test_gcp_operations_pubsub_helpers_and_publish_paths(monkeypatch):
     assert published["dataflow"]["status"] == "mirrored"
 
 
+def test_gcp_operations_credentials_and_mirror_error_edges(monkeypatch):
+    clear_gcp_ops_env(monkeypatch)
+
+    class Credentials:
+        token = None
+
+        def refresh(self, request):
+            self.token = "token"
+
+    google_auth = SimpleNamespace(default=lambda scopes: (Credentials(), None))
+    google_request = SimpleNamespace(Request=lambda: object())
+    monkeypatch.setitem(sys.modules, "google.auth", google_auth)
+    monkeypatch.setitem(sys.modules, "google.auth.transport.requests", google_request)
+    assert gcp_operations._credentials(["scope"]).token == "token"
+
+    class BadPath:
+        def exists(self):
+            raise OSError("path broken")
+
+        def __str__(self):
+            return "/bad/path"
+
+    monkeypatch.setattr(gcp_operations, "_firestore_mirror_path", lambda: BadPath())
+    firestore = gcp_operations.firestore_status()
+    assert firestore["mirror"]["ready"] is False
+    assert "path broken" in firestore["mirror"]["error"]
+
+    monkeypatch.setattr(gcp_operations, "_dataflow_mirror_path", lambda: BadPath())
+    dataflow = gcp_operations.dataflow_status()
+    assert dataflow["mirror"]["ready"] is False
+    assert "path broken" in dataflow["mirror"]["error"]
+
+
 def test_gcp_operations_fcm_and_workflow_paths(monkeypatch):
     clear_gcp_ops_env(monkeypatch)
     dispatch = {"id": "d1", "channel": "worker_device", "status": "sent", "payload": {"task": "Check gate", "decisionId": "decision"}}
@@ -278,6 +311,49 @@ def test_firestore_operations_mirror_dispatch_and_approval(monkeypatch, tmp_path
     assert approval_rows[0]["payload"]["decision"] == "approved"
 
 
+def test_firestore_enabled_import_write_and_failure_paths(monkeypatch, tmp_path):
+    clear_gcp_ops_env(monkeypatch)
+    monkeypatch.setenv("PARKPULSE_FIRESTORE_MIRROR", str(tmp_path / "firestore.jsonl"))
+    monkeypatch.setenv("ENABLE_PARKPULSE_FIRESTORE", "true")
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    assert gcp_operations.write_firestore_operation("dispatches", "d1", {})["status"] == "skipped"
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "demo-project")
+
+    class FakeDocument:
+        def __init__(self, fail=False):
+            self.fail = fail
+
+        def set(self, *args, **kwargs):
+            if self.fail:
+                raise RuntimeError("firestore write failed")
+
+    class FakeCollection:
+        def __init__(self, fail=False):
+            self.fail = fail
+
+        def document(self, document_id):
+            return FakeDocument(fail=self.fail)
+
+    class FakeClient:
+        fail = False
+
+        def __init__(self, project=None):
+            self.project = project
+
+        def collection(self, name):
+            return FakeCollection(fail=self.fail)
+
+    fake_firestore = SimpleNamespace(Client=FakeClient)
+    monkeypatch.setitem(sys.modules, "google.cloud", SimpleNamespace(firestore=fake_firestore))
+    assert gcp_operations.firestore_status()["error"] is None
+    written = gcp_operations.write_firestore_operation("dispatches", "d2", {"ok": True})
+    assert written["status"] == "written"
+    FakeClient.fail = True
+    failed = gcp_operations.write_firestore_operation("dispatches", "d3", {"ok": False})
+    assert failed["status"] == "failed"
+
+
 def test_agent_builder_and_dataflow_contracts(monkeypatch, tmp_path):
     clear_gcp_ops_env(monkeypatch)
     monkeypatch.setenv("PARKPULSE_DATAFLOW_MIRROR", str(tmp_path / "dataflow.jsonl"))
@@ -332,6 +408,45 @@ def test_agent_builder_and_dataflow_contracts(monkeypatch, tmp_path):
     monkeypatch.setenv("ENABLE_PARKPULSE_DATAFLOW", "true")
     monkeypatch.setenv("PARKPULSE_DATAFLOW_TEMPLATE", "gs://demo/templates/parkpulse.json")
     assert gcp_operations.dataflow_status()["ready"] is True
+    queued = gcp_operations.write_dataflow_stream_event("parkpulse.ready", {"ready": True})
+    assert queued["status"] == "queued_for_dataflow"
+
+
+def test_publish_approval_decision_writes_all_delivery_proofs(monkeypatch):
+    clear_gcp_ops_env(monkeypatch)
+    pubsub_calls = []
+    pseudo_calls = []
+    firestore_calls = []
+
+    monkeypatch.setattr(gcp_operations, "publish_park_event", lambda event_type, payload, attributes=None: pubsub_calls.append((event_type, payload, attributes)) or {"status": "published", "dataflow": {"status": "mirrored"}})
+    monkeypatch.setattr(
+        gcp_operations,
+        "send_pseudo_firebase_message",
+        lambda topic, title, body, data, dispatch, raw: pseudo_calls.append((topic, title, body, data, dispatch, raw)) or {"status": "sent"},
+    )
+    monkeypatch.setattr(
+        gcp_operations,
+        "write_firestore_operation",
+        lambda kind, document_id, payload: firestore_calls.append((kind, document_id, payload)) or {"status": "written"},
+    )
+    dispatch = {
+        "id": "dispatch-1",
+        "channel": "equipment_controller",
+        "targetSystem": "ride-control",
+        "status": "approved_for_execution",
+        "agentBoundary": {"agent_id": "tool_executor_agent"},
+        "payload": {"command": "hold dispatch"},
+    }
+    decision = {"decision": "approved", "actor": "lead"}
+    result = gcp_operations.publish_approval_decision(dispatch, decision)
+
+    assert result["pubsub"]["status"] == "published"
+    assert result["pseudoFirebase"]["status"] == "sent"
+    assert result["firestore"]["status"] == "written"
+    assert result["agentBoundary"]["agent_id"] == "tool_executor_agent"
+    assert pubsub_calls[0][0] == "parkpulse.delivery.approval_decision"
+    assert pseudo_calls[0][1] == "ParkPulse approval decision"
+    assert firestore_calls[0][0] == "approvals"
 
 
 def test_pseudo_firebase_persists_topic_messages(monkeypatch, tmp_path):

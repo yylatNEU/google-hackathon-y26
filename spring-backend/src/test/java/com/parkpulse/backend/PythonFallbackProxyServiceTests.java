@@ -74,7 +74,7 @@ class PythonFallbackProxyServiceTests {
             .withProperty("parkpulse.python-backend-url", "http://127.0.0.1:9")
             .withProperty("parkpulse.python-backend-timeout-ms", "500");
         PythonFallbackProxyService service = new PythonFallbackProxyService(environment);
-        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/park/product-learning/loop");
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/park/unmigrated-test-route");
 
         ResponseEntity<byte[]> response = service.forward(request, new byte[0]);
 
@@ -233,5 +233,54 @@ class PythonFallbackProxyServiceTests {
         assertThat(reviewLedgerResponse.getStatusCode().value()).isEqualTo(409);
         assertThat(new String(reviewLedgerResponse.getBody(), StandardCharsets.UTF_8))
             .contains("GET /api/park/review-training-ledger");
+
+        MockHttpServletRequest productLoopRequest = new MockHttpServletRequest("GET", "/api/park/product-learning/loop");
+        ResponseEntity<byte[]> productLoopResponse = service.forward(productLoopRequest, new byte[0]);
+
+        assertThat(productLoopResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(productLoopResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/product-learning/loop");
+
+        MockHttpServletRequest productIssueRequest = new MockHttpServletRequest("POST", "/api/park/product-learning/issue-ticket");
+        ResponseEntity<byte[]> productIssueResponse = service.forward(productIssueRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(productIssueResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(productIssueResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/product-learning/issue-ticket");
+
+        MockHttpServletRequest productGapRequest = new MockHttpServletRequest("POST", "/api/park/product-learning/training-gap-ticket");
+        ResponseEntity<byte[]> productGapResponse = service.forward(productGapRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(productGapResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(productGapResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/product-learning/training-gap-ticket");
+
+        MockHttpServletRequest staffScenariosRequest = new MockHttpServletRequest("GET", "/api/park/staff-training/scenarios");
+        ResponseEntity<byte[]> staffScenariosResponse = service.forward(staffScenariosRequest, new byte[0]);
+
+        assertThat(staffScenariosResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(staffScenariosResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/staff-training/scenarios");
+
+        MockHttpServletRequest staffSessionRequest = new MockHttpServletRequest("POST", "/api/park/staff-training/sessions");
+        ResponseEntity<byte[]> staffSessionResponse = service.forward(staffSessionRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(staffSessionResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(staffSessionResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/staff-training/sessions");
+
+        MockHttpServletRequest staffFinishRequest = new MockHttpServletRequest("POST", "/api/park/staff-training/finish");
+        ResponseEntity<byte[]> staffFinishResponse = service.forward(staffFinishRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(staffFinishResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(staffFinishResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/staff-training/finish");
+
+        MockHttpServletRequest staffAnalyticsRequest = new MockHttpServletRequest("GET", "/api/park/staff-training/analytics");
+        ResponseEntity<byte[]> staffAnalyticsResponse = service.forward(staffAnalyticsRequest, new byte[0]);
+
+        assertThat(staffAnalyticsResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(staffAnalyticsResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/staff-training/analytics");
     }
 }

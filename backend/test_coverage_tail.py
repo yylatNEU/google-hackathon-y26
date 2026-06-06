@@ -34,7 +34,6 @@ def run(coro):
 
 def fallback_memory():
     memory = mongo_memory.OperationalMemory()
-    memory.initialize()
     memory.connected = False
     memory.db = None
     memory.mode = "fallback"
@@ -254,13 +253,10 @@ def test_gcp_bigquery_autodream_and_wrapper_tail_branches(monkeypatch, capsys):
     monkeypatch.setenv("BIGQUERY_DATASET", "dataset")
     assert bigquery_analytics._client_status()[0].project == "project"
 
-    priors = {"best_prior": {"cohort": "best"}, "weakest_prior": {"cohort": "weak"}}
-    weak = park_autodream_agent._counterfactual_for_signal("ride_down", {"take_rate": "bad", "follow_through": 0.2, "overall_score": "bad"}, priors)
-    success = park_autodream_agent._counterfactual_for_signal("ride_down", {"take_rate": 0.8, "follow_through": 0.7, "overall_score": 90, "density_delta": -4}, priors)
-    limited = park_autodream_agent._counterfactual_for_signal("ride_down", {"take_rate": 0.8, "follow_through": 0.7, "overall_score": 60}, priors)
-    assert weak["outcomeLabel"] == "counterfactual_low_response"
-    assert success["outcomeLabel"] == "counterfactual_success_pattern"
-    assert limited["outcomeLabel"] == "counterfactual_limited_movement"
+    retired_dream = park_autodream_agent.run_autodream("ride_down", max_cases=99, persist=False)
+    assert retired_dream["status"] == "retired"
+    assert retired_dream["max_cases"] == 25
+    assert retired_dream["dream_learnings"] == []
 
     assert governance.governance_status()["status"] == "ready"
     assert simulation.parkpulse_simulation is not None
@@ -276,59 +272,15 @@ def test_gcp_bigquery_autodream_and_wrapper_tail_branches(monkeypatch, capsys):
 
 def test_autodream_benchmark_and_mongo_measurement_paths(monkeypatch, capsys):
     state = sample_state()
-    rule = {
-        "_id": "rule-1",
-        "sourceDreamLearningId": "dream-1",
-        "scenarioKey": "ride_down",
-        "incidentType": "ride_down",
-        "outcomeLabel": "counterfactual_low_response",
-        "confidence": 80,
-        "promotionImpact": {"status": "pending_measurement"},
-    }
-    monkeypatch.setattr(park_autodream_benchmark, "get_latest_memory_documents", lambda collection, limit: [rule] if collection == "agent_learnings" else [])
-    assert park_autodream_benchmark._number("bad", 2.0) == 2.0
-    assert park_autodream_benchmark._active_scenario({}) == "ride_down"
-    assert park_autodream_benchmark._primary_ride({"guestFlow": {"rides": []}})["id"] == "dragonCoaster"
-    assert park_autodream_benchmark._find_ride(state, "missing") == {}
-    assert park_autodream_benchmark._promoted_rule("ride_down", "missing") is None
-    assert park_autodream_benchmark.run_autodream_benchmark(state, scenario_key="food_spike")["status"] == "retired"
-
-    def fake_optimize(current_state, scenario_key, context=None):
-        learned = bool((context or {}).get("retrieved", {}).get("learnings"))
-        return {
-            "selected_plan": {
-                "id": "learned" if learned else "baseline",
-                "name": "Learned" if learned else "Baseline",
-                "scorecard": {"overall": 88 if learned else 80, "take_rate_likelihood": 58 if learned else 42},
-                "action_mix": {"guest_reroute": {"target_mix": [{"destinationId": "theaterB", "share": 0.5}]}},
-                "selected_action": {"label": "Split route"},
-            }
-        }
-
-    def fake_simulate(current_state, selected, horizon_minutes=30, seed=""):
-        learned = selected.get("id") == "learned"
-        projected = sample_state()
-        projected["guestFlow"]["rides"][0]["queueGuests"] = 360 if learned else 520
-        projected["guestFlow"]["rides"][0]["waitMins"] = 28 if learned else 45
-        return {
-            "projected_state": projected,
-            "projected_impact": {"movedGuests": 340 if learned else 180},
-            "scorecard": {"overall": 90 if learned else 80},
-            "source": "unit",
-        }
-
-    monkeypatch.setattr(park_autodream_benchmark, "optimize_park_response", fake_optimize)
-    monkeypatch.setattr(park_autodream_benchmark, "simulate_action_plan", fake_simulate)
     benchmark = park_autodream_benchmark.run_autodream_benchmark(state, scenario_key="ride_down", seeds=5)
     assert benchmark["status"] == "retired"
     assert benchmark["confidence"] == "disabled"
+    assert benchmark["sample_size"] == 0
+    assert benchmark["requested_seeds"] == 5
     assert benchmark["pairs"] == []
-    assert park_autodream_benchmark._confidence(0, 0, 0) == "no_signal"
-    assert park_autodream_benchmark._confidence(2, 0.8, 0.1) == "early_signal"
-    assert park_autodream_benchmark._confidence(4, 0.8, 0.1) == "directional"
-    assert park_autodream_benchmark._confidence(5, 0.3, 0.1) == "regression_risk"
-    assert park_autodream_benchmark._confidence(5, 0.8, 0.01) == "directional"
-    assert park_autodream_benchmark._confidence(5, 0.5, 0.01) == "mixed"
+    fallback_benchmark = park_autodream_benchmark.run_autodream_benchmark({"guestFlow": {"activeScenario": {"key": "staff_shortage"}}}, seeds=99)
+    assert fallback_benchmark["scenario_key"] == "staff_shortage"
+    assert fallback_benchmark["requested_seeds"] == 20
 
     memory = fallback_memory()
     assert memory.ground_truth_improvement()["status"] == "not_measured"

@@ -277,6 +277,166 @@ class ParkPulseSpringBackendApplicationTests {
 	}
 
 	@Test
+	void productLearningRoutesRunNativelyInSpringWithDurableLedgerAndRoleGates() throws Exception {
+		Path runtime = Path.of("target/test-parkpulse-runtime");
+		Files.deleteIfExists(runtime.resolve("product_learning_loop.jsonl"));
+
+		mockMvc.perform(get("/api/park/product-learning/loop"))
+			.andExpect(status().isUnauthorized());
+
+		mockMvc.perform(get("/api/park/product-learning/loop").header("authorization", "Bearer " + signedRoleToken("customer")))
+			.andExpect(status().isForbidden());
+
+		mockMvc.perform(
+				post("/api/park/product-learning/issue-ticket")
+					.header("authorization", "Bearer " + signedRoleToken("customer"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"source\":\"guest\",\"issueType\":\"angry_parent\",\"summary\":\"Guest needs recovery after long queue\",\"severity\":\"high\",\"location\":\"Covered Plaza\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("created")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.ticket.source", equalTo("guest")))
+			.andExpect(jsonPath("$.ticket.requires_human_ack", equalTo(true)))
+			.andExpect(jsonPath("$.ledger.mode", equalTo("spring_product_learning_jsonl_ledger")));
+
+		mockMvc.perform(
+				post("/api/park/product-learning/training-gap-ticket")
+					.header("authorization", "Bearer " + signedRoleToken("onsite_worker"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"scenarioId\":\"angry_parent\",\"gapType\":\"policy_correctness\"}")
+			)
+			.andExpect(status().isForbidden());
+
+		mockMvc.perform(
+				post("/api/park/product-learning/training-gap-ticket")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"scenarioId\":\"angry_parent\",\"gapType\":\"policy_correctness\",\"severity\":\"critical_training_gap\",\"evidence\":{\"summary\":\"Missed escalation threshold\"}}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("created")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.ticket.live_ops_authority", equalTo(false)))
+			.andExpect(jsonPath("$.ledger.mode", equalTo("spring_product_learning_jsonl_ledger")));
+
+		mockMvc.perform(get("/api/park/product-learning/loop?limit=20").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.mode", equalTo("product_learning_loop_spring")))
+			.andExpect(jsonPath("$.park_issue_ticket_count", equalTo(2)))
+			.andExpect(jsonPath("$.training_gap_ticket_count", equalTo(1)))
+			.andExpect(jsonPath("$.product_learning_signals[0].id", notNullValue()))
+			.andExpect(jsonPath("$.loop_contract.human_on_exception", equalTo(true)));
+
+		org.assertj.core.api.Assertions.assertThat(Files.readString(runtime.resolve("product_learning_loop.jsonl")))
+			.contains("park_issue_ticket_created")
+			.contains("training_gap_ticket_created")
+			.contains("java_spring");
+	}
+
+	@Test
+	void staffTrainingRoutesRunNativelyInSpringWithSessionAndReceiptFlow() throws Exception {
+		Path runtime = Path.of("target/test-parkpulse-runtime");
+		Files.deleteIfExists(runtime.resolve("staff_training_ledger.jsonl"));
+
+		mockMvc.perform(get("/api/park/staff-training/scenarios"))
+			.andExpect(status().isUnauthorized());
+
+		mockMvc.perform(get("/api/park/staff-training/scenarios").header("authorization", "Bearer " + signedRoleToken("customer")))
+			.andExpect(status().isForbidden());
+
+		mockMvc.perform(get("/api/park/staff-training/scenarios").header("authorization", "Bearer " + signedRoleToken("onsite_worker")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.scenarios[0].id", equalTo("angry_parent")));
+
+		mockMvc.perform(get("/api/park/staff-training/assignments").header("authorization", "Bearer " + signedRoleToken("onsite_worker")))
+			.andExpect(status().isForbidden());
+
+		MvcResult assignmentResult = mockMvc.perform(
+				post("/api/park/staff-training/assignments")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"traineeName\":\"Spring Trainee\",\"staffRole\":\"guest_care\",\"scenarioIds\":[\"angry_parent\"]}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.assignment.id", notNullValue()))
+			.andReturn();
+
+		String assignmentId = objectMapper.readTree(assignmentResult.getResponse().getContentAsByteArray()).get("assignment").get("id").asText();
+		MvcResult sessionResult = mockMvc.perform(
+				post("/api/park/staff-training/sessions")
+					.header("authorization", "Bearer " + signedRoleToken("onsite_worker"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"scenarioId\":\"angry_parent\",\"traineeName\":\"Spring Trainee\",\"assignmentId\":\"" + assignmentId + "\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("active")))
+			.andExpect(jsonPath("$.scenario.id", equalTo("angry_parent")))
+			.andReturn();
+
+		String sessionId = objectMapper.readTree(sessionResult.getResponse().getContentAsByteArray()).get("id").asText();
+		mockMvc.perform(
+				post("/api/park/staff-training/turn")
+					.header("authorization", "Bearer " + signedRoleToken("onsite_worker"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"sessionId\":\"" + sessionId + "\",\"employeeMessage\":\"I am sorry this happened. I can help and bring a manager into the policy step.\",\"useShadowEval\":true}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.turn_score.overall", equalTo(84)))
+			.andExpect(jsonPath("$.shadow_evaluator.status", equalTo("complete")));
+
+		mockMvc.perform(
+				post("/api/park/staff-training/finish")
+					.header("authorization", "Bearer " + signedRoleToken("onsite_worker"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"sessionId\":\"" + sessionId + "\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("finished")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.receipt.manager_review_required", equalTo(true)));
+
+		mockMvc.perform(get("/api/park/staff-training/receipts?limit=10").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.receipts[0].session_id", equalTo(sessionId)));
+
+		mockMvc.perform(get("/api/park/staff-training/analytics?limit=10").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.session_count", equalTo(1)));
+
+		mockMvc.perform(get("/api/park/staff-training/certification-packet?assignment_id=" + assignmentId).header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.assignment.id", equalTo(assignmentId)));
+
+		mockMvc.perform(
+				post("/api/park/staff-training/receipt-review")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"sessionId\":\"" + sessionId + "\",\"decision\":\"approve_shadowing\",\"reviewer\":\"Spring Manager\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("recorded")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(get("/api/park/staff-training/golden-eval").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.case_count", equalTo(2)));
+
+		org.assertj.core.api.Assertions.assertThat(Files.readString(runtime.resolve("staff_training_ledger.jsonl")))
+			.contains("staff_training_assignment_created")
+			.contains("staff_training_receipt_created")
+			.contains("staff_training_receipt_reviewed");
+	}
+
+	@Test
 	void reliabilityDiagnosticsAndAuthorizationAuditRunNativelyInSpring() throws Exception {
 		mockMvc.perform(get("/api/park/reliability").header("authorization", "Bearer " + signedRoleToken("customer")))
 			.andExpect(status().isForbidden());

@@ -526,6 +526,12 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
     executor = payload.get("tool_executor_live_test", {}) if isinstance(payload.get("tool_executor_live_test"), dict) else {}
     hard_follow = payload.get("hard_decision_follow_through", {}) if isinstance(payload.get("hard_decision_follow_through"), dict) else {}
     receiver_delivery = payload.get("live_feed_receiver_delivery", {}) if isinstance(payload.get("live_feed_receiver_delivery"), dict) else {}
+    simulated_ops_impact = payload.get("live_feed_simulated_ops_impact", {}) if isinstance(payload.get("live_feed_simulated_ops_impact"), dict) else {}
+    risk_escalation = payload.get("risk_escalation_approval", {}) if isinstance(payload.get("risk_escalation_approval"), dict) else {}
+    risk_executor = payload.get("risk_escalated_tool_executor", {}) if isinstance(payload.get("risk_escalated_tool_executor"), dict) else {}
+    risk_delivery = payload.get("risk_escalation_receiver_delivery", {}) if isinstance(payload.get("risk_escalation_receiver_delivery"), dict) else {}
+    risk_impact = payload.get("risk_escalation_simulated_ops_impact", {}) if isinstance(payload.get("risk_escalation_simulated_ops_impact"), dict) else {}
+    risk_validation_mode = str(payload.get("risk_escalation_validation_mode") or "normal")
     outcome_measurement = payload.get("live_feed_outcome_measurement", {}) if isinstance(payload.get("live_feed_outcome_measurement"), dict) else {}
     outcome_memory = payload.get("live_feed_outcome_memory", {}) if isinstance(payload.get("live_feed_outcome_memory"), dict) else {}
     reward_layers = outcome_measurement.get("reward_layers", {}) if isinstance(outcome_measurement.get("reward_layers"), dict) else {}
@@ -655,6 +661,23 @@ def _summarize_payload(payload: dict[str, Any], cycle_index: int, injected_issue
             "acknowledged_count": receiver_delivery.get("acknowledged_count"),
             "material_state_mutation": receiver_delivery.get("material_state_mutation"),
             "public_guest_messages_sent": receiver_delivery.get("public_guest_messages_sent"),
+            "simulated_ops_impact_status": simulated_ops_impact.get("status"),
+            "simulated_material_state_mutation": simulated_ops_impact.get("material_state_mutation"),
+            "simulated_state_impact": simulated_ops_impact.get("state_impact", {}),
+            "simulated_episode_fitness": simulated_ops_impact.get("episode_fitness", {}),
+            "risk_escalation_status": risk_escalation.get("status"),
+            "risk_escalation_stage": risk_escalation.get("stage"),
+            "risk_escalation_requested_count": risk_escalation.get("requested_count"),
+            "risk_escalation_approved_count": risk_escalation.get("approved_count"),
+            "risk_escalated_executed_count": risk_executor.get("executed_count"),
+            "risk_escalation_delivery_status": risk_delivery.get("status"),
+            "risk_escalation_acknowledged_count": risk_delivery.get("acknowledged_count"),
+            "risk_escalation_impact_status": risk_impact.get("status"),
+            "risk_escalation_material_state_mutation": risk_impact.get("material_state_mutation"),
+            "risk_escalation_state_impact": risk_impact.get("state_impact", {}),
+            "risk_escalation_episode_fitness": risk_impact.get("episode_fitness", {}),
+            "risk_escalation_validation_mode": risk_validation_mode,
+            "risk_escalation_validation_fault": risk_impact.get("validation_fault") or payload.get("risk_escalation_validation_fault"),
             "follow_through_status": hard_follow.get("status"),
             "follow_through_task_count": hard_follow.get("task_count"),
             "active_follow_up_count": hard_follow.get("active_follow_up_count"),
@@ -842,6 +865,7 @@ async def _run_cycle(
     case_bank_rows: list[dict[str, Any]],
     batch_summaries: list[dict[str, Any]],
     agent_timeout_seconds: float,
+    risk_escalation_validation_mode: str = "normal",
     forced_issue_kind: str | None = None,
     forced_target_id: str | None = None,
     forced_intensity: int | None = None,
@@ -870,6 +894,8 @@ async def _run_cycle(
                 refresh_stale=False,
                 execute=False,
                 controlled_executor_execute=True,
+                allow_risk_escalation=risk_escalation_validation_mode != "disabled",
+                risk_escalation_validation_mode=risk_escalation_validation_mode,
                 measure_post_action=True,
                 min_ready_feeds=4,
                 require_persisted_events=True,
@@ -1124,6 +1150,23 @@ def _case_bank_row_from_summary(summary: dict[str, Any], *, batch_id: str, outpu
             "receiver_delivery_status": actions.get("receiver_delivery_status"),
             "material_state_mutation": actions.get("material_state_mutation"),
             "public_guest_messages_sent": actions.get("public_guest_messages_sent"),
+            "simulated_ops_impact_status": actions.get("simulated_ops_impact_status"),
+            "simulated_material_state_mutation": actions.get("simulated_material_state_mutation"),
+            "simulated_state_impact": actions.get("simulated_state_impact"),
+            "simulated_episode_fitness": actions.get("simulated_episode_fitness"),
+            "risk_escalation_status": actions.get("risk_escalation_status"),
+            "risk_escalation_stage": actions.get("risk_escalation_stage"),
+            "risk_escalation_requested_count": actions.get("risk_escalation_requested_count"),
+            "risk_escalation_approved_count": actions.get("risk_escalation_approved_count"),
+            "risk_escalated_executed_count": actions.get("risk_escalated_executed_count"),
+            "risk_escalation_delivery_status": actions.get("risk_escalation_delivery_status"),
+            "risk_escalation_acknowledged_count": actions.get("risk_escalation_acknowledged_count"),
+            "risk_escalation_impact_status": actions.get("risk_escalation_impact_status"),
+            "risk_escalation_material_state_mutation": actions.get("risk_escalation_material_state_mutation"),
+            "risk_escalation_state_impact": actions.get("risk_escalation_state_impact"),
+            "risk_escalation_episode_fitness": actions.get("risk_escalation_episode_fitness"),
+            "risk_escalation_validation_mode": actions.get("risk_escalation_validation_mode"),
+            "risk_escalation_validation_fault": actions.get("risk_escalation_validation_fault"),
         },
         "memory": {
             "prior_status": memory.get("prior_status"),
@@ -1478,6 +1521,16 @@ def _aggregate_report(cycles: list[dict[str, Any]], actual_training: dict[str, A
     held = sum(_safe_int(summary.get("actions", {}).get("held_count")) for summary in summaries if isinstance(summary.get("actions"), dict))
     unresolved = sum(_safe_int(summary.get("actions", {}).get("unresolved_without_owner_count")) for summary in summaries if isinstance(summary.get("actions"), dict))
     active_followups = sum(_safe_int(summary.get("actions", {}).get("active_follow_up_count")) for summary in summaries if isinstance(summary.get("actions"), dict))
+    risk_modes: dict[str, int] = {}
+    risk_labels: dict[str, int] = {}
+    for summary in summaries:
+        actions = summary.get("actions", {}) if isinstance(summary.get("actions"), dict) else {}
+        mode = str(actions.get("risk_escalation_validation_mode") or "normal")
+        risk_modes[mode] = risk_modes.get(mode, 0) + 1
+        measurement = summary.get("measurement", {}) if isinstance(summary.get("measurement"), dict) else {}
+        reward_layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
+        label = str(reward_layers.get("risk_lift_label") or "missing")
+        risk_labels[label] = risk_labels.get(label, 0) + 1
     template_mismatches = sum(
         1
         for summary in summaries
@@ -1524,6 +1577,8 @@ def _aggregate_report(cycles: list[dict[str, Any]], actual_training: dict[str, A
             "case_bank_duplicate_count": case_bank_summary.get("duplicate_count"),
             "case_bank_quality_status": quality_gate.get("status"),
             "case_bank_sustainability_status": sustainability_gate.get("status"),
+            "risk_escalation_validation_modes": risk_modes,
+            "risk_lift_labels": risk_labels,
             "memory_growth": memory_growth,
             "actual_training_status": actual_training.get("status"),
             "actual_training_sample_count": actual_training.get("sample_count"),
@@ -1650,6 +1705,15 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
     sustainability_metrics = sustainability_gate.get("metrics", {}) if isinstance(sustainability_gate.get("metrics"), dict) else {}
     sustainability_blockers = sustainability_gate.get("blockers", []) if isinstance(sustainability_gate.get("blockers"), list) else []
     memory_growth = summary.get("memory_growth", {}) if isinstance(summary.get("memory_growth"), dict) else {}
+    risk_modes = summary.get("risk_escalation_validation_modes", {}) if isinstance(summary.get("risk_escalation_validation_modes"), dict) else {}
+    risk_labels = summary.get("risk_lift_labels", {}) if isinstance(summary.get("risk_lift_labels"), dict) else {}
+    risk_modes_text = ", ".join(f"{key}: {value}" for key, value in sorted(risk_modes.items())) or "none"
+    risk_labels_text = ", ".join(f"{key}: {value}" for key, value in sorted(risk_labels.items())) or "none"
+    mixed_mode_detected = len(risk_modes) > 1
+    risk_success_count = int(risk_labels.get("risk_lift_success") or 0)
+    risk_blocked_count = int(risk_labels.get("risk_lift_blocked") or 0)
+    risk_pending_count = int(risk_labels.get("risk_lift_pending_measurement") or 0)
+    risk_regression_count = int(risk_labels.get("risk_lift_regression") or 0)
     cycle_cards = []
     for cycle in cycles:
         issue = cycle.get("issue", {}) if isinstance(cycle.get("issue"), dict) else {}
@@ -1663,11 +1727,22 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
         negotiation_rounds = agents.get("negotiation_rounds", []) if isinstance(agents.get("negotiation_rounds"), list) else []
         measurement = cycle.get("measurement", {}) if isinstance(cycle.get("measurement"), dict) else {}
         reward_layers = measurement.get("reward_layers", {}) if isinstance(measurement.get("reward_layers"), dict) else {}
+        branch_rewards = reward_layers.get("branch_rewards", {}) if isinstance(reward_layers.get("branch_rewards"), dict) else {}
+        controlled_branch = branch_rewards.get("controlled_low_risk", {}) if isinstance(branch_rewards.get("controlled_low_risk"), dict) else {}
+        risk_lift_branch = branch_rewards.get("risk_lift", {}) if isinstance(branch_rewards.get("risk_lift"), dict) else {}
         controlled_effect_projection = (
             measurement.get("controlled_effect_projection", {})
             if isinstance(measurement.get("controlled_effect_projection"), dict)
             else {}
         )
+        simulated_state_impact = actions.get("simulated_state_impact", {}) if isinstance(actions.get("simulated_state_impact"), dict) else {}
+        simulated_episode_fitness = actions.get("simulated_episode_fitness", {}) if isinstance(actions.get("simulated_episode_fitness"), dict) else {}
+        simulated_episode_scores = simulated_episode_fitness.get("scores", {}) if isinstance(simulated_episode_fitness.get("scores"), dict) else {}
+        simulated_fitness_score = simulated_episode_fitness.get("fitness", simulated_episode_scores.get("fitness"))
+        risk_state_impact = actions.get("risk_escalation_state_impact", {}) if isinstance(actions.get("risk_escalation_state_impact"), dict) else {}
+        risk_episode_fitness = actions.get("risk_escalation_episode_fitness", {}) if isinstance(actions.get("risk_escalation_episode_fitness"), dict) else {}
+        risk_episode_scores = risk_episode_fitness.get("scores", {}) if isinstance(risk_episode_fitness.get("scores"), dict) else {}
+        risk_fitness_score = risk_episode_fitness.get("fitness", risk_episode_scores.get("fitness"))
         training = cycle.get("training_closure", {}) if isinstance(cycle.get("training_closure"), dict) else {}
         feed_ids = anti_script.get("live_feed_event_ids") if isinstance(anti_script.get("live_feed_event_ids"), list) else live_feed.get("event_ids", [])
         if not isinstance(feed_ids, list):
@@ -1703,7 +1778,12 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
                 <p><b>ML policy evidence:</b> scenario {html.escape(str(ml_policy.get('scenario_key')))}, status {html.escape(str(ml_policy.get('status')))}, slice decision {html.escape(str(ml_policy.get('slice_decision')))}. Accepted low-risk guidance {html.escape(str(ml_policy.get('accepted_low_risk_count')))}, context-only {html.escape(str(ml_policy.get('context_only_count')))}, warnings {html.escape(str(ml_policy.get('warning_count')))}.</p>
                 <p><b>Measured outcome:</b> {html.escape(str(measurement.get('status')))} with attribution confidence {html.escape(str(measurement.get('attribution_confidence')))} and operational reward {html.escape(str(reward_layers.get('operational_reward', measurement.get('reward_value'))))}. Promotion eligible: {html.escape(str(measurement.get('promotion_eligible')))}.</p>
                 <p><b>Reward layers:</b> trace {html.escape(str(reward_layers.get('trace_reward')))}, policy {html.escape(str(reward_layers.get('policy_reward')))}, execution {html.escape(str(reward_layers.get('execution_reward')))}, operational {html.escape(str(reward_layers.get('operational_reward')))}, learning {html.escape(str(reward_layers.get('learning_reward')))}.</p>
+                <p><b>Reward branch separation:</b> controlled low-risk reward {html.escape(str(controlled_branch.get('reward', reward_layers.get('controlled_low_risk_reward', 'n/a'))))}; risk-lift reward {html.escape(str(risk_lift_branch.get('reward', reward_layers.get('risk_lift_reward', 'n/a'))))}; risk-lift label {html.escape(str(risk_lift_branch.get('label', reward_layers.get('risk_lift_label', 'n/a'))))}; effect score {html.escape(str(risk_lift_branch.get('effect_score', (reward_layers.get('metrics', {}) if isinstance(reward_layers.get('metrics'), dict) else {}).get('risk_escalation_effect_score', 'n/a'))))}.</p>
                 <p><b>Controlled effect:</b> {html.escape(str(controlled_effect_projection.get('status') or 'not_applied'))}; {html.escape(str(controlled_effect_projection.get('projection_count') or 0))} projected feed rows from acknowledged low-risk receiver actions.</p>
+                <p><b>Simulated park impact:</b> {html.escape(str(actions.get('simulated_ops_impact_status') or 'not_applied'))}; material mutation {html.escape(str(actions.get('simulated_material_state_mutation')))}. {html.escape(str(simulated_state_impact.get('headline') or 'No simulated operational state delta recorded.'))}</p>
+                <p><b>Impact detail:</b> {html.escape(str(simulated_state_impact.get('before_after_line') or 'n/a'))}. Domain {html.escape(str(simulated_state_impact.get('domain') or 'n/a'))}; queue delta {html.escape(str(simulated_state_impact.get('queued_guest_delta') or simulated_state_impact.get('queue_delta') or 'n/a'))}; congestion delta {html.escape(str(simulated_state_impact.get('congestion_delta') or 'n/a'))}; episode fitness {html.escape(str(simulated_fitness_score or 'n/a'))}.</p>
+                <p><b>Risk escalation gate:</b> {html.escape(str(actions.get('risk_escalation_stage') or actions.get('risk_escalation_status') or 'not_requested'))}; requested {html.escape(str(actions.get('risk_escalation_requested_count') or 0))}, approved {html.escape(str(actions.get('risk_escalation_approved_count') or 0))}, escalated executed {html.escape(str(actions.get('risk_escalated_executed_count') or 0))}, delivery {html.escape(str(actions.get('risk_escalation_delivery_status') or 'n/a'))}.</p>
+                <p><b>Risk escalation impact:</b> {html.escape(str(actions.get('risk_escalation_impact_status') or 'not_applied'))}; material mutation {html.escape(str(actions.get('risk_escalation_material_state_mutation')))}. {html.escape(str(risk_state_impact.get('headline') or 'No lifted-action simulated impact recorded.'))} Fitness {html.escape(str(risk_fitness_score or 'n/a'))}.</p>
               </div>
               <div class="negotiation">
                 <h3>Negotiation rounds</h3>
@@ -1746,6 +1826,7 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
     .grid {{ display: grid; gap: 12px; margin-top: 18px; }}
     .four {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
     .three {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+    .two {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
     .grid > div {{ border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: var(--panel); min-height: 96px; }}
     strong {{ display: block; font-size: 12px; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; letter-spacing: 0; }}
     span {{ display: block; font-size: 21px; font-weight: 700; line-height: 1.2; }}
@@ -1765,10 +1846,14 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
     .round p {{ margin: 0; }}
     .round ul {{ margin: 0; }}
     .truth {{ border: 1px solid var(--line); border-radius: 8px; padding: 16px; background: #fbfcfd; }}
+    .change {{ border: 2px solid #1d5f8f; border-radius: 8px; padding: 18px; background: #f2f8fc; margin-top: 18px; }}
+    .change h2 {{ margin: 0 0 10px; }}
+    .change-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }}
+    .change-grid > div {{ border: 1px solid #b9d7e8; border-radius: 8px; background: #fff; padding: 14px; }}
     ul {{ margin: 10px 0 0; padding-left: 20px; color: #293847; }}
     li {{ margin: 6px 0; }}
     footer {{ color: var(--muted); padding-top: 24px; border-top: 1px solid var(--line); margin-top: 28px; }}
-    @media (max-width: 980px) {{ header, main {{ padding-left: 18px; padding-right: 18px; }} .four, .three {{ grid-template-columns: 1fr; }} span {{ font-size: 18px; }} }}
+    @media (max-width: 980px) {{ header, main {{ padding-left: 18px; padding-right: 18px; }} .four, .three, .two {{ grid-template-columns: 1fr; }} span {{ font-size: 18px; }} }}
   </style>
 </head>
 <body>
@@ -1778,11 +1863,32 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
   </header>
   <main>
     <section>
+      <div class="change">
+        <h2>What Changed In This Report</h2>
+        <p>This report is materially different only if it shows a mixed risk-lift batch. Mixed mode detected: <b>{html.escape(str(mixed_mode_detected))}</b>.</p>
+        <div class="change-grid">
+          <div>
+            <strong>Before</strong>
+            <span>Success-only risk lift</span>
+            <small>Earlier reports mostly showed approved/executed escalation, so the model only learned that lifting the gate can work.</small>
+          </div>
+          <div>
+            <strong>Now</strong>
+            <span>{html.escape(str(risk_success_count))} success / {html.escape(str(risk_blocked_count))} blocked / {html.escape(str(risk_pending_count))} pending / {html.escape(str(risk_regression_count))} regression</span>
+            <small>The training material now includes when to approve, when to block, when to wait for measurement, and when a lifted action made the simulated state worse.</small>
+          </div>
+        </div>
+        <p style="margin-top:12px;"><b>Decision impact:</b> an executed lifted action no longer counts as good by itself. If measured impact is adverse, the branch is labeled <code>risk_lift_regression</code>, capped at reward 0.45, and added to promotion blockers.</p>
+      </div>
       <div class="grid four">
         <div><strong>Cycles</strong><span>{html.escape(str(summary.get('passed_cycle_count')))} / {html.escape(str(summary.get('cycle_count')))} passed</span><small>Status {_badge(report.get('status'))}</small></div>
         <div><strong>Actions</strong><span>{html.escape(str(summary.get('executed_action_count')))} executed</span><small>{html.escape(str(summary.get('held_action_count')))} held, {html.escape(str(summary.get('active_follow_up_count')))} active follow-ups</small></div>
         <div><strong>Issue/action fit</strong><span>{html.escape(str(summary.get('issue_action_template_mismatch_count')))} review</span><small>Template mismatch count; these are not strong issue-specific decisions.</small></div>
         <div><strong>Training material</strong><span>{html.escape(str(summary.get('training_example_count')))} examples</span><small>{html.escape(str(summary.get('reward_example_count')))} reward candidates</small></div>
+      </div>
+      <div class="grid two">
+        <div><strong>Risk escalation modes</strong><span>{html.escape(risk_modes_text)}</span><small>QA validation mix used for this batch.</small></div>
+        <div><strong>Risk-lift labels</strong><span>{html.escape(risk_labels_text)}</span><small>Training labels recorded from branch-specific reward scoring.</small></div>
       </div>
     </section>
 
@@ -1857,6 +1963,13 @@ def _render_html(report: dict[str, Any], path: Path) -> None:
     path.write_text(html_doc, encoding="utf-8")
 
 
+def _risk_escalation_mode_for_cycle(args: argparse.Namespace, cycle_index: int) -> str:
+    if args.risk_escalation_batch == "mixed":
+        plan = ["normal", "disabled", "missing_controls", "pending_measurement", "impact_regression"]
+        return plan[(cycle_index - 1) % len(plan)]
+    return str(args.risk_escalation_validation_mode or "normal")
+
+
 async def _async_main(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1866,6 +1979,7 @@ async def _async_main(args: argparse.Namespace) -> int:
     starting_case_bank_rows = _read_case_bank_rows(case_bank_dir)
     cycles: list[dict[str, Any]] = []
     for index in range(1, args.cycles + 1):
+        risk_escalation_validation_mode = _risk_escalation_mode_for_cycle(args, index)
         result = await _run_cycle(
             index,
             output_dir,
@@ -1874,6 +1988,7 @@ async def _async_main(args: argparse.Namespace) -> int:
             case_bank_rows=starting_case_bank_rows,
             batch_summaries=[row["summary"] for row in cycles],
             agent_timeout_seconds=args.agent_timeout_seconds,
+            risk_escalation_validation_mode=risk_escalation_validation_mode,
             forced_issue_kind=args.force_issue_kind,
             forced_target_id=args.force_target_id,
             forced_intensity=args.force_intensity,
@@ -1938,6 +2053,18 @@ def main() -> int:
     parser.add_argument("--force-issue-kind", default=None, help="Force a specific issue kind for targeted slice validation.")
     parser.add_argument("--force-target-id", default=None, help="Force a target id/zone for targeted slice validation.")
     parser.add_argument("--force-intensity", type=int, default=None, help="Force issue intensity for targeted slice validation.")
+    parser.add_argument(
+        "--risk-escalation-validation-mode",
+        choices=["normal", "disabled", "missing_controls", "pending_measurement", "impact_regression"],
+        default="normal",
+        help="QA-only risk escalation gate mode for generated live-feed cases.",
+    )
+    parser.add_argument(
+        "--risk-escalation-batch",
+        choices=["single", "mixed"],
+        default="single",
+        help="Use mixed to rotate normal, disabled, missing-controls, pending-measurement, and regression escalation cases.",
+    )
     parser.add_argument("--training-detail", choices=["readiness", "full"], default="full")
     parser.add_argument("--training-timeout-seconds", type=float, default=90.0)
     parser.add_argument("--agent-timeout-seconds", type=float, default=180.0, help="Maximum seconds to wait for each live-feed agent cycle.")

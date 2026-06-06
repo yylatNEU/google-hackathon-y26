@@ -4,7 +4,8 @@ import json
 import os
 from types import SimpleNamespace
 
-os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
+os.environ["MONGODB_DISABLE_DRIVER_IMPORT"] = "1"
+os.environ["PARKPULSE_MONGO_MODEL_EMBEDDINGS"] = "false"
 
 import pytest
 
@@ -82,9 +83,16 @@ def test_parkpulse_api_health_sync_cache_and_context_helpers(monkeypatch):
 
     monkeypatch.setattr(parkpulse_api, "get_operational_memory_dashboard", lambda query: {"dashboard": query})
     monkeypatch.setattr(parkpulse_api, "_build_agent_bigquery_priors", lambda scenario, dashboard: {"scenario": scenario})
+    monkeypatch.setattr(
+        parkpulse_api,
+        "get_role_quality_priors",
+        lambda scenario: (_ for _ in ()).throw(AssertionError("disabled Mongo driver path must not load role quality priors")),
+    )
     monkeypatch.setattr(parkpulse_api, "replay_collaboration_context", lambda limit: {"limit": limit})
     enriched = parkpulse_api._collaboration_context({"status": "ok"}, "food_spike")
     assert enriched["bigquery_priors"]["scenario"] == "food_spike"
+    assert enriched["role_quality_priors"]["status"] == "skipped"
+    assert enriched["role_quality_priors"]["scenario_key"] == "food_spike"
     assert enriched["relational_context"]["limit"] == 8
 
     parkpulse_api.clear_hot_endpoint_cache()
@@ -213,6 +221,7 @@ def test_parkpulse_api_endpoint_wrappers_cover_recent_surfaces(monkeypatch, tmp_
     monkeypatch.setattr(parkpulse_api, "list_benchmark_scenarios", lambda: [{"id": "ride_down"}])
     monkeypatch.setattr(parkpulse_api, "run_parkpulse_agent_benchmark", fake_agent_benchmark)
     monkeypatch.setattr(parkpulse_api, "run_digital_twin_benchmark", lambda current_state, **kwargs: {"status": "benchmark", **kwargs})
+    monkeypatch.setattr(parkpulse_api, "record_benchmark_result", lambda result: {**result, "recorded": True})
     monkeypatch.setattr(parkpulse_api, "send_guest_promotion", lambda payload: {"id": "guest", "status": "sent", "payload": payload})
     monkeypatch.setattr(parkpulse_api, "send_worker_notification", lambda payload: {"id": "worker", "status": "sent", "payload": payload})
     monkeypatch.setattr(parkpulse_api, "send_equipment_command", lambda payload: {"id": "equipment", "status": "sent", "payload": payload})

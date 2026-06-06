@@ -673,7 +673,139 @@ def _learning_context(export: dict[str, Any], zones: dict[str, dict[str, Any]]) 
     }
 
 
+def _experience_operations(export: dict[str, Any]) -> dict[str, Any]:
+    operations = _as_dict(export.get("experience_operations") or export.get("experienceOperations"))
+    if not operations:
+        return {}
+    current_status = _as_dict(operations.get("current_status_snapshot"))
+    path_status = _as_dict(operations.get("path_status"))
+    signage = _as_dict(operations.get("signage_inventory"))
+    channel_templates = _as_dict(operations.get("channel_templates"))
+    calendar = _as_dict(operations.get("operating_calendar"))
+    weather_policy = _as_dict(operations.get("weather_policy"))
+    return {
+        "source": _text(operations.get("source")) or "venue_profile.experience_operations",
+        "status": _text(operations.get("status")) or "supplied",
+        "snapshotLocalDate": _text(operations.get("snapshot_local_date")),
+        "snapshotTimeLocal": _text(operations.get("snapshot_time_local")),
+        "currentStatus": current_status,
+        "pathStatus": path_status,
+        "signageInventory": signage,
+        "channelTemplates": channel_templates,
+        "operatingCalendar": calendar,
+        "weatherPolicy": weather_policy,
+        "coverage": {
+            "currentOptions": len(_as_list(current_status.get("attractions"))),
+            "facilityStatuses": len(_as_list(current_status.get("facilityStatus"))),
+            "pathStatusSegments": len(_as_list(path_status.get("routeSegments"))),
+            "blockedPathRows": len(_as_list(path_status.get("blockedPathStatus"))),
+            "signagePlacements": len(_as_list(signage.get("placements"))),
+            "channelTemplates": len(_as_dict(channel_templates.get("templates"))),
+            "approvalWorkflowRows": len(_as_list(channel_templates.get("approvalWorkflow"))),
+            "eventWindows": len(_as_list(calendar.get("eventWindows"))),
+            "weatherPolicies": len([key for key in ("rain", "heat") if _as_dict(weather_policy.get(key))]),
+        },
+    }
+
+
+def venue_operating_context_coverage(real_inputs: dict[str, Any]) -> dict[str, Any]:
+    intelligence = _as_dict(real_inputs.get("profileIntelligence"))
+    nested_operating_context = _as_dict(intelligence.get("operatingContext"))
+    operating_context = _as_dict(real_inputs.get("operatingContext")) or nested_operating_context
+    current_status = _as_dict(real_inputs.get("currentStatus")) or _as_dict(operating_context.get("currentStatus"))
+    path_status = _as_dict(real_inputs.get("pathStatus")) or _as_dict(operating_context.get("pathStatus"))
+    signage = _as_dict(real_inputs.get("signageInventory")) or _as_dict(operating_context.get("signageInventory"))
+    templates = _as_dict(real_inputs.get("channelTemplates")) or _as_dict(operating_context.get("channelTemplates"))
+    calendar = _as_dict(real_inputs.get("operatingCalendar")) or _as_dict(operating_context.get("operatingCalendar"))
+    weather_policy = _as_dict(real_inputs.get("weatherPolicy")) or _as_dict(operating_context.get("weatherPolicy"))
+    return {
+        "currentOptions": len(_as_list(current_status.get("attractions"))),
+        "facilityStatuses": len(_as_list(current_status.get("facilityStatus"))),
+        "pathStatusSegments": len(_as_list(path_status.get("routeSegments"))),
+        "blockedPathRows": len(_as_list(path_status.get("blockedPathStatus"))),
+        "signagePlacements": len(_as_list(signage.get("placements"))),
+        "channelTemplates": len(_as_dict(templates.get("templates"))),
+        "approvalWorkflowRows": len(_as_list(templates.get("approvalWorkflow"))),
+        "eventWindows": len(_as_list(calendar.get("eventWindows"))),
+        "weatherPolicies": len([key for key in ("rain", "heat") if _as_dict(weather_policy.get(key))]),
+    }
+
+
+def _synthetic_profile_gap_rows(real_inputs: dict[str, Any]) -> tuple[list[str], list[str], dict[str, Any]]:
+    coverage = venue_operating_context_coverage(real_inputs)
+    missing = ["real venue source feed instead of approved synthetic profile"]
+    filled = []
+    if coverage["currentOptions"]:
+        filled.append("synthetic current-options and attraction status snapshot")
+    else:
+        missing.append("live attraction closure/current-options feed")
+    if coverage["pathStatusSegments"] and coverage["blockedPathRows"]:
+        filled.append("synthetic indoor, sheltered, step-free, and blocked-path status")
+    else:
+        missing.append("current indoor, sheltered, and blocked-path status")
+    if coverage["signagePlacements"]:
+        filled.append("synthetic physical signage placement inventory")
+    else:
+        missing.append("approved physical signage placement inventory")
+    if coverage["channelTemplates"] and coverage["approvalWorkflowRows"]:
+        filled.append("synthetic channel-owner CRM/app/signage/staff templates")
+    else:
+        missing.append("channel-owner approved CRM/app/staff language templates")
+    if coverage["eventWindows"] and coverage["weatherPolicies"]:
+        filled.append("synthetic operating calendar, weather policy, and blackout constraints")
+    else:
+        missing.append("operating calendar, weather policy, and event blackout constraints")
+    if coverage["facilityStatuses"]:
+        filled.append("synthetic food, restroom, guest services, and family-room status")
+    else:
+        missing.append("food, restroom, guest services, and family-room status")
+    return missing, filled, coverage
+
+
+def venue_profile_gap_contract(
+    real_inputs: dict[str, Any],
+    profile_type: str,
+    readiness: dict[str, Any] | None = None,
+    intelligence_coverage: dict[str, Any] | None = None,
+    quality_gaps: list[str] | None = None,
+    include_generation_requirements: bool = True,
+) -> dict[str, Any]:
+    readiness = _as_dict(readiness)
+    intelligence_coverage = _as_dict(intelligence_coverage)
+    quality_gaps = [_text(item) for item in (quality_gaps or []) if _text(item)]
+    clean_profile_type = _text(profile_type) or "unknown"
+    production_missing = [_text(item) for item in _as_list(readiness.get("missingForRealVenueReady")) if _text(item)]
+    synthetic_filled: list[str] = []
+    synthetic_coverage: dict[str, Any] = {}
+    if clean_profile_type == "synthetic_approved":
+        synthetic_missing, synthetic_filled, synthetic_coverage = _synthetic_profile_gap_rows(real_inputs)
+        production_missing.extend(synthetic_missing)
+    if include_generation_requirements:
+        if not _as_dict(real_inputs.get("channelOwners")):
+            production_missing.append("named channel owners for guest_app, signage, email, and staff_cue")
+        if not intelligence_coverage.get("certifiedPaths"):
+            production_missing.append("certified path records for selected route segments")
+    missing_for_production = list(dict.fromkeys([item for item in production_missing + quality_gaps if item]))
+    production_real_venue_ready = bool(readiness.get("realVenueReady") and clean_profile_type != "synthetic_approved" and not missing_for_production)
+    synthetic_complete = clean_profile_type == "synthetic_approved" and missing_for_production == ["real venue source feed instead of approved synthetic profile"]
+    return {
+        "status": "real_venue_ready" if production_real_venue_ready else "synthetic_complete_review_required" if synthetic_complete else "creative_ready_review_required",
+        "profileType": clean_profile_type,
+        "productionRealVenueReady": production_real_venue_ready,
+        "missingForProduction": missing_for_production,
+        "filledForSyntheticDemo": synthetic_filled,
+        "syntheticOperatingCoverage": synthetic_coverage,
+        "nextProfileImports": [
+            "replace approved synthetic operating snapshot with venue-owned live status feed",
+            "replace synthetic path status with real accessibility/path certification export",
+            "replace synthetic signage placements with real signage inventory and placement approvals",
+            "replace synthetic channel templates with channel-owner CMS/CRM/app template exports",
+        ],
+    }
+
+
 def _agent_context(export: dict[str, Any], zones: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    operations = _experience_operations(export)
     return {
         "source": "derived_from_approved_venue_profile",
         "groundingFields": [
@@ -686,12 +818,19 @@ def _agent_context(export: dict[str, Any], zones: dict[str, dict[str, Any]]) -> 
             "safetyInstructions",
             "channelOwners",
             "copyVariants",
+            "currentStatus",
+            "pathStatus",
+            "signageInventory",
+            "channelTemplates",
+            "operatingCalendar",
+            "weatherPolicy",
         ],
         "capabilitiesBacked": [
             "draft themed attraction and event copy from venue-approved locations",
             "build low-sensory, rainy-day, family-care, and VIP guest journeys",
             "rank route options using zone role, shelter, accessibility, dining, and care anchors",
             "generate signage and pre-arrival language with source-integrity warnings",
+            "attach demo current-options, signage placement, operating calendar, and channel-template constraints",
             "label agent outcomes for later prompt and policy evaluation",
         ],
         "humanReviewTriggers": [
@@ -702,16 +841,23 @@ def _agent_context(export: dict[str, Any], zones: dict[str, dict[str, Any]]) -> 
             "claims about live staffing, equipment, refunds, or guaranteed availability",
         ],
         "moduleBindings": {
-            "experience_studio": ["venueIdentity", "locationDetails", "guestSegments", "copyVariants", "channelOwners"],
+            "experience_studio": ["venueIdentity", "locationDetails", "guestSegments", "copyVariants", "channelOwners", "currentStatus", "pathStatus", "signageInventory", "channelTemplates", "weatherPolicy"],
             "accessibility_journey": ["spatialModel", "locationDetails", "guestSegments", "safetyInstructions"],
             "command_center_review": ["spatialModel", "operatingPriors", "safetyInstructions"],
             "guest_recommendations": ["locationDetails", "guestSegments", "spatialModel"],
             "learning_evaluation": ["learningContext", "sourceIntegrity", "operatingPriors"],
         },
+        "operationsCoverage": {
+            "currentOptions": len(_as_list(_as_dict(operations.get("currentStatus")).get("attractions"))),
+            "pathStatusSegments": len(_as_list(_as_dict(operations.get("pathStatus")).get("routeSegments"))),
+            "signagePlacements": len(_as_list(_as_dict(operations.get("signageInventory")).get("placements"))),
+            "channelTemplates": len(_as_dict(_as_dict(operations.get("channelTemplates")).get("templates"))),
+            "eventWindows": len(_as_list(_as_dict(operations.get("operatingCalendar")).get("eventWindows"))),
+        },
         "knownGaps": [
-            "live capacity by room or queue is not part of the Venue Profile and must come from live state",
+            "live capacity by room or queue is simulated in the approved profile and must be replaced by real venue state before production publish",
             "staff rosters and backstage procedures are intentionally excluded",
-            "certified ADA route geometry requires a venue-provided path feed, not derived map adjacency",
+            "certified ADA claims remain blocked even when step-free route facts are supplied",
         ],
     }
 
@@ -1093,6 +1239,7 @@ def _profile_intelligence(
         "learningSchema": _outcome_learning_schema(learning_context),
         "brandBible": _brand_bible(export),
         "liveFeedBindings": _live_feed_bindings(details, zones),
+        "operatingContext": _experience_operations(export),
     }
     merged = {**generated, **{key: value for key, value in supplied.items() if value not in (None, "", [], {})}}
     merged["source"] = "venue_profile.profile_intelligence" if supplied_raw else "derived_from_approved_venue_profile"
@@ -1106,6 +1253,11 @@ def _profile_intelligence(
         "fieldSourceRows": len(_as_list(_as_dict(merged.get("fieldSourceLedger")).get("rows"))),
         "learningLabels": len(_as_list(_as_dict(merged.get("learningSchema")).get("feedbackLabels"))),
         "liveFeedBindingGroups": len(_as_dict(merged.get("liveFeedBindings"))),
+        "currentOptions": int(_as_dict(_as_dict(merged.get("operatingContext")).get("coverage")).get("currentOptions") or 0),
+        "pathStatusSegments": int(_as_dict(_as_dict(merged.get("operatingContext")).get("coverage")).get("pathStatusSegments") or 0),
+        "signagePlacements": int(_as_dict(_as_dict(merged.get("operatingContext")).get("coverage")).get("signagePlacements") or 0),
+        "channelTemplates": int(_as_dict(_as_dict(merged.get("operatingContext")).get("coverage")).get("channelTemplates") or 0),
+        "operatingEventWindows": int(_as_dict(_as_dict(merged.get("operatingContext")).get("coverage")).get("eventWindows") or 0),
         "venueOwnedOverrides": len(supplied),
     }
     readiness = _profile_intelligence_readiness(merged, supplied_raw)
@@ -1205,6 +1357,7 @@ def build_venue_experience_data_from_export(export: dict[str, Any] | None, loade
     operating_priors = _operating_priors(export, zone_details) if export and validation.get("autofillAllowed") else {}
     learning_context = _learning_context(export, zone_details) if export and validation.get("autofillAllowed") else {}
     agent_context = _agent_context(export, zone_details) if export and validation.get("autofillAllowed") else {}
+    operating_context = _experience_operations(export) if export and validation.get("autofillAllowed") else {}
     profile_intelligence = (
         _profile_intelligence(export, location_details, zone_details, spatial_model, guest_segments, operating_priors, learning_context, agent_context)
         if export and validation.get("autofillAllowed")
@@ -1225,6 +1378,13 @@ def build_venue_experience_data_from_export(export: dict[str, Any] | None, loade
         "spatialModel": spatial_model,
         "guestSegments": guest_segments,
         "operatingPriors": operating_priors,
+        "operatingContext": operating_context,
+        "currentStatus": operating_context.get("currentStatus", {}) if operating_context else {},
+        "pathStatus": operating_context.get("pathStatus", {}) if operating_context else {},
+        "signageInventory": operating_context.get("signageInventory", {}) if operating_context else {},
+        "channelTemplates": operating_context.get("channelTemplates", {}) if operating_context else {},
+        "operatingCalendar": operating_context.get("operatingCalendar", {}) if operating_context else {},
+        "weatherPolicy": operating_context.get("weatherPolicy", {}) if operating_context else {},
         "learningContext": learning_context,
         "agentContext": agent_context,
         "profileIntelligence": profile_intelligence,
@@ -1245,6 +1405,11 @@ def build_venue_experience_data_from_export(export: dict[str, Any] | None, loade
         "fieldSourceRows": len((profile_intelligence.get("fieldSourceLedger") or {}).get("rows") or []) if isinstance(profile_intelligence, dict) else 0,
         "modulePolicies": len(profile_intelligence.get("modulePolicy") or {}) if isinstance(profile_intelligence, dict) else 0,
         "liveFeedBindingGroups": len(profile_intelligence.get("liveFeedBindings") or {}) if isinstance(profile_intelligence, dict) else 0,
+        "currentOptions": len(((operating_context.get("currentStatus") or {}).get("attractions") or [])) if isinstance(operating_context, dict) else 0,
+        "pathStatusSegments": len(((operating_context.get("pathStatus") or {}).get("routeSegments") or [])) if isinstance(operating_context, dict) else 0,
+        "signagePlacements": len(((operating_context.get("signageInventory") or {}).get("placements") or [])) if isinstance(operating_context, dict) else 0,
+        "channelTemplates": len(((operating_context.get("channelTemplates") or {}).get("templates") or {})) if isinstance(operating_context, dict) else 0,
+        "operatingEventWindows": len(((operating_context.get("operatingCalendar") or {}).get("eventWindows") or [])) if isinstance(operating_context, dict) else 0,
     }
     return {
         "status": "ready",

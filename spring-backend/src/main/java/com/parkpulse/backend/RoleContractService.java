@@ -122,10 +122,10 @@ public class RoleContractService {
 
     private List<Map<String, Object>> roles() {
         return List.of(
-            role("customer", "Customer / Guest", "guest_assistance", List.of("read_guest_guidance", "use_guest_chat")),
-            role("onsite_worker", "Onsite Worker", "task_execution", List.of("read_worker_tasks", "read_staff_training", "use_staff_training", "acknowledge_dispatch")),
-            role("ops_team", "Ops Team", "command_center", List.of("read_identity_status", "read_ops_evidence", "read_staff_training_analytics", "use_ops_chat", "dispatch_live_action", "run_live_outcome_cycle")),
-            role("ml_ops_admin", "ML / Ops Admin", "learning_governance", List.of("read_identity_status", "read_platform_status", "manage_platform_store", "read_executive_intelligence", "read_ml_training", "start_offline_training", "manage_agent_trust"))
+            role("customer", "Customer / Guest", "guest_assistance", List.of("read_guest_guidance", "use_guest_chat", "create_park_issue_ticket")),
+            role("onsite_worker", "Onsite Worker", "task_execution", List.of("read_worker_tasks", "read_staff_training", "use_staff_training", "acknowledge_dispatch", "create_park_issue_ticket")),
+            role("ops_team", "Ops Team", "command_center", List.of("read_identity_status", "read_ops_evidence", "read_staff_training_analytics", "read_product_learning", "create_park_issue_ticket", "create_training_gap_ticket", "use_ops_chat", "dispatch_live_action", "run_live_outcome_cycle")),
+            role("ml_ops_admin", "ML / Ops Admin", "learning_governance", List.of("read_identity_status", "read_platform_status", "read_product_learning", "create_training_gap_ticket", "manage_platform_store", "read_executive_intelligence", "read_ml_training", "start_offline_training", "manage_agent_trust"))
         );
     }
 

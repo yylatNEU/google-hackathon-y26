@@ -28,9 +28,8 @@
     body {
       margin: 0;
       background:
-        linear-gradient(180deg, rgba(11, 16, 20, .98), rgba(8, 11, 14, 1) 34%),
-        repeating-linear-gradient(90deg, rgba(73, 214, 232, .08) 0 1px, transparent 1px 80px),
-        repeating-linear-gradient(0deg, rgba(255, 209, 102, .06) 0 1px, transparent 1px 80px);
+        radial-gradient(circle at 18% 0%, rgba(73, 214, 232, .12), transparent 34%),
+        linear-gradient(180deg, rgba(11, 16, 20, .98), rgba(8, 11, 14, 1) 36%);
       color: var(--ink);
       letter-spacing: 0;
     }
@@ -121,7 +120,7 @@
       max-width: 1480px;
       margin: 0 auto;
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: minmax(320px, 1fr) auto;
       gap: 18px;
       padding: 14px 18px;
       align-items: center;
@@ -158,7 +157,7 @@
       margin-top: 7px;
       color: var(--muted);
       font-weight: 700;
-      max-width: 760px;
+      max-width: 620px;
       line-height: 1.45;
     }
 
@@ -168,6 +167,54 @@
       gap: 8px;
       justify-content: flex-end;
       align-items: center;
+    }
+
+    .primary-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .topbar-more {
+      position: relative;
+    }
+
+    .topbar-more summary {
+      list-style: none;
+      cursor: pointer;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-weight: 800;
+      min-height: 42px;
+    }
+
+    .topbar-more summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .topbar-more[open] summary {
+      border-color: rgba(73, 214, 232, .5);
+    }
+
+    .topbar-menu {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 8px);
+      z-index: 40;
+      width: min(520px, calc(100vw - 36px));
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto auto;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: rgba(11, 16, 20, .98);
+      box-shadow: 0 18px 50px rgba(0,0,0,.34);
     }
 
     .api-box {
@@ -712,7 +759,7 @@
 
     .live-demo {
       display: grid;
-      grid-template-columns: minmax(280px, .82fr) minmax(0, 1.18fr);
+      grid-template-columns: minmax(280px, .76fr) minmax(0, 1.24fr);
       gap: 14px;
       align-items: stretch;
     }
@@ -727,7 +774,8 @@
     }
 
     .post-panel {
-      border-color: rgba(255, 107, 122, .3);
+      border-color: rgba(141, 182, 255, .32);
+      background: rgba(141, 182, 255, .04);
     }
 
     .handshake-panel {
@@ -741,6 +789,62 @@
       font-size: 13px;
       line-height: 1.45;
       font-weight: 750;
+    }
+
+    .protocol-path {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .protocol-step {
+      display: grid;
+      grid-template-columns: 36px 1fr;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 8px;
+      padding: 10px;
+      background: rgba(255,255,255,.035);
+    }
+
+    .protocol-step .icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: rgba(73, 214, 232, .12);
+      color: var(--cyan);
+      font-size: 11px;
+      font-weight: 1000;
+      text-transform: uppercase;
+    }
+
+    .protocol-step strong {
+      display: block;
+      font-size: 13px;
+      line-height: 1.25;
+    }
+
+    .protocol-step p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+      font-weight: 720;
+    }
+
+    .context-note {
+      border: 1px solid rgba(131, 227, 119, .22);
+      border-radius: 8px;
+      padding: 11px;
+      margin-top: 12px;
+      background: rgba(131, 227, 119, .055);
+      color: #dbeee0;
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 800;
     }
 
     .flow-list {
@@ -922,6 +1026,7 @@
     }
 
     .final-result {
+      grid-column: 1 / -1;
       border: 1px solid rgba(131, 227, 119, .58);
       background:
         linear-gradient(135deg, rgba(131, 227, 119, .13), rgba(73, 214, 232, .06)),
@@ -1508,7 +1613,8 @@
     @media (max-width: 720px) {
       .topbar-inner { grid-template-columns: 1fr; }
       .api-box { width: 100%; }
-      .actions { justify-content: flex-start; }
+      .actions, .primary-actions { justify-content: flex-start; }
+      .topbar-menu { position: static; width: 100%; grid-template-columns: 1fr; margin-top: 8px; }
       .metrics, .form-grid, .policy-grid, .story-grid, .outcome-grid { grid-template-columns: 1fr; }
       .live-bubbles { grid-template-columns: 1fr; }
       .chat-line.client, .chat-line.park { margin-left: 0; margin-right: 0; }
@@ -1533,13 +1639,20 @@
           </div>
         </div>
         <div class="actions">
-          <input id="apiUrl" class="api-box" aria-label="API URL" />
           <span id="apiHealth" class="badge warn">checking api</span>
-          <a id="servedLink" class="button-link" href="http://127.0.0.1:3003/agent-handshake-full-demo.html?api=http://127.0.0.1:8001">Open localhost page</a>
-          <button id="runExternal" class="primary">Run guest case</button>
-          <button id="runCustom">Edit and run</button>
-          <button id="runSupply" class="green">Run supply-chain case</button>
-          <button id="runJudge" class="amber">Quality sweep</button>
+          <div class="primary-actions" aria-label="Primary demo cases">
+            <button id="runExternal" class="primary">Run guest case</button>
+            <button id="runSupply" class="green">Run supply-chain case</button>
+          </div>
+          <details class="topbar-more">
+            <summary>Advanced</summary>
+            <div class="topbar-menu">
+              <input id="apiUrl" class="api-box" aria-label="API URL" />
+              <a id="servedLink" class="button-link" href="http://127.0.0.1:3003/agent-handshake-full-demo.html?api=http://127.0.0.1:8001">Open localhost page</a>
+              <button id="runCustom">Edit and run</button>
+              <button id="runJudge" class="amber">Quality sweep</button>
+            </div>
+          </details>
         </div>
       </div>
     </header>
@@ -1548,34 +1661,28 @@
       <section class="card pad live-spotlight">
         <div class="section-title">
           <div>
-            <div class="kicker">Conversational presentation</div>
-            <h2>Handshake demo as a dialogue</h2>
+            <div class="kicker">Agent-native interaction</div>
+            <h2>External agents negotiate with ParkPulse</h2>
             <div class="demo-context">
-              <span class="badge info">default: guest experience</span>
-              <span class="badge">extension: supply chain</span>
-              <span class="badge">proof below</span>
+              <span class="badge info">Guest case</span>
+              <span class="badge">Supply-chain case</span>
+              <span class="badge good">Verified receipt</span>
             </div>
           </div>
           <span id="liveBadge" class="badge info">ready</span>
         </div>
         <div class="live-demo">
           <section class="post-panel">
-            <div class="kicker">Opening contrast</div>
-            <h3>Why this is not just a POST</h3>
-            <p class="compare-copy">A POST says, “Here is data, give me an answer.” A handshake says, “I represent someone, here is my authority, negotiate within it, and prove what happened.”</p>
-            <div class="script-card">
-              <strong>POST version</strong>
-              <p>“John has two kids and a peanut allergy. Give him a plan.” Result: one route, no authority model, no counteroffer, no signed receipt.</p>
+            <div class="kicker">Visual context</div>
+            <h3>Handshake contract in one loop</h3>
+            <p class="compare-copy">An outside agent does not just request data. It proves representation, negotiates what it may do, receives a bounded plan, and leaves with a receipt ParkPulse can verify later.</p>
+            <div class="protocol-path" aria-label="Agent handshake protocol loop">
+              <div class="protocol-step"><span class="icon">1</span><div><strong>Represent</strong><p>Guest or supplier agent declares who it acts for.</p></div></div>
+              <div class="protocol-step"><span class="icon">2</span><div><strong>Scope</strong><p>Shareable data, allowed actions, and cannot-do boundaries are set.</p></div></div>
+              <div class="protocol-step"><span class="icon">3</span><div><strong>Negotiate</strong><p>ParkPulse proposes; the external agent can counter.</p></div></div>
+              <div class="protocol-step"><span class="icon">4</span><div><strong>Deliver</strong><p>The final result is a plan plus policy gates and a signed receipt.</p></div></div>
             </div>
-            <div class="script-card">
-              <strong>Handshake version</strong>
-              <p>“I represent John. I can share preferences. I cannot pay, share health data, or accept refunds. ParkPulse, negotiate a better plan and respect those boundaries.”</p>
-            </div>
-            <div class="flow-list">
-              <div class="flow-row"><span>1</span><div><strong>Authority first</strong><p>The agent proves who it represents before planning.</p></div></div>
-              <div class="flow-row"><span>2</span><div><strong>Negotiation second</strong><p>ParkPulse proposes, the agent counters, ParkPulse revises.</p></div></div>
-              <div class="flow-row"><span>3</span><div><strong>Receipt last</strong><p>Unsafe actions are blocked and the outcome is signed.</p></div></div>
-            </div>
+            <div class="context-note">The demo ends on the final artifact: what the external agent can tell its user and what still requires approval.</div>
           </section>
 
           <section class="handshake-panel">
@@ -1592,9 +1699,10 @@
               <button id="nextStep" type="button" class="primary">Next</button>
               <button id="replaySteps" type="button">Replay</button>
             </div>
-            <div id="finalResult" class="final-result"></div>
             <div id="liveTimeline"></div>
           </section>
+
+          <div id="finalResult" class="final-result"></div>
 
           <section class="agent-result">
             <div class="section-title">

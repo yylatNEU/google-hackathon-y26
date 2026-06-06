@@ -174,8 +174,23 @@ public class RoleAuthService {
         if ("read_worker_tasks".equals(capability) || "acknowledge_dispatch".equals(capability)) {
             return WORKER_TASK_ROLES.contains(role);
         }
-        if ("dispatch_live_action".equals(capability) || "run_live_outcome_cycle".equals(capability)) {
+        if ("read_staff_training".equals(capability) || "use_staff_training".equals(capability)) {
+            return "onsite_worker".equals(role) || "ops_team".equals(role) || "ml_ops_admin".equals(role);
+        }
+        if ("read_staff_training_analytics".equals(capability)) {
+            return "ops_team".equals(role) || "ml_ops_admin".equals(role);
+        }
+        if ("create_park_issue_ticket".equals(capability)) {
+            return "customer".equals(role) || "onsite_worker".equals(role) || "ops_team".equals(role);
+        }
+        if ("create_training_gap_ticket".equals(capability) || "read_product_learning".equals(capability)) {
+            return "ops_team".equals(role) || "ml_ops_admin".equals(role);
+        }
+        if ("dispatch_live_action".equals(capability)) {
             return "ops_team".equals(role);
+        }
+        if ("run_live_outcome_cycle".equals(capability)) {
+            return "ops_team".equals(role) || "ml_ops_admin".equals(role);
         }
         if ("read_platform_status".equals(capability) || "manage_platform_store".equals(capability) || "manage_agent_trust".equals(capability)) {
             return "ml_ops_admin".equals(role);

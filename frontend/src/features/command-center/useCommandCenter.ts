@@ -281,7 +281,9 @@ export type LiveAgentsSmokeReport = {
 };
 
 function normalizeRunTelemetry(payload: RunPayload): RunTelemetry {
-  return payload.run_telemetry ?? payload;
+  if (!payload.run_telemetry) return payload;
+  const { run_telemetry: runTelemetry, ...topLevelTelemetry } = payload;
+  return { ...topLevelTelemetry, ...runTelemetry };
 }
 
 function runtimeDispatchBody(dispatch: DeliveryDispatch) {
@@ -418,7 +420,7 @@ export function useCommandCenter() {
     try {
       const response = await fetchParkPulseApi(runGcpTraining ? "/api/park/actual-training?runGcpTraining=true" : "/api/park/actual-training", {
         headers: { "x-parkpulse-role": "ml_ops_admin" },
-        timeoutMs: longRunningRequestTimeoutMs,
+        timeoutMs: Math.max(longRunningRequestTimeoutMs, 180_000),
       });
       const payload = (await response.json()) as ActualTrainingStatus;
       setActualTraining(payload);
@@ -533,7 +535,7 @@ export function useCommandCenter() {
         method: "POST",
         headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify({ stale_only: true, refresh_margin_seconds: 20 }),
-        timeoutMs: longRunningRequestTimeoutMs,
+        timeoutMs: Math.max(longRunningRequestTimeoutMs, 180_000),
       });
       const payload = (await response.json()) as LiveFeedRefreshSupervisorResult;
       setLiveFeedRefreshSupervisor(payload);
@@ -802,10 +804,13 @@ export function useCommandCenter() {
         body: JSON.stringify({
           refresh_stale: true,
           execute: false,
+          controlled_executor_execute: true,
+          allow_risk_escalation: true,
+          measure_post_action: true,
           min_ready_feeds: 4,
           require_persisted_events: true,
         }),
-        timeoutMs: longRunningRequestTimeoutMs,
+        timeoutMs: Math.max(longRunningRequestTimeoutMs, 180_000),
       });
       const payload = (await response.json()) as RunPayload;
       const telemetry = normalizeRunTelemetry(payload);

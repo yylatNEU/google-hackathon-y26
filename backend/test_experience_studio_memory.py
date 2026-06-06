@@ -223,6 +223,10 @@ def test_profile_backed_generation_uses_venue_pattern_and_copy_voice(monkeypatch
     assert "rain" in package["copyVoice"]["thematicLexicon"]
     assert package["venuePattern"]["channelRules"]["guest_app"]
     assert venue_data["realInputs"]["profileIntelligence"]["experienceRules"]["routePatterns"]["rainy_day"]["preferredStops"]
+    assert package["venueDataGapAnalysis"]["status"] == "synthetic_complete_review_required"
+    assert package["venueDataGapAnalysis"]["missingForProduction"] == ["real venue source feed instead of approved synthetic profile"]
+    assert "synthetic current-options and attraction status snapshot" in package["venueDataGapAnalysis"]["filledForSyntheticDemo"]
+    assert package["venueDataGapAnalysis"]["syntheticOperatingCoverage"]["signagePlacements"] >= 4
 
 
 def test_generation_uses_approved_finished_work_memory_without_feedback_loop(monkeypatch, tmp_path):
@@ -314,9 +318,16 @@ def test_human_promoted_learning_rule_influences_future_generation(monkeypatch, 
     assert promoted["rule"]["approvalStatus"] == "approved"
     assert promoted["rule"]["learningSource"] == "human_promoted_finished_work_rule"
     assert promoted["rule"]["learningEligible"] is False
+    craft_promoted = experience_studio.promote_experience_studio_learning_rule(
+        draft_id,
+        {"candidateId": "creative_craft_examples", "actor": "creative_lead", "note": "Accepted one creative lead sample as reusable craft guidance."},
+    )
+    assert craft_promoted["status"] == "promoted"
+    assert "creative_craft" in craft_promoted["rule"]["tags"]
+    assert "craft sample" in craft_promoted["rule"]["lesson"].lower()
 
     rules = experience_studio.list_experience_studio_learning_rules(limit=5)
-    assert rules["count"] >= 1
+    assert rules["count"] >= 2
 
     second = experience_studio._draft_from_payload(
         {
@@ -332,11 +343,14 @@ def test_human_promoted_learning_rule_influences_future_generation(monkeypatch, 
     package_rules = second["creativePackage"]["approvedRuleInfluence"]
 
     assert rule_context["status"] == "ready"
-    assert rule_context["ruleCount"] >= 1
+    assert rule_context["ruleCount"] >= 2
     assert rule_context["learningBoundary"] == "Rules are human-promoted from finished work and can shape generation, but they cannot override Venue Profile facts, route locks, banned claims, or review gates."
+    assert any("creative_craft" in rule.get("tags", []) for rule in rule_context["rules"])
     assert package_rules["usedForGeneration"] is True
     assert package_rules["authority"] == "human_promoted_rules_only"
     assert second["creativeSynthesis"]["learningRuleInfluence"]["usedForGeneration"] is True
+    assert any("creative_craft" in rule.get("tags", []) for rule in second["creativeSynthesis"]["learningRuleInfluence"]["rules"])
+    assert any("accepted craft" in item.lower() or "creative lead-approved craft" in item.lower() for item in second["creativePackage"]["memoryApplication"]["visibleChanges"])
     assert "approvedRulesApplied" in second["creativePackage"]["memoryApplication"]
     assert any(
         dossier.get("section") == "approved rules"
@@ -348,6 +362,11 @@ def test_human_promoted_learning_rule_influences_future_generation(monkeypatch, 
         {"status": "demoted", "actor": "reviewer", "note": "Rule no longer needed."},
     )
     assert demoted["status"] == "updated"
+    craft_demoted = experience_studio.update_experience_studio_learning_rule(
+        craft_promoted["rule"]["id"],
+        {"status": "demoted", "actor": "creative_lead", "note": "Craft sample rule no longer needed."},
+    )
+    assert craft_demoted["status"] == "updated"
 
     third = experience_studio._draft_from_payload(
         {
@@ -579,6 +598,45 @@ def test_conversation_plan_uses_followup_answers_to_refine_recommendation(monkey
     assert payload["walkingPace"] == "compact"
     assert "Success metric: pre-arrival clarity." in payload["constraints"]
     assert "Approved comfort claims:" in payload["constraints"]
+
+
+def test_approved_learning_rules_deduplicate_semantic_duplicates(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+
+    duplicate_rows = [
+        {
+            "id": "rule_a",
+            "approvalStatus": "approved",
+            "rule": "Keep the rainy-day package complete: route, channels, staff cue, review gates.",
+            "scope": {"templateId": "rainy-day", "audience": "families", "channels": ["guest_app", "email"]},
+            "tags": ["complete_package", "rainy-day"],
+            "guardrails": ["Do not override venue profile facts."],
+        },
+        {
+            "id": "rule_b",
+            "approvalStatus": "approved",
+            "rule": "Keep   the rainy-day package complete: route, channels, staff cue, review gates.",
+            "scope": {"templateId": "rainy-day", "audience": "families", "channels": ["email", "guest_app"]},
+            "tags": ["rainy-day", "complete_package"],
+            "guardrails": ["Do not override venue profile facts."],
+        },
+        {
+            "id": "rule_c",
+            "approvalStatus": "approved",
+            "rule": "Use short pre-arrival copy before guest arrival.",
+            "scope": {"templateId": "rainy-day", "audience": "families", "channels": ["email"]},
+            "tags": ["pre_arrival"],
+            "guardrails": ["Do not invent weather guarantees."],
+        },
+    ]
+    monkeypatch.setattr(experience_studio, "_latest_studio_memory", lambda collection, limit: duplicate_rows)
+
+    active = experience_studio._active_learning_rules("rainy-day", "families", ["guest_app", "email"])
+    context = experience_studio._learning_rule_context("rainy-day", "families", ["guest_app", "email"])
+
+    assert [item["id"] for item in active] == ["rule_a", "rule_c"]
+    assert context["ruleCount"] == 2
+    assert len(context["appliedRules"]) == 2
 
 
 def test_full_studio_lifecycle_writes_audit_receipts(monkeypatch, tmp_path):

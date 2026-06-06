@@ -56,6 +56,24 @@ def _receipt_status(receipt: dict[str, Any]) -> str:
     return str(result.get("status") or "")
 
 
+def _proposal_policy_status(proposal: dict[str, Any]) -> str:
+    policy = proposal.get("policy_judge", {}) if isinstance(proposal.get("policy_judge"), dict) else {}
+    return str(policy.get("status") or "unknown")
+
+
+def _proposal_disposition(proposal: dict[str, Any]) -> str:
+    disposition = proposal.get("action_disposition", {}) if isinstance(proposal.get("action_disposition"), dict) else {}
+    return str(disposition.get("decision") or "")
+
+
+def _proposal_key(proposal: dict[str, Any]) -> tuple[str, str, str]:
+    return (str(proposal.get("agent_id") or ""), str(proposal.get("department") or ""), _proposal_tool(proposal))
+
+
+def _receipt_key(receipt: dict[str, Any]) -> tuple[str, str, str]:
+    return (str(receipt.get("agent") or ""), str(receipt.get("department") or ""), str(receipt.get("source_tool") or ""))
+
+
 def _coverage_row(result: dict[str, Any]) -> dict[str, Any]:
     summary = result.get("summary", {}) if isinstance(result.get("summary"), dict) else {}
     payload = result.get("payload", {}) if isinstance(result.get("payload"), dict) else {}
@@ -67,32 +85,33 @@ def _coverage_row(result: dict[str, Any]) -> dict[str, Any]:
     alignment = summary.get("issue_action_alignment", {}) if isinstance(summary.get("issue_action_alignment"), dict) else {}
 
     issue_specific = [row for row in proposals if isinstance(row, dict) and row.get("issue_specific") is True]
-    issue_specific_keys = {
-        (str(row.get("department") or ""), _proposal_tool(row))
-        for row in issue_specific
-    }
     executed_receipts = [row for row in receipts if isinstance(row, dict) and _receipt_status(row) == "executed_controlled"]
-    held_receipts = [row for row in receipts if isinstance(row, dict) and _receipt_status(row) == "held"]
-    executed_keys = {
-        (str(row.get("department") or ""), str(row.get("source_tool") or ""))
-        for row in executed_receipts
-    }
-    held_keys = {
-        (str(row.get("department") or ""), str(row.get("source_tool") or ""))
-        for row in held_receipts
-    }
+    executed_keys = {_receipt_key(row) for row in executed_receipts}
     issue_specific_executed = sorted(
         f"{department}::{tool}"
-        for department, tool in (issue_specific_keys & executed_keys)
-        if department and tool
+        for row in issue_specific
+        for agent, department, tool in [_proposal_key(row)]
+        if agent and department and tool and _proposal_status(row) == "ready_for_executor" and _proposal_disposition(row) == "execute_controlled_internal" and (agent, department, tool) in executed_keys
     )
     issue_specific_held = sorted(
         f"{department}::{tool}"
-        for department, tool in (issue_specific_keys & held_keys)
-        if department and tool
+        for row in issue_specific
+        for _agent, department, tool in [_proposal_key(row)]
+        if department
+        and tool
+        and (
+            _proposal_status(row) != "ready_for_executor"
+            or _proposal_disposition(row) != "execute_controlled_internal"
+            or _proposal_policy_status(row) in {"requires_human_approval", "requires_compliance", "requires_executive", "blocked"}
+        )
     )
+    issue_specific_sensitive = [
+        row
+        for row in issue_specific
+        if _proposal_policy_status(row) in {"requires_human_approval", "requires_compliance", "requires_executive", "blocked"}
+    ]
     issue_specific_policy_mix = {
-        str((row.get("policy_judge", {}) if isinstance(row.get("policy_judge"), dict) else {}).get("status") or "unknown")
+        _proposal_policy_status(row)
         for row in issue_specific
         if isinstance(row, dict)
     }
@@ -102,8 +121,8 @@ def _coverage_row(result: dict[str, Any]) -> dict[str, Any]:
             "department": row.get("department"),
             "tool": _proposal_tool(row),
             "status": _proposal_status(row),
-            "policy": (row.get("policy_judge", {}) if isinstance(row.get("policy_judge"), dict) else {}).get("status"),
-            "disposition": (row.get("action_disposition", {}) if isinstance(row.get("action_disposition"), dict) else {}).get("decision"),
+            "policy": _proposal_policy_status(row),
+            "disposition": _proposal_disposition(row),
             "recommendation": _short(row.get("recommendation")),
         }
         for row in issue_specific[:4]
@@ -112,8 +131,8 @@ def _coverage_row(result: dict[str, Any]) -> dict[str, Any]:
 
     alignment_status = str(alignment.get("status") or "missing")
     has_issue_specific = bool(issue_specific)
-    has_executed_match = bool(issue_specific_executed) or bool(alignment.get("executed_match"))
-    has_gated_sensitive = bool(issue_specific_held) or bool(alignment.get("held_match"))
+    has_executed_match = bool(issue_specific_executed)
+    has_gated_sensitive = bool(issue_specific_held) or not issue_specific_sensitive
     ownerless = _safe_int((summary.get("actions", {}) if isinstance(summary.get("actions"), dict) else {}).get("unresolved_without_owner_count"))
     if summary.get("status") != "passed":
         grade = "failed"
@@ -156,6 +175,7 @@ def _coverage_row(result: dict[str, Any]) -> dict[str, Any]:
         "issue_specific_proposal_count": len(issue_specific),
         "issue_specific_executed": issue_specific_executed,
         "issue_specific_held": issue_specific_held,
+        "issue_specific_sensitive_count": len(issue_specific_sensitive),
         "issue_specific_policy_mix": sorted(issue_specific_policy_mix),
         "proposal_count": len(proposals),
         "negotiation_round_count": _safe_int((summary.get("agents", {}) if isinstance(summary.get("agents"), dict) else {}).get("negotiation_round_count")),

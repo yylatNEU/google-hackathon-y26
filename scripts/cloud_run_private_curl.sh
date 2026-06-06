@@ -14,7 +14,10 @@ if [[ -z "$PROJECT_ID" ]]; then
   exit 2
 fi
 
-SERVICE_URL="$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')"
+SERVICE_URL="${PARKPULSE_PRIVATE_VERIFY_URL:-${PARKPULSE_CLOUD_RUN_URL:-}}"
+if [[ -z "$SERVICE_URL" ]]; then
+  SERVICE_URL="$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')"
+fi
 TOKEN="$(gcloud auth print-identity-token)"
 ROLE_HEADERS=()
 

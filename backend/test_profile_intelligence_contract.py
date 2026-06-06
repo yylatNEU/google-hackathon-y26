@@ -1,6 +1,6 @@
 import copy
 
-from venue_experience_data import approved_synthetic_venue_export, build_venue_experience_data_from_export, profile_intelligence_contract, validate_venue_experience_export
+from venue_experience_data import approved_synthetic_venue_export, build_venue_experience_data_from_export, profile_intelligence_contract, validate_venue_experience_export, venue_profile_gap_contract
 
 
 def _certified_profile_intelligence():
@@ -87,7 +87,37 @@ def test_approved_synthetic_profile_supplies_creative_venue_intelligence():
     assert intelligence["modulePolicy"]["experience_studio"]["preferredOutputs"]
     assert intelligence["learningSchema"]["feedbackLabels"]
     assert intelligence["liveFeedBindings"]["weather"]
+    assert real_inputs["currentStatus"]["attractions"]
+    assert real_inputs["pathStatus"]["routeSegments"]
+    assert real_inputs["signageInventory"]["placements"]
+    assert real_inputs["channelTemplates"]["templates"]["guest_app"]["requiredClauses"]
+    assert real_inputs["operatingCalendar"]["eventWindows"]
+    assert real_inputs["weatherPolicy"]["rain"]["blockedClaims"]
+    assert intelligence["operatingContext"]["coverage"]["signagePlacements"] >= 4
+    assert intelligence["coverage"]["currentOptions"] >= 5
+    assert intelligence["coverage"]["channelTemplates"] >= 4
     assert intelligence["coverage"]["venueOwnedOverrides"] >= 8
+
+
+def test_venue_profile_gap_contract_consolidates_synthetic_operating_coverage():
+    venue_data = build_venue_experience_data_from_export(approved_synthetic_venue_export(), loaded_from="approved_profile.json")
+    real_inputs = venue_data["realInputs"]
+    intelligence = real_inputs["profileIntelligence"]
+    contract = venue_profile_gap_contract(
+        real_inputs,
+        real_inputs["venueIdentity"]["profileType"],
+        intelligence["readiness"],
+        intelligence["coverage"],
+        [],
+        include_generation_requirements=True,
+    )
+
+    assert contract["status"] == "synthetic_complete_review_required"
+    assert contract["productionRealVenueReady"] is False
+    assert contract["missingForProduction"] == ["real venue source feed instead of approved synthetic profile"]
+    assert "synthetic channel-owner CRM/app/signage/staff templates" in contract["filledForSyntheticDemo"]
+    assert contract["syntheticOperatingCoverage"]["currentOptions"] >= 5
+    assert contract["syntheticOperatingCoverage"]["approvalWorkflowRows"] >= 4
 
 
 def test_real_venue_ready_requires_certified_profile_intelligence_and_non_synthetic_sources():

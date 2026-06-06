@@ -92,7 +92,16 @@ from park_staff_roleplay import (
     review_staff_training_receipt,
     start_staff_training_session,
 )
-from product_learning_loop import create_park_issue_ticket, create_training_gap_ticket, product_learning_loop_status
+from product_learning_loop import (
+    apply_active_ops_checklist_guidance,
+    create_park_issue_ticket,
+    create_training_gap_ticket,
+    product_learning_event_store_status,
+    product_learning_loop_status,
+    promote_learning_version,
+    resolve_review_place_queue,
+    rollback_learning_version,
+)
 from live_feedback_loop import (
     apply_live_food_ops_to_state,
     apply_live_guest_flow_to_state,
@@ -200,6 +209,7 @@ _monitor_evidence_refreshing: set[str] = set()
 _monitor_evidence_lock = threading.Lock()
 _monitor_evidence_mongo_client: Any | None = None
 _monitor_evidence_mongo_lock = threading.Lock()
+_monitor_evidence_storage_status_cache: tuple[float, dict[str, Any]] | None = None
 _monitor_evidence_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-monitor-evidence")
 _live_feed_health_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _live_feed_weather_refresh_task: asyncio.Task | None = None
@@ -8074,10 +8084,12 @@ def _monitor_evidence_snapshot_payload(limit: int, graph: dict[str, Any]) -> dic
     bounded_limit = max(1, min(limit, 80))
     source_watermark = _monitor_dict(graph.get("source_watermark"))
     now_epoch = time.time()
+    created_at_date = datetime.fromtimestamp(now_epoch, tz=timezone.utc)
     return {
         "status": "ready",
         "mode": "monitor_evidence_snapshot",
-        "created_at": datetime.fromtimestamp(now_epoch, tz=timezone.utc).isoformat(),
+        "created_at": created_at_date.isoformat(),
+        "created_at_date": created_at_date,
         "created_epoch": now_epoch,
         "created_monotonic": time.monotonic(),
         "ttl_seconds": _monitor_evidence_cache_ttl_seconds(),
@@ -8087,6 +8099,143 @@ def _monitor_evidence_snapshot_payload(limit: int, graph: dict[str, Any]) -> dic
         "source_watermark": source_watermark,
         "graph": graph,
     }
+
+
+def _monitor_evidence_mongo_indexes(collection: Any) -> list[str]:
+    created: list[str] = []
+    ttl_seconds = max(0, _int_env("PARKPULSE_MONITOR_EVIDENCE_MONGO_TTL_SECONDS", 0))
+    index_specs: list[tuple[Any, dict[str, Any]]] = [
+        ([("key", 1)], {"name": "monitor_evidence_key_idx", "background": True}),
+        ([("source_fingerprint", 1)], {"name": "monitor_evidence_source_fingerprint_idx", "background": True}),
+    ]
+    if ttl_seconds > 0:
+        index_specs.append(([("created_at_date", 1)], {"name": "monitor_evidence_created_ttl_idx", "expireAfterSeconds": ttl_seconds, "background": True}))
+    for spec, options in index_specs:
+        try:
+            name = collection.create_index(spec, **options)
+            created.append(str(name or options.get("name") or spec))
+        except AttributeError:
+            break
+    return created
+
+
+def monitor_evidence_storage_status(*, force_refresh: bool = False) -> dict[str, Any]:
+    global _monitor_evidence_storage_status_cache
+    ttl = max(0.0, _float_env("PARKPULSE_MONITOR_EVIDENCE_STORAGE_STATUS_TTL_SECONDS", 30.0))
+    now = time.monotonic()
+    if not force_refresh and ttl > 0 and _monitor_evidence_storage_status_cache and _monitor_evidence_storage_status_cache[0] > now:
+        return _monitor_evidence_copy(_monitor_evidence_storage_status_cache[1])
+
+    mode = _monitor_evidence_storage_mode()
+    store = _monitor_evidence_snapshot_store(40)
+    local_path = _monitor_evidence_snapshot_path(40)
+    base = {
+        "status": "ready",
+        "ready": True,
+        "mode": store.get("mode"),
+        "backend": store.get("backend"),
+        "requested_storage": mode,
+        "shared_across_instances": bool(store.get("shared_across_instances")),
+        "snapshot_store": store,
+        "local_fallback_path": str(local_path),
+        "readiness_issues": [],
+    }
+    if mode == "local":
+        payload = {**base, "writable": os.access(local_path.parent if local_path.parent.exists() else local_path.parent.parent, os.W_OK) if local_path.parent.parent.exists() else None}
+    elif mode == "redis":
+        payload = {
+            **base,
+            "status": "degraded",
+            "ready": False,
+            "shared_across_instances": False,
+            "readiness_issues": ["Redis Monitor evidence snapshots are registered as a future cache target; this runtime currently serves MongoDB or local JSON snapshots."],
+            "fallback": "local_json_snapshot",
+        }
+    else:
+        uri = _monitor_evidence_mongo_uri()
+        if not uri:
+            payload = {
+                **base,
+                "status": "degraded",
+                "ready": False,
+                "configured": False,
+                "connected": False,
+                "readiness_issues": ["PARKPULSE_MONITOR_EVIDENCE_STORAGE=mongodb but no Mongo URI is configured."],
+            }
+        elif not _truthy_env("PARKPULSE_MONITOR_EVIDENCE_READINESS_PING", True):
+            payload = {
+                **base,
+                "status": "configured",
+                "ready": True,
+                "configured": True,
+                "connected": None,
+                "database": _monitor_evidence_mongo_database_name(),
+                "collection": _monitor_evidence_mongo_collection_name(),
+                "validation_path": "Set PARKPULSE_MONITOR_EVIDENCE_READINESS_PING=true to validate Mongo read/write and index creation on readiness.",
+            }
+        else:
+            started = time.monotonic()
+            client = _monitor_evidence_mongo_client_ref()
+            if client is None:
+                payload = {
+                    **base,
+                    "status": "degraded",
+                    "ready": False,
+                    "configured": True,
+                    "connected": False,
+                    "database": _monitor_evidence_mongo_database_name(),
+                    "collection": _monitor_evidence_mongo_collection_name(),
+                    "readiness_issues": ["Mongo Monitor evidence snapshot client is unavailable."],
+                }
+            else:
+                database = _monitor_evidence_mongo_database_name()
+                collection_name = _monitor_evidence_mongo_collection_name()
+                try:
+                    collection = client[database][collection_name]
+                    index_names = _monitor_evidence_mongo_indexes(collection) if _truthy_env("PARKPULSE_MONITOR_EVIDENCE_MONGO_CREATE_INDEXES", True) else []
+                    max_time_ms = max(250, _int_env("PARKPULSE_MONITOR_EVIDENCE_MONGO_QUERY_TIMEOUT_MS", 1000))
+                    write_checked = _truthy_env("PARKPULSE_MONITOR_EVIDENCE_READINESS_WRITE_CHECK", True)
+                    if write_checked:
+                        collection.replace_one(
+                            {"_id": "__monitor_evidence_readiness__"},
+                            {
+                                "_id": "__monitor_evidence_readiness__",
+                                "status": "ready",
+                                "mode": "monitor_evidence_storage_readiness",
+                                "updated_at": datetime.now(timezone.utc),
+                                "storage_key": "monitor_evidence_snapshot",
+                            },
+                            upsert=True,
+                        )
+                    collection.find_one({"_id": "__monitor_evidence_readiness__"}, {"_id": 1}, max_time_ms=max_time_ms)
+                    payload = {
+                        **base,
+                        "status": "ready",
+                        "ready": True,
+                        "configured": True,
+                        "connected": True,
+                        "database": database,
+                        "collection": collection_name,
+                        "write_checked": write_checked,
+                        "indexes": index_names,
+                        "latency_ms": int((time.monotonic() - started) * 1000),
+                    }
+                except Exception as error:
+                    payload = {
+                        **base,
+                        "status": "degraded",
+                        "ready": False,
+                        "configured": True,
+                        "connected": False,
+                        "database": database,
+                        "collection": collection_name,
+                        "readiness_issues": [str(error)[:240]],
+                        "latency_ms": int((time.monotonic() - started) * 1000),
+                    }
+
+    if ttl > 0:
+        _monitor_evidence_storage_status_cache = (now + ttl, _monitor_evidence_copy(payload))
+    return _monitor_evidence_copy(payload)
 
 
 def _read_monitor_evidence_mongo_snapshot(limit: int, current_watermark: dict[str, Any] | None = None) -> tuple[float, float, dict[str, Any]] | None:
@@ -8524,9 +8673,11 @@ def _readiness_payload() -> dict[str, Any]:
     integration = _lightweight_integration_status()
     delivery = _hot_delivery_outbox_health()
     platform = _hot_platform_store_health()
+    monitor_storage = monitor_evidence_storage_status()
 
     dependency_status = {
         "platform_store": platform,
+        "monitor_evidence_snapshot": monitor_storage,
         "gemini": integration.get("gemini", {}),
         "mongo": integration.get("mongo", {}),
         "bigquery": integration.get("bigquery", {}),
@@ -8535,7 +8686,7 @@ def _readiness_payload() -> dict[str, Any]:
         "evaluator_loop": integration.get("evaluator_loop", {}),
     }
     hard_dependencies = ["platform_store", "gemini", "bigquery"]
-    soft_dependencies = ["mongo", "delivery_outbox"]
+    soft_dependencies = ["mongo", "delivery_outbox", "monitor_evidence_snapshot"]
     hard_blockers = [name for name in hard_dependencies if not _dependency_ready(dependency_status.get(name, {}))]
     degraded = [name for name in soft_dependencies if not _dependency_ready(dependency_status.get(name, {}))]
     status = "not_ready" if hard_blockers else "degraded" if degraded else "ok"
@@ -8583,6 +8734,7 @@ async def _readiness_payload_bounded() -> dict[str, Any]:
 def _readyz_fast_payload() -> dict[str, Any]:
     configured = {
         "mongo": bool(os.getenv("MONGODB_DIRECT_URI") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")),
+        "monitor_evidence_snapshot": _monitor_evidence_snapshot_store(40),
         "mongodb_model_api_key": bool(os.getenv("MONGODB_MODEL_API_KEY")),
         "gemini": bool(os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")),
         "bigquery": bool(os.getenv("BIGQUERY_DATASET") or os.getenv("PARKPULSE_LIVE_BIGQUERY")),
@@ -9181,60 +9333,17 @@ def _fast_agent_role_eval_report() -> dict[str, Any]:
 
 
 async def _real_agent_role_eval_report() -> dict[str, Any]:
-    customer_route = route_agent_role("where should my family go next", "customer")
     scan_task = asyncio.create_task(_agent_role_run_payload("scan vague guest complaints and worker taps for early crowd risk", "scan"))
     react_task = asyncio.create_task(_agent_role_run_payload("food court is down and mobile orders are backing up near the west plaza", "auto"))
     proact_task = asyncio.create_task(_agent_role_run_payload("Staff note: kids are crying near the barrier and the crowd stopped moving by the maze exit", "auto"))
     qa_task = asyncio.create_task(_agent_role_run_payload("pre-deploy failure mode matrix", "qa"))
-    customer_task = asyncio.create_task(
-        _customer_support_agent_payload(
-            {
-                "question": "Where should my family go next with low waits and a calm route?",
-                "mode": "recommendation",
-                "station": {"id": "eval_customer_station", "name": "Customer support station"},
-            }
-        )
-    )
+    customer_task = asyncio.create_task(_agent_role_run_payload("Where should my family go next with low waits and a calm route?", "customer"))
     scan_payload, react_payload, proact_payload, qa_payload, customer_payload = await asyncio.gather(
         scan_task,
         react_task,
         proact_task,
         qa_task,
         customer_task,
-    )
-    customer_trace = _role_tool_trace(customer_route, selected_role="customer", scenario_key="customer_public")
-    customer_payload.update(
-        {
-            "selected_role": "customer",
-            "skill": customer_route.get("skill"),
-            "role_route": customer_route,
-            "role_run": {
-                "role": "customer",
-                "dispatch_allowed": False,
-                "dispatch_count": 0,
-                "policy_gates": customer_route.get("policy_gates", []),
-                "receipt_artifacts": customer_route.get("expected_receipt", []),
-            },
-            "digital_twin_tools": customer_trace,
-            "run_telemetry": {
-                "delivery": {"summary": {"total": 0}, "dispatches": []},
-                "digital_twin_tools": customer_trace,
-            },
-            "role_receipt": {
-                "role": "customer",
-                "skill": customer_route.get("skill"),
-                "scenario_key": "customer_public",
-                "dispatch_ids": [],
-                "read_only": True,
-            },
-        }
-    )
-    customer_payload = _attach_role_work_contract(
-        customer_payload,
-        message="Where should my family go next with low waits and a calm route?",
-        route=customer_route,
-        role="customer",
-        scenario_key="customer_public",
     )
     payloads = {
         "scan": scan_payload,
@@ -12467,6 +12576,21 @@ async def _build_copilot_payload_with_runtime(request_payload: dict[str, Any]) -
         }
 
     try:
+        if _truthy_env("PARKPULSE_COPILOT_HOT_PATH_LOCAL_ONLY", False) and _truthy_env("PARKPULSE_COPILOT_LIGHTWEIGHT_PATH", True):
+            mark("lightweight_hot_path")
+            payload = await _build_lightweight_copilot_payload(request_payload)
+            payload.setdefault("latency_diagnostics", {})
+            if isinstance(payload["latency_diagnostics"], dict):
+                payload["latency_diagnostics"]["wrapper"] = {
+                    "mode": "main_asgi_copilot_wrapper",
+                    "path": "lightweight_hot_path_local_only",
+                    "total_ms": round((time.monotonic() - started) * 1000, 2),
+                    "stages": stages,
+                    "load_timeout_seconds": load_timeout,
+                    "run_timeout_seconds": run_timeout,
+                    "full_runtime": _full_runtime_status(),
+                }
+            return payload
         if _parkpulse_app is None:
             if _truthy_env("PARKPULSE_COPILOT_LIGHTWEIGHT_PATH", True):
                 mark("lightweight_path")
@@ -13543,6 +13667,95 @@ async def app(scope, receive, send):
             )
         except Exception as error:
             await _send_json(send, 200, {"status": "error", "mode": "training_gap_ticket", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "POST" and path == "/api/park/product-learning/promote-version":
+        try:
+            request_payload = await _read_json_body(receive)
+            if not await _authorize_or_send(send, scope, "read_product_learning", "learning_version_promotion", request_payload, default_role="ops_team"):
+                return
+            operational_backlog = None
+            state = None
+            try:
+                from agent_ops_ledger import build_operational_backlog
+
+                cached_state = _hot_endpoint_cache.get("park_state_lite")
+                if cached_state:
+                    state = cached_state[1]
+                else:
+                    state = await asyncio.wait_for(
+                        _fast_park_state_lite(),
+                        timeout=max(0.5, _float_env("PARKPULSE_PRODUCT_LEARNING_STATE_TIMEOUT_SECONDS", 1.5)),
+                    )
+                    _hot_endpoint_cache["park_state_lite"] = (time.monotonic() + _hot_endpoint_ttls()["park_state"], state)
+                operational_backlog = await asyncio.wait_for(
+                    asyncio.to_thread(build_operational_backlog, state),
+                    timeout=max(0.5, _float_env("PARKPULSE_PRODUCT_LEARNING_BACKLOG_TIMEOUT_SECONDS", 2.5)),
+                )
+            except Exception:
+                operational_backlog = None
+            await _send_json(
+                send,
+                200,
+                promote_learning_version(
+                    str(request_payload.get("version_id") or request_payload.get("versionId") or ""),
+                    operational_backlog=operational_backlog,
+                    park_state=state,
+                    promoted_by=request_payload.get("promoted_by") or request_payload.get("promotedBy") or "ops_team",
+                ),
+            )
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "learning_version_promotion", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "POST" and path == "/api/park/product-learning/rollback-version":
+        try:
+            request_payload = await _read_json_body(receive)
+            if not await _authorize_or_send(send, scope, "read_product_learning", "learning_version_rollback", request_payload, default_role="ops_team"):
+                return
+            await _send_json(
+                send,
+                200,
+                rollback_learning_version(
+                    str(request_payload.get("version_id") or request_payload.get("versionId") or ""),
+                    reason=request_payload.get("reason"),
+                    rolled_back_by=request_payload.get("rolled_back_by") or request_payload.get("rolledBackBy") or "ops_team",
+                ),
+            )
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "learning_version_rollback", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "POST" and path == "/api/park/product-learning/review-place-resolution":
+        try:
+            request_payload = await _read_json_body(receive)
+            if not await _authorize_or_send(send, scope, "read_product_learning", "review_place_resolution", request_payload, default_role="ops_team"):
+                return
+            issue_types = request_payload.get("issue_types") or request_payload.get("issueTypes")
+            if not isinstance(issue_types, list):
+                issue_types = []
+            await _send_json(
+                send,
+                200,
+                resolve_review_place_queue(
+                    str(request_payload.get("review_place") or request_payload.get("reviewPlace") or ""),
+                    decision=request_payload.get("decision"),
+                    notes=request_payload.get("notes"),
+                    reviewer=request_payload.get("reviewer") or "ops_team",
+                    issue_types=issue_types,
+                ),
+            )
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "review_place_resolution", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "GET" and path == "/api/park/product-learning/event-store":
+        try:
+            if not await _authorize_or_send(send, scope, "read_product_learning", "product_learning_event_store", None, default_role="ops_team"):
+                return
+            await _send_json(send, 200, product_learning_event_store_status())
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "product_learning_event_store", "readiness_issues": [str(error)[:240]]})
         return
 
     if method == "GET" and path == "/api/park/product-learning/loop":
@@ -15123,7 +15336,7 @@ async def app(scope, receive, send):
                 send,
                 200,
                 await asyncio.wait_for(
-                    asyncio.to_thread(build_operational_backlog, state),
+                    asyncio.to_thread(lambda: apply_active_ops_checklist_guidance(build_operational_backlog(state))),
                     timeout=max(0.5, _float_env("PARKPULSE_OPERATIONAL_BACKLOG_TIMEOUT_SECONDS", 2.5)),
                 ),
             )
@@ -17466,11 +17679,19 @@ async def app(scope, receive, send):
                 refresh_stale=str(payload.get("refresh_stale", payload.get("refreshStale", "true"))).strip().lower()
                 not in {"0", "false", "no", "off"},
                 execute=str(payload.get("execute", "false")).strip().lower() in {"1", "true", "yes", "on"},
+                controlled_executor_execute=str(payload.get("controlled_executor_execute", payload.get("controlledExecutorExecute", "false"))).strip().lower()
+                in {"1", "true", "yes", "on"},
+                allow_risk_escalation=str(payload.get("allow_risk_escalation", payload.get("allowRiskEscalation", "false"))).strip().lower()
+                in {"1", "true", "yes", "on"},
+                risk_escalation_validation_mode=payload.get("risk_escalation_validation_mode")
+                or payload.get("riskEscalationValidationMode"),
+                measure_post_action=str(payload.get("measure_post_action", payload.get("measurePostAction", "true"))).strip().lower()
+                not in {"0", "false", "no", "off"},
                 min_ready_feeds=int(payload.get("min_ready_feeds") or payload.get("minReadyFeeds") or 4),
                 require_persisted_events=str(payload.get("require_persisted_events", payload.get("requirePersistedEvents", "true"))).strip().lower()
                 not in {"0", "false", "no", "off"},
             )
-            result = await asyncio.wait_for(module.park_live_feed_agent_run(request), timeout=float(_timeout_tiers()["agent_run_seconds"]))
+            result = await asyncio.wait_for(module.park_live_feed_agent_run(request), timeout=max(float(_timeout_tiers()["agent_run_seconds"]), 180.0))
             await _send_json(send, 200, _store_run_receipt(result, message=(result.get("live_feed_case", {}) or {}).get("operator_message", "live feed case"), mode="live_feed_agent_run", kind="agent_run") if isinstance(result, dict) else result)
         except Exception as error:
             await _send_json(
@@ -17907,6 +18128,12 @@ async def app(scope, receive, send):
         except ValueError:
             limit = 30
         await _send_json(send, 200, await _monitor_evidence_graph_cached(case_id=case_id, limit=limit, force_refresh=force_refresh))
+        return
+
+    if method == "GET" and path == "/api/park/monitor-evidence/storage-status":
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        force_refresh = str((query.get("refresh") or [""])[0]).strip().lower() in {"1", "true", "yes", "on"}
+        await _send_json(send, 200, monitor_evidence_storage_status(force_refresh=force_refresh))
         return
 
     if method == "GET" and path.startswith("/api/park/cases/") and path.endswith("/brief"):

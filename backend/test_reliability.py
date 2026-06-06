@@ -80,6 +80,7 @@ def test_replay_store_backup_and_status(tmp_path, monkeypatch):
 def test_delivery_and_replay_degraded_branches(tmp_path, monkeypatch):
     outbox = tmp_path / "missing" / "delivery.jsonl"
     monkeypatch.setenv("PARKPULSE_DELIVERY_OUTBOX", str(outbox))
+    monkeypatch.setattr(reliability.time, "sleep", lambda seconds: None)
     assert park_delivery._durable_outbox_count() == 0
 
     monkeypatch.setattr(park_delivery, "_persist_dispatch", lambda document: (_ for _ in ()).throw(RuntimeError("disk full")))

@@ -436,8 +436,8 @@ def _read_training_events(limit: int = 2000) -> list[dict[str, Any]]:
     return _read_jsonl(limit=max(1, min(5000, int(limit or 2000))))
 
 
-def _public_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
-    return {
+def _public_scenario(scenario: dict[str, Any], active_learning_versions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    public = {
         "id": scenario["id"],
         "title": scenario["title"],
         "category": scenario["category"],
@@ -447,6 +447,31 @@ def _public_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
         "context": scenario["context"],
         "objectives": scenario["objectives"],
     }
+    versions = active_learning_versions or []
+    if versions:
+        guidance = _learning_version_guidance(versions)
+        public["active_learning_versions"] = versions
+        public["learning_version_guidance"] = guidance
+        public["context"] = f"{public['context']} Active learning guidance: {' '.join(guidance)}"
+    return public
+
+
+def _active_learning_versions_for_scenario(scenario_id: str) -> list[dict[str, Any]]:
+    try:
+        from product_learning_loop import active_learning_versions_for_scenario
+
+        return active_learning_versions_for_scenario(scenario_id, target_surface="staff_training")
+    except Exception:
+        return []
+
+
+def _learning_version_guidance(active_learning_versions: list[dict[str, Any]]) -> list[str]:
+    guidance: list[str] = []
+    for version in active_learning_versions[:3]:
+        summary = str(version.get("content_summary") or version.get("draft_title") or "").strip()
+        if summary:
+            guidance.append(summary[:500])
+    return guidance
 
 
 def _llm_guest_provider_status() -> dict[str, Any]:
@@ -804,12 +829,17 @@ def start_staff_training_session(
     scenario = SCENARIOS.get(str(scenario_key or "").strip()) or SCENARIOS["lost_child_report"]
     session_id = "staff-train-" + hashlib.sha1(f"{scenario['id']}:{time.time()}:{trainee_name or ''}".encode("utf-8")).hexdigest()[:16]
     llm_guest_enabled = _llm_guest_requested(use_llm_guest)
+    active_learning_versions = _active_learning_versions_for_scenario(scenario["id"])
+    public_scenario = _public_scenario(scenario, active_learning_versions=active_learning_versions)
     session = {
         "id": session_id,
         "status": "active",
         "mode": "staff_roleplay_session",
         "scenario_id": scenario["id"],
-        "scenario": _public_scenario(scenario),
+        "scenario": public_scenario,
+        "active_learning_versions": active_learning_versions,
+        "active_learning_version_ids": [str(item.get("version_id") or "") for item in active_learning_versions if item.get("version_id")],
+        "learning_version_guidance": _learning_version_guidance(active_learning_versions),
         "trainee_name": str(trainee_name or "Seasonal staff trainee")[:80],
         "assignment_id": str(assignment_id or "")[:80] or None,
         "retry_of_session_id": str(retry_of_session_id or "")[:80] or None,
@@ -915,6 +945,12 @@ def finish_staff_training_session(session_id: str) -> dict[str, Any]:
         session["training_gap_ticket"] = record_training_gap_from_staff_session(session)
     except Exception as error:
         session["training_gap_ticket"] = {"status": "error", "readiness_issues": [str(error)[:240]], "live_ops_authority": False}
+    try:
+        from product_learning_loop import record_learning_version_outcome_from_staff_session
+
+        session["learning_version_outcome"] = record_learning_version_outcome_from_staff_session(session)
+    except Exception as error:
+        session["learning_version_outcome"] = {"status": "error", "readiness_issues": [str(error)[:240]], "live_ops_authority": False}
     _write_jsonl({"event": "session_finished", "debrief": debrief, **_session_event_snapshot(session)})
     return {
         "status": "complete",
@@ -922,6 +958,7 @@ def finish_staff_training_session(session_id: str) -> dict[str, Any]:
         "session": _session_response(session),
         "debrief": debrief,
         "training_gap_ticket": session.get("training_gap_ticket"),
+        "learning_version_outcome": session.get("learning_version_outcome"),
     }
 
 
@@ -1671,6 +1708,8 @@ def _llm_guest_prompt(
             "opening_message": scenario.get("opening_message"),
             "objectives_still_missing": missing[:4],
             "known_guest_followups": scenario.get("guest_followups", [])[:3],
+            "active_learning_version_ids": session.get("active_learning_version_ids", []),
+            "active_learning_guidance": session.get("learning_version_guidance", []),
         },
         "conversation": recent_turns,
         "latest_employee_message": employee_message[:1000],
@@ -1980,6 +2019,10 @@ def _session_event_snapshot(session: dict[str, Any]) -> dict[str, Any]:
         "critical_miss": session.get("critical_miss"),
         "mastery_tracker": session.get("mastery_tracker"),
         "training_gap_ticket": session.get("training_gap_ticket"),
+        "learning_version_outcome": session.get("learning_version_outcome"),
+        "active_learning_version_ids": session.get("active_learning_version_ids", []),
+        "active_learning_versions": session.get("active_learning_versions", []),
+        "learning_version_guidance": session.get("learning_version_guidance", []),
         "completed_objectives": session.get("completed_objectives", []),
         "missing_objectives": session.get("missing_objectives", []),
         "created_at": _now_iso(),
@@ -2007,6 +2050,10 @@ def _session_response(session: dict[str, Any]) -> dict[str, Any]:
         "missing_objectives": session.get("missing_objectives", []),
         "debrief": session.get("debrief"),
         "training_gap_ticket": session.get("training_gap_ticket"),
+        "learning_version_outcome": session.get("learning_version_outcome"),
+        "active_learning_version_ids": session.get("active_learning_version_ids", []),
+        "active_learning_versions": session.get("active_learning_versions", []),
+        "learning_version_guidance": session.get("learning_version_guidance", []),
         "guest_simulator": session.get("guest_simulator"),
         "boundary": session.get("boundary"),
         "uses_generated_data": True,

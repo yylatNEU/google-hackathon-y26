@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 
 import main
 import product_learning_loop as loop
@@ -9,6 +10,7 @@ from park_role_access import sign_role_session
 
 def reset_loop(monkeypatch, tmp_path):
     monkeypatch.setenv("PARKPULSE_PRODUCT_LEARNING_LOG_PATH", str(tmp_path / "product_learning_loop.jsonl"))
+    monkeypatch.setenv("PARKPULSE_PRODUCT_LEARNING_DB_PATH", str(tmp_path / "product_learning_loop.sqlite"))
     monkeypatch.setenv("PARKPULSE_STAFF_TRAINING_LOG_PATH", str(tmp_path / "staff_training_sessions.jsonl"))
     roleplay._SESSIONS.clear()
 
@@ -326,9 +328,364 @@ def test_auto_learning_governance_blocks_high_risk_and_refund_exceptions(monkeyp
     assert "refund_request" in exceptions
     assert "heat_exhaustion_concern" in exceptions
     assert exceptions["refund_request"]["governance_status"] == "human_exception_required"
-    assert "protected_or_high_risk_issue_type" in exceptions["refund_request"]["exception_reasons"]
+    assert "requires_review_at:guest_services_refund_policy" in exceptions["refund_request"]["exception_reasons"]
+    assert "requires_review_at:first_aid_station" in exceptions["heat_exhaustion_concern"]["exception_reasons"]
     assert exceptions["heat_exhaustion_concern"]["shadow_deployment"]["status"] == "blocked"
     assert status["auto_learning_governance"]["eval_contract"]["auto_promote_live_ops"] is False
+
+
+def test_specific_review_places_block_only_named_exception_scopes(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    state = {
+        "placeRiskGraph": {
+            "places": [
+                {
+                    "id": "queue_merge_a",
+                    "name": "Queue Merge A",
+                    "currentLoad": 94,
+                    "riskFactors": ["queue_merge_conflict"],
+                    "evidence": ["pathCongestion=94", "mergeComplaints=4"],
+                },
+                {
+                    "id": "queue_merge_b",
+                    "name": "Queue Merge B",
+                    "currentLoad": 91,
+                    "riskFactors": ["queue_merge_conflict"],
+                    "evidence": ["pathCongestion=91", "mergeComplaints=5"],
+                },
+                {
+                    "id": "accessibility_detour",
+                    "name": "Accessibility Detour",
+                    "currentLoad": 83,
+                    "riskFactors": ["misplaced_accessibility_route"],
+                    "evidence": ["accessibleRouteBlocked=true"],
+                },
+            ]
+        },
+        "simTime": {"day": 1, "hour": 15, "minute": 20},
+    }
+
+    status = loop.product_learning_loop_status(park_state=state, incident_seed="review-place-test")
+    auto = {candidate["scenario_id"]: candidate for candidate in status["auto_learning_candidates"]}
+    exceptions = {candidate["scenario_id"]: candidate for candidate in status["human_exception_queue"]}
+
+    assert "line_cutting_conflict" in auto
+    assert auto["line_cutting_conflict"]["shadow_deployment"]["status"] == "shadow_ready"
+    assert "accessibility_accommodation" in exceptions
+    assert "requires_review_at:accessibility_lead" in exceptions["accessibility_accommodation"]["exception_reasons"]
+
+
+def test_ticket_lifecycle_dedupes_repeated_backend_generated_tickets(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    backlog = {
+        "issues": [
+            {
+                "id": "queue-merge-watch-a",
+                "domain": "Ride Ops",
+                "title": "Queue merge conflict complaints at mild threshold",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "merge complaint cluster",
+                "recommendedNext": "Clarify merge signage and staff script.",
+                "evidence": ["mergeComplaints=3"],
+            },
+            {
+                "id": "queue-merge-watch-a",
+                "domain": "Ride Ops",
+                "title": "Queue merge conflict complaints at mild threshold",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "merge complaint cluster",
+                "recommendedNext": "Clarify merge signage and staff script.",
+                "evidence": ["mergeComplaints=3"],
+            },
+        ]
+    }
+
+    status = loop.product_learning_loop_status(operational_backlog=backlog)
+    line_lifecycle = [item for item in status["ticket_lifecycle"] if item["issue_type"] == "line_cutting_conflict"]
+
+    assert status["park_issue_ticket_count"] == 2
+    assert status["deduped_park_issue_ticket_count"] == 1
+    assert len(line_lifecycle) == 1
+    assert line_lifecycle[0]["open_ticket_count"] == 2
+    assert line_lifecycle[0]["lifecycle_status"] == "auto_evolve_ready"
+    assert line_lifecycle[0]["dedupe_window_minutes"] == 120
+
+
+def test_review_place_queues_group_specific_human_review_places(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    state = {
+        "placeRiskGraph": {
+            "places": [
+                {
+                    "id": "west_plaza",
+                    "name": "West Plaza",
+                    "currentLoad": 92,
+                    "riskFactors": ["poor_shade", "long_wait"],
+                    "evidence": ["heatIndexF=104", "shadeCoverage=18", "queueWaitMinutes=31"],
+                },
+                {
+                    "id": "coaster_exit_merge",
+                    "name": "Coaster Exit Merge",
+                    "currentLoad": 94,
+                    "riskFactors": ["narrow_path", "crowd_bottleneck"],
+                    "evidence": ["pathCongestion=94", "widthM=3.8"],
+                },
+                {
+                    "id": "accessibility_detour",
+                    "name": "Accessibility Detour",
+                    "currentLoad": 83,
+                    "riskFactors": ["misplaced_accessibility_route"],
+                    "evidence": ["accessibleRouteBlocked=true"],
+                },
+            ]
+        }
+    }
+
+    status = loop.product_learning_loop_status(park_state=state, incident_seed="review-queue-test")
+    queues = {queue["review_place"]: queue for queue in status["review_place_queues"]}
+
+    assert status["review_place_queue_count"] >= 3
+    assert queues["first_aid_station"]["queue_status"] == "needs_human_review"
+    assert "heat_exhaustion_concern" in queues["first_aid_station"]["issue_types"]
+    assert queues["safety_command"]["auto_evolve_blocked"] is True
+    assert "injury_or_safety_incident" in queues["safety_command"]["issue_types"]
+    assert queues["accessibility_lead"]["required_action"].startswith("Review accommodation language")
+
+
+def test_auto_draft_registry_and_promotion_queue_use_shadow_ready_candidates(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    backlog = {
+        "issues": [
+            {
+                "id": "queue-merge-watch-a",
+                "domain": "Ride Ops",
+                "title": "Queue merge conflict complaints at mild threshold",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "merge complaint cluster",
+                "recommendedNext": "Clarify merge signage and staff script.",
+                "evidence": ["mergeComplaints=3"],
+            },
+            {
+                "id": "queue-merge-watch-b",
+                "domain": "Ride Ops",
+                "title": "Queue merge conflict repeated after show wave",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "merge complaint cluster repeated",
+                "recommendedNext": "Clarify merge signage and staff script.",
+                "evidence": ["mergeComplaints=4"],
+            },
+        ]
+    }
+
+    status = loop.product_learning_loop_status(operational_backlog=backlog)
+    registry = {item["scenario_id"]: item for item in status["auto_draft_registry"]}
+    metrics = {item["scenario_id"]: item for item in status["shadow_metrics"]}
+    promotions = {item["scenario_id"]: item for item in status["promotion_queue"]}
+
+    assert status["auto_draft_count"] >= 1
+    assert registry["line_cutting_conflict"]["registry_status"] == "shadow_registered"
+    assert registry["line_cutting_conflict"]["version_id"]
+    assert metrics["line_cutting_conflict"]["promotion_eligible"] is True
+    assert promotions["line_cutting_conflict"]["promotion_status"] == "ready_for_auto_promotion"
+    assert promotions["line_cutting_conflict"]["can_promote_live_ops"] is False
+    assert status["rollback_watchlist"][0]["watch_status"] == "armed"
+
+
+def test_learning_version_promotion_and_rollback_persist_to_registry(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    backlog = {
+        "issues": [
+            {
+                "id": "queue-merge-watch-a",
+                "domain": "Ride Ops",
+                "title": "Queue merge conflict complaints at mild threshold",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "merge complaint cluster",
+                "recommendedNext": "Clarify merge signage and staff script.",
+                "evidence": ["mergeComplaints=3"],
+            },
+            {
+                "id": "queue-merge-watch-b",
+                "domain": "Ride Ops",
+                "title": "Queue merge conflict repeated after show wave",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "merge complaint cluster repeated",
+                "recommendedNext": "Clarify merge signage and staff script.",
+                "evidence": ["mergeComplaints=4"],
+            },
+        ]
+    }
+
+    status = loop.product_learning_loop_status(operational_backlog=backlog)
+    version_id = next(item["version_id"] for item in status["promotion_queue"] if item["scenario_id"] == "line_cutting_conflict")
+
+    promoted = loop.promote_learning_version(version_id, operational_backlog=backlog, promoted_by="test-worker")
+    promoted_status = loop.product_learning_loop_status(operational_backlog=backlog)
+    active = {item["version_id"]: item for item in promoted_status["active_learning_versions"]}
+
+    assert promoted["status"] == "promoted"
+    assert promoted["version"]["live_ops_authority"] is False
+    assert promoted["version"]["can_promote_live_ops"] is False
+    assert version_id in active
+    assert active[version_id]["registry_status"] == "active"
+    assert active[version_id]["promotion_status"] == "active"
+    assert promoted_status["active_learning_version_count"] == 1
+
+    rolled_back = loop.rollback_learning_version(version_id, reason="staff score regression in shadow monitor")
+    rollback_status = loop.product_learning_loop_status(operational_backlog=backlog)
+    registry = {item["version_id"]: item for item in rollback_status["learning_version_registry"]}
+
+    assert rolled_back["status"] == "rolled_back"
+    assert rolled_back["version"]["can_rollback_live_ops"] is False
+    assert registry[version_id]["registry_status"] == "rolled_back"
+    assert registry[version_id]["rollback_reason"] == "staff score regression in shadow monitor"
+    assert rollback_status["active_learning_version_count"] == 0
+    assert rollback_status["rolled_back_learning_version_count"] == 1
+
+
+def test_active_learning_version_feeds_roleplay_outcome_and_auto_rollback(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    backlog = {
+        "issues": [
+            {
+                "id": "fast-lane-fairness-risk",
+                "domain": "Guest Recovery",
+                "title": "Fast lane fairness complaints rising",
+                "severity": "warning",
+                "status": "unresolved",
+                "current": "complaint risk 76%",
+                "recommendedNext": "Move a guest services lead to the fast lane merge.",
+                "evidence": ["complaintRiskPct=76"],
+            },
+            {
+                "id": "guest-recovery-pressure",
+                "domain": "Guest Recovery",
+                "title": "Guest recovery trust complaints repeated",
+                "severity": "warning",
+                "status": "unresolved",
+                "current": "complaint risk 78%",
+                "recommendedNext": "Use clearer family recovery script.",
+                "evidence": ["complaintRiskPct=78"],
+            },
+        ]
+    }
+    status = loop.product_learning_loop_status(operational_backlog=backlog)
+    version_id = next(item["version_id"] for item in status["promotion_queue"] if item["scenario_id"] == "angry_parent")
+
+    promoted = loop.promote_learning_version(version_id, operational_backlog=backlog)
+    assert promoted["status"] == "promoted"
+
+    session = roleplay.start_staff_training_session("angry_parent", "Outcome QA")
+    assert version_id in session["active_learning_version_ids"]
+    assert session["scenario"]["learning_version_guidance"]
+
+    finished = roleplay.finish_staff_training_session(session["id"])
+    outcome = finished["learning_version_outcome"]
+    rollback_status = loop.product_learning_loop_status(operational_backlog=backlog)
+    registry = {item["version_id"]: item for item in rollback_status["learning_version_registry"]}
+
+    assert outcome["status"] == "recorded"
+    assert outcome["outcome_count"] == 1
+    assert outcome["outcomes"][0]["outcome_metrics"]["measurement_status"] == "regressed_auto_rollback"
+    assert outcome["auto_rollbacks"][0]["status"] == "rolled_back"
+    assert registry[version_id]["registry_status"] == "rolled_back"
+    assert registry[version_id]["outcome_metrics"]["session_count"] == 1
+    assert registry[version_id]["outcome_metrics"]["average_overall"] == 0
+
+
+def test_sqlite_event_store_indexes_product_learning_events(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    loop.create_park_issue_ticket(source="employee", issue_type="angry_parent", summary="Parent complaint near merge.", severity="medium")
+
+    store = loop.product_learning_event_store_status()
+
+    assert store["mode"] == "sqlite_event_store_with_jsonl_compatibility"
+    assert os.path.exists(store["sqlite_path"])
+    assert store["sqlite_event_count"] == 1
+    assert "event_type" in store["indexes"]
+    assert store["event_type_counts"]["park_issue_ticket_created"] == 1
+
+
+def test_review_place_resolution_updates_human_review_queue(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    backlog = {
+        "issues": [
+            {
+                "id": "food-court-a-backlog",
+                "domain": "Food",
+                "title": "Food pickup backlog driving refund pressure",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "mobile backlog 180 orders / ETA 32m",
+                "recommendedNext": "Open mobile-order recovery desk.",
+                "evidence": ["mobileOrderBacklog=180", "pickupEtaMinutes=32"],
+            }
+        ]
+    }
+    before = loop.product_learning_loop_status(operational_backlog=backlog)
+    assert next(queue for queue in before["review_place_queues"] if queue["review_place"] == "guest_services_refund_policy")["queue_status"] == "needs_human_review"
+
+    resolution = loop.resolve_review_place_queue(
+        "guest_services_refund_policy",
+        decision="approve",
+        notes="Approved for reviewed training/checklist learning only.",
+        reviewer="QA manager",
+        issue_types=["refund_request"],
+    )
+    after = loop.product_learning_loop_status(operational_backlog=backlog)
+    queue = next(item for item in after["review_place_queues"] if item["review_place"] == "guest_services_refund_policy")
+
+    assert resolution["status"] == "recorded"
+    assert queue["queue_status"] == "resolved_approve"
+    assert queue["auto_evolve_blocked"] is False
+    assert queue["review_resolution"]["reviewer"] == "QA manager"
+    assert after["human_review_resolutions"][0]["decision"] == "approve"
+
+
+def test_active_ops_checklist_version_augments_operational_backlog(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    for index in range(4):
+        loop.create_training_gap_ticket(
+            scenario_id="line_cutting_conflict",
+            gap_type="policy_correctness",
+            severity="coaching",
+            evidence={"score": 68 + index, "source": "ops-checklist-test"},
+            trainee_name="Ops QA",
+            session_id=f"ops-gap-{index}",
+        )
+    status = loop.product_learning_loop_status()
+    version_id = next(item["version_id"] for item in status["promotion_queue"] if item["scenario_id"] == "line_cutting_conflict" and item["target_surface"] == "ops_checklist")
+    promoted = loop.promote_learning_version(version_id)
+    assert promoted["status"] == "promoted"
+
+    backlog = {
+        "issues": [
+            {
+                "id": "queue-merge-watch-a",
+                "domain": "Ride Ops",
+                "title": "Queue merge conflict complaints at mild threshold",
+                "severity": "medium",
+                "status": "unresolved",
+                "current": "merge complaint cluster",
+                "recommendedNext": "Clarify merge signage and staff script.",
+                "evidence": ["mergeComplaints=3"],
+            }
+        ]
+    }
+    augmented = loop.apply_active_ops_checklist_guidance(backlog)
+
+    assert augmented["activeOpsChecklistGuidanceCount"] == 1
+    issue = augmented["issues"][0]
+    assert issue["productLearningIssueType"] == "line_cutting_conflict"
+    assert issue["activeOpsChecklistVersions"][0]["version_id"] == version_id
+    assert "Product learning checklist" in issue["recommendedNext"]
+    assert augmented["productLearningOpsChecklistContract"]["live_ops_authority"] is False
 
 
 def test_product_learning_api_backtests_dynamic_park_live_ticket_generation(monkeypatch, tmp_path):
@@ -373,6 +730,78 @@ def test_product_learning_api_backtests_dynamic_park_live_ticket_generation(monk
     assert ticket["severity"] == "high"
     assert ticket["derived_from"] == "operational_backlog"
     assert payload["loop_contract"]["training_gaps_create_live_issues"] is False
+
+
+def test_product_learning_api_promotes_and_rolls_back_learning_version(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    main._hot_endpoint_cache.pop("park_state_lite", None)
+
+    async def fake_state_lite():
+        return {"operatingClock": {"accessFairness": {"complaintRiskPct": 81}}}
+
+    def fake_backlog(state):
+        return {
+            "issues": [
+                {
+                    "id": "queue-merge-watch-a",
+                    "domain": "Ride Ops",
+                    "title": "Queue merge conflict complaints at mild threshold",
+                    "severity": "medium",
+                    "status": "unresolved",
+                    "current": "merge complaint cluster",
+                    "recommendedNext": "Clarify merge signage and staff script.",
+                    "evidence": ["mergeComplaints=3"],
+                },
+                {
+                    "id": "queue-merge-watch-b",
+                    "domain": "Ride Ops",
+                    "title": "Queue merge conflict repeated after show wave",
+                    "severity": "medium",
+                    "status": "unresolved",
+                    "current": "merge complaint cluster repeated",
+                    "recommendedNext": "Clarify merge signage and staff script.",
+                    "evidence": ["mergeComplaints=4"],
+                },
+            ]
+        }
+
+    monkeypatch.setattr(main, "_fast_park_state_lite", fake_state_lite)
+    import agent_ops_ledger
+
+    monkeypatch.setattr(agent_ops_ledger, "build_operational_backlog", fake_backlog)
+    ops_token = sign_role_session("test-ops", "ops_team", main._role_auth_secret())
+
+    loop_status, payload = asyncio.run(_call_app("GET", "/api/park/product-learning/loop?limit=20", token=ops_token))
+    assert loop_status == 200
+    version_id = next(item["version_id"] for item in payload["promotion_queue"] if item["scenario_id"] == "line_cutting_conflict")
+
+    promote_status, promoted = asyncio.run(
+        _call_app(
+            "POST",
+            "/api/park/product-learning/promote-version",
+            {"versionId": version_id, "promotedBy": "api-test"},
+            token=ops_token,
+        )
+    )
+    assert promote_status == 200
+    assert promoted["status"] == "promoted"
+    assert promoted["version"]["can_promote_live_ops"] is False
+
+    loop_status, after_promote = asyncio.run(_call_app("GET", "/api/park/product-learning/loop?limit=80", token=ops_token))
+    assert loop_status == 200
+    assert any(item["version_id"] == version_id for item in after_promote["active_learning_versions"])
+
+    rollback_status, rolled_back = asyncio.run(
+        _call_app(
+            "POST",
+            "/api/park/product-learning/rollback-version",
+            {"versionId": version_id, "reason": "api test rollback"},
+            token=ops_token,
+        )
+    )
+    assert rollback_status == 200
+    assert rolled_back["status"] == "rolled_back"
+    assert rolled_back["version"]["can_rollback_live_ops"] is False
 
 
 def test_passed_roleplay_does_not_create_training_gap_ticket(monkeypatch, tmp_path):

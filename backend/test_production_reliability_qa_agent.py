@@ -4,6 +4,8 @@ import json
 import os
 import time
 
+import pytest
+
 os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
 
 from agent_role_skills import build_agent_role_product_readiness_report, build_deliberate_role_eval_report, build_deliberate_role_negative_fixtures, evaluate_agent_role_trace, list_agent_role_skills, route_agent_role
@@ -12,6 +14,11 @@ from prod_reliability_qa_agent import run_production_reliability_qa
 
 import main
 import parkpulse_api
+
+
+@pytest.fixture(scope="module")
+def real_role_eval_report():
+    return asyncio.run(main._real_agent_role_eval_report())
 
 
 def test_production_reliability_qa_contract_is_read_only():
@@ -26,6 +33,40 @@ def test_production_reliability_qa_contract_is_read_only():
         "dispatch_failure",
         "stream_interruption",
     }
+
+
+def test_production_reliability_qa_blocks_high_risk_simulation_timeout():
+    report = run_production_reliability_qa(
+        "simulation timeout safety review",
+        runtime_status={
+            "simulation": {
+                "timeout": True,
+                "high_risk_timeout": True,
+                "dispatch_allowed_after_timeout": True,
+            }
+        },
+    )
+
+    assert report["risk_level"] == "CRITICAL"
+    assert report["deployment_recommendation"] == "REJECT"
+    assert report["go_no_go_recommendation"]["decision"] == "NO-GO"
+    assert "High-risk action remained dispatchable after simulation timeout." in report["critical_findings"]
+    assert "Digital-twin simulation timed out before producing action evidence." in report["completeness_evaluation"]["missing_data"]
+    assert report["action_safety_evaluation"]["requires_human_approval"] is True
+    assert report["evaluation_scores"]["safety"] < 60
+
+
+def test_production_reliability_qa_blocks_duplicate_dispatch_side_effects():
+    report = run_production_reliability_qa(
+        "duplicate dispatch review",
+        runtime_status={"delivery": {"duplicate_side_effects_detected": True}},
+    )
+
+    assert report["risk_level"] == "CRITICAL"
+    assert report["deployment_recommendation"] == "REJECT"
+    assert report["go_no_go_recommendation"]["decision"] == "NO-GO"
+    assert "Dispatch safety is not proven or duplicate receiver side effects were detected." in report["critical_findings"]
+    assert any("Duplicate or partial dispatch" in risk["risk"] for risk in report["reliability_risk_summary"])
 
 
 def test_role_registry_routes_production_reliability_qa():
@@ -69,8 +110,8 @@ def test_deliberate_role_eval_report_covers_all_roles():
     assert all(row["trace"]["deliberate_eval"]["status"] == "passed" for row in report["roles"])
 
 
-def test_real_role_eval_report_uses_actual_role_payloads():
-    report = asyncio.run(main._real_agent_role_eval_report())
+def test_real_role_eval_report_uses_actual_role_payloads(real_role_eval_report):
+    report = real_role_eval_report
 
     assert report["status"] == "passed"
     assert report["decision"] == "allow_real_trace_role_agent_tool_use_claim"
@@ -86,9 +127,23 @@ def test_real_role_eval_report_uses_actual_role_payloads():
     assert all(row["trace_eval"]["critical_failures"] == [] for row in report["roles"])
 
 
-def test_product_readiness_report_marks_each_role_ready():
+def test_real_role_eval_uses_bounded_customer_hot_path(monkeypatch):
+    async def fail_provider_customer_agent(payload):
+        raise AssertionError("real role eval must not wait on the provider-backed customer support agent")
+
+    monkeypatch.setattr(main, "_customer_support_agent_payload", fail_provider_customer_agent)
+
+    report = asyncio.run(main._real_agent_role_eval_report())
+    customer = next(row for row in report["roles"] if row["role"] == "customer")
+
+    assert customer["status"] == "passed"
+    assert customer["trace"]["summary"]["selected_role"] == "customer"
+    assert customer["output_eval"]["checks"]["customer_read_only"] is True
+
+
+def test_product_readiness_report_marks_each_role_ready(real_role_eval_report):
     synthetic = build_deliberate_role_eval_report()
-    real = asyncio.run(main._real_agent_role_eval_report())
+    real = real_role_eval_report
     product = build_agent_role_product_readiness_report(
         real,
         synthetic_report=synthetic,
@@ -106,9 +161,9 @@ def test_product_readiness_report_marks_each_role_ready():
         assert all(depth.values()), row["role"]
 
 
-def test_product_readiness_report_blocks_specific_role_gap():
+def test_product_readiness_report_blocks_specific_role_gap(real_role_eval_report):
     synthetic = build_deliberate_role_eval_report()
-    real = deepcopy(asyncio.run(main._real_agent_role_eval_report()))
+    real = deepcopy(real_role_eval_report)
     for row in real["roles"]:
         if row["role"] == "customer":
             row["output_eval"]["checks"]["public_actions_only"] = False
@@ -127,9 +182,9 @@ def test_product_readiness_report_blocks_specific_role_gap():
     assert "public_actions_only" in customer["failed_checks"]
 
 
-def test_product_readiness_report_blocks_missing_role_work_contract():
+def test_product_readiness_report_blocks_missing_role_work_contract(real_role_eval_report):
     synthetic = build_deliberate_role_eval_report()
-    real = deepcopy(asyncio.run(main._real_agent_role_eval_report()))
+    real = deepcopy(real_role_eval_report)
     for row in real["roles"]:
         if row["role"] == "react":
             row["output_eval"]["checks"]["role_setup_complete"] = False
@@ -241,7 +296,12 @@ def test_agent_role_eval_api_surface_returns_report():
     assert report["roles"][0]["trace"]["deliberate_eval"]["mode"] == "deliberate_role_tool_use_eval"
 
 
-def test_agent_role_real_eval_api_surface_returns_release_gate():
+def test_agent_role_real_eval_api_surface_returns_release_gate(monkeypatch, real_role_eval_report):
+    async def cached_real_report():
+        return deepcopy(real_role_eval_report)
+
+    monkeypatch.setattr(main, "_real_agent_role_eval_report", cached_real_report)
+
     report = asyncio.run(parkpulse_api.park_agent_role_eval(real=True))
 
     assert report["status"] == "passed"

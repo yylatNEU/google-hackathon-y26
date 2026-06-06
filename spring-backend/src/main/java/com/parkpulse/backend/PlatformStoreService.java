@@ -130,7 +130,7 @@ public class PlatformStoreService {
         Map<String, Object> result = orderedMap();
         result.put("status", "active");
         result.put("mode", "continuous_java_spring_migration");
-        result.put("current_slice", "spring_backend_gateway_plus_live_feed_health_and_review_authority");
+        result.put("current_slice", "spring_backend_gateway_plus_staff_training_authority");
         result.put("spring_owned_routes", List.of(
             "/",
             "/healthz",
@@ -154,6 +154,22 @@ public class PlatformStoreService {
             "/api/park/live-feeds/{source}",
             "/api/park/live-feeds/{source}/load",
             "/api/park/review-training-ledger",
+            "/api/park/product-learning/loop",
+            "/api/park/product-learning/issue-ticket",
+            "/api/park/product-learning/training-gap-ticket",
+            "/api/park/staff-training/scenarios",
+            "/api/park/staff-training/policy-pack",
+            "/api/park/staff-training/assignments",
+            "/api/park/staff-training/readiness",
+            "/api/park/staff-training/receipts",
+            "/api/park/staff-training/certification-packet",
+            "/api/park/staff-training/receipt-review",
+            "/api/park/staff-training/demo-seed",
+            "/api/park/staff-training/golden-eval",
+            "/api/park/staff-training/sessions",
+            "/api/park/staff-training/turn",
+            "/api/park/staff-training/finish",
+            "/api/park/staff-training/analytics",
             "/api/park/role-access-contracts",
             "/api/park/reliability",
             "/api/park/latency-diagnostics",
@@ -205,7 +221,7 @@ public class PlatformStoreService {
             "/api/park/backend-gateway/status"
         ));
         result.put("spring_gateway_routes", List.of("/api/**", "/readyz/deep"));
-        result.put("python_owned_routes", "agent orchestration, Gemini/Vertex, Mongo memory, remaining simulation surfaces, product-learning routes, and live GCP delivery adapters are reached through the Spring gateway until each route group is migrated natively.");
+        result.put("python_owned_routes", "agent orchestration, Gemini/Vertex, Mongo memory, remaining simulation surfaces, and live GCP delivery adapters are reached through the Spring gateway until each route group is migrated natively.");
         result.put("handoff_rule", "Move one bounded route group at a time only after parity tests and SQLite authority checks pass.");
         result.put("rollback", "Stop the Spring service and keep Python serving the same SQLite-backed authority.");
         result.put("platform_store", compactStatus());

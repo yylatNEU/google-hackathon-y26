@@ -266,6 +266,7 @@ def _active_learning_rules(template_id: str, audience: str, channel_targets: lis
     rows = _latest_studio_memory("experience_studio_learning_rules", max(limit * 3, 20))
     active: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    seen_fingerprints: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -283,6 +284,17 @@ def _active_learning_rules(template_id: str, audience: str, channel_targets: lis
         rule_channels = {str(item) for item in _as_text_list(scope.get("channels") or row.get("channels"))}
         if rule_channels and channel_set and not rule_channels.intersection(channel_set):
             continue
+        fingerprint = json.dumps(
+            {
+                "templateId": row_template or template_id,
+                "rule": " ".join(str(row.get("rule") or "").lower().split()),
+                "tags": sorted(_as_text_list(row.get("tags"))),
+            },
+            sort_keys=True,
+        )
+        if fingerprint in seen_fingerprints:
+            continue
+        seen_fingerprints.add(fingerprint)
         active.append(
             {
                 "id": row.get("id") or row.get("_id"),
@@ -548,10 +560,13 @@ def _promotable_rule_candidates(record: dict[str, Any]) -> list[dict[str, Any]]:
     venue_pattern = package.get("venuePattern") if isinstance(package.get("venuePattern"), dict) else {}
     production = package.get("productionDetail") if isinstance(package.get("productionDetail"), dict) else {}
     memory = package.get("memoryInfluence") if isinstance(package.get("memoryInfluence"), dict) else {}
+    craft = package.get("craftArtifacts") if isinstance(package.get("craftArtifacts"), dict) else {}
+    craft_samples = craft.get("samples") if isinstance(craft.get("samples"), list) else []
+    accepted_sample = next((item for item in craft_samples if isinstance(item, dict) and item.get("copy")), {})
     must_include = _as_text_list(venue_pattern.get("mustInclude"))
     checklist = _as_text_list(production.get("contentCompletenessChecklist"))
     reusable = _as_text_list(memory.get("reusablePatterns"))
-    return [
+    candidates = [
         {
             "id": "concept_continuity",
             "label": "Concept continuity",
@@ -585,6 +600,21 @@ def _promotable_rule_candidates(record: dict[str, Any]) -> list[dict[str, Any]]:
             "guardrails": ["only approved or ready_for_publish work can influence generation"],
         },
     ]
+    if accepted_sample:
+        sample_label = str(accepted_sample.get("label") or accepted_sample.get("id") or "accepted craft sample")
+        sample_channel = str(accepted_sample.get("channel") or "channel artifact")
+        sample_copy = " ".join(str(accepted_sample.get("copy") or "").split())
+        candidates.append(
+            {
+                "id": "creative_craft_examples",
+                "label": "Creative craft examples",
+                "rule": f"For {record.get('templateId')}, reuse the accepted craft move from {sample_label}: write {sample_channel} copy with a concrete guest-facing image, optional movement, and a clear current-options boundary. Example pattern: {sample_copy[:220]}",
+                "lesson": "A creative lead-approved craft sample should shape future copy craft, not just package completeness.",
+                "tags": ["creative_craft", "craft_sample", "channel_voice"],
+                "guardrails": ["craft pattern can improve voice and specificity but cannot invent venue facts, availability, staffing, or safety claims"],
+            }
+        )
+    return candidates
 
 
 def promote_experience_studio_learning_rule(draft_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1701,6 +1731,14 @@ def _real_inputs(payload: dict[str, Any]) -> dict[str, Any]:
     spatial_model = raw.get("spatialModel") if isinstance(raw.get("spatialModel"), dict) else {}
     agent_context = raw.get("agentContext") if isinstance(raw.get("agentContext"), dict) else {}
     learning_context = raw.get("learningContext") if isinstance(raw.get("learningContext"), dict) else {}
+    nested_operating_context = profile_intelligence.get("operatingContext") if isinstance(profile_intelligence.get("operatingContext"), dict) else {}
+    operating_context = raw.get("operatingContext") if isinstance(raw.get("operatingContext"), dict) else nested_operating_context
+    current_status = raw.get("currentStatus") if isinstance(raw.get("currentStatus"), dict) else operating_context.get("currentStatus") if isinstance(operating_context.get("currentStatus"), dict) else {}
+    path_status = raw.get("pathStatus") if isinstance(raw.get("pathStatus"), dict) else operating_context.get("pathStatus") if isinstance(operating_context.get("pathStatus"), dict) else {}
+    signage_inventory = raw.get("signageInventory") if isinstance(raw.get("signageInventory"), dict) else operating_context.get("signageInventory") if isinstance(operating_context.get("signageInventory"), dict) else {}
+    channel_templates = raw.get("channelTemplates") if isinstance(raw.get("channelTemplates"), dict) else operating_context.get("channelTemplates") if isinstance(operating_context.get("channelTemplates"), dict) else {}
+    operating_calendar = raw.get("operatingCalendar") if isinstance(raw.get("operatingCalendar"), dict) else operating_context.get("operatingCalendar") if isinstance(operating_context.get("operatingCalendar"), dict) else {}
+    weather_policy = raw.get("weatherPolicy") if isinstance(raw.get("weatherPolicy"), dict) else operating_context.get("weatherPolicy") if isinstance(operating_context.get("weatherPolicy"), dict) else {}
     source = _text(raw.get("source"), "manual_brief")
     return {
         "venueIdentity": venue_identity,
@@ -1717,6 +1755,13 @@ def _real_inputs(payload: dict[str, Any]) -> dict[str, Any]:
         "spatialModel": spatial_model,
         "agentContext": agent_context,
         "learningContext": learning_context,
+        "operatingContext": operating_context,
+        "currentStatus": current_status,
+        "pathStatus": path_status,
+        "signageInventory": signage_inventory,
+        "channelTemplates": channel_templates,
+        "operatingCalendar": operating_calendar,
+        "weatherPolicy": weather_policy,
         "source": source,
         "hasRealInputs": bool(locations or indoor or quiet or attractions or accessible or safety or channel_owners),
     }
@@ -1823,17 +1868,18 @@ def _source_integrity(route: list[dict[str, Any]], real_inputs: dict[str, Any], 
     readiness = intelligence.get("readiness") if isinstance(intelligence.get("readiness"), dict) else {}
     venue = real_inputs.get("venueIdentity", {}) if isinstance(real_inputs.get("venueIdentity"), dict) else {}
     profile_type = str(venue.get("profileType") or "")
-    production_missing = _as_text_list(readiness.get("missingForRealVenueReady"))
-    if profile_type == "synthetic_approved":
-        production_missing.extend(
-            [
-                "real venue source feed instead of approved synthetic profile",
-                "live attraction closure/current-options feed",
-                "current indoor, sheltered, and blocked-path status",
-                "approved physical signage placement inventory",
-                "channel-owner approved CRM/app/staff language templates",
-            ]
-        )
+    try:
+        from venue_experience_data import venue_profile_gap_contract
+
+        gap_contract = venue_profile_gap_contract(real_inputs, profile_type, readiness, intelligence.get("coverage") if isinstance(intelligence.get("coverage"), dict) else {}, quality_gaps, include_generation_requirements=False)
+    except Exception:
+        production_missing = list(dict.fromkeys(_as_text_list(readiness.get("missingForRealVenueReady")) + quality_gaps))
+        gap_contract = {
+            "productionRealVenueReady": bool(readiness.get("realVenueReady") and profile_type != "synthetic_approved" and not production_missing),
+            "missingForProduction": production_missing,
+            "filledForSyntheticDemo": [],
+            "syntheticOperatingCoverage": {},
+        }
     return {
         "usesSeedData": False,
         "usesSimulatedParkState": False,
@@ -1847,8 +1893,10 @@ def _source_integrity(route: list[dict[str, Any]], real_inputs: dict[str, Any], 
         "profileIntelligenceStatus": readiness.get("status") or "unknown",
         "profileIntelligenceQualityGaps": quality_gaps,
         "realVenueReady": bool(readiness.get("realVenueReady") and profile_type != "synthetic_approved"),
-        "productionRealVenueReady": bool(readiness.get("realVenueReady") and profile_type != "synthetic_approved" and not production_missing),
-        "missingProductionRealVenueInputs": list(dict.fromkeys(production_missing + quality_gaps)),
+        "productionRealVenueReady": bool(gap_contract.get("productionRealVenueReady")),
+        "missingProductionRealVenueInputs": gap_contract.get("missingForProduction", []),
+        "syntheticFilledVenueGaps": gap_contract.get("filledForSyntheticDemo", []),
+        "syntheticOperatingCoverage": gap_contract.get("syntheticOperatingCoverage", {}),
         "missingRealInputs": missing_inputs,
         "readyForHandoff": not missing_inputs and not _has_unresolved_placeholders({"route": route}),
     }
@@ -3007,7 +3055,7 @@ def _apply_learning_rules_to_synthesis(synthesis: dict[str, Any], learning_conte
             continue
         if {"package_completeness", "owner_review", "route", "review_readiness"}.intersection(tags):
             preserve.append(text)
-        elif {"concept", "channel_consistency", "memory", "continuity"}.intersection(tags):
+        elif {"concept", "channel_consistency", "memory", "continuity", "creative_craft", "craft_sample", "channel_voice"}.intersection(tags):
             use_more.append(text)
         guardrails = _as_text_list(rule.get("guardrails"))
         avoid.extend(guardrails)
@@ -3340,6 +3388,9 @@ def _memory_application_detail(memory_context: dict[str, Any], learning_context:
         )
     if applied_rules:
         visible_changes.append("Inserted human-promoted package rules into the synthesis preserve/avoid strategy.")
+        rule_rows = learning_context.get("rules") if isinstance(learning_context.get("rules"), list) else []
+        if any({"creative_craft", "craft_sample", "channel_voice"}.intersection(set(_as_text_list(rule.get("tags")))) for rule in rule_rows if isinstance(rule, dict)):
+            visible_changes.append("Applied a creative lead-approved craft sample as a reusable voice and specificity pattern.")
     return {
         "status": "active",
         "usedForGeneration": True,
@@ -3366,22 +3417,29 @@ def _venue_data_gap_analysis(real_inputs: dict[str, Any], intelligence: dict[str
     readiness = intelligence.get("readiness") if isinstance(intelligence.get("readiness"), dict) else {}
     coverage = intelligence.get("coverage") if isinstance(intelligence.get("coverage"), dict) else {}
     profile_type = str(venue.get("profileType") or "unknown")
-    missing_for_real = _as_text_list(readiness.get("missingForRealVenueReady"))
-    production_missing = list(missing_for_real)
-    if profile_type == "synthetic_approved":
-        production_missing.extend(
-            [
-                "real venue source feed instead of approved synthetic profile",
-                "live attraction closure and current-options feed",
-                "current indoor, sheltered, and blocked-path status",
-                "approved physical signage placement inventory",
-                "channel-owner approved CRM/app/staff language templates",
-            ]
-        )
-    if not real_inputs.get("channelOwners"):
-        production_missing.append("named channel owners for guest_app, signage, email, and staff_cue")
-    if not coverage.get("certifiedPaths"):
-        production_missing.append("certified path records for selected route segments")
+    try:
+        from venue_experience_data import venue_profile_gap_contract
+
+        gap_contract = venue_profile_gap_contract(real_inputs, profile_type, readiness, coverage, quality_gaps, include_generation_requirements=True)
+    except Exception:
+        production_missing = _as_text_list(readiness.get("missingForRealVenueReady"))
+        if not real_inputs.get("channelOwners"):
+            production_missing.append("named channel owners for guest_app, signage, email, and staff_cue")
+        if not coverage.get("certifiedPaths"):
+            production_missing.append("certified path records for selected route segments")
+        gap_contract = {
+            "status": "creative_ready_review_required",
+            "productionRealVenueReady": False,
+            "missingForProduction": list(dict.fromkeys(production_missing + quality_gaps)),
+            "filledForSyntheticDemo": [],
+            "syntheticOperatingCoverage": {},
+            "nextProfileImports": [
+                "replace approved synthetic operating snapshot with venue-owned live status feed",
+                "replace synthetic path status with real accessibility/path certification export",
+                "replace synthetic signage placements with real signage inventory and placement approvals",
+                "replace synthetic channel templates with channel-owner CMS/CRM/app template exports",
+            ],
+        }
     route_checks = [
         {
             "stop": item.get("stop"),
@@ -3397,19 +3455,16 @@ def _venue_data_gap_analysis(real_inputs: dict[str, Any], intelligence: dict[str
         if isinstance(item, dict)
     ]
     return {
-        "status": "real_venue_ready" if readiness.get("realVenueReady") and profile_type != "synthetic_approved" and not production_missing else "creative_ready_review_required",
+        "status": gap_contract.get("status", "creative_ready_review_required"),
         "profileType": profile_type,
         "creativeReady": bool(intelligence and not quality_gaps),
-        "productionRealVenueReady": bool(readiness.get("realVenueReady") and profile_type != "synthetic_approved" and not production_missing),
-        "missingForProduction": list(dict.fromkeys(production_missing + quality_gaps)),
+        "productionRealVenueReady": bool(gap_contract.get("productionRealVenueReady")),
+        "missingForProduction": gap_contract.get("missingForProduction", []),
+        "filledForSyntheticDemo": gap_contract.get("filledForSyntheticDemo", []),
+        "syntheticOperatingCoverage": gap_contract.get("syntheticOperatingCoverage", {}),
         "coverage": coverage,
         "routeChecks": route_checks,
-        "nextProfileImports": [
-            "venue-owned live status feed",
-            "accessibility/path certification export",
-            "signage inventory and placement approvals",
-            "channel owner templates and banned-claim updates",
-        ],
+        "nextProfileImports": gap_contract.get("nextProfileImports", []),
     }
 
 
@@ -3480,6 +3535,108 @@ def _high_craft_artifacts(
     }
 
 
+def _experience_reviewer_panel(
+    route: list[dict[str, Any]],
+    channel_matrix: list[dict[str, Any]],
+    section_dossiers: list[dict[str, Any]],
+    package: dict[str, Any],
+    memory_application: dict[str, Any],
+    venue_gap_analysis: dict[str, Any],
+    banned_hits: list[str],
+) -> dict[str, Any]:
+    craft = package.get("craftArtifacts") if isinstance(package.get("craftArtifacts"), dict) else {}
+    craft_samples = craft.get("samples") if isinstance(craft.get("samples"), list) else []
+    owner_questions = package.get("ownerQuestions") if isinstance(package.get("ownerQuestions"), list) else []
+    approved_rules = package.get("approvedRuleInfluence") if isinstance(package.get("approvedRuleInfluence"), dict) else {}
+    route_rows = [item for item in route if isinstance(item, dict)]
+    source_backed_stops = sum(1 for item in route_rows if item.get("source"))
+    accessibility_stops = sum(1 for item in route_rows if item.get("accessibilityNote"))
+    optional_copy_count = sum(
+        1
+        for item in route_rows
+        if any(term in str(item.get("guestCopy") or "").lower() for term in ("optional", "choose", "pause", "current options", "when you are ready"))
+    )
+    craft_sample_count = sum(1 for item in craft_samples if isinstance(item, dict) and item.get("copy") and item.get("reviewGate") and item.get("whyItHelps"))
+    guest_copy_words = " ".join(str(item.get("guestCopy") or "") for item in route_rows).lower().split()
+    distinct_guest_terms = len(set(word.strip(".,:;!?()[]").lower() for word in guest_copy_words if len(word.strip(".,:;!?()[]")) > 4))
+    route_count = max(1, len(route_rows))
+    reviewers = [
+        {
+            "reviewerId": "creative_director",
+            "role": "Creative director",
+            "score": min(100, 48 + craft_sample_count * 12 + min(distinct_guest_terms, 18)),
+            "finding": "Craft samples and route copy give the concept enough inspectable texture." if craft_sample_count >= 3 and distinct_guest_terms >= 14 else "The concept still risks reading like a package skeleton instead of a finished guest-facing idea.",
+            "requiredRevision": "Add more concrete guest-facing images and one stronger sample for each priority channel." if craft_sample_count < 3 or distinct_guest_terms < 14 else "Keep the selected craft move and verify it with the creative lead.",
+            "gateImpact": "creative_director_critique",
+        },
+        {
+            "reviewerId": "accessibility_reviewer",
+            "role": "Accessibility reviewer",
+            "score": round(55 + (accessibility_stops / route_count) * 35 + (10 if owner_questions else 0), 1),
+            "finding": "Route stops carry accessibility notes and owner-review questions." if accessibility_stops >= len(route_rows) and owner_questions else "Accessibility is mentioned, but the route still needs stronger verification hooks.",
+            "requiredRevision": "Attach owner-confirmed step-free path, seating, lighting, and exit checks to every stop." if accessibility_stops < len(route_rows) or not owner_questions else "Keep accessibility language plain and move operational verification into owner review.",
+            "gateImpact": "accessibility_reviewer_critique",
+        },
+        {
+            "reviewerId": "safety_claims_reviewer",
+            "role": "Safety and claims reviewer",
+            "score": 96 if not banned_hits and optional_copy_count >= max(1, len(route_rows) - 1) else 62 if not banned_hits else 30,
+            "finding": "Guest-facing copy avoids banned promises and frames the route as optional." if not banned_hits and optional_copy_count >= max(1, len(route_rows) - 1) else "Claims language needs a tighter pass before owner review.",
+            "requiredRevision": f"Remove blocked claim language: {', '.join(banned_hits)}." if banned_hits else "Increase optional/current-options language so guests are not directed into a fixed operating promise.",
+            "gateImpact": "safety_claims_critique",
+        },
+        {
+            "reviewerId": "channel_owner_reviewer",
+            "role": "Channel owner reviewer",
+            "score": min(100, 50 + len(channel_matrix) * 8 + len(section_dossiers) * 3),
+            "finding": "Channel artifacts have named owners, objectives, and review gates." if len(channel_matrix) >= 4 and len(section_dossiers) >= 6 else "Some channel artifacts are present but still thin for owner handoff.",
+            "requiredRevision": "Add explicit owner, placement, success measure, and approval question for each channel." if len(channel_matrix) < 4 or len(section_dossiers) < 6 else "Send to channel owners as a review draft, not a publish package.",
+            "gateImpact": "channel_owner_critique",
+        },
+        {
+            "reviewerId": "memory_governance_reviewer",
+            "role": "Memory governance reviewer",
+            "score": 94 if memory_application.get("usedForGeneration") and approved_rules.get("authority") == "human_promoted_rules_only" else 76 if memory_application.get("usedForGeneration") else 58,
+            "finding": "Memory use is visible and bounded to human-promoted rules." if memory_application.get("usedForGeneration") and approved_rules.get("authority") == "human_promoted_rules_only" else "Memory is either inactive or not yet backed by human-promoted rule authority.",
+            "requiredRevision": "Promote only lead-approved package/craft patterns before using memory as an improvement signal." if approved_rules.get("authority") != "human_promoted_rules_only" else "Keep rule receipts visible and deduplicated.",
+            "gateImpact": "memory_governance_critique",
+        },
+    ]
+    production_ready = bool(venue_gap_analysis.get("productionRealVenueReady"))
+    for reviewer in reviewers:
+        score = float(reviewer.get("score") or 0)
+        if reviewer["gateImpact"] == "safety_claims_critique" and banned_hits:
+            reviewer["gateStatus"] = "block"
+        elif score >= 85:
+            reviewer["gateStatus"] = "pass"
+        elif score >= 70:
+            reviewer["gateStatus"] = "review"
+        else:
+            reviewer["gateStatus"] = "block"
+    consensus = round(sum(float(item.get("score") or 0) for item in reviewers) / len(reviewers), 1)
+    blocked = sum(1 for item in reviewers if item.get("gateStatus") == "block")
+    review = sum(1 for item in reviewers if item.get("gateStatus") == "review")
+    return {
+        "status": "panel_passed" if blocked == 0 and review <= 1 else "panel_review_required" if blocked == 0 else "panel_blocked",
+        "loopType": "internal_multi_reviewer_critique",
+        "consensusScore": consensus,
+        "reviewerCount": len(reviewers),
+        "productionPublishReady": production_ready and blocked == 0 and review == 0,
+        "summary": f"{len(reviewers)} internal reviewers produced {blocked} block(s), {review} review item(s), and consensus score {consensus}.",
+        "reviewers": reviewers,
+        "revisionQueue": [
+            {
+                "reviewerId": item.get("reviewerId"),
+                "role": item.get("role"),
+                "status": item.get("gateStatus"),
+                "requiredRevision": item.get("requiredRevision"),
+            }
+            for item in reviewers
+            if item.get("gateStatus") != "pass"
+        ],
+    }
+
+
 def _studio_quality_eval(
     route: list[dict[str, Any]],
     channel_matrix: list[dict[str, Any]],
@@ -3489,39 +3646,130 @@ def _studio_quality_eval(
     venue_gap_analysis: dict[str, Any],
     quality_gaps: list[str],
 ) -> dict[str, Any]:
+    craft = package.get("craftArtifacts") if isinstance(package.get("craftArtifacts"), dict) else {}
+    craft_samples = craft.get("samples") if isinstance(craft.get("samples"), list) else []
+    owner_questions = package.get("ownerQuestions") if isinstance(package.get("ownerQuestions"), list) else []
+    approved_rules = package.get("approvedRuleInfluence") if isinstance(package.get("approvedRuleInfluence"), dict) else {}
+    production_missing = _as_text_list(venue_gap_analysis.get("missingForProduction"))
+    synthetic_filled = _as_text_list(venue_gap_analysis.get("filledForSyntheticDemo"))
+    route_rows = [item for item in route if isinstance(item, dict)]
+    source_backed_stops = sum(1 for item in route_rows if item.get("source"))
+    accessibility_stops = sum(1 for item in route_rows if item.get("accessibilityNote"))
+    review_gate_count = sum(1 for item in section_dossiers if isinstance(item, dict) and item.get("reviewGate"))
+    craft_sample_count = sum(1 for item in craft_samples if isinstance(item, dict) and item.get("copy") and item.get("reviewGate") and item.get("whyItHelps"))
+    guest_facing_text = " ".join(
+        [
+            *(str(item.get("guestCopy") or "") for item in route_rows),
+            str((package.get("preArrivalEmail") or {}).get("subject") or "") if isinstance(package.get("preArrivalEmail"), dict) else "",
+            str((package.get("preArrivalEmail") or {}).get("body") or "") if isinstance(package.get("preArrivalEmail"), dict) else "",
+            *(str(item.get("headline") or "") + " " + str(item.get("body") or "") for item in (package.get("signageSet") if isinstance(package.get("signageSet"), list) else []) if isinstance(item, dict)),
+        ]
+    ).lower()
+    banned_claims = ["guaranteed", "allergen-free", "ada compliant", "always available", "no wait", "priority access", "backstage access", "private route"]
+    banned_hits = [claim for claim in banned_claims if claim in guest_facing_text]
+    source_ratio = source_backed_stops / max(1, len(route_rows))
+    access_ratio = accessibility_stops / max(1, len(route_rows))
+    review_ratio = review_gate_count / max(1, len(section_dossiers))
+    reviewer_panel = _experience_reviewer_panel(route, channel_matrix, section_dossiers, package, memory_application, venue_gap_analysis, banned_hits)
+    reviewer_consensus = float(reviewer_panel.get("consensusScore") or 0)
     scores = {
-        "specificity": 90 if route and all(item.get("guestCopy") and item.get("staffNote") for item in route if isinstance(item, dict)) else 55,
-        "venueGrounding": 92 if route and all(item.get("source") for item in route if isinstance(item, dict)) else 65,
-        "sectionCompleteness": min(100, 50 + len(section_dossiers) * 7 + len(channel_matrix) * 3),
-        "creativeQuality": 92 if (package.get("executiveConcept") or {}).get("name") and (package.get("creativeSynthesis") or {}).get("concepts") and (package.get("craftArtifacts") or {}).get("samples") else 70,
-        "reviewReadiness": 72 if quality_gaps else 88,
-        "memoryUse": 90 if memory_application.get("usedForGeneration") else 60,
-        "publishRisk": 55 if venue_gap_analysis.get("missingForProduction") else 85,
+        "specificity": 92 if route_rows and all(item.get("guestCopy") and item.get("staffNote") for item in route_rows) else 58,
+        "sourceEvidence": round(60 + source_ratio * 35 + min(len(synthetic_filled), 5), 1) if route_rows else 45,
+        "routeAndAccessGovernance": round(55 + access_ratio * 35 + (10 if venue_gap_analysis.get("routeChecks") else 0), 1),
+        "channelOwnerReadiness": min(100, 55 + len(channel_matrix) * 7 + len(owner_questions) * 3),
+        "craftDepth": min(100, 48 + craft_sample_count * 14 + (10 if craft.get("craftNotes") else 0)),
+        "reviewGovernance": round(50 + review_ratio * 30 + min(len(owner_questions), 5) * 4, 1),
+        "memoryAndLearningAuthority": 94 if memory_application.get("usedForGeneration") and approved_rules.get("authority") == "human_promoted_rules_only" else 66 if memory_application.get("usedForGeneration") else 48,
+        "claimSafety": 96 if not banned_hits else 45,
+        "productionBoundary": 100 if venue_gap_analysis.get("productionRealVenueReady") else 72 if production_missing == ["real venue source feed instead of approved synthetic profile"] else 45,
+        "reviewerConsensus": reviewer_consensus,
     }
-    total = round(sum(scores.values()) / len(scores), 1)
+    weights = {
+        "specificity": 0.1,
+        "sourceEvidence": 0.12,
+        "routeAndAccessGovernance": 0.11,
+        "channelOwnerReadiness": 0.09,
+        "craftDepth": 0.11,
+        "reviewGovernance": 0.1,
+        "memoryAndLearningAuthority": 0.1,
+        "claimSafety": 0.09,
+        "productionBoundary": 0.07,
+        "reviewerConsensus": 0.11,
+    }
+    total = round(sum(scores[key] * weights[key] for key in weights), 1)
+    production_score = round((scores["sourceEvidence"] * 0.2) + (scores["routeAndAccessGovernance"] * 0.18) + (scores["channelOwnerReadiness"] * 0.16) + (scores["claimSafety"] * 0.18) + (scores["productionBoundary"] * 0.28), 1)
+    gate_results = [
+        {"id": "guest_facing_claim_safety", "status": "pass" if not banned_hits else "block", "severity": "critical", "evidence": "No banned claims found in guest-facing copy." if not banned_hits else f"Banned claims found: {', '.join(banned_hits)}."},
+        {"id": "source_backed_route", "status": "pass" if source_ratio >= 0.95 else "review", "severity": "high", "evidence": f"{source_backed_stops}/{len(route_rows)} route stops include source evidence."},
+        {"id": "accessibility_notes", "status": "pass" if access_ratio >= 0.8 else "review", "severity": "high", "evidence": f"{accessibility_stops}/{len(route_rows)} route stops include accessibility notes."},
+        {"id": "owner_review_gates", "status": "pass" if review_ratio >= 0.9 and owner_questions else "review", "severity": "high", "evidence": f"{review_gate_count}/{len(section_dossiers)} section dossiers include review gates; {len(owner_questions)} owner question(s)."},
+        {"id": "creative_craft_evidence", "status": "pass" if craft_sample_count >= 3 else "review", "severity": "medium", "evidence": f"{craft_sample_count} craft sample(s) include copy, review gate, and why-it-helps evidence."},
+        {"id": "learning_authority", "status": "pass" if approved_rules.get("authority") == "human_promoted_rules_only" else "review", "severity": "critical", "evidence": f"Approved-rule authority: {approved_rules.get('authority') or 'not active'}."},
+        {"id": "production_publish_boundary", "status": "pass" if venue_gap_analysis.get("productionRealVenueReady") else "block", "severity": "critical", "evidence": "Production-real venue ready." if venue_gap_analysis.get("productionRealVenueReady") else f"Production publish blocked by: {', '.join(production_missing) or 'unknown venue gap'}."},
+    ]
+    gate_results.extend(
+        {
+            "id": str(item.get("gateImpact") or item.get("reviewerId")),
+            "status": str(item.get("gateStatus") or "review"),
+            "severity": "critical" if item.get("gateStatus") == "block" else "high" if item.get("gateStatus") == "review" else "medium",
+            "evidence": f"{item.get('role')}: {item.get('finding')}",
+            "reviewerId": item.get("reviewerId"),
+            "requiredRevision": item.get("requiredRevision"),
+        }
+        for item in reviewer_panel.get("reviewers", [])
+        if isinstance(item, dict)
+    )
+    gate_results.append(
+        {
+            "id": "reviewer_panel_consensus",
+            "status": "pass" if reviewer_panel.get("status") == "panel_passed" else "review" if reviewer_panel.get("status") == "panel_review_required" else "block",
+            "severity": "high",
+            "evidence": reviewer_panel.get("summary"),
+        }
+    )
+    block_count = sum(1 for gate in gate_results if gate["status"] == "block")
+    review_count = sum(1 for gate in gate_results if gate["status"] == "review")
     findings = []
-    if venue_gap_analysis.get("missingForProduction"):
-        findings.append("Production-real venue launch still needs live/profile imports before publish.")
+    if production_missing:
+        findings.append(f"Production publish remains blocked by {len(production_missing)} venue source gap(s); demo/channel-owner review can continue.")
     if not memory_application.get("usedForGeneration"):
         findings.append("No approved memory or promoted rules influenced this generation yet.")
-    if scores["sectionCompleteness"] >= 85:
-        findings.append("Package includes concept, journey, channels, staff, accessibility, memory, and review sections.")
+    if block_count or review_count:
+        findings.append(f"Gates: {block_count} blocked, {review_count} review, {len(gate_results) - block_count - review_count} passed.")
+    if scores["craftDepth"] >= 90:
+        findings.append("Creative craft evidence includes inspectable samples with review gates.")
+    findings.append(str(reviewer_panel.get("summary") or "Internal reviewer panel completed."))
     return {
-        "status": "strong_review_draft" if total >= 80 else "needs_review_work",
+        "status": "demo_ready_production_blocked" if total >= 82 and block_count == 1 and not banned_hits else "strong_review_draft" if total >= 80 and not banned_hits else "needs_review_work",
         "score": total,
+        "demoScore": total,
+        "productionScore": production_score,
         "scores": scores,
+        "weights": weights,
+        "gateSummary": {"passed": len(gate_results) - block_count - review_count, "review": review_count, "blocked": block_count},
+        "gateResults": gate_results,
+        "reviewerPanel": reviewer_panel,
+        "reviewLoop": {
+            "status": reviewer_panel.get("status"),
+            "consensusScore": reviewer_panel.get("consensusScore"),
+            "revisionQueue": reviewer_panel.get("revisionQueue", []),
+            "learningUse": "Only reviewer-approved finished-work patterns can be promoted into future generation rules.",
+        },
         "findings": findings,
         "qaChecklist": [
-            {"check": "specific copy in each stop", "status": "pass" if scores["specificity"] >= 80 else "review"},
-            {"check": "venue facts attached", "status": "pass" if scores["venueGrounding"] >= 80 else "review"},
-            {"check": "complete artifacts", "status": "pass" if scores["sectionCompleteness"] >= 80 else "review"},
-            {"check": "memory/rule influence visible", "status": "pass" if scores["memoryUse"] >= 80 else "review"},
-            {"check": "production-real venue ready", "status": "pass" if not venue_gap_analysis.get("missingForProduction") else "blocked"},
+            {"check": "guest-facing claim safety", "status": "pass" if not banned_hits else "blocked"},
+            {"check": "source-backed route", "status": "pass" if source_ratio >= 0.95 else "review"},
+            {"check": "accessibility notes attached", "status": "pass" if access_ratio >= 0.8 else "review"},
+            {"check": "owner gates and questions", "status": "pass" if review_ratio >= 0.9 and owner_questions else "review"},
+            {"check": "creative craft samples", "status": "pass" if craft_sample_count >= 3 else "review"},
+            {"check": "human-approved learning authority", "status": "pass" if approved_rules.get("authority") == "human_promoted_rules_only" else "review"},
+            {"check": "internal reviewer panel", "status": "pass" if reviewer_panel.get("status") == "panel_passed" else "review"},
+            {"check": "production-real venue ready", "status": "pass" if venue_gap_analysis.get("productionRealVenueReady") else "blocked"},
         ],
         "recommendedNextActions": [
             "Send section details to channel owners for edits.",
-            "Resolve production data gaps before publish or live deployment.",
-            "Promote only reviewer-approved rules from finished work.",
+            "Keep demo handoff separate from production publish until the real venue source feed replaces synthetic.",
+            "Promote only creative-lead or reviewer-approved rules from finished work.",
         ],
     }
 
@@ -3571,11 +3819,15 @@ def _experience_review_agent(package: dict[str, Any], draft_context: dict[str, A
     memory = package.get("memoryApplication") if isinstance(package.get("memoryApplication"), dict) else {}
     rules = package.get("approvedRuleInfluence") if isinstance(package.get("approvedRuleInfluence"), dict) else {}
     score = float(qa.get("score") or 0)
+    gates = qa.get("gateResults") if isinstance(qa.get("gateResults"), list) else []
+    blocking_gates = [gate for gate in gates if isinstance(gate, dict) and gate.get("status") == "block"]
+    non_publish_blocks = [gate for gate in blocking_gates if gate.get("id") != "production_publish_boundary"]
+    review_gates = [gate for gate in gates if isinstance(gate, dict) and gate.get("status") == "review"]
     findings = []
-    if score >= 85:
-        findings.append("Package is strong enough for creative review: specific route copy, complete artifacts, and visible review gates are present.")
+    if score >= 85 and not non_publish_blocks:
+        findings.append("Package is strong enough for channel-owner creative review: specific route copy, complete artifacts, visible gates, and no non-publish blockers are present.")
     else:
-        findings.append("Package needs more section detail before owner review.")
+        findings.append("Package needs revision before owner review because one or more non-publish gates did not pass.")
     if venue_gaps.get("missingForProduction"):
         findings.append("Do not present this as production-real venue ready until live/profile imports are resolved.")
     if memory.get("usedForGeneration"):
@@ -3590,15 +3842,24 @@ def _experience_review_agent(package: dict[str, Any], draft_context: dict[str, A
         section_targets.append({"section": "venue data", "reason": "production profile gap"})
     if revision_request.get("sectionId"):
         section_targets.insert(0, {"section": revision_request.get("sectionId"), "reason": "reviewer-requested revision"})
+    channel_owner_ready = score >= 82 and not non_publish_blocks
+    production_publish_ready = bool(venue_gaps.get("productionRealVenueReady")) and not blocking_gates and not revision_request.get("blockingIssue")
     return {
         "agentId": "experience_studio_review_agent",
         "agentName": "Experience Studio Review Agent",
-        "status": "ready_for_owner_review" if score >= 85 else "needs_revision",
+        "status": "ready_for_owner_review" if channel_owner_ready else "needs_revision",
         "score": score,
+        "demoScore": qa.get("demoScore"),
+        "productionScore": qa.get("productionScore"),
         "reviewMode": "post_revision_review" if revision_request else "generation_review",
         "findings": findings,
+        "gateSummary": qa.get("gateSummary", {}),
+        "gateResults": gates,
+        "blockingGates": blocking_gates,
+        "reviewGates": review_gates,
         "sectionTargets": section_targets[:6],
-        "approvalRecommendation": "approve_for_channel_owner_review" if score >= 85 and not revision_request.get("blockingIssue") else "revise_before_approval",
+        "approvalRecommendation": "approve_for_channel_owner_review" if channel_owner_ready and not revision_request.get("blockingIssue") else "revise_before_approval",
+        "publishRecommendation": "production_publish_ready" if production_publish_ready else "blocked_until_real_venue_imports" if venue_gaps.get("missingForProduction") else "blocked_until_review_gates_pass",
         "memoryJudgment": {
             "memoryUsed": bool(memory.get("usedForGeneration")),
             "rulesUsed": bool(rules.get("usedForGeneration")),
@@ -3711,12 +3972,31 @@ def revise_experience_studio_section(payload: dict[str, Any]) -> dict[str, Any]:
     after_eval = json.loads(json.dumps(before_eval, default=str)) if before_eval else {"score": 0, "scores": {}}
     scores = after_eval.setdefault("scores", {})
     if isinstance(scores, dict):
-        scores["sectionCompleteness"] = min(100, float(scores.get("sectionCompleteness") or 70) + 2)
-        scores["creativeQuality"] = min(100, float(scores.get("creativeQuality") or 70) + 3)
+        baseline_score = float(after_eval.get("score") or 0)
+        if baseline_score <= 0 and scores:
+            baseline_score = sum(float(value or 0) for value in scores.values()) / len(scores)
+        baseline_score = max(70.0, baseline_score)
+        if "specificity" in scores:
+            scores["specificity"] = min(100, float(scores.get("specificity") or baseline_score) + 2)
+        if "reviewGovernance" in scores:
+            scores["reviewGovernance"] = min(100, float(scores.get("reviewGovernance") or baseline_score) + 4)
+        if "channelOwnerReadiness" in scores:
+            scores["channelOwnerReadiness"] = min(100, float(scores.get("channelOwnerReadiness") or baseline_score) + 1)
+        if "craftDepth" in scores:
+            scores["craftDepth"] = min(100, float(scores.get("craftDepth") or baseline_score) + 1)
         if section_id in {"staff", "staff_script", "staff_cue", "signage", "signage_set"}:
-            scores["reviewReadiness"] = min(100, float(scores.get("reviewReadiness") or 70) + 2)
-        after_eval["score"] = round(sum(float(value or 0) for value in scores.values()) / len(scores), 1) if scores else after_eval.get("score")
-    after_eval["status"] = "strong_review_draft" if float(after_eval.get("score") or 0) >= 80 else "needs_review_work"
+            if "reviewGovernance" in scores:
+                scores["reviewGovernance"] = min(100, float(scores.get("reviewGovernance") or baseline_score) + 2)
+        weights = after_eval.get("weights") if isinstance(after_eval.get("weights"), dict) else {}
+        if weights:
+            after_eval["score"] = round(sum(float(scores.get(key) or 0) * float(weight or 0) for key, weight in weights.items()), 1)
+        else:
+            after_eval["score"] = round(sum(float(value or 0) for value in scores.values()) / len(scores), 1) if scores else after_eval.get("score")
+        after_eval["score"] = max(float(before_eval.get("score") or 0), float(after_eval.get("score") or 0))
+        after_eval["demoScore"] = after_eval["score"]
+    gate_summary = after_eval.get("gateSummary") if isinstance(after_eval.get("gateSummary"), dict) else {}
+    blocked = int(gate_summary.get("blocked") or 0)
+    after_eval["status"] = "demo_ready_production_blocked" if float(after_eval.get("score") or 0) >= 82 and blocked == 1 else "strong_review_draft" if float(after_eval.get("score") or 0) >= 80 else "needs_review_work"
     after_eval.setdefault("findings", [])
     if isinstance(after_eval["findings"], list):
         after_eval["findings"] = list(dict.fromkeys(["Reviewer-targeted section revision applied."] + after_eval["findings"]))

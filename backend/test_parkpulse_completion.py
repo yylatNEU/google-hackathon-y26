@@ -808,7 +808,7 @@ def test_parkpulse_api_routes_and_lifecycle(monkeypatch):
     assert "Operational action" in parkpulse_api._dispatch_body({"payload": {"promotion": {"offer": ""}}})
 
 
-def test_parkpulse_new_api_surfaces_and_cache_branches(monkeypatch):
+def test_parkpulse_new_api_surfaces_and_cache_branches(monkeypatch, tmp_path):
     install_api_fakes(monkeypatch)
     parkpulse_api.clear_hot_endpoint_cache()
     parkpulse_api._hot_endpoint_refreshing.clear()
@@ -935,6 +935,16 @@ def test_parkpulse_new_api_surfaces_and_cache_branches(monkeypatch):
     assert run(parkpulse_api.park_digital_twin_tool_run(parkpulse_api.DigitalTwinToolRequest(tool="get_park_state")))["tool"] == "get_park_state"
     assert run(parkpulse_api.park_digital_twin_trace())
     assert run(parkpulse_api.park_digital_twin_benchmark_scenarios())["scenario_count"] >= 5
+    original_record_benchmark_result = parkpulse_api.record_benchmark_result
+
+    def record_benchmark_to_tmp(result):
+        return original_record_benchmark_result(
+            result,
+            history_path=tmp_path / "digital-twin-history.json",
+            reports_dir=tmp_path / "digital-twin-reports",
+        )
+
+    monkeypatch.setattr(parkpulse_api, "record_benchmark_result", record_benchmark_to_tmp)
     benchmark = run(parkpulse_api.park_digital_twin_benchmark(parkpulse_api.DigitalTwinBenchmarkRequest(scenario_id="policy_gate_pressure", seed="api-test")))
     assert benchmark["status"] == "complete"
     assert benchmark["summary"]["episodes"] == 1
