@@ -2057,3 +2057,126 @@ def test_main_runtime_status_diagnostics_dynamic_twin_and_evidence_routes(monkey
     )
     _, latency_error = run(_asgi_json("GET", "/api/park/latency-diagnostics"))
     assert latency_error["status"] == "diagnostics_error"
+
+
+def test_main_internal_agent_and_handshake_routes(monkeypatch):
+    async def state_ok():
+        return compact_state()
+
+    async def state_bad():
+        raise RuntimeError("state unavailable")
+
+    monkeypatch.setattr(main, "_fast_park_state_lite", state_ok)
+    monkeypatch.setattr(main, "commerce_agent_evaluate", lambda session_id, payload: {"status": "commerce", "session_id": session_id, "sku": payload.get("sku")})
+    monkeypatch.setattr(main, "queue_agent_reroute", lambda session_id, payload, park_state=None: {"status": "queue", "session_id": session_id, "has_state": park_state is not None})
+    monkeypatch.setattr(main, "demo_handshake", lambda park_state=None: {"status": "demo", "has_state": park_state is not None})
+    monkeypatch.setattr(main, "demo_supply_chain_handshake", lambda scenario_mode: {"status": "supply", "scenario_mode": scenario_mode})
+    monkeypatch.setattr(main, "identity_handshake", lambda payload: {"status": "identity", "payload": payload})
+
+    _, commerce = run(_asgi_json("POST", "/api/park/internal-agents/commerce/evaluate", {"session_id": "s1", "sku": "water"}))
+    _, queue = run(_asgi_json("POST", "/api/park/internal-agents/queue/reroute", {"sessionId": "s1"}))
+    _, demo = run(_asgi_json("GET", "/api/park/agent-handshake/demo"))
+    _, supply_default = run(_asgi_json("GET", "/api/park/agent-handshake/supply-chain/demo"))
+    _, supply_post = run(_asgi_json("POST", "/api/park/agent-handshake/supply-chain/demo", {"scenarioMode": "inventory_delay"}))
+    _, identity = run(_asgi_json("POST", "/api/park/handshake", {"agent": "unit"}))
+    assert commerce["status"] == "commerce"
+    assert queue["has_state"] is True
+    assert demo["has_state"] is True
+    assert supply_default["scenario_mode"] == "supply_replenishment"
+    assert supply_post["scenario_mode"] == "inventory_delay"
+    assert identity["payload"]["agent"] == "unit"
+
+    monkeypatch.setattr(main, "_fast_park_state_lite", state_bad)
+    _, queue_fallback = run(_asgi_json("POST", "/api/park/internal-agents/queue/reroute", {"session_id": "s2"}))
+    _, demo_fallback = run(_asgi_json("POST", "/api/park/agent-handshake/demo", {}))
+    assert queue_fallback["has_state"] is False
+    assert demo_fallback["has_state"] is False
+
+    monkeypatch.setattr(main, "commerce_agent_evaluate", lambda session_id, payload: (_ for _ in ()).throw(KeyError("missing commerce")))
+    status_missing, missing = run(_asgi_json("POST", "/api/park/internal-agents/commerce/evaluate", {"session_id": "missing"}))
+    assert status_missing == 404
+    assert missing["mode"] == "commerce_agent_evaluate"
+    monkeypatch.setattr(main, "commerce_agent_evaluate", lambda session_id, payload: (_ for _ in ()).throw(PermissionError("denied commerce")))
+    status_denied, denied = run(_asgi_json("POST", "/api/park/internal-agents/commerce/evaluate", {"session_id": "denied"}))
+    assert status_denied == 403
+    assert denied["mode"] == "commerce_agent_evaluate"
+    monkeypatch.setattr(main, "_fast_park_state_lite", state_ok)
+    monkeypatch.setattr(main, "queue_agent_reroute", lambda session_id, payload, park_state=None: (_ for _ in ()).throw(KeyError("missing queue")))
+    status_queue_missing, queue_missing = run(_asgi_json("POST", "/api/park/internal-agents/queue/reroute", {"session_id": "missing"}))
+    assert status_queue_missing == 404
+    assert queue_missing["mode"] == "queue_agent_reroute"
+
+
+def test_main_actual_training_and_gcp_dry_run_routes(monkeypatch):
+    async def allow(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(main, "_authorize_or_send", allow)
+    monkeypatch.setattr(main, "_evidence_refresh_accepted_payload", lambda kind, cache_key, ttl_seconds, builder: {"status": "refresh_queued", "kind": kind, "cache_key": cache_key})
+    status_refresh, refresh = run(_asgi_json("GET", "/api/park/actual-training", query_string=b"refresh=true&asyncRefresh=true&minRows=4"))
+    assert status_refresh == 202
+    assert refresh["kind"] == "actual_training"
+
+    import training_run_receipts
+    import controlled_training_eval as controlled_eval_module
+
+    monkeypatch.setattr(park_actual_training, "actual_training_status", lambda *args, **kwargs: {"status": "ready"})
+    monkeypatch.setattr(controlled_eval_module, "offline_training_eval_gate_passed", lambda *args, **kwargs: {"allowed": False, "readiness_issues": ["gate held"], "eval": {"id": "eval-1"}})
+    monkeypatch.setattr(training_run_receipts, "record_training_run_receipt", lambda **kwargs: {"receipt": {"id": "receipt-blocked", "status": kwargs.get("status")}})
+    _, blocked = run(_asgi_json("POST", "/api/park/actual-training", {"runGcpTraining": True, "minRows": 3}))
+    assert blocked["status"] == "blocked"
+    assert blocked["training_run_receipt"]["id"] == "receipt-blocked"
+
+    async def preflight(payload, default_refresh=True):
+        return {"status": "ready", "default_refresh": default_refresh}
+
+    async def export_live_episodes(limit=80):
+        return {"status": "exported", "limit": limit}
+
+    monkeypatch.setattr(main, "_training_live_feed_preflight_payload", preflight)
+    monkeypatch.setattr(main, "_export_live_episode_fitness_to_bigquery", export_live_episodes)
+    monkeypatch.setattr(main, "_call_actual_training_status", lambda status_fn, min_rows, run_gcp_training, detail=None: {"status": "ready", "sample_count": min_rows, "detail": detail})
+    monkeypatch.setattr(controlled_eval_module, "latest_controlled_training_eval", lambda: {"status": "latest"})
+    monkeypatch.setattr(training_run_receipts, "record_training_run_receipt", lambda **kwargs: {"receipt": {"id": f"receipt-{kwargs.get('attempt_type')}"}})
+    class EpisodeSource:
+        async def get_episode_fitness(self, limit=20):
+            return {"episodes": [{"id": "ep"}], "limit": limit}
+
+    monkeypatch.setattr(main, "_fast_park_simulation", EpisodeSource())
+    _, exported = run(_asgi_json("POST", "/api/park/actual-training", {"exportLiveEpisodes": True, "minRows": 5}))
+    assert exported["status"] == "ready"
+    assert exported["live_episode_export"]["status"] == "exported"
+    assert exported["training_run_receipt"]["id"] == "receipt-live_episode_export"
+    assert exported["episode_fitness"]["episodes"][0]["id"] == "ep"
+
+    monkeypatch.setattr(training_run_receipts, "training_run_receipt_ledger", lambda limit=80: {"status": "ready", "limit": limit})
+    _, ledger = run(_asgi_json("GET", "/api/park/training-run-receipts", query_string=b"limit=7"))
+    assert ledger == {"status": "ready", "limit": 7}
+
+    def old_style_dry_run(min_rows, *, validate_tables=False, live_feed_preflight=None, fast_readiness=True):
+        return {
+            "status": "ready",
+            "mode": "gcp_training_dry_run_readiness",
+            "min_rows": min_rows,
+            "validate_tables": validate_tables,
+            "fast_readiness": fast_readiness,
+            "live_feed_preflight": live_feed_preflight,
+        }
+
+    monkeypatch.setattr(park_actual_training, "gcp_training_dry_run_readiness", old_style_dry_run)
+    _, dry_run = run(
+        _asgi_json(
+            "POST",
+            "/api/park/gcp-training-dry-run",
+            {"minRows": 6, "validateTables": True, "deepReadiness": True, "controlledEval": {"id": "override"}},
+        )
+    )
+    assert dry_run["status"] == "ready"
+    assert dry_run["min_rows"] == 6
+    assert dry_run["validate_tables"] is True
+    assert dry_run["live_feed_preflight"]["status"] == "ready"
+
+    monkeypatch.setattr(park_actual_training, "gcp_training_dry_run_readiness", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("dry run offline")))
+    _, dry_error = run(_asgi_json("GET", "/api/park/gcp-training-dry-run"))
+    assert dry_error["status"] == "error"
+    assert dry_error["mode"] == "gcp_training_dry_run_readiness"

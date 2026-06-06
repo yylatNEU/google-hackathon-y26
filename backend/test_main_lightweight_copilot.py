@@ -232,6 +232,102 @@ def test_lightweight_copilot_retrieves_semantic_memory_on_hot_path(monkeypatch):
     assert any(item["tool"] == "memory.retrieve_semantic_context" for item in payload["tool_call_timeline"])
 
 
+def test_scan_semantic_memory_uses_role_cache_on_hot_path(monkeypatch):
+    seen = {}
+
+    def fake_retrieve(query, state, limit, agent_role, cache_policy):
+        seen["agent_role"] = agent_role
+        seen["cache_policy"] = cache_policy
+        return {
+            "status": {"modelApi": {"enabled": True, "provider": "voyage"}},
+            "query": query,
+            "scenario_key": "ride_down",
+            "agent_role": agent_role,
+            "cache_policy": cache_policy,
+            "retrieved": {
+                "method": "role_context_cache",
+                "playbooks": [{"_id": "pb-scan", "title": "Watch weak queue signal"}],
+                "incidents": [{"_id": "inc-scan", "summary": "Prior weak signal"}],
+                "learnings": [{"_id": "learn-scan", "lesson": "Escalate only after confirmation."}],
+            },
+            "summary": "Retrieved cached scan context.",
+        }
+
+    monkeypatch.setenv("PARKPULSE_COPILOT_SEMANTIC_MEMORY", "true")
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "true")
+    monkeypatch.setenv("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY_CACHE_POLICY", "fresh_retrieval")
+    monkeypatch.setattr(main, "_lightweight_retrieve_operational_context", fake_retrieve)
+
+    payload = run(
+        main._lightweight_copilot_semantic_memory_context(
+            "What weak signal should we watch right now?",
+            {"guestFlow": {"activeScenario": {"key": "ride_down"}}},
+            {"top_rides": [], "crowded_zones": [], "constrained_paths": [], "weather": {}},
+            {"selected_role": "scan"},
+        )
+    )
+
+    assert seen == {"agent_role": "scan", "cache_policy": "role_cache_only"}
+    assert payload["status"] == "ready"
+    assert payload["retrieval_method"] == "role_context_cache"
+
+
+def test_scan_semantic_memory_cache_miss_serves_static_fallback(monkeypatch):
+    warmups = []
+
+    def fake_retrieve(query, state, limit, agent_role, cache_policy):
+        return {
+            "status": {"modelApi": {"enabled": True, "provider": "voyage"}},
+            "query": query,
+            "scenario_key": "ride_down",
+            "agent_role": "scan_agent",
+            "cache_policy": cache_policy,
+            "retrieved": {
+                "method": "role_context_cache_miss",
+                "playbooks": [],
+                "incidents": [],
+                "learnings": [],
+            },
+            "summary": "No cached scan context.",
+        }
+
+    def fake_warmup(message, state, selected_role, scenario_key):
+        warmups.append({"message": message, "selected_role": selected_role, "scenario_key": scenario_key})
+        return {"status": "queued", "scenario_key": scenario_key, "role": selected_role}
+
+    monkeypatch.setenv("PARKPULSE_COPILOT_SEMANTIC_MEMORY", "true")
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "true")
+    monkeypatch.setenv("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY_CACHE_POLICY", "fresh_retrieval")
+    monkeypatch.setattr(main, "_lightweight_retrieve_operational_context", fake_retrieve)
+    monkeypatch.setattr(main, "_schedule_lightweight_role_cache_warmup", fake_warmup)
+    main._lightweight_semantic_memory_cache.clear()
+
+    payload = run(
+        main._lightweight_copilot_semantic_memory_context(
+            "What weak signal should we watch right now?",
+            {"guestFlow": {"activeScenario": {"key": "ride_down"}}},
+            {
+                "top_ride": {"id": "dragonCoaster", "name": "Dragon Coaster"},
+                "top_zone": {"id": "paradePlaza", "name": "Parade Plaza"},
+                "top_path": {"fromName": "Coaster Gate", "toName": "Parade Plaza"},
+            },
+            {"selected_role": "scan"},
+        )
+    )
+
+    assert payload["status"] == "ready"
+    assert payload["retrieval_method"] == "role_context_cache_static_fallback"
+    assert payload["fallback_reason"] == "role_context_cache_miss"
+    assert payload["counts"] == {"playbooks": 1, "incidents": 1, "learnings": 1}
+    assert warmups == [
+        {
+            "message": "What weak signal should we watch right now?",
+            "selected_role": "scan",
+            "scenario_key": "ride_down",
+        }
+    ]
+
+
 def test_lightweight_semantic_memory_timeout_does_not_block_answer(monkeypatch):
     async def fake_model_response(**kwargs):
         return {

@@ -180,6 +180,7 @@ _load_task: concurrent.futures.Future[Any] | None = None
 _refinement_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="parkpulse-refinement")
 _role_auth_audit_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-role-auth-audit")
 _fast_state_sync_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-fast-state-sync")
+_semantic_role_cache_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-semantic-role-cache")
 _load_started_at: float | None = None
 _load_completed_at: float | None = None
 _load_duration_ms: int | None = None
@@ -204,6 +205,8 @@ _hot_endpoint_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _hot_endpoint_refreshing: set[str] = set()
 _lightweight_semantic_memory_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _lightweight_semantic_memory_lock = threading.Lock()
+_semantic_role_cache_warmups: dict[str, float] = {}
+_semantic_role_cache_warmup_lock = threading.Lock()
 _mongo_hot_status_cache: tuple[float, dict[str, Any]] | None = None
 _evidence_endpoint_cache: dict[str, tuple[float, float, dict[str, Any]]] = {}
 _evidence_endpoint_refreshing: set[str] = set()
@@ -9039,6 +9042,104 @@ def _lightweight_copilot_memory_doc_summary(document: dict[str, Any]) -> dict[st
     }
 
 
+def _lightweight_semantic_scenario_key(state: dict[str, Any], memory: dict[str, Any] | None = None) -> str:
+    if isinstance(memory, dict) and memory.get("scenario_key"):
+        return str(memory.get("scenario_key"))
+    guest_flow = state.get("guestFlow") if isinstance(state.get("guestFlow"), dict) else {}
+    active = guest_flow.get("activeScenario") if isinstance(guest_flow.get("activeScenario"), dict) else {}
+    return str(active.get("key") or "ride_down")
+
+
+def _schedule_lightweight_role_cache_warmup(message: str, state: dict[str, Any], selected_role: str, scenario_key: str) -> dict[str, Any]:
+    interval = max(1.0, _float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_ROLE_CACHE_WARMUP_INTERVAL_SECONDS", 30.0))
+    role = str(selected_role or "scan")
+    key = f"{scenario_key}:{role}"
+    now = time.monotonic()
+    with _semantic_role_cache_warmup_lock:
+        last = _semantic_role_cache_warmups.get(key, 0.0)
+        if now - last < interval:
+            return {"status": "throttled", "scenario_key": scenario_key, "role": role}
+        _semantic_role_cache_warmups[key] = now
+
+    def operation() -> None:
+        try:
+            from mongo_memory import get_operational_intelligence
+
+            get_operational_intelligence(message, scenario_key, role)
+        except Exception:
+            return
+
+    _semantic_role_cache_executor.submit(operation)
+    return {"status": "queued", "scenario_key": scenario_key, "role": role}
+
+
+def _lightweight_scan_cache_miss_fallback(
+    *,
+    message: str,
+    state: dict[str, Any],
+    state_summary: dict[str, Any],
+    memory: dict[str, Any],
+    started: float,
+    timeout: float,
+) -> dict[str, Any]:
+    scenario_key = _lightweight_semantic_scenario_key(state, memory)
+    warmup = _schedule_lightweight_role_cache_warmup(message, state, "scan", scenario_key)
+    top_ride = state_summary.get("top_ride") if isinstance(state_summary.get("top_ride"), dict) else {}
+    top_zone = state_summary.get("top_zone") if isinstance(state_summary.get("top_zone"), dict) else {}
+    top_path = state_summary.get("top_path") if isinstance(state_summary.get("top_path"), dict) else {}
+    ride_name = top_ride.get("name") or top_ride.get("id") or "top ride"
+    zone_name = top_zone.get("name") or top_zone.get("id") or "highest-density zone"
+    return {
+        "status": "ready",
+        "source": "mongo_operational_memory_lightweight",
+        "query": memory.get("query") or message,
+        "scenario_key": scenario_key,
+        "agent_role": "scan_agent",
+        "cache_policy": memory.get("cache_policy") or "role_cache_only",
+        "retrieval_method": "role_context_cache_static_fallback",
+        "summary": "Scan role cache was cold; served deterministic weak-signal context and queued Mongo role-cache warmup.",
+        "model_api": (memory.get("status") or {}).get("modelApi") if isinstance(memory.get("status"), dict) else {},
+        "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
+        "readiness_issues": [],
+        "fallback_reason": "role_context_cache_miss",
+        "warmup": warmup,
+        "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+        "timeout_ms": round(timeout * 1000, 2),
+        "cache_status": "static_fallback",
+        "counts": {"playbooks": 1, "incidents": 1, "learnings": 1},
+        "retrieved": {
+            "playbooks": [
+                {
+                    "_id": f"scan_static_playbook_{scenario_key}",
+                    "title": "Scan weak-signal triage",
+                    "summary": f"Watch {ride_name}, {zone_name}, path congestion, weather, and guest-care notes before recommending action.",
+                    "scenarioKey": scenario_key,
+                    "recommendedAction": "Surface uncertainty, name the signal, and request operator confirmation before mutation.",
+                }
+            ],
+            "incidents": [
+                {
+                    "_id": f"scan_static_incident_{scenario_key}",
+                    "summary": f"Cold role-cache fallback for {scenario_key}; compare live ride, zone, and path pressure before escalation.",
+                    "scenarioKey": scenario_key,
+                }
+            ],
+            "learnings": [
+                {
+                    "_id": f"scan_static_learning_{scenario_key}",
+                    "lesson": "Scan answers should observe and explain weak signals, not dispatch or mutate park operations.",
+                    "scenarioKey": scenario_key,
+                }
+            ],
+        },
+        "state_focus": {
+            "top_ride": top_ride,
+            "top_zone": top_zone,
+            "top_path": top_path,
+        },
+    }
+
+
 def _compact_lightweight_copilot_semantic_memory(memory: dict[str, Any]) -> dict[str, Any]:
     status = memory.get("status") if isinstance(memory.get("status"), dict) else {}
     retrieved = memory.get("retrieved") if isinstance(memory.get("retrieved"), dict) else {}
@@ -9053,7 +9154,7 @@ def _compact_lightweight_copilot_semantic_memory(memory: dict[str, Any]) -> dict
     degraded_reasons: list[str] = []
     if not retrieval_method or retrieval_method in {"degraded_empty", "role_context_cache_miss"}:
         degraded_reasons.append("Semantic memory returned no usable hot-path context.")
-    if model_api_enabled and not retrieval_method.startswith("mongodb_vector_search"):
+    if model_api_enabled and not retrieval_method.startswith("mongodb_vector_search") and not retrieval_method.startswith("role_context_cache"):
         degraded_reasons.append(f"Model API is enabled but retrieval used {retrieval_method or 'unknown'} instead of vector search.")
     if total_count <= 0:
         degraded_reasons.append("No playbooks, incidents, or learnings were retrieved.")
@@ -9106,6 +9207,8 @@ async def _lightweight_copilot_semantic_memory_context(
             "PARKPULSE_COPILOT_SEMANTIC_MEMORY_CACHE_POLICY",
             "role_cache_only",
         )
+    if selected_role == "scan" and cache_policy == "fresh_retrieval":
+        cache_policy = os.getenv("PARKPULSE_COPILOT_LIGHTWEIGHT_SCAN_SEMANTIC_MEMORY_CACHE_POLICY", "role_cache_only")
     cache_key = json.dumps(
         {
             "message": message,
@@ -9147,9 +9250,22 @@ async def _lightweight_copilot_semantic_memory_context(
             timeout=timeout,
         )
         payload = _compact_lightweight_copilot_semantic_memory(memory if isinstance(memory, dict) else {})
+        if (
+            selected_role == "scan"
+            and payload.get("status") == "degraded"
+            and payload.get("retrieval_method") == "role_context_cache_miss"
+        ):
+            payload = _lightweight_scan_cache_miss_fallback(
+                message=message,
+                state=state if isinstance(state, dict) else {},
+                state_summary=state_summary if isinstance(state_summary, dict) else {},
+                memory=memory if isinstance(memory, dict) else {},
+                started=started,
+                timeout=timeout,
+            )
         payload["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
         payload["timeout_ms"] = round(timeout * 1000, 2)
-        payload["cache_status"] = "miss"
+        payload.setdefault("cache_status", "miss")
         if ttl > 0:
             with _lightweight_semantic_memory_lock:
                 if len(_lightweight_semantic_memory_cache) >= 128:

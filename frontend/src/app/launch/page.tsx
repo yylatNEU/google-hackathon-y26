@@ -11,6 +11,7 @@ const chapterLinks = [
   { href: "#venue", label: "Venue" },
   { href: "#signals", label: "Signals" },
   { href: "#architecture", label: "Architecture" },
+  { href: "#suite", label: "Suite" },
   { href: "#loop", label: "Loop" },
   { href: "#governance", label: "Governance" },
   { href: "#proof", label: "Proof" },
@@ -132,6 +133,89 @@ const architectureFlow = [
   "Vertex AI Gemini interprets context and drafts human-readable reasoning.",
   "Simulation and optimizer score bounded actions against capacity and policy.",
   "Workflows, FCM, BigQuery, and memory receive the approved dispatch receipt.",
+];
+
+const productFeatures = [
+  {
+    id: "ops-agent",
+    route: "/ops-agent",
+    eyebrow: "Ops Agent",
+    title: "A conversational copilot that still produces a receipt.",
+    story:
+      "Operators can ask what is happening, ask why, request a safer alternative, or apply an action. The copilot routes between scan, react, proact, customer, and QA modes while preserving tool traces, policy gates, and recommended actions.",
+    metric: "5 agent modes",
+    capabilities: ["Conversation memory", "Tool timeline", "Map-grounded action plan", "Policy-aware apply mode"],
+  },
+  {
+    id: "guest-triage",
+    route: "/guest-triage",
+    eyebrow: "Guest Triage",
+    title: "Incoming guest messages become routed live issues.",
+    story:
+      "A lost child, heat concern, line conflict, accessibility request, refund complaint, or food question should not hit the same generic inbox. Guest Triage classifies urgency, drafts a safe first reply, and creates the right human-acknowledged ticket.",
+    metric: "8 triage examples",
+    capabilities: ["Urgency scoring", "Venue-context matching", "Safe reply draft", "Routed issue ticket"],
+  },
+  {
+    id: "staff-training",
+    route: "/staff-training",
+    eyebrow: "Staff Training",
+    title: "The system trains people, not just models.",
+    story:
+      "Staff can roleplay difficult guest-care scenarios, receive rubric-based feedback, surface mastery gaps, and convert recurring weaknesses into reviewable product-learning tickets.",
+    metric: "Roleplay + eval",
+    capabilities: ["Guest simulator", "Shadow evaluator", "Mastery tracker", "Training-gap tickets"],
+  },
+  {
+    id: "venue-profile",
+    route: "/venue-profile",
+    eyebrow: "Venue Profile",
+    title: "Every agent needs a real venue model underneath it.",
+    story:
+      "Venue Profile validates the park identity, locations, zones, paths, channel owners, accessibility notes, sensory notes, dining constraints, and brand rules that downstream agents are allowed to use.",
+    metric: "Ground truth layer",
+    capabilities: ["Location model", "Zone graph", "Profile validation", "Module policy rules"],
+  },
+  {
+    id: "experience-studio",
+    route: "/experience-studio",
+    eyebrow: "Experience Studio",
+    title: "Marketing and guest experiences stay grounded in operations.",
+    story:
+      "Experience Studio drafts seasonal routes, attraction copy, signage, VIP tours, and guest-facing experiences from approved venue data, then routes risky claims through review instead of publishing unsupported content.",
+    metric: "8 templates",
+    capabilities: ["Route concepts", "Guest copy", "Review risks", "Learning rules"],
+  },
+  {
+    id: "accessibility-journey",
+    route: "/accessibility-journey",
+    eyebrow: "Accessibility Journey",
+    title: "Personalized park plans without exposing sensitive details.",
+    story:
+      "Guests can ask for low-walking, low-sensory, allergy-aware, cooling, dining, or accessibility-aware routes. The system recommends practical steps while keeping medical, privacy, and staff-confirmation boundaries explicit.",
+    metric: "Human review aware",
+    capabilities: ["Low-walking plans", "Sensory-aware stops", "Dining constraints", "Review reasons"],
+  },
+  {
+    id: "monitor",
+    route: "/monitor",
+    eyebrow: "Monitor",
+    title: "Production evidence is visible while the system runs.",
+    story:
+      "The monitor view exposes policy integrity, trace/eval readiness, supervised actions, runtime governance, review ledgers, and evidence packets so agent behavior can be audited after the demo moment.",
+    metric: "Runtime evidence",
+    capabilities: ["Policy ledger", "Trace readiness", "Review queue", "Evidence packets"],
+  },
+  {
+    id: "agent-handshake",
+    route: "/agent-handshake",
+    eyebrow: "Agent Handshake",
+    title: "External agents can participate without crossing authority lines.",
+    story:
+      "Personal agents and supplier agents negotiate through identity, capability, intent, proposal, counterproposal, commit, monitor, and receipt phases. ParkPulse verifies scope before trusting external automation.",
+    metric: "Protocol proof",
+    capabilities: ["Credential verification", "Delegation scopes", "Policy challenges", "Signed receipts"],
+  },
 ];
 
 const policyGates = [
@@ -364,10 +448,73 @@ export default function LaunchPage() {
         </div>
       </section>
 
+      <section id="suite" className="bg-neutral-100 px-5 py-20 text-neutral-950">
+        <div className="mx-auto max-w-7xl">
+          <div className="grid gap-10 lg:grid-cols-[0.95fr_1.05fr] lg:items-end">
+            <div>
+              <SectionLabel tone="text-cyan-700">Chapter 4 / Built Product Suite</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">
+                The decision loop is one surface. ParkPulse is a full operating product.
+              </h2>
+            </div>
+            <p className="text-lg leading-8 text-neutral-600">
+              The front page now shows the other built modules too: guest care, frontline support, staff training, venue intelligence, experience design, accessibility planning, monitoring, and external-agent trust.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {productFeatures.map((feature, index) => {
+        const isLight = index % 2 === 0;
+        return (
+          <section key={feature.id} id={`feature-${feature.id}`} className={`${isLight ? "bg-white text-neutral-950" : "bg-neutral-950 text-white"} px-5 py-20`}>
+            <div className="mx-auto grid max-w-7xl gap-12 lg:grid-cols-[0.95fr_1.05fr] lg:items-center">
+              <div>
+                <SectionLabel tone={isLight ? "text-cyan-700" : "text-cyan-300"}>{feature.eyebrow}</SectionLabel>
+                <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">{feature.title}</h2>
+                <p className={`mt-5 text-lg leading-8 ${isLight ? "text-neutral-600" : "text-neutral-300"}`}>{feature.story}</p>
+                <div className="mt-8">
+                  <a
+                    href={feature.route}
+                    className={`rounded-full px-5 py-3 text-sm font-black transition ${
+                      isLight ? "bg-neutral-950 text-white hover:bg-neutral-800" : "bg-white text-neutral-950 hover:bg-cyan-100"
+                    }`}
+                  >
+                    Open {feature.eyebrow}
+                  </a>
+                </div>
+              </div>
+
+              <div className={`rounded-[28px] p-6 ${isLight ? "border border-neutral-200 bg-neutral-50" : "border border-white/10 bg-neutral-900"}`}>
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className={`text-xs font-black uppercase tracking-[0.24em] ${isLight ? "text-neutral-500" : "text-neutral-400"}`}>Built surface</div>
+                    <div className="mt-2 text-3xl font-black">{feature.metric}</div>
+                  </div>
+                  <div className={`w-fit rounded-full px-3 py-1.5 text-xs font-black ${isLight ? "bg-neutral-950 text-white" : "bg-cyan-300 text-neutral-950"}`}>
+                    {feature.route}
+                  </div>
+                </div>
+                <div className={`mt-6 grid gap-3 sm:grid-cols-2`}>
+                  {feature.capabilities.map((capability) => (
+                    <div
+                      key={capability}
+                      className={`rounded-2xl p-4 text-sm font-bold leading-6 ${isLight ? "border border-neutral-200 bg-white text-neutral-700" : "border border-white/10 bg-neutral-950 text-neutral-200"}`}
+                    >
+                      {capability}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </section>
+        );
+      })}
+
       <section id="loop" className="px-5 py-20">
         <div className="mx-auto max-w-7xl">
           <div className="max-w-4xl">
-            <SectionLabel tone="text-amber-300">Chapter 4 / Operating Loop</SectionLabel>
+            <SectionLabel tone="text-amber-300">Chapter 5 / Operating Loop</SectionLabel>
             <h2 className="mt-4 text-4xl font-black leading-tight text-white sm:text-6xl">
               Not a chatbot. A controlled decision loop.
             </h2>
@@ -394,7 +541,7 @@ export default function LaunchPage() {
       <section id="governance" className="bg-neutral-100 px-5 py-20 text-neutral-950">
         <div className="mx-auto grid max-w-7xl gap-12 lg:grid-cols-[0.95fr_1.05fr] lg:items-center">
           <div>
-            <SectionLabel tone="text-rose-700">Chapter 5 / Governance</SectionLabel>
+            <SectionLabel tone="text-rose-700">Chapter 6 / Governance</SectionLabel>
             <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">
               The safest recommendation may be the one the system refuses to execute.
             </h2>
@@ -423,7 +570,7 @@ export default function LaunchPage() {
         <div className="mx-auto max-w-7xl">
           <div className="grid gap-10 lg:grid-cols-[1fr_1fr] lg:items-end">
             <div>
-              <SectionLabel tone="text-emerald-300">Chapter 6 / Proof</SectionLabel>
+              <SectionLabel tone="text-emerald-300">Chapter 7 / Proof</SectionLabel>
               <h2 className="mt-4 text-4xl font-black leading-tight text-white sm:text-6xl">
                 Every recommendation ships with receipts.
               </h2>
@@ -470,7 +617,7 @@ export default function LaunchPage() {
       <section id="trust" className="bg-white px-5 py-20 text-neutral-950">
         <div className="mx-auto grid max-w-7xl gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
           <div>
-            <SectionLabel tone="text-cyan-700">Chapter 7 / Agent Trust</SectionLabel>
+            <SectionLabel tone="text-cyan-700">Chapter 8 / Agent Trust</SectionLabel>
             <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">
               Outside agents negotiate. ParkPulse enforces the boundary.
             </h2>
@@ -500,7 +647,7 @@ export default function LaunchPage() {
           <div className="rounded-[32px] border border-white/10 bg-neutral-900 p-6 sm:p-10">
             <div className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-center">
               <div>
-                <SectionLabel tone="text-lime-300">Chapter 8 / Learning</SectionLabel>
+                <SectionLabel tone="text-lime-300">Chapter 9 / Learning</SectionLabel>
                 <h2 className="mt-4 text-4xl font-black leading-tight text-white sm:text-6xl">
                   The loop gets better without giving the model more power.
                 </h2>
