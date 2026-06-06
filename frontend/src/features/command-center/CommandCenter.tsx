@@ -1,15 +1,29 @@
 "use client";
 
-import { ActualTrainingPanel } from "./ActualTrainingPanel";
-import { DispatchApprovalPanel } from "./DispatchApprovalPanel";
-import { EvalReceiptPanel } from "./EvalReceiptPanel";
-import { LiveFeedReviewPanel } from "./LiveFeedReviewPanel";
+import { lazy, Suspense } from "react";
+import { DecisionBriefPanel } from "./DecisionBriefPanel";
 import { ParkStateStrip } from "./ParkStateStrip";
-import { ProductLoopPanel } from "./ProductLoopPanel";
-import { ReviewLabelPipelinePanel } from "./ReviewLabelPipelinePanel";
-import { RoleAccessPanel } from "./RoleAccessPanel";
-import { StaffTrainingAnalyticsPanel } from "./StaffTrainingAnalyticsPanel";
 import { useCommandCenter } from "./useCommandCenter";
+
+const LiveFeedReviewPanel = lazy(() => import("./LiveFeedReviewPanel").then((module) => ({ default: module.LiveFeedReviewPanel })));
+const ReviewLabelPipelinePanel = lazy(() => import("./ReviewLabelPipelinePanel").then((module) => ({ default: module.ReviewLabelPipelinePanel })));
+const RoleAccessPanel = lazy(() => import("./RoleAccessPanel").then((module) => ({ default: module.RoleAccessPanel })));
+const StaffTrainingAnalyticsPanel = lazy(() => import("./StaffTrainingAnalyticsPanel").then((module) => ({ default: module.StaffTrainingAnalyticsPanel })));
+const ProductLoopPanel = lazy(() => import("./ProductLoopPanel").then((module) => ({ default: module.ProductLoopPanel })));
+const ActualTrainingPanel = lazy(() => import("./ActualTrainingPanel").then((module) => ({ default: module.ActualTrainingPanel })));
+const DispatchApprovalPanel = lazy(() => import("./DispatchApprovalPanel").then((module) => ({ default: module.DispatchApprovalPanel })));
+const EvalReceiptPanel = lazy(() => import("./EvalReceiptPanel").then((module) => ({ default: module.EvalReceiptPanel })));
+
+function PanelFallback({ label }: { label: string }) {
+  return (
+    <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
+      <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</div>
+      <div className="mt-2 h-2 w-full max-w-md overflow-hidden rounded bg-slate-900">
+        <div className="h-full w-1/3 rounded bg-cyan-300/70" />
+      </div>
+    </section>
+  );
+}
 
 export function CommandCenter() {
   const command = useCommandCenter();
@@ -71,52 +85,70 @@ export function CommandCenter() {
           onRefresh={() => void command.refreshParkState()}
         />
 
-        <LiveFeedReviewPanel
-          health={command.liveFeedHealth}
-          ledger={command.reviewTrainingLedger}
-          isLoading={command.isLiveFeedHealthLoading}
-          isLoadingWeather={command.isLoadingLiveWeather}
-          isLoadingRideOps={command.isLoadingLiveRideOps}
-          isLoadingGuestFlow={command.isLoadingLiveGuestFlow}
-          isLoadingStaffing={command.isLoadingLiveStaffing}
-          isLoadingFoodOps={command.isLoadingLiveFoodOps}
-          isLoadingOperatorSignal={command.isLoadingLiveOperatorSignal}
-          weatherLoad={command.liveWeatherLoad}
-          rideOpsLoad={command.liveRideOpsLoad}
-          guestFlowLoad={command.liveGuestFlowLoad}
-          staffingLoad={command.liveStaffingLoad}
-          foodOpsLoad={command.liveFoodOpsLoad}
-          operatorSignalLoad={command.liveOperatorSignalLoad}
-          refreshSupervisor={command.liveFeedRefreshSupervisor}
-          onRefresh={() => void command.refreshLiveFeedHealth()}
-          onRefreshStale={() => void command.refreshStaleLiveFeeds()}
-          onLoadWeather={() => void command.loadLiveWeatherFeed()}
-          onLoadRideOps={() => void command.loadLiveRideOpsFeed()}
-          onLoadGuestFlow={() => void command.loadLiveGuestFlowFeed()}
-          onLoadStaffing={() => void command.loadLiveStaffingFeed()}
-          onLoadFoodOps={() => void command.loadLiveFoodOpsFeed()}
-          onLoadOperatorSignal={() => void command.loadLiveOperatorSignalFeed()}
-          onReviewDecision={(caseId, decision) => void command.recordReviewDecision(caseId, decision)}
-          canManageFeeds={command.canManageFeeds}
-          canReviewCases={command.canReviewCases}
+        <DecisionBriefPanel
+          runTelemetry={command.runTelemetry}
+          selectedAction={command.selectedAction}
+          policyGate={command.policyGate}
+          evalScore={command.evalScore}
+          evals={command.activeEvalScores}
+          dispatches={command.dispatches}
+          liveFeedHealth={command.liveFeedHealth}
+          isRunning={command.isRunning}
+          statusMessage={command.statusMessage}
+          errorMessage={command.errorMessage ?? command.connectionError}
+          startupLoadTimings={command.startupLoadTimings}
         />
 
-        <ReviewLabelPipelinePanel
-          pipeline={command.reviewLabelPipeline}
-          isLoading={command.isReviewLabelPipelineLoading}
-          onRefresh={() => void command.refreshReviewLabelPipeline()}
-          onAutoLabel={() => void command.autoLabelHighConfidenceReviewLabels()}
-          onDecision={(candidate, decision, finalLabel) => void command.recordReviewLabelDecision(candidate, decision, finalLabel)}
-          canReviewLabels={command.canReviewLabels}
-        />
+        <Suspense fallback={<PanelFallback label="Loading live feed review" />}>
+          <LiveFeedReviewPanel
+            health={command.liveFeedHealth}
+            ledger={command.reviewTrainingLedger}
+            isLoading={command.isLiveFeedHealthLoading}
+            isLoadingWeather={command.isLoadingLiveWeather}
+            isLoadingRideOps={command.isLoadingLiveRideOps}
+            isLoadingGuestFlow={command.isLoadingLiveGuestFlow}
+            isLoadingStaffing={command.isLoadingLiveStaffing}
+            isLoadingFoodOps={command.isLoadingLiveFoodOps}
+            isLoadingOperatorSignal={command.isLoadingLiveOperatorSignal}
+            weatherLoad={command.liveWeatherLoad}
+            rideOpsLoad={command.liveRideOpsLoad}
+            guestFlowLoad={command.liveGuestFlowLoad}
+            staffingLoad={command.liveStaffingLoad}
+            foodOpsLoad={command.liveFoodOpsLoad}
+            operatorSignalLoad={command.liveOperatorSignalLoad}
+            refreshSupervisor={command.liveFeedRefreshSupervisor}
+            onRefresh={() => void command.refreshLiveFeedHealth()}
+            onRefreshStale={() => void command.refreshStaleLiveFeeds()}
+            onLoadWeather={() => void command.loadLiveWeatherFeed()}
+            onLoadRideOps={() => void command.loadLiveRideOpsFeed()}
+            onLoadGuestFlow={() => void command.loadLiveGuestFlowFeed()}
+            onLoadStaffing={() => void command.loadLiveStaffingFeed()}
+            onLoadFoodOps={() => void command.loadLiveFoodOpsFeed()}
+            onLoadOperatorSignal={() => void command.loadLiveOperatorSignalFeed()}
+            onReviewDecision={(caseId, decision) => void command.recordReviewDecision(caseId, decision)}
+            canManageFeeds={command.canManageFeeds}
+            canReviewCases={command.canReviewCases}
+          />
+        </Suspense>
 
-        <RoleAccessPanel
-          contracts={command.roleAccess}
-          isLoading={command.isRoleAccessLoading}
-          onRefresh={() => void command.refreshRoleAccess()}
-        />
+        <Suspense fallback={<PanelFallback label="Loading review and role panels" />}>
+          <ReviewLabelPipelinePanel
+            pipeline={command.reviewLabelPipeline}
+            isLoading={command.isReviewLabelPipelineLoading}
+            onRefresh={() => void command.refreshReviewLabelPipeline()}
+            onAutoLabel={() => void command.autoLabelHighConfidenceReviewLabels()}
+            onDecision={(candidate, decision, finalLabel) => void command.recordReviewLabelDecision(candidate, decision, finalLabel)}
+            canReviewLabels={command.canReviewLabels}
+          />
 
-        <StaffTrainingAnalyticsPanel />
+          <RoleAccessPanel
+            contracts={command.roleAccess}
+            isLoading={command.isRoleAccessLoading}
+            onRefresh={() => void command.refreshRoleAccess()}
+          />
+
+          <StaffTrainingAnalyticsPanel />
+        </Suspense>
 
         {(command.statusMessage || command.errorMessage || command.connectionError) && (
           <section className="rounded-lg border border-slate-800 bg-slate-950 p-3">
@@ -161,43 +193,45 @@ export function CommandCenter() {
             </div>
           </section>
 
-          <ProductLoopPanel
-            parkState={command.parkState}
-            runTelemetry={command.runTelemetry}
-            dispatches={command.dispatches}
-            evals={command.activeEvalScores}
-            selectedAction={command.selectedAction}
-            policyGate={command.policyGate}
-            memoryMode={command.memoryMode}
-            liveAgentsSmoke={command.liveAgentsSmoke}
-          />
-          <ActualTrainingPanel
-            training={command.actualTraining}
-            isLoading={command.isTrainingLoading}
-            isStartingGcpTraining={command.isStartingGcpTraining}
-            onRefresh={() => void command.refreshActualTraining()}
-            onStartGcpTraining={() => void command.refreshActualTraining({ runGcpTraining: true })}
-            canStartTraining={command.canStartTraining}
-          />
-          <DispatchApprovalPanel
-            dispatches={command.dispatches}
-            humanApproval={command.policyGate?.toLowerCase().includes("review") ?? false}
-            isDispatching={command.isDispatching}
-            isApproving={command.isApproving}
-            onExecute={() => void command.executeSelectedAction()}
-            onAcknowledge={(dispatch, choice) => void command.acknowledgeDispatch(dispatch, choice)}
-            canExecute={command.canExecute}
-            canAcknowledge={command.canAcknowledge}
-          />
-          <EvalReceiptPanel
-            evals={command.activeEvalScores}
-            telemetry={command.runTelemetry}
-            integrationStatus={command.integrationStatus}
-            gcpLiveReadiness={command.gcpLiveReadiness}
-            operatingLoopResilience={command.operatingLoopResilience}
-            evalScore={command.evalScore}
-            memoryMode={command.memoryMode}
-          />
+          <Suspense fallback={<PanelFallback label="Loading operating loop panels" />}>
+            <ProductLoopPanel
+              parkState={command.parkState}
+              runTelemetry={command.runTelemetry}
+              dispatches={command.dispatches}
+              evals={command.activeEvalScores}
+              selectedAction={command.selectedAction}
+              policyGate={command.policyGate}
+              memoryMode={command.memoryMode}
+              liveAgentsSmoke={command.liveAgentsSmoke}
+            />
+            <ActualTrainingPanel
+              training={command.actualTraining}
+              isLoading={command.isTrainingLoading}
+              isStartingGcpTraining={command.isStartingGcpTraining}
+              onRefresh={() => void command.refreshActualTraining()}
+              onStartGcpTraining={() => void command.refreshActualTraining({ runGcpTraining: true })}
+              canStartTraining={command.canStartTraining}
+            />
+            <DispatchApprovalPanel
+              dispatches={command.dispatches}
+              humanApproval={command.policyGate?.toLowerCase().includes("review") ?? false}
+              isDispatching={command.isDispatching}
+              isApproving={command.isApproving}
+              onExecute={() => void command.executeSelectedAction()}
+              onAcknowledge={(dispatch, choice) => void command.acknowledgeDispatch(dispatch, choice)}
+              canExecute={command.canExecute}
+              canAcknowledge={command.canAcknowledge}
+            />
+            <EvalReceiptPanel
+              evals={command.activeEvalScores}
+              telemetry={command.runTelemetry}
+              integrationStatus={command.integrationStatus}
+              gcpLiveReadiness={command.gcpLiveReadiness}
+              operatingLoopResilience={command.operatingLoopResilience}
+              evalScore={command.evalScore}
+              memoryMode={command.memoryMode}
+            />
+          </Suspense>
         </div>
       </div>
     </main>

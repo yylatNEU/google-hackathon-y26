@@ -281,7 +281,7 @@ async function serveStatic(request, response) {
 }
 
 createServer((request, response) => {
-  if ((request.url || "").startsWith("/api/") || request.url === "/readyz" || request.url === "/healthz") {
+  if ((request.url || "").startsWith("/api/") || request.url === "/readyz" || request.url === "/health" || request.url === "/healthz") {
     void proxyApi(request, response);
     return;
   }

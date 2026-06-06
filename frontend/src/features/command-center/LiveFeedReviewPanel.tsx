@@ -92,8 +92,13 @@ export function LiveFeedReviewPanel({
   canReviewCases: boolean;
 }) {
   const feeds = health?.feeds ?? [];
-  const reviews = health?.open_reviews ?? ledger?.open_reviews ?? ledger?.rows?.filter((row) => row.status !== "closed").slice(0, 6) ?? [];
+  const reviews = health?.open_reviews?.length ? health.open_reviews : ledger?.open_reviews?.length ? ledger.open_reviews : ledger?.rows?.filter((row) => row.status !== "closed").slice(0, 6) ?? [];
   const closedReviews = ledger?.closed_reviews ?? [];
+  const refreshedSources = refreshSupervisor?.refreshed_sources ?? [];
+  const queuedSources = refreshSupervisor?.queued_sources ?? [];
+  const growthLoop = health?.growth_loop ?? [];
+  const healthReadinessIssues = health?.readiness_issues ?? [];
+  const ledgerReadinessIssues = ledger?.readiness_issues ?? [];
   const summary = health?.summary;
   const ledgerSummary = ledger?.summary;
   const additionalLoads: Array<[string, LiveWeatherLoadResult | null, string]> = [
@@ -194,8 +199,8 @@ export function LiveFeedReviewPanel({
           <div>Latest signal</div>
         </div>
         <div className="divide-y divide-slate-800">
-          {feeds.map((feed) => (
-            <div key={feed.source} className="grid grid-cols-[1.1fr_0.7fr_0.7fr_0.7fr_1.4fr] gap-0 bg-slate-950 px-3 py-3 text-xs leading-relaxed">
+          {feeds.map((feed, index) => (
+            <div key={`${feed.source ?? feed.label ?? "feed"}-${index}`} className="grid grid-cols-[1.1fr_0.7fr_0.7fr_0.7fr_1.4fr] gap-0 bg-slate-950 px-3 py-3 text-xs leading-relaxed">
               <div className="min-w-0 pr-3">
                 <div className="truncate font-black text-slate-100">{feed.label ?? humanize(feed.source)}</div>
                 <div className="mt-1 truncate text-slate-500">{feed.owner ?? "--"}</div>
@@ -239,7 +244,7 @@ export function LiveFeedReviewPanel({
             <div>
               <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Latest stale-feed refresh</div>
               <div className="mt-1 font-black text-lime-100">
-                {fmt(refreshSupervisor.status)} / {fmt(refreshSupervisor.refreshed_sources?.length ?? 0)} refreshed / {fmt(refreshSupervisor.queued_sources?.length ?? 0)} queued
+                {fmt(refreshSupervisor.status)} / {fmt(refreshedSources.length)} refreshed / {fmt(queuedSources.length)} queued
               </div>
             </div>
             <div className={`w-fit rounded border px-2 py-1 font-black uppercase tracking-widest ${toneClass(statusTone(refreshSupervisor.status))}`}>{fmt(refreshSupervisor.status)}</div>
@@ -247,8 +252,8 @@ export function LiveFeedReviewPanel({
           <div className="mt-2 text-slate-400">
             Before {fmt(refreshSupervisor.before?.ready_feed_count)}/{fmt(refreshSupervisor.before?.required_feed_count)} ready / After {fmt(refreshSupervisor.after?.ready_feed_count)}/{fmt(refreshSupervisor.after?.required_feed_count)} ready
           </div>
-          {refreshSupervisor.refreshed_sources?.length ? <div className="mt-2 text-lime-100">{refreshSupervisor.refreshed_sources.map(humanize).join(" / ")}</div> : null}
-          {refreshSupervisor.queued_sources?.length ? <div className="mt-2 text-sky-100">Queued: {refreshSupervisor.queued_sources.map(humanize).join(" / ")}</div> : null}
+          {refreshedSources.length ? <div className="mt-2 text-lime-100">{refreshedSources.map(humanize).join(" / ")}</div> : null}
+          {queuedSources.length ? <div className="mt-2 text-sky-100">Queued: {queuedSources.map(humanize).join(" / ")}</div> : null}
           {refreshSupervisor.readiness_issues?.length ? <div className="mt-2 text-amber-100">{refreshSupervisor.readiness_issues.slice(0, 2).join(" / ")}</div> : null}
           {refreshSupervisor.remaining_issues?.length ? <div className="mt-2 text-amber-100">{refreshSupervisor.remaining_issues.slice(0, 3).join(" / ")}</div> : null}
         </div>
@@ -309,8 +314,8 @@ export function LiveFeedReviewPanel({
         <div className="rounded border border-slate-800 bg-slate-900 p-3">
           <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Open review queue</div>
           <div className="mt-3 space-y-2">
-            {reviews.slice(0, 5).map((review) => (
-              <div key={review.id} className="rounded border border-slate-800 bg-slate-950 p-3 text-xs leading-relaxed">
+            {reviews.slice(0, 5).map((review, index) => (
+              <div key={`${review.id ?? review.reason ?? "review"}-${index}`} className="rounded border border-slate-800 bg-slate-950 p-3 text-xs leading-relaxed">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                   <div className="min-w-0">
                     <div className="truncate font-black text-slate-100">{fmt(review.reason)}</div>
@@ -357,22 +362,22 @@ export function LiveFeedReviewPanel({
         <div className="rounded border border-slate-800 bg-slate-900 p-3">
           <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Systematic growth loop</div>
           <div className="mt-3 space-y-2">
-            {(health?.growth_loop ?? []).map((step, index) => (
-              <div key={step} className="flex gap-2 rounded border border-slate-800 bg-slate-950 p-2 text-xs leading-relaxed text-slate-300">
+            {growthLoop.map((step, index) => (
+              <div key={`${index}-${fmt(step)}`} className="flex gap-2 rounded border border-slate-800 bg-slate-950 p-2 text-xs leading-relaxed text-slate-300">
                 <span className="font-black text-cyan-200">{index + 1}</span>
-                <span>{step}</span>
+                <span>{fmt(step)}</span>
               </div>
             ))}
           </div>
           <div className="mt-3 rounded border border-slate-800 bg-slate-950 p-3 text-xs leading-relaxed text-slate-400">
-            {ledger?.training_rule ?? "Review evidence is collected separately from measured reward."}
+            {ledger?.training_rule ? fmt(ledger.training_rule) : "Review evidence is collected separately from measured reward."}
           </div>
         </div>
       </div>
 
-      {(health?.readiness_issues?.length || ledger?.readiness_issues?.length) && (
+      {(healthReadinessIssues.length || ledgerReadinessIssues.length) && (
         <div className="mt-3 rounded border border-amber-400/30 bg-amber-950/15 p-3 text-xs leading-relaxed text-amber-100">
-          Debug: {[...(health?.readiness_issues ?? []), ...(ledger?.readiness_issues ?? [])].slice(0, 3).join(" / ")}
+          Debug: {[...healthReadinessIssues, ...ledgerReadinessIssues].slice(0, 3).join(" / ")}
         </div>
       )}
     </section>

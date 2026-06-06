@@ -9,6 +9,8 @@ def _fresh_modules(monkeypatch, tmp_path):
     monkeypatch.setenv("MONGODB_DISABLE_DRIVER_IMPORT", "true")
     monkeypatch.delenv("MONGODB_URI", raising=False)
     monkeypatch.delenv("MONGODB_DIRECT_URI", raising=False)
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
+    monkeypatch.setenv("PARKPULSE_EXPERIENCE_STUDIO_USE_LLM", "false")
     monkeypatch.setenv("PARKPULSE_EXPERIENCE_STUDIO_STORE_PATH", str(tmp_path / "experience_studio_drafts.json"))
     monkeypatch.setenv("PARKPULSE_EXPERIENCE_STUDIO_MEMORY_FALLBACK_PATH", str(tmp_path / "experience_studio_memory_fallback.json"))
     import mongo_memory

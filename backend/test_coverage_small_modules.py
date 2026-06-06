@@ -1,9 +1,14 @@
 import asyncio
 import builtins
 import json
+import sys
+from types import SimpleNamespace
 
+import customer_emergency_scope
 import park_ops_chat_quality
 import park_ops_mcp
+import park_role_access
+import park_role_access_audit
 import training_run_receipts
 import executive_experience_evidence
 import weather_live_feed
@@ -84,6 +89,57 @@ def test_training_run_receipt_records_ledger_and_dedupes_readiness(monkeypatch, 
     assert ledger["status"] == "ready"
     assert ledger["summary"]["blocked_count"] == 1
     assert ledger["receipts"][0]["id"] == receipt["id"]
+
+
+def test_customer_emergency_scope_and_role_access_edges(monkeypatch, tmp_path):
+    scope = customer_emergency_scope.build_customer_emergency_scope()
+    assert scope["customer_bot_role"] == "intake_and_guidance_only"
+    assert "diagnose_medical_condition" in scope["prohibited_customer_bot_actions"]
+
+    fire = customer_emergency_scope.classify_customer_scope_text("smoke and gas smell near the arcade")
+    assert fire["primary_category"] == "fire_smoke_hazard"
+    assert fire["severity"] == "life_safety"
+    assert fire["show_911_banner"] is True
+    unknown = customer_emergency_scope.classify_customer_scope_text("I have a general question")
+    assert unknown["primary_category"] == "unknown"
+    assert unknown["requires_human_review"] is False
+
+    monkeypatch.setenv("PARKPULSE_ADMIN_EMAILS", "admin@example.com")
+    monkeypatch.setenv("PARKPULSE_OPS_GROUPS", "park-ops")
+    assert park_role_access._role_from_external_claims("accounts.google.com:admin@example.com", set()) == "ml_ops_admin"
+    assert park_role_access._role_from_external_claims("", {"park-ops"}) == "ops_team"
+    monkeypatch.setenv("PARKPULSE_ALLOW_TRUSTED_ROLE_HEADER", "true")
+    assert park_role_access._role_from_external_claims("", set(), "worker") == "onsite_worker"
+
+    secret = "unit-secret"
+    token = park_role_access.sign_role_session("subject", "unknown", secret, now=10)
+    assert park_role_access.verify_role_session(token, secret, now=11)["status"] == "invalid"
+    expired = park_role_access.sign_role_session("subject", "ops_team", secret, ttl_seconds=1, now=10)
+    assert park_role_access.verify_role_session(expired, secret, now=100)["status"] == "expired"
+    bad_signature = token.rsplit(".", 1)[0] + ".bad!"
+    assert park_role_access.verify_role_session(bad_signature, secret)["reason"].startswith("Role session signature")
+    assert park_role_access.capability_for_mcp_tool("get_bigquery_training_status") == "read_ml_training"
+
+    audit_path = tmp_path / "role-audit.jsonl"
+    monkeypatch.setenv("PARKPULSE_ROLE_ACCESS_AUDIT_LOG", str(audit_path))
+    monkeypatch.setitem(
+        sys.modules,
+        "mongo_memory",
+        SimpleNamespace(
+            record_role_access_audit_event=lambda event: (_ for _ in ()).throw(RuntimeError("mongo down")),
+            get_latest_role_access_audit_events=lambda limit: [],
+        ),
+    )
+    event = park_role_access_audit.record_role_access_audit_event("mutation_denied", role="ops", subject="u1", capability="dispatch")
+    assert event["mongo_status"] == "failed"
+    assert event["write_status"] == "ok"
+    audit_path.write_text("{bad json\n" + json.dumps({"id": "row-1", "event_type": "mutation_denied"}) + "\n", encoding="utf-8")
+    status = park_role_access_audit.role_access_audit_status(limit=5)
+    assert status["storage"] == "jsonl_fallback"
+    assert status["events"][0]["id"] == "row-1"
+
+    monkeypatch.setitem(sys.modules, "mongo_memory", SimpleNamespace(get_latest_role_access_audit_events=lambda limit: [{"id": "mongo"}]))
+    assert park_role_access_audit.role_access_audit_status()["storage"] == "mongodb"
 
 
 def test_training_run_receipt_defaults_and_bad_json_ledger(monkeypatch, tmp_path):

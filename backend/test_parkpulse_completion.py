@@ -245,6 +245,10 @@ def clear_delivery_outbox(monkeypatch):
         "PARKPULSE_ENABLE_HOSTED_EVAL_TRIGGER",
         "ENABLE_VERTEX_CONTINUOUS_EVAL",
         "ENABLE_GCP_CLOUD_TRACE_EXPORT",
+        "ENABLE_BIGQUERY_ANALYTICS",
+        "PARKPULSE_ENABLE_OTEL_SPANS",
+        "PARKPULSE_MONGO_MODEL_EMBEDDINGS",
+        "PARKPULSE_COPILOT_SEMANTIC_MEMORY",
     ):
         monkeypatch.setenv(name, "false")
     for name in (
@@ -641,43 +645,53 @@ def test_agent_monitoring_and_outcome_loop_cover_policy_lanes(monkeypatch):
 
 class FakeApiSimulation:
     def __init__(self):
-        self.sim = ParkSimulation()
-        run(self.sim.execute_action("scenario", "ride_down"))
+        self.initial_state = sample_state()
+        self.state = copy.deepcopy(self.initial_state)
+        self.replay_events = [{"id": "replay-1", "type": "scenario", "scenario_key": "ride_down"}]
 
     async def step(self):
-        await self.sim.step()
+        self.state.setdefault("simTime", {})["minute"] = int(self.state.get("simTime", {}).get("minute", 0) or 0) + 1
 
     async def get_state(self):
-        state = await self.sim.get_state()
-        state["simTime"] = {"day": 1, "hour": 17, "minute": 50}
-        state["staffing"]["openCallouts"] = 22
-        state["energy"]["gridLoadPercent"] = 95
-        state["weather"]["heatIndexF"] = 99
-        return state
+        self.state["simTime"] = {"day": 1, "hour": 17, "minute": 50}
+        self.state["staffing"]["openCallouts"] = 22
+        self.state["energy"]["gridLoadPercent"] = 95
+        self.state["weather"]["heatIndexF"] = 99
+        return self.state
 
     async def execute_action(self, target, action):
-        return await self.sim.execute_action(target, action)
+        self.state.setdefault("guestFlow", {})["activePolicy"] = action
+        return {"status": "success", "message": f"{target}/{action} applied", "target": target, "action": action}
 
     async def inject_event(self, kind, target_id, intensity):
-        return await self.sim.inject_event(kind, target_id, intensity)
+        event = {"kind": kind, "targetId": target_id, "intensity": intensity}
+        self.state.setdefault("alerts", []).append({"severity": "warning", "title": kind, "detail": target_id})
+        return {"status": "success", "message": "Event injected", "event": event}
 
     async def reset_demo(self):
-        return await self.sim.reset_demo()
+        self.state = copy.deepcopy(self.initial_state)
+        return {"status": "success", "message": "Demo reset"}
 
     async def apply_delivery_outcomes(self, dispatches, reason="closed_loop_outcome"):
-        return await self.sim.apply_delivery_outcomes(dispatches, reason)
+        return {"status": "applied", "reason": reason, "dispatch_count": len(dispatches or [])}
 
     async def get_replay(self, limit=20):
-        return await self.sim.get_replay(limit)
+        events = self.replay_events[-max(1, int(limit or 20)) :]
+        return {"mode": "park_replay", "event_count": len(events), "events": events, "latest_event": events[-1] if events else None}
 
     async def start_replay_run(self, seed=None, scenario_key="ride_down"):
-        return await self.sim.start_replay_run(seed, scenario_key)
+        event = {"id": f"replay-{len(self.replay_events) + 1}", "type": "replay_start", "seed": seed, "scenario_key": scenario_key}
+        self.replay_events.append(event)
+        return {"status": "success", "run": event}
 
 
 def install_api_fakes(monkeypatch):
     monkeypatch.setattr(parkpulse_api, "park_simulation", FakeApiSimulation())
     monkeypatch.setattr(parkpulse_api, "sync_park_state", lambda state: {"status": "stored"})
     monkeypatch.setattr(parkpulse_api, "retrieve_operational_context", lambda query, state: sample_context())
+    monkeypatch.setattr(parkpulse_api, "bigquery_status", lambda: {"enabled": False, "ready": False, "issues": ["unit test disabled"]})
+    monkeypatch.setattr(parkpulse_api, "build_bigquery_agent_priors", lambda *args, **kwargs: {"status": "disabled", "source": "unit_test", "priors": []})
+    monkeypatch.setattr(parkpulse_api, "build_digital_twin_tool_trace", lambda *args, **kwargs: {"tool_count": 0, "summary": {"policy_gate": "unit"}, "tool_calls": []})
     monkeypatch.setattr(parkpulse_api, "record_mongo_agent_decision", lambda *args, **kwargs: "decision-1")
     monkeypatch.setattr(parkpulse_api, "record_mongo_event_plan", lambda *args, **kwargs: "event-plan-1")
     monkeypatch.setattr(parkpulse_api, "record_mongo_outcome_event", lambda *args, **kwargs: "outcome-1")
@@ -945,7 +959,7 @@ def test_parkpulse_new_api_surfaces_and_cache_branches(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(parkpulse_api, "record_benchmark_result", record_benchmark_to_tmp)
-    benchmark = run(parkpulse_api.park_digital_twin_benchmark(parkpulse_api.DigitalTwinBenchmarkRequest(scenario_id="policy_gate_pressure", seed="api-test")))
+    benchmark = run(parkpulse_api.park_digital_twin_benchmark(parkpulse_api.DigitalTwinBenchmarkRequest(scenario_id="policy_gate_pressure", seed="api-test", horizon_minutes=5)))
     assert benchmark["status"] == "complete"
     assert benchmark["summary"]["episodes"] == 1
     async def fake_benchmark_plan(state, scenario_key, context):
@@ -976,6 +990,7 @@ def test_parkpulse_new_api_surfaces_and_cache_branches(monkeypatch, tmp_path):
             parkpulse_api.DigitalTwinBenchmarkRequest(
                 scenario_id="sensor_lag_mislead",
                 seed="api-agent-test",
+                horizon_minutes=5,
                 policy_under_test="parkpulse_agent",
             )
         )

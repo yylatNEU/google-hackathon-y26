@@ -61,6 +61,14 @@ class ParkPulseSpringBackendApplicationTests {
 	}
 
 	@Test
+	void healthReportsSpringMigrationSlice() throws Exception {
+		mockMvc.perform(get("/health"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.service", equalTo("parkpulse-spring-backend")))
+			.andExpect(jsonPath("$.entrypoint", equalTo("java-spring-migration")));
+	}
+
+	@Test
 	void readyzReportsSpringMigrationSlice() throws Exception {
 		mockMvc.perform(get("/readyz"))
 			.andExpect(status().isOk())
@@ -327,11 +335,65 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(jsonPath("$.park_issue_ticket_count", equalTo(2)))
 			.andExpect(jsonPath("$.training_gap_ticket_count", equalTo(1)))
 			.andExpect(jsonPath("$.product_learning_signals[0].id", notNullValue()))
-			.andExpect(jsonPath("$.loop_contract.human_on_exception", equalTo(true)));
+			.andExpect(jsonPath("$.loop_contract.human_on_exception", equalTo(true)))
+			.andExpect(jsonPath("$.promotion_ready_count", notNullValue()))
+			.andExpect(jsonPath("$.review_place_queue_count", notNullValue()));
+
+		mockMvc.perform(
+				post("/api/park/product-learning/promote-version")
+					.header("authorization", "Bearer " + signedRoleToken("onsite_worker"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"versionId\":\"version-spring-test\"}")
+			)
+			.andExpect(status().isForbidden());
+
+		mockMvc.perform(
+				post("/api/park/product-learning/promote-version")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"versionId\":\"version-spring-test\",\"promotedBy\":\"Spring Manager\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("promoted")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.version.version_id", equalTo("version-spring-test")))
+			.andExpect(jsonPath("$.version.active", equalTo(true)));
+
+		mockMvc.perform(
+				post("/api/park/product-learning/review-place-resolution")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"reviewPlace\":\"covered_plaza\",\"decision\":\"approve\",\"issueTypes\":[\"angry_parent\"],\"reviewer\":\"Spring Manager\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("resolved")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.resolution.decision", equalTo("approve")));
+
+		mockMvc.perform(
+				post("/api/park/product-learning/rollback-version")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"versionId\":\"version-spring-test\",\"reason\":\"Spring rollback test\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("rolled_back")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.version.rolled_back", equalTo(true)));
+
+		mockMvc.perform(get("/api/park/product-learning/loop?limit=50").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.learning_version_count", notNullValue()))
+			.andExpect(jsonPath("$.rolled_back_learning_version_count", equalTo(1)))
+			.andExpect(jsonPath("$.human_review_resolutions[0].review_place", equalTo("covered_plaza")));
 
 		org.assertj.core.api.Assertions.assertThat(Files.readString(runtime.resolve("product_learning_loop.jsonl")))
 			.contains("park_issue_ticket_created")
 			.contains("training_gap_ticket_created")
+			.contains("learning_version_promoted")
+			.contains("learning_version_rolled_back")
+			.contains("review_place_resolved")
 			.contains("java_spring");
 	}
 
@@ -434,6 +496,545 @@ class ParkPulseSpringBackendApplicationTests {
 			.contains("staff_training_assignment_created")
 			.contains("staff_training_receipt_created")
 			.contains("staff_training_receipt_reviewed");
+	}
+
+	@Test
+	void experienceStudioControlLoopRunsNativelyInSpringWithRoleAndReviewGates() throws Exception {
+		Path runtime = Path.of("target/test-parkpulse-runtime");
+		Files.deleteIfExists(runtime.resolve("experience_studio_drafts.json"));
+		Files.deleteIfExists(runtime.resolve("experience_studio_learning_rules.json"));
+
+		mockMvc.perform(get("/api/park/experience-studio/drafts"))
+			.andExpect(status().isUnauthorized());
+
+		mockMvc.perform(get("/api/park/experience-studio/drafts").header("authorization", "Bearer " + signedRoleToken("customer")))
+			.andExpect(status().isForbidden());
+
+		MvcResult plan = mockMvc.perform(
+				post("/api/park/experience-studio/conversation-plan")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"message\":\"Create a rainy-day comfort journey for families\",\"templateId\":\"rainy-day\",\"audience\":\"mixed family groups\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("ready")))
+			.andExpect(jsonPath("$.mode", equalTo("experience_studio_conversation_plan_spring")))
+			.andExpect(jsonPath("$.recommendedPlan.payload.templateId", equalTo("rainy-day")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andReturn();
+
+		MvcResult generated = mockMvc.perform(
+				post("/api/park/experience-studio/draft")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content(objectMapper.writeValueAsString(Map.of("templateId", "rainy-day", "audience", "mixed family groups", "tone", "calm, helpful", "constraints", "Use verified venue facts only.")))
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("ready")))
+			.andExpect(jsonPath("$.mode", equalTo("experience_studio_gated_draft_spring")))
+			.andExpect(jsonPath("$.draft.sourceIntegrity.readyForHandoff", equalTo(true)))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andReturn();
+
+		mockMvc.perform(
+				post("/api/park/experience-studio/section-revision")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content(objectMapper.writeValueAsString(Map.of("sectionId", "staff_script", "feedback", "Keep the staff language plain.", "draft", objectMapper.readTree(generated.getResponse().getContentAsByteArray()).get("draft"))))
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("revised")))
+			.andExpect(jsonPath("$.mode", equalTo("experience_studio_section_revision_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(get("/api/park/experience-studio/layer-contract").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("experience_studio_layer_contract_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		String draftJson = """
+			{
+			  "templateId":"rainy-day",
+			  "actor":"spring-test",
+			  "draft":{
+			    "title":"Covered comfort route",
+			    "audience":"mixed family groups",
+			    "route":[{"stop":"Covered Plaza","purpose":"Comfortable arrival","guestCopy":"Start under the covered plaza.","staffNote":"Keep movement optional."}],
+			    "messages":[{"channel":"Guest app","copy":"Start with a covered, optional comfort stop.","owner":"Digital product"}],
+			    "productionNotes":["Owner review required before publishing."],
+			    "sourceIntegrity":{"readyForHandoff":true,"missingRealInputs":[],"usesSeedData":false,"usesSimulatedParkState":false,"usesInventedLocations":false},
+			    "studioReview":[{"agentId":"safety_messaging_reviewer","status":"pass"}]
+			  }
+			}
+			""";
+
+		MvcResult saved = mockMvc.perform(
+				post("/api/park/experience-studio/drafts")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content(draftJson)
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("saved")))
+			.andExpect(jsonPath("$.mode", equalTo("experience_studio_saved_draft_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.summary.title", equalTo("Covered comfort route")))
+			.andReturn();
+		String draftId = objectMapper.readTree(saved.getResponse().getContentAsByteArray()).get("draftRecord").get("id").asText();
+
+		mockMvc.perform(get("/api/park/experience-studio/drafts/" + draftId).header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.draftRecord.id", equalTo(draftId)));
+
+		mockMvc.perform(
+				post("/api/park/experience-studio/drafts/" + draftId + "/status")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"status\":\"approved\",\"actor\":\"spring-reviewer\",\"note\":\"Approved for controlled handoff.\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("updated")))
+			.andExpect(jsonPath("$.draftRecord.status", equalTo("approved")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(
+				post("/api/park/experience-studio/drafts/" + draftId + "/handoff")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"actor\":\"spring-reviewer\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("created")))
+			.andExpect(jsonPath("$.handoff.requiresCommandCenterReview", equalTo(true)))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		MvcResult promoted = mockMvc.perform(
+				post("/api/park/experience-studio/drafts/" + draftId + "/promote-rule")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"candidateId\":\"complete_package_shape\",\"actor\":\"spring-reviewer\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("promoted")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andReturn();
+		String ruleId = objectMapper.readTree(promoted.getResponse().getContentAsByteArray()).get("rule").get("id").asText();
+
+		mockMvc.perform(get("/api/park/experience-studio/memory?limit=20").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("experience_studio_memory_spring")))
+			.andExpect(jsonPath("$.collectionCounts.experience_studio_drafts", equalTo(1)))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(get("/api/park/experience-studio/learning-rules?limit=20").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("experience_studio_learning_rules_spring")))
+			.andExpect(jsonPath("$.count", equalTo(1)))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(
+				post("/api/park/experience-studio/learning-rules/" + ruleId + "/status")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"status\":\"archived\",\"actor\":\"spring-reviewer\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("updated")))
+			.andExpect(jsonPath("$.rule.approvalStatus", equalTo("archived")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+	}
+
+	@Test
+	void venueProfileRoutesRunNativelyInSpringWithImportPreviewAndActivation() throws Exception {
+		Path runtime = Path.of("target/test-parkpulse-runtime");
+		Files.deleteIfExists(runtime.resolve("customer_venue_export.json"));
+
+		mockMvc.perform(get("/api/park/venue-profile"))
+			.andExpect(status().isUnauthorized());
+
+		mockMvc.perform(get("/api/park/venue-profile").header("authorization", "Bearer " + signedRoleToken("customer")))
+			.andExpect(status().isForbidden());
+
+		mockMvc.perform(
+				post("/api/park/venue-profile/import")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{}")
+			)
+			.andExpect(status().isForbidden());
+
+		MvcResult synthetic = mockMvc.perform(get("/api/park/venue-profile/synthetic/export").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("ready")))
+			.andExpect(jsonPath("$.mode", equalTo("venue_profile_synthetic_export_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.validation.status", equalTo("studio_ready")))
+			.andReturn();
+		String exportJson = objectMapper.readTree(synthetic.getResponse().getContentAsByteArray()).get("export").toString();
+		String importBody = "{\"sourceName\":\"parkpulse_synthetic_venue_export.approved.json\",\"actor\":\"spring-test\",\"export\":" + exportJson + "}";
+
+		mockMvc.perform(
+				post("/api/park/venue-profile/validate")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content(importBody)
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("venue_profile_validation_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.validation.status", equalTo("studio_ready")));
+
+		mockMvc.perform(
+				post("/api/park/venue-profile/import/preview")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content(importBody)
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("ready")))
+			.andExpect(jsonPath("$.mode", equalTo("venue_profile_import_preview_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.canActivate", equalTo(true)))
+			.andExpect(jsonPath("$.validation.status", equalTo("studio_ready")));
+
+		mockMvc.perform(
+				post("/api/park/venue-profile/import")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content(importBody)
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("imported")))
+			.andExpect(jsonPath("$.mode", equalTo("venue_profile_import_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.venueProfile.mode", equalTo("venue_profile_spring")))
+			.andExpect(jsonPath("$.venueProfile.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.venueProfile.venueIdentity.name", equalTo("ParkPulse Adventure Park")));
+
+		mockMvc.perform(get("/api/park/venue-profile").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("venue_profile_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.venueIdentity.name", equalTo("ParkPulse Adventure Park")))
+			.andExpect(jsonPath("$.readiness.autofillAllowed", equalTo(true)))
+			.andExpect(jsonPath("$.sourceIntegrity.usesApprovedSyntheticProfile", equalTo(true)))
+			.andExpect(jsonPath("$.globalProfile.scope", equalTo("tenant_venue")));
+
+		mockMvc.perform(
+				post("/api/park/venue-profile/synthetic/activate")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"actor\":\"spring-test\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("imported")))
+			.andExpect(jsonPath("$.mode", equalTo("venue_profile_synthetic_activation_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.venueProfile.runtime", equalTo("java_spring")));
+	}
+
+	@Test
+	void accessibilityJourneyRunsNativelyInSpringFromVenueProfileWithCustomerGate() throws Exception {
+		Path runtime = Path.of("target/test-parkpulse-runtime");
+		Files.deleteIfExists(runtime.resolve("customer_venue_export.json"));
+
+		mockMvc.perform(get("/api/park/accessibility/scope"))
+			.andExpect(status().isUnauthorized());
+
+		MvcResult synthetic = mockMvc.perform(get("/api/park/venue-profile/synthetic/export").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andReturn();
+		String exportJson = objectMapper.readTree(synthetic.getResponse().getContentAsByteArray()).get("export").toString();
+		mockMvc.perform(
+				post("/api/park/venue-profile/import")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"sourceName\":\"parkpulse_synthetic_venue_export.approved.json\",\"actor\":\"spring-accessibility-test\",\"export\":" + exportJson + "}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("imported")));
+
+		mockMvc.perform(get("/api/park/accessibility/scope").header("authorization", "Bearer " + signedRoleToken("customer")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("accessibility_scope_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.venueProfile.status", equalTo("studio_ready")))
+			.andExpect(jsonPath("$.venueProfile.venueIdentity.name", equalTo("ParkPulse Adventure Park")));
+
+		mockMvc.perform(
+				post("/api/park/accessibility/journey")
+					.header("authorization", "Bearer " + signedRoleToken("customer"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+						{
+						  "request":"Create a lower-walking, low-sensory route for a family with a stroller, peanut allergy, indoor breaks, restroom access, and no loud shows.",
+						  "needs":["mobility","low_sensory","family_care","allergy"],
+						  "allergies":["peanut"],
+						  "durationMinutes":180,
+						  "currentLocation":"Entrance Plaza",
+						  "avoidStairs":true,
+						  "indoorBreaks":true,
+						  "nearRestrooms":true,
+						  "avoidLoudShows":true,
+						  "minimalWalking":true
+						}
+						""")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("ok")))
+			.andExpect(jsonPath("$.mode", equalTo("accessible_journey_builder_spring")))
+			.andExpect(jsonPath("$.springRuntime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.runtime.backend", equalTo("java_spring")))
+			.andExpect(jsonPath("$.summary.requiresHumanReview", equalTo(true)))
+			.andExpect(jsonPath("$.profile.guestSegmentId", equalTo("allergy_or_dietary_guests")))
+			.andExpect(jsonPath("$.staffHandoff.owner", equalTo("Dining manager or allergy-trained staff")))
+			.andExpect(jsonPath("$.planSteps.length()", org.hamcrest.Matchers.greaterThanOrEqualTo(3)))
+			.andExpect(jsonPath("$.guardrails[?(@ == 'Allergy result is a dining shortlist, not an allergen-free guarantee.')]", org.hamcrest.Matchers.notNullValue()))
+			.andExpect(jsonPath("$.venueProfile.status", equalTo("studio_ready")))
+			.andExpect(jsonPath("$.learningReceipt.scenarioTaxonomy", equalTo("accessibility_journey")));
+	}
+
+	@Test
+	void reviewLabelPipelineRunsNativelyInSpringWithDecisionLedgerAndAutoLabel() throws Exception {
+		Path runtime = Path.of("target/test-parkpulse-runtime");
+		Files.deleteIfExists(runtime.resolve("review_label_decisions.jsonl"));
+
+		mockMvc.perform(get("/api/park/review-label-pipeline?limit=40"))
+			.andExpect(status().isUnauthorized());
+
+		mockMvc.perform(get("/api/park/review-label-pipeline?limit=40").header("authorization", "Bearer " + signedRoleToken("customer")))
+			.andExpect(status().isForbidden());
+
+		MvcResult pipelineResult = mockMvc.perform(get("/api/park/review-label-pipeline?limit=40").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("ready")))
+			.andExpect(jsonPath("$.mode", equalTo("review_label_pipeline_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.summary.candidate_count", org.hamcrest.Matchers.greaterThanOrEqualTo(3)))
+			.andExpect(jsonPath("$.summary.open_count", org.hamcrest.Matchers.greaterThanOrEqualTo(3)))
+			.andExpect(jsonPath("$.summary.decided_count", equalTo(0)))
+			.andExpect(jsonPath("$.auto_label_rule.confidence_threshold", equalTo(0.7)))
+			.andExpect(jsonPath("$.labels_or_reward_changed", equalTo(false)))
+			.andExpect(jsonPath("$.llm_used_for_reward_or_label", equalTo(false)))
+			.andReturn();
+
+		var candidate = objectMapper.readTree(pipelineResult.getResponse().getContentAsByteArray()).get("candidates").get(0);
+		String candidateId = candidate.get("id").asText();
+		String proposedLabel = candidate.get("proposed_label").asText();
+		String decisionBody = """
+			{
+			  "candidate_id": %s,
+			  "candidate": %s,
+			  "decision": "approve_label",
+			  "final_label": %s,
+			  "reviewer": "spring-test-reviewer",
+			  "reason": "Reviewed from Spring migration test."
+			}
+			""".formatted(
+				objectMapper.writeValueAsString(candidateId),
+				candidate.toString(),
+				objectMapper.writeValueAsString(proposedLabel)
+			);
+
+		mockMvc.perform(
+				post("/api/park/review-label-pipeline/decision")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content(decisionBody)
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("recorded")))
+			.andExpect(jsonPath("$.mode", equalTo("review_label_decision_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.decision.candidate_id", equalTo(candidateId)))
+			.andExpect(jsonPath("$.decision.decision", equalTo("approve_label")))
+			.andExpect(jsonPath("$.decision.final_label", equalTo(proposedLabel)))
+			.andExpect(jsonPath("$.decision.eligible_for_supervised_training", equalTo(true)))
+			.andExpect(jsonPath("$.decision.eligible_for_reward", equalTo(false)))
+			.andExpect(jsonPath("$.decision.labels_or_reward_changed", equalTo(false)));
+
+		mockMvc.perform(get("/api/park/review-label-pipeline/decisions?limit=20").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("ready")))
+			.andExpect(jsonPath("$.mode", equalTo("review_label_decision_ledger_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.summary.row_count", equalTo(1)))
+			.andExpect(jsonPath("$.summary.approved_label_count", equalTo(1)))
+			.andExpect(jsonPath("$.rows[0].candidate_id", equalTo(candidateId)))
+			.andExpect(jsonPath("$.rows[0].eligible_for_reward", equalTo(false)));
+
+		mockMvc.perform(get("/api/park/review-label-pipeline?limit=40").header("authorization", "Bearer " + signedRoleToken("ml_ops_admin")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.summary.decided_count", equalTo(1)))
+			.andExpect(jsonPath("$.decided[0].decision.decision", equalTo("approve_label")))
+			.andExpect(jsonPath("$.decided[0].decision.eligible_for_reward", equalTo(false)));
+
+		mockMvc.perform(
+				post("/api/park/review-label-pipeline/auto-label")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"reviewer\":\"spring-auto-label-test\",\"confidence_threshold\":0.7}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("review_label_auto_label_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.recorded_count", org.hamcrest.Matchers.greaterThanOrEqualTo(1)))
+			.andExpect(jsonPath("$.labels_or_reward_changed", equalTo(false)))
+			.andExpect(jsonPath("$.llm_used_for_reward_or_label", equalTo(false)));
+	}
+
+	@Test
+	void agentOrchestrationShellRunsNativelyInSpringWithReceiptsAndGates() throws Exception {
+		Path runtime = Path.of("target/test-parkpulse-runtime");
+		Files.deleteIfExists(runtime.resolve("agent_ops_ledger.jsonl"));
+		Files.deleteIfExists(runtime.resolve("live_feed_events.jsonl"));
+
+		mockMvc.perform(
+				post("/api/park/signals/intake")
+					.header("authorization", "Bearer " + signedRoleToken("onsite_worker"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"text\":\"Food Court A mobile orders are backing up and the queue is blocking the merge\",\"source\":\"employee_text\",\"reporterRole\":\"frontline_employee\"}")
+			)
+			.andExpect(status().isForbidden());
+
+		mockMvc.perform(
+				post("/api/park/signals/intake")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"text\":\"Food Court A mobile orders are backing up and the queue is blocking the merge\",\"source\":\"employee_text\",\"reporterRole\":\"frontline_employee\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("signal_intake_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.signal.categories[0]", notNullValue()));
+
+		mockMvc.perform(
+				post("/api/park/agent-role-run")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"message\":\"scan weak food and crowd signals before the plaza gets stuck\",\"mode\":\"auto\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.selected_role", equalTo("proact")))
+			.andExpect(jsonPath("$.run_receipt.upgrade_status", equalTo("final")))
+			.andExpect(jsonPath("$.digital_twin_tools.tool_count", notNullValue()));
+
+		mockMvc.perform(
+				post("/api/park/agent-run")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"scenario_key\":\"food_spike\",\"operator_message\":\"Food Court A is down; redirect demand safely\",\"execute\":true}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("agent_run_spring_fast_shell")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.planner.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.run_receipt.kind", equalTo("agent_run")))
+			.andExpect(jsonPath("$.delivery.dispatches[0].agentBoundary.policy_gate_checked", equalTo(true)));
+
+		mockMvc.perform(
+				post("/api/park/action")
+					.header("authorization", "Bearer " + signedRoleToken("customer"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"target\":\"food\",\"action\":\"redirect_food_demand\"}")
+			)
+			.andExpect(status().isForbidden());
+
+		mockMvc.perform(
+				post("/api/park/action")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"target\":\"food\",\"action\":\"redirect_food_demand\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("spring_policy_gated_action")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.governance.allowed", equalTo(true)))
+			.andExpect(jsonPath("$.result.mutated_python_simulation", equalTo(false)))
+			.andExpect(jsonPath("$.run_receipt.kind", equalTo("park_action")));
+
+		mockMvc.perform(
+				post("/api/park/live-feed-agent-run")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"refresh_stale\":true,\"execute\":false,\"min_ready_feeds\":4}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.live_feed_case.source", equalTo("spring_live_feed_jsonl_ledger")))
+			.andExpect(jsonPath("$.run_receipt.kind", equalTo("live_feed_agent_run")));
+
+		mockMvc.perform(
+				post("/api/park/ops-chat")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"message\":\"what should we watch after the food backup?\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("bounded_ops_analyst_chat_spring")))
+			.andExpect(jsonPath("$.llm_control_authority", equalTo(false)));
+
+		mockMvc.perform(
+				post("/api/park/copilot-chat")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"message\":\"The coaster queue is too long and families are stuck near the parade. What should we do?\",\"mode\":\"auto\",\"turn_mode\":\"propose\",\"allow_action\":false}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("complete")))
+			.andExpect(jsonPath("$.mode", equalTo("spring_copilot_chat")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.conversation_response.answer", notNullValue()))
+			.andExpect(jsonPath("$.recommended_action.gate", notNullValue()))
+			.andExpect(jsonPath("$.object_action_plan.will_execute", equalTo(false)))
+			.andExpect(jsonPath("$.semantic_memory_context.status", equalTo("not_required")))
+			.andExpect(jsonPath("$.run_receipt.kind", equalTo("copilot_chat")));
+
+		mockMvc.perform(
+				post("/api/park/agent-role-refine")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"message\":\"Refine the last bounded plan\",\"receipt\":{\"selected_role\":\"proact\",\"scenario_key\":\"food_spike\",\"delivery\":{\"dispatches\":[{\"id\":\"d1\"}]}}}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("complete")))
+			.andExpect(jsonPath("$.mode", equalTo("spring_bounded_refinement")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.refinement.status", equalTo("no_change")));
+
+		mockMvc.perform(get("/api/park/full-runtime-status"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("spring_runtime_status")))
+			.andExpect(jsonPath("$.python_full_runtime_required", equalTo(false)))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(
+				post("/api/park/full-runtime-warmup?force=true")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("accepted")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(get("/api/park/warmup-status"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.policy", equalTo("spring_hot_path_plus_optional_deep_model_adapter")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")));
+
+		mockMvc.perform(get("/api/park/agent-ops-ledger?limit=10").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.count", equalTo(5)));
+
+		org.assertj.core.api.Assertions.assertThat(Files.readString(runtime.resolve("agent_ops_ledger.jsonl")))
+			.contains("agent_run_receipt_created")
+			.contains("agent_role_run")
+			.contains("park_action")
+			.contains("copilot_chat")
+			.contains("live_feed_agent_run")
+			.contains("java_spring");
 	}
 
 	@Test

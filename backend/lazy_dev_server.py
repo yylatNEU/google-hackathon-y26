@@ -308,17 +308,22 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
         return payload if isinstance(payload, dict) else {}
 
     def _run_health_fast_path(self, path: str) -> bool:
-        if self.command != "GET" or path not in {"/", "/healthz", "/readyz"}:
+        if self.command != "GET" or path not in {"/", "/health", "/healthz", "/readyz"}:
             return False
+        payload = {
+            "service": "parkpulse-api",
+            "status": "ok",
+            "entrypoint": "lazy-dev-server",
+            "mode": "direct_health",
+            "runtime": "python-fallback",
+        }
+        if path == "/readyz":
+            monitor_storage = parkpulse_lazy_main.monitor_evidence_storage_status()
+            payload["dependency_status"] = {"monitor_evidence_snapshot": monitor_storage}
+            payload["degraded_dependencies"] = [] if monitor_storage.get("ready") else ["monitor_evidence_snapshot is degraded or unavailable"]
         self._send_direct_json(
             200,
-            {
-                "service": "parkpulse-api",
-                "status": "ok",
-                "entrypoint": "lazy-dev-server",
-                "mode": "direct_health",
-                "runtime": "python-fallback",
-            },
+            payload,
         )
         return True
 

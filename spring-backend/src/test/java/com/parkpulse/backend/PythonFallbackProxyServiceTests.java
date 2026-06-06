@@ -255,6 +255,27 @@ class PythonFallbackProxyServiceTests {
         assertThat(new String(productGapResponse.getBody(), StandardCharsets.UTF_8))
             .contains("POST /api/park/product-learning/training-gap-ticket");
 
+        MockHttpServletRequest productPromoteRequest = new MockHttpServletRequest("POST", "/api/park/product-learning/promote-version");
+        ResponseEntity<byte[]> productPromoteResponse = service.forward(productPromoteRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(productPromoteResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(productPromoteResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/product-learning/promote-version");
+
+        MockHttpServletRequest productRollbackRequest = new MockHttpServletRequest("POST", "/api/park/product-learning/rollback-version");
+        ResponseEntity<byte[]> productRollbackResponse = service.forward(productRollbackRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(productRollbackResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(productRollbackResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/product-learning/rollback-version");
+
+        MockHttpServletRequest productReviewPlaceRequest = new MockHttpServletRequest("POST", "/api/park/product-learning/review-place-resolution");
+        ResponseEntity<byte[]> productReviewPlaceResponse = service.forward(productReviewPlaceRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(productReviewPlaceResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(productReviewPlaceResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/product-learning/review-place-resolution");
+
         MockHttpServletRequest staffScenariosRequest = new MockHttpServletRequest("GET", "/api/park/staff-training/scenarios");
         ResponseEntity<byte[]> staffScenariosResponse = service.forward(staffScenariosRequest, new byte[0]);
 
@@ -282,5 +303,182 @@ class PythonFallbackProxyServiceTests {
         assertThat(staffAnalyticsResponse.getStatusCode().value()).isEqualTo(409);
         assertThat(new String(staffAnalyticsResponse.getBody(), StandardCharsets.UTF_8))
             .contains("GET /api/park/staff-training/analytics");
+
+        assertSpringOwnedRouteBlocked(service, "GET", "/api/park/venue-profile", new byte[0], "GET /api/park/venue-profile");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/venue-profile/validate", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/venue-profile/validate");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/venue-profile/import/preview", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/venue-profile/import/preview");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/venue-profile/import", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/venue-profile/import");
+        assertSpringOwnedRouteBlocked(service, "GET", "/api/park/venue-profile/synthetic/export", new byte[0], "GET /api/park/venue-profile/synthetic/export");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/venue-profile/synthetic/activate", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/venue-profile/synthetic/activate");
+        assertSpringOwnedRouteBlocked(service, "GET", "/api/park/accessibility/scope", new byte[0], "GET /api/park/accessibility/scope");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/accessibility/journey", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/accessibility/journey");
+        assertSpringOwnedRouteBlocked(service, "GET", "/api/park/review-label-pipeline", new byte[0], "GET /api/park/review-label-pipeline");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/review-label-pipeline/decision", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/review-label-pipeline/decision");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/review-label-pipeline/auto-label", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/review-label-pipeline/auto-label");
+        assertSpringOwnedRouteBlocked(service, "GET", "/api/park/review-label-pipeline/decisions", new byte[0], "GET /api/park/review-label-pipeline/decisions");
+
+        MockHttpServletRequest studioDraftsRequest = new MockHttpServletRequest("GET", "/api/park/experience-studio/drafts");
+        ResponseEntity<byte[]> studioDraftsResponse = service.forward(studioDraftsRequest, new byte[0]);
+
+        assertThat(studioDraftsResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioDraftsResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/experience-studio/drafts");
+
+        MockHttpServletRequest studioSaveRequest = new MockHttpServletRequest("POST", "/api/park/experience-studio/drafts");
+        ResponseEntity<byte[]> studioSaveResponse = service.forward(studioSaveRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(studioSaveResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioSaveResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/experience-studio/drafts");
+
+        MockHttpServletRequest studioPlanRequest = new MockHttpServletRequest("POST", "/api/park/experience-studio/conversation-plan");
+        ResponseEntity<byte[]> studioPlanResponse = service.forward(studioPlanRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(studioPlanResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioPlanResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/experience-studio/conversation-plan");
+
+        MockHttpServletRequest studioGenerateRequest = new MockHttpServletRequest("POST", "/api/park/experience-studio/draft");
+        ResponseEntity<byte[]> studioGenerateResponse = service.forward(studioGenerateRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(studioGenerateResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioGenerateResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/experience-studio/draft");
+
+        MockHttpServletRequest studioRevisionRequest = new MockHttpServletRequest("POST", "/api/park/experience-studio/section-revision");
+        ResponseEntity<byte[]> studioRevisionResponse = service.forward(studioRevisionRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(studioRevisionResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioRevisionResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/experience-studio/section-revision");
+
+        MockHttpServletRequest studioDraftRequest = new MockHttpServletRequest("GET", "/api/park/experience-studio/drafts/exp_spring");
+        ResponseEntity<byte[]> studioDraftResponse = service.forward(studioDraftRequest, new byte[0]);
+
+        assertThat(studioDraftResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioDraftResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/experience-studio/drafts/{draft_id}");
+
+        MockHttpServletRequest studioStatusRequest = new MockHttpServletRequest("POST", "/api/park/experience-studio/drafts/exp_spring/status");
+        ResponseEntity<byte[]> studioStatusResponse = service.forward(studioStatusRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(studioStatusResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioStatusResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/experience-studio/drafts/{draft_id}/status");
+
+        MockHttpServletRequest studioHandoffRequest = new MockHttpServletRequest("POST", "/api/park/experience-studio/drafts/exp_spring/handoff");
+        ResponseEntity<byte[]> studioHandoffResponse = service.forward(studioHandoffRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(studioHandoffResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioHandoffResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/experience-studio/drafts/{draft_id}/handoff");
+
+        MockHttpServletRequest studioMemoryRequest = new MockHttpServletRequest("GET", "/api/park/experience-studio/memory");
+        ResponseEntity<byte[]> studioMemoryResponse = service.forward(studioMemoryRequest, new byte[0]);
+
+        assertThat(studioMemoryResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioMemoryResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/experience-studio/memory");
+
+        MockHttpServletRequest studioRulesRequest = new MockHttpServletRequest("GET", "/api/park/experience-studio/learning-rules");
+        ResponseEntity<byte[]> studioRulesResponse = service.forward(studioRulesRequest, new byte[0]);
+
+        assertThat(studioRulesResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioRulesResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/experience-studio/learning-rules");
+
+        MockHttpServletRequest studioPromoteRequest = new MockHttpServletRequest("POST", "/api/park/experience-studio/drafts/exp_spring/promote-rule");
+        ResponseEntity<byte[]> studioPromoteResponse = service.forward(studioPromoteRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(studioPromoteResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioPromoteResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/experience-studio/drafts/{draft_id}/promote-rule");
+
+        MockHttpServletRequest studioRuleStatusRequest = new MockHttpServletRequest("POST", "/api/park/experience-studio/learning-rules/rule_spring/status");
+        ResponseEntity<byte[]> studioRuleStatusResponse = service.forward(studioRuleStatusRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(studioRuleStatusResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(studioRuleStatusResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/experience-studio/learning-rules/{rule_id}/status");
+
+        MockHttpServletRequest agentRunRequest = new MockHttpServletRequest("POST", "/api/park/agent-run");
+        ResponseEntity<byte[]> agentRunResponse = service.forward(agentRunRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(agentRunResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(agentRunResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/agent-run");
+
+        MockHttpServletRequest roleRunRequest = new MockHttpServletRequest("POST", "/api/park/agent-role-run");
+        ResponseEntity<byte[]> roleRunResponse = service.forward(roleRunRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(roleRunResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(roleRunResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/agent-role-run");
+
+        MockHttpServletRequest liveFeedRunRequest = new MockHttpServletRequest("POST", "/api/park/live-feed-agent-run");
+        ResponseEntity<byte[]> liveFeedRunResponse = service.forward(liveFeedRunRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(liveFeedRunResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(liveFeedRunResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/live-feed-agent-run");
+
+        MockHttpServletRequest actionRequest = new MockHttpServletRequest("POST", "/api/park/action");
+        ResponseEntity<byte[]> actionResponse = service.forward(actionRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(actionResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(actionResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/action");
+
+        MockHttpServletRequest signalIntakeRequest = new MockHttpServletRequest("POST", "/api/park/signals/intake");
+        ResponseEntity<byte[]> signalIntakeResponse = service.forward(signalIntakeRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(signalIntakeResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(signalIntakeResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/signals/intake");
+
+        MockHttpServletRequest copilotChatRequest = new MockHttpServletRequest("POST", "/api/park/copilot-chat");
+        ResponseEntity<byte[]> copilotChatResponse = service.forward(copilotChatRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(copilotChatResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(copilotChatResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/copilot-chat");
+
+        MockHttpServletRequest refineRequest = new MockHttpServletRequest("POST", "/api/park/agent-role-refine");
+        ResponseEntity<byte[]> refineResponse = service.forward(refineRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(refineResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(refineResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/agent-role-refine");
+
+        MockHttpServletRequest runtimeStatusRequest = new MockHttpServletRequest("GET", "/api/park/full-runtime-status");
+        ResponseEntity<byte[]> runtimeStatusResponse = service.forward(runtimeStatusRequest, new byte[0]);
+
+        assertThat(runtimeStatusResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(runtimeStatusResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/full-runtime-status");
+
+        MockHttpServletRequest runtimeWarmupRequest = new MockHttpServletRequest("POST", "/api/park/full-runtime-warmup");
+        ResponseEntity<byte[]> runtimeWarmupResponse = service.forward(runtimeWarmupRequest, "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertThat(runtimeWarmupResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(runtimeWarmupResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("POST /api/park/full-runtime-warmup");
+
+        MockHttpServletRequest warmupStatusRequest = new MockHttpServletRequest("GET", "/api/park/warmup-status");
+        ResponseEntity<byte[]> warmupStatusResponse = service.forward(warmupStatusRequest, new byte[0]);
+
+        assertThat(warmupStatusResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(warmupStatusResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/warmup-status");
+    }
+
+    private void assertSpringOwnedRouteBlocked(PythonFallbackProxyService service, String method, String path, byte[] body, String expectedRoute) {
+        MockHttpServletRequest request = new MockHttpServletRequest(method, path);
+        ResponseEntity<byte[]> response = service.forward(request, body);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(response.getBody(), StandardCharsets.UTF_8))
+            .contains("spring_owned_route_fallback_gate")
+            .contains(expectedRoute);
     }
 }

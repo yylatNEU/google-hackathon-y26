@@ -1,3 +1,6 @@
+import asyncio
+
+import scenario_eval_sweep
 from scenario_eval_sweep import build_sweep_analytics_rows, summarize_scenario_result
 
 
@@ -100,3 +103,62 @@ def test_build_sweep_analytics_rows_exports_eval_result_rows():
     assert row["response_score"] == 29
     assert row["vertex_score"] == 0.29
     assert row["vertex_status"] == "completed"
+
+
+def test_scenario_eval_sweep_inputs_recommendations_and_async_failures():
+    custom = scenario_eval_sweep._scenario_input(
+        {
+            "id": "custom",
+            "name": "Custom Ops",
+            "prompt": "ride outage queue staff food complaint safety",
+            "signals": ["crowd density", "medical risk"],
+            "policy_refs": ["POL-1"],
+            "humanApproval": True,
+        }
+    )
+    assert custom["key"] == "custom"
+    assert custom["requires_human_approval"] is True
+    assert scenario_eval_sweep._dynamic_state_chain(custom) == [
+        "ride_outage",
+        "crowd_redistribution",
+        "staffing_pressure",
+        "food_demand_spike",
+        "guest_sentiment_shift",
+        "safety_risk",
+    ]
+    assert scenario_eval_sweep._scenario_input("  ")["key"] == "custom_scenario"
+    assert scenario_eval_sweep._vertex_score_100({"score": None}) is None
+    assert scenario_eval_sweep._vertex_score_100({"score": 88}) == 88
+
+    no_go = scenario_eval_sweep._recommendation({"completed_count": 0, "vertex_completed_count": 0, "aligned_count": 0, "scenario_count": 2})
+    missing_vertex = scenario_eval_sweep._recommendation({"completed_count": 2, "vertex_completed_count": 1, "aligned_count": 2, "scenario_count": 2})
+    mismatch = scenario_eval_sweep._recommendation({"completed_count": 2, "vertex_completed_count": 2, "aligned_count": 1, "scenario_count": 2})
+    go = scenario_eval_sweep._recommendation({"completed_count": 2, "vertex_completed_count": 2, "aligned_count": 2, "scenario_count": 2})
+    assert no_go["decision"] == "NO-GO"
+    assert missing_vertex["decision"] == "GO WITH CONDITIONS"
+    assert mismatch["decision"] == "GO WITH CONDITIONS"
+    assert go["decision"] == "GO"
+
+    async def runner(key, execute):
+        if key == "error":
+            raise RuntimeError("runner failed")
+        if key == "timeout":
+            await asyncio.sleep(0.02)
+        return {
+            "status": "complete",
+            "scenario_key": key,
+            "eval": {"scorecard": {"overall": 80}, "hosted_eval": {"vertex_result": {"result": {"score": 0.8}}}},
+        }
+
+    sweep = asyncio.run(
+        scenario_eval_sweep.run_vertex_eval_scenario_sweep(
+            runner,
+            scenario_keys=["ok", "error", "timeout"],
+            timeout_seconds=0.001,
+        )
+    )
+    statuses = {row["scenario_key"]: row["status"] for row in sweep["scenarios"]}
+    assert statuses["ok"] == "complete"
+    assert statuses["error"] == "error"
+    assert statuses["timeout"] == "timeout"
+    assert sweep["status"] == "review"

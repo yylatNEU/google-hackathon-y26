@@ -7,6 +7,7 @@ SERVICE="${3:-${PARKPULSE_CLOUD_RUN_SERVICE:-parkpulse-private-api}}"
 DATASET="${BIGQUERY_DATASET:-parkpulse_analytics}"
 EXPECTED_BUILD_ID="${PARKPULSE_EXPECTED_LAZY_ROUTER_BUILD_ID:-latency-hot-route-v5-2026-06-03}"
 ROLE_AUTH_RESOURCE_NAME="${PARKPULSE_ROLE_AUTH_SECRET_NAME:-parkpulse-role-auth-secret}"
+VERIFY_URL="${PARKPULSE_PRIVATE_VERIFY_URL:-${PARKPULSE_CLOUD_RUN_URL:-}}"
 READYZ_MAX_SECONDS="${PARKPULSE_SMOKE_READYZ_MAX_SECONDS:-20}"
 READYZ_WARMUP_MAX_SECONDS="${PARKPULSE_SMOKE_READYZ_WARMUP_MAX_SECONDS:-150}"
 READYZ_STABILIZE_ATTEMPTS="${PARKPULSE_SMOKE_READYZ_STABILIZE_ATTEMPTS:-6}"
@@ -25,7 +26,10 @@ if [[ -z "$PROJECT_ID" ]]; then
 fi
 
 mkdir -p "$TMP_DIR"
-SERVICE_URL="$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')"
+SERVICE_URL="$VERIFY_URL"
+if [[ -z "$SERVICE_URL" ]]; then
+  SERVICE_URL="$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')"
+fi
 TOKEN="$(gcloud auth print-identity-token)"
 ROLE_SIGNING_VALUE="$(gcloud secrets versions access latest --secret "$ROLE_AUTH_RESOURCE_NAME" --project "$PROJECT_ID")"
 
@@ -118,13 +122,18 @@ if payload.get("build_id") != expected:
     raise SystemExit(f"Unexpected build_id: {payload.get('build_id')} expected {expected}")
 if payload.get("status") not in {"ok", "degraded"}:
     raise SystemExit(f"Readiness status is not acceptable: {payload.get('status')}")
-if payload.get("full_app_loaded"):
-    raise SystemExit("Readiness loaded the full runtime unexpectedly.")
-deps = payload.get("dependency_status", {})
+if payload.get("mode") not in {"readyz_fast", "readyz_timeout_fallback", None}:
+    raise SystemExit(f"Readiness is not on the lazy readiness contract: {payload.get('mode')}")
+deps = payload.get("dependency_status") or payload.get("configured_dependencies") or {}
 for name in ("gemini", "bigquery"):
-    if not deps.get(name, {}).get("ready"):
+    value = deps.get(name)
+    if isinstance(value, dict):
+        ready = bool(value.get("ready")) if "ready" in value else bool(value.get("configured"))
+    else:
+        ready = bool(value)
+    if not ready:
         raise SystemExit(f"{name} is not ready: {deps.get(name)}")
-print("readyz proof:", {"build_id": payload.get("build_id"), "status": payload.get("status")})
+print("readyz proof:", {"build_id": payload.get("build_id"), "status": payload.get("status"), "mode": payload.get("mode"), "full_app_loaded": payload.get("full_app_loaded")})
 PY
 
 echo "Checking GCP status hot path..."

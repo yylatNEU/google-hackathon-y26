@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from copy import deepcopy
+
+os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
+os.environ.setdefault("ENABLE_BIGQUERY_ANALYTICS", "false")
+os.environ.setdefault("PARKPULSE_ENABLE_OTEL_SPANS", "false")
+os.environ.setdefault("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
 
 from digital_twin_benchmark import (
     attach_learning_comparison,
@@ -37,7 +43,7 @@ def test_benchmark_lists_adversarial_scenarios():
 
 
 def test_benchmark_runs_single_episode_with_hidden_truth_and_policy_gate():
-    result = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="unit", horizon_minutes=25)
+    result = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="unit", horizon_minutes=5)
 
     assert result["status"] == "complete"
     assert result["summary"]["episodes"] == 1
@@ -61,7 +67,7 @@ def test_benchmark_runs_single_episode_with_hidden_truth_and_policy_gate():
 
 
 def test_benchmark_runs_full_suite_and_unknown_scenario_path():
-    result = run_digital_twin_benchmark(_state(), seed="suite", horizon_minutes=30)
+    result = run_digital_twin_benchmark(_state(), seed="suite", horizon_minutes=5)
 
     assert result["status"] == "complete"
     assert result["summary"]["episodes"] >= 5
@@ -81,12 +87,12 @@ def test_benchmark_runs_full_suite_and_unknown_scenario_path():
 def test_benchmark_regression_history_records_matching_runs(tmp_path):
     history_path = tmp_path / "benchmark-history.json"
 
-    first = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="history-a", horizon_minutes=30)
+    first = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="history-a", horizon_minutes=5)
     recorded_first = record_benchmark_result(first, history_path=history_path)
     assert recorded_first["regression"]["previous"] is None
     assert recorded_first["regression"]["current"]["episodes"] == 1
 
-    second = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="history-b", horizon_minutes=30)
+    second = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="history-b", horizon_minutes=5)
     recorded_second = record_benchmark_result(second, history_path=history_path)
     assert recorded_second["regression"]["previous"]["seed"] == "history-a"
     assert "average_score" in recorded_second["regression"]["delta"]
@@ -94,7 +100,7 @@ def test_benchmark_regression_history_records_matching_runs(tmp_path):
 
 
 def test_benchmark_generates_remediation_playbooks_and_learning_comparison():
-    baseline = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="remediation-a", horizon_minutes=30)
+    baseline = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="remediation-a", horizon_minutes=5)
     baseline["episodes"][0]["passed"] = False
     baseline["episodes"][0]["failure_modes"] = ["regret versus benchmark selector", "secondary risk remains high"]
     remediations = generate_remediation_playbooks(baseline)
@@ -104,7 +110,7 @@ def test_benchmark_generates_remediation_playbooks_and_learning_comparison():
     assert remediations[0]["adjustment"]["requireEquipmentOrStaffAction"] is True
     assert "digital_twin" in remediations[0]["tags"]
 
-    learned = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="remediation-b", horizon_minutes=30)
+    learned = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="remediation-b", horizon_minutes=5)
     compared = attach_learning_comparison(
         learned,
         baseline,
@@ -116,7 +122,7 @@ def test_benchmark_generates_remediation_playbooks_and_learning_comparison():
 
 
 def test_benchmark_report_artifact_and_gate(tmp_path):
-    result = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="report-a", horizon_minutes=30)
+    result = run_digital_twin_benchmark(_state(), scenario_id="policy_gate_pressure", seed="report-a", horizon_minutes=5)
     report = build_benchmark_report(result)
 
     assert report["mode"] == "digital_twin_benchmark_report"

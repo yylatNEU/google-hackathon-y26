@@ -267,7 +267,7 @@ def test_scan_semantic_memory_uses_role_cache_on_hot_path(monkeypatch):
         )
     )
 
-    assert seen == {"agent_role": "scan", "cache_policy": "role_cache_only"}
+    assert seen == {"agent_role": "scan", "cache_policy": "normal"}
     assert payload["status"] == "ready"
     assert payload["retrieval_method"] == "role_context_cache"
 
@@ -328,6 +328,31 @@ def test_scan_semantic_memory_cache_miss_serves_static_fallback(monkeypatch):
     ]
 
 
+def test_scan_semantic_memory_timeout_serves_static_fallback(monkeypatch):
+    def slow_retrieve(*args, **kwargs):
+        raise TimeoutError("memory budget exceeded")
+
+    monkeypatch.setenv("PARKPULSE_COPILOT_SEMANTIC_MEMORY", "true")
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "true")
+    monkeypatch.setenv("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY_CACHE_POLICY", "fresh_retrieval")
+    monkeypatch.setattr(main, "_lightweight_retrieve_operational_context", slow_retrieve)
+    main._lightweight_semantic_memory_cache.clear()
+
+    payload = run(
+        main._lightweight_copilot_semantic_memory_context(
+            "What weak signal should we watch right now?",
+            {"guestFlow": {"activeScenario": {"key": "ride_down"}}},
+            {"top_ride": {"id": "dragonCoaster", "name": "Dragon Coaster"}},
+            {"selected_role": "scan"},
+        )
+    )
+
+    assert payload["status"] == "ready"
+    assert payload["retrieval_method"] == "role_context_cache_static_fallback"
+    assert payload["fallback_reason"] == "role_context_cache_miss"
+    assert payload["cache_policy"] == "normal"
+
+
 def test_lightweight_semantic_memory_timeout_does_not_block_answer(monkeypatch):
     async def fake_model_response(**kwargs):
         return {
@@ -353,7 +378,7 @@ def test_lightweight_semantic_memory_timeout_does_not_block_answer(monkeypatch):
     payload = run(
         main._build_lightweight_copilot_payload(
             {
-                "message": "What is the biggest risk?",
+                "message": "The coaster queue is too long near the parade. What should operations do?",
                 "mode": "auto",
                 "turn_mode": "answer",
                 "allow_action": False,

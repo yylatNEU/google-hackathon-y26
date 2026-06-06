@@ -7,6 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
+os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
+os.environ.setdefault("ENABLE_BIGQUERY_ANALYTICS", "false")
+os.environ.setdefault("PARKPULSE_ENABLE_OTEL_SPANS", "false")
+os.environ.setdefault("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
+os.environ.setdefault("PARKPULSE_COPILOT_SEMANTIC_MEMORY", "false")
+
 import digital_twin_gate
 import gcp_trace_eval
 import gemini_hard_timeout
@@ -305,9 +311,14 @@ def test_main_lazy_entrypoint_helpers_and_http_routes(monkeypatch):
 
     assert run(call_app("OPTIONS", "/healthz"))[0] == 204
     assert run(call_app("GET", "/healthz"))[1]["service"] == "parkpulse-api"
+    assert run(call_app("GET", "/health"))[1]["mode"] == "health_fast"
     assert run(call_app("GET", "/readyz"))[1]["entrypoint"] == "lazy-main"
     assert run(call_app("GET", "/api/park/full-runtime-status"))[1]["status"] in {"idle", "loading", "loaded", "failed"}
-    assert run(call_app("GET", "/api/park/api-capabilities"))[1]["status"] == "ready"
+    capabilities = run(call_app("GET", "/api/park/api-capabilities"))[1]
+    assert capabilities["status"] == "ready"
+    health_routes = next(item["routes"] for item in capabilities["route_families"] if item["id"] == "health_readiness")
+    assert "/health" in health_routes
+    assert "/healthz" not in health_routes
     assert run(call_app("GET", "/api/park/run-receipt/missing"))[0] == 404
 
     async def fake_agent_run(payload, reason):

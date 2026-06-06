@@ -87,6 +87,8 @@
 
     input, select, textarea {
       width: 100%;
+      max-width: 100%;
+      min-width: 0;
       border: 1px solid var(--line);
       background: #090f13;
       color: var(--ink);
@@ -215,6 +217,19 @@
       padding: 10px;
       background: rgba(11, 16, 20, .98);
       box-shadow: 0 18px 50px rgba(0,0,0,.34);
+    }
+
+    .topbar-menu .api-field {
+      grid-column: 1 / -1;
+      display: grid;
+      gap: 6px;
+    }
+
+    .topbar-menu .api-field span {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 1000;
+      text-transform: uppercase;
     }
 
     .api-box {
@@ -462,13 +477,17 @@
     .metric .value.info { color: var(--cyan); }
 
     .split-3 {
-      grid-template-columns: .95fr 1.15fr .9fr;
+      grid-template-columns: minmax(0, .95fr) minmax(0, 1.15fr) minmax(0, .9fr);
     }
 
     .form-grid {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
+    }
+
+    .form-grid > label {
+      min-width: 0;
     }
 
     label span {
@@ -478,6 +497,15 @@
       font-size: 10px;
       font-weight: 1000;
       text-transform: uppercase;
+    }
+
+    label small {
+      display: block;
+      margin: -2px 0 7px;
+      color: #a7b8bf;
+      font-size: 11px;
+      line-height: 1.35;
+      font-weight: 720;
     }
 
     .scenario-board {
@@ -1635,7 +1663,7 @@
           <div class="mark">AHP</div>
           <div>
             <h1>ParkPulse Agent Handshake</h1>
-            <div class="subhead">Watch an outside guest or supplier agent negotiate with ParkPulse, hit safety and commerce boundaries, and leave with a verified receipt.</div>
+            <div class="subhead">Choose a case, watch the agents negotiate authority, then inspect the final plan and receipt delivered back to the outside agent.</div>
           </div>
         </div>
         <div class="actions">
@@ -1645,12 +1673,12 @@
             <button id="runSupply" class="green">Run supply-chain case</button>
           </div>
           <details class="topbar-more">
-            <summary>Advanced</summary>
+            <summary>Advanced tools</summary>
             <div class="topbar-menu">
-              <input id="apiUrl" class="api-box" aria-label="API URL" />
+              <label class="api-field"><span>Backend API used by this demo</span><input id="apiUrl" class="api-box" aria-label="Backend API URL" /></label>
               <a id="servedLink" class="button-link" href="http://127.0.0.1:3003/agent-handshake-full-demo.html?api=http://127.0.0.1:8001">Open localhost page</a>
-              <button id="runCustom">Edit and run</button>
-              <button id="runJudge" class="amber">Quality sweep</button>
+              <button id="runCustom">Run edited payload</button>
+              <button id="runJudge" class="amber">Run quality sweep</button>
             </div>
           </details>
         </div>
@@ -1707,9 +1735,9 @@
           <section class="agent-result">
             <div class="section-title">
               <div>
-                <div class="kicker">Useful result to external agent</div>
-                <h3>What the client agent receives after the handshake</h3>
-                <p class="section-note">This card is sourced from the backend `external_agent_result` artifact, not frontend copy.</p>
+                <div class="kicker">Structured handoff artifact</div>
+                <h3>Fields behind the final result card</h3>
+                <p class="section-note">Use this when you need to prove the visible plan came from backend `external_agent_result`, not presentation copy.</p>
               </div>
               <span id="agentResultBadge" class="badge">waiting</span>
             </div>
@@ -1719,12 +1747,12 @@
           <section class="passport-loop">
             <div class="section-title">
               <div>
-                <div class="kicker">Passport product loop</div>
-                <h3>Before Passport -> verified run -> next Passport</h3>
-                <p class="section-note">The protocol does not just answer once. It turns a verified interaction into bounded memory, an eval score, and a better scoped Passport for the next run.</p>
+                <div class="kicker">Passport memory loop</div>
+                <h3>What improves after a verified run</h3>
+                <p class="section-note">The receipt writes bounded memory for the represented subject. The next run can reuse safe context, but approval gates stay locked.</p>
               </div>
               <div class="passport-actions">
-                <button id="runSecondPass" type="button">Run second pass</button>
+                <button id="runSecondPass" type="button">Run second pass from Passport</button>
                 <span id="passportBadge" class="badge">waiting</span>
               </div>
             </div>
@@ -1735,7 +1763,7 @@
 
       <details class="advanced-evidence">
         <summary>
-          <span>Protocol evidence, controls, and raw traces</span>
+          <span>Supporting proof and payload editor</span>
           <span class="badge">supporting proof</span>
         </summary>
         <div class="advanced-inner grid">
@@ -1843,23 +1871,24 @@
             <div>
               <div class="kicker">Editable payload</div>
               <h2>External agent input</h2>
+              <p class="section-note">Use this panel only when you want to change the agent contract before running `Run edited payload` from Advanced tools.</p>
             </div>
             <span id="counterpartyBadge" class="badge info">guest</span>
           </div>
           <div class="form-grid">
-            <label><span>Counterparty</span><select id="counterparty"><option value="supplier">Supplier agent</option><option value="guest">Guest agent</option></select></label>
-            <label><span>Scenario</span><select id="scenario"></select></label>
-            <label><span>Agent id</span><input id="agentId" /></label>
-            <label><span>Represents</span><input id="represents" /></label>
-            <label><span>Goal</span><input id="goal" /></label>
-            <label><span>Commerce action</span><input id="commerceAction" /></label>
+            <label><span>Counterparty</span><small>Chooses whether the outside agent acts for a guest or supplier.</small><select id="counterparty"><option value="supplier">Supplier agent</option><option value="guest">Guest agent</option></select></label>
+            <label><span>Scenario</span><small>Loads the matching goal, constraints, and policy gates.</small><select id="scenario"></select></label>
+            <label><span>Agent id</span><small>Names the external agent making the handshake request.</small><input id="agentId" /></label>
+            <label><span>Represents</span><small>The subject whose memory, receipt, and authority are isolated.</small><input id="represents" /></label>
+            <label><span>Goal</span><small>The optimization target ParkPulse accepts or refuses.</small><input id="goal" /></label>
+            <label><span>Policy probe action</span><small>The sensitive action used to prove gates still hold.</small><input id="commerceAction" /></label>
           </div>
           <div style="height:10px"></div>
-          <label><span>Constraints JSON</span><textarea id="constraints"></textarea></label>
+          <label><span>Constraints JSON</span><small>Scenario facts the external agent is allowed to share, such as allergy, inventory, or incident state.</small><textarea id="constraints"></textarea></label>
           <div style="height:10px"></div>
-          <label><span>Scopes</span><textarea id="scopes"></textarea></label>
+          <label><span>Scopes</span><small>Capabilities the agent can share or receive during this run.</small><textarea id="scopes"></textarea></label>
           <div style="height:10px"></div>
-          <label><span>Cannot do</span><textarea id="cannotDo"></textarea></label>
+          <label><span>Cannot do</span><small>Hard boundaries that must stay blocked even if they would improve the plan.</small><textarea id="cannotDo"></textarea></label>
         </section>
 
         <section class="card pad">
@@ -2517,7 +2546,7 @@
       if (!state.session) {
         return {
           title: "Final result appears after the run",
-          text: "Run the agent demo to see the accepted plan, receipt status, blocked actions, and internal handoffs."
+          text: "Run the guest case or supply-chain case to see the accepted plan, receipt status, blocked actions, and internal handoffs."
         };
       }
       const blocked = actionSummary("blocked");
@@ -2671,7 +2700,7 @@
           <div class="agent-result-grid">
             <article class="agent-result-main">
               <strong>No external-agent result yet</strong>
-              <p>Run the agent demo to generate the final handoff: message to represented party, final plan, allowed actions, and approval-required actions.</p>
+              <p>Run a case to generate the final handoff: message to represented party, final plan, allowed actions, and approval-required actions.</p>
             </article>
             <article class="agent-result-side">
               <strong>Expected artifact</strong>
@@ -2953,7 +2982,7 @@
           phase: "Second Run",
           title: comparison ? "Run 2 uses the Passport without weakening gates" : "Run 2 can be executed from the evolved Passport",
           client: comparison ? `Compare this run against the prior receipt. Did ParkPulse reuse only ${input.represents}'s scoped memory, and did it avoid asking repeated setup questions?` : `If I run again, preload only this represented subject's Passport. Do not borrow another guest or supplier's memory, and do not unlock payment, refund, safety, or procurement gates.`,
-          park: comparison ? `Run 1 session ${comparison.first_session_id}; Run 2 session ${comparison.second_session_id}. Reused memory: ${shortList(comparison.reused_memory, "bounded subject memory")}. Repeated questions reduced by ${comparison.repeated_questions_reduced_by}.` : `Ready. Click "Run second pass" to execute another real handshake. The second run will receive the prior Passport context but must produce a new receipt and preserve approval gates.`,
+          park: comparison ? `Run 1 session ${comparison.first_session_id}; Run 2 session ${comparison.second_session_id}. Reused memory: ${shortList(comparison.reused_memory, "bounded subject memory")}. Repeated questions reduced by ${comparison.repeated_questions_reduced_by}.` : `Ready. Click "Run second pass from Passport" to execute another real handshake. The second run will receive the prior Passport context but must produce a new receipt and preserve approval gates.`,
           outcome: comparison ? `The evolution is now proven inside the dialogue: the Passport improved the next interaction while preserving ${shortList(comparison.preserved_approval_gates, "hard approval gates")}.` : `This is the product loop: receipt creates Passport, Passport improves next run, next run still produces a new receipt.`,
           evidence: comparison ? `First receipt=${comparison.first_receipt_id}; second receipt=${comparison.second_receipt_id}; isolation=${String(Boolean(comparison.subject_isolation_preserved))}.` : `Awaiting second-run comparison. Current Passport level=${passport.passport_level || "pending"}.`
         }
@@ -2967,10 +2996,10 @@
       const hasSession = Boolean(state.session);
       $("liveBadge").textContent = state.running ? "running" : hasSession ? "played" : "ready";
       $("liveBadge").className = state.running ? "badge warn" : hasSession ? "badge good" : "badge info";
-      $("liveHeadline").textContent = steps[maxIndex]?.title || "Run the agent demo";
+      $("liveHeadline").textContent = steps[maxIndex]?.title || "Run a case";
       $("liveSubhead").textContent = hasSession
         ? `${steps.length} protocol moments from the actual run. Click any step below to inspect it.`
-        : "Run the demo, then click any step below to inspect what happened.";
+        : "Run a case, then click any step below to inspect what happened.";
       $("prevStep").disabled = maxIndex === 0;
       $("nextStep").disabled = maxIndex >= steps.length - 1;
       const finalResult = renderFinalResultCard();
@@ -3115,7 +3144,7 @@
       const policyDecisions = session.policy_decisions || [];
       const blocked = policyDecisions.filter((item) => item.status === "blocked" || item.status === "requires_user_approval");
       const plan = Array.isArray(proposal.plan) && proposal.plan.length ? proposal.plan.join(" -> ") : scenario.summary;
-      const resolution = monitoring.accepted_resolution || monitoring.park_agent_revision || (state.receipt ? "Committed plan with signed receipt" : "Run the agent demo to produce a committed outcome.");
+      const resolution = monitoring.accepted_resolution || monitoring.park_agent_revision || (state.receipt ? "Committed plan with signed receipt" : "Run a case to produce a committed outcome.");
       const blockedText = blocked.length
         ? blocked.slice(-3).map((item) => `${titleize(item.action)}: ${titleize(item.status)}`).join("; ")
         : state.session ? "No unsafe delegated action was allowed." : "Payment, refund, medical, food-safety, and vendor-payment actions stay gated.";
@@ -3290,7 +3319,7 @@
           `).join("")}
           <ul class="findings">${(report.findings || []).slice(0, 4).map((finding) => `<li>${safe(finding)}</li>`).join("")}</ul>
         </article>
-      `).join("") : `<article class="judge-card"><div class="judge-top"><strong>Quality sweep not run</strong><span class="badge">idle</span></div><p style="margin:0;color:var(--muted);font-weight:800">Run Quality sweep to score negotiation depth, policy reasoning, handoffs, receipts, and autonomy.</p></article>`;
+      `).join("") : `<article class="judge-card"><div class="judge-top"><strong>Quality sweep not run</strong><span class="badge">idle</span></div><p style="margin:0;color:var(--muted);font-weight:800">Open Advanced tools and run the quality sweep to score negotiation depth, policy reasoning, handoffs, receipts, and autonomy.</p></article>`;
     }
 
     function renderProtocolReplay() {
@@ -3314,7 +3343,7 @@
             </div>
           </div>
         </article>
-      `).join("") : `<article class="exchange"><div class="exchange-head"><strong>No replay trace yet</strong><span class="badge">idle</span></div><p style="margin:0;color:var(--muted);font-weight:800">Run external agent to see ordered request/response pairs another agent could replay.</p></article>`;
+      `).join("") : `<article class="exchange"><div class="exchange-head"><strong>No replay trace yet</strong><span class="badge">idle</span></div><p style="margin:0;color:var(--muted);font-weight:800">Run the guest case or supply-chain case to see ordered request/response pairs another agent could replay.</p></article>`;
     }
 
     function renderProtocolDocs() {
@@ -3323,7 +3352,7 @@
       $("docsBadge").textContent = docs ? `${(docs.routes || []).length} routes` : "not loaded";
       $("docsBadge").className = docs ? "badge info" : "badge";
       if (!docs && !external) {
-        $("protocolDocs").innerHTML = `<article class="judge-card"><div class="judge-top"><strong>Contract not loaded</strong><span class="badge">idle</span></div><p style="margin:0;color:var(--muted);font-weight:800">Run external agent to load protocol docs, consent grant, live-state evidence, and SDK path.</p></article>`;
+        $("protocolDocs").innerHTML = `<article class="judge-card"><div class="judge-top"><strong>Contract not loaded</strong><span class="badge">idle</span></div><p style="margin:0;color:var(--muted);font-weight:800">Run a case to load protocol docs, consent grant, live-state evidence, and SDK path.</p></article>`;
         return;
       }
       const consent = external?.consent_grant;
@@ -3343,7 +3372,7 @@ await client.externalClientDemo({ scenario_mode: "${safe(state.selectedScenario)
             <div><div class="kicker">Consent</div><strong>${safe(consent?.grant_id || "No grant yet")}</strong></div>
             <span class="badge ${consent ? "good" : ""}">${safe(consent?.signature?.artifact_type || "missing")}</span>
           </div>
-          <p style="margin:0;color:var(--muted);font-size:12px;font-weight:750;line-height:1.45">${safe(consent?.consent_text || "Run external agent to issue a signed consent grant.")}</p>
+          <p style="margin:0;color:var(--muted);font-size:12px;font-weight:750;line-height:1.45">${safe(consent?.consent_text || "Run a case to issue a signed consent grant.")}</p>
         </article>
         <article class="judge-card">
           <div class="judge-top">

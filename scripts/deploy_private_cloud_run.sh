@@ -19,6 +19,7 @@ RESTORE_NO_TRAFFIC_BASELINE="${PARKPULSE_RESTORE_NO_TRAFFIC_BASELINE:-true}"
 PRODUCTION_TRAFFIC_SERVICE="${PARKPULSE_PRODUCTION_CLOUD_RUN_SERVICE:-parkpulse-private-api}"
 ALLOW_PRODUCTION_TRAFFIC_UPDATE="${PARKPULSE_ALLOW_PRODUCTION_TRAFFIC_UPDATE:-false}"
 DEPLOY_AUDIT_DIR="${PARKPULSE_DEPLOY_AUDIT_DIR:-${ROOT_DIR}/output/deploy}"
+EXPECTED_BASELINE_REVISION="${PARKPULSE_EXPECTED_PRODUCTION_REVISION:-${PARKPULSE_NO_TRAFFIC_BASELINE_REVISION:-}}"
 
 if [[ -z "$PROJECT_ID" ]]; then
   echo "Usage: scripts/deploy_private_cloud_run.sh <gcp-project-id> [region]" >&2
@@ -59,12 +60,8 @@ if gcloud run services describe "$SERVICE" \
   cp "$BASELINE_TRAFFIC_FILE" "${DEPLOY_AUDIT_DIR}/${SERVICE}-traffic-before.json"
 fi
 
-restore_no_traffic_baseline() {
-  if ! truthy "$NO_TRAFFIC_DEPLOY" || ! truthy "$RESTORE_NO_TRAFFIC_BASELINE" || [[ "$BASELINE_TRAFFIC_CAPTURED" != "true" ]]; then
-    return 0
-  fi
-  local baseline_revisions
-  baseline_revisions="$(python3 - "$BASELINE_TRAFFIC_FILE" <<'PY'
+traffic_revisions_from_file() {
+  python3 - "$1" <<'PY'
 import json
 import sys
 
@@ -78,13 +75,56 @@ for row in traffic:
         parts.append(f"{revision}={percent}")
 print(",".join(parts))
 PY
-)"
+}
+
+BASELINE_ACTIVE_REVISIONS=""
+if [[ "$BASELINE_TRAFFIC_CAPTURED" == "true" ]]; then
+  BASELINE_ACTIVE_REVISIONS="$(traffic_revisions_from_file "$BASELINE_TRAFFIC_FILE")"
+  if truthy "$NO_TRAFFIC_DEPLOY" && [[ -n "$EXPECTED_BASELINE_REVISION" && "$BASELINE_ACTIVE_REVISIONS" != "${EXPECTED_BASELINE_REVISION}=100" ]]; then
+    cat >&2 <<EOF
+Refusing no-traffic deploy because the live production revision is not the expected baseline.
+
+Expected: ${EXPECTED_BASELINE_REVISION}=100
+Observed: ${BASELINE_ACTIVE_REVISIONS:-none}
+
+Refresh your Cloud Run traffic first, or update PARKPULSE_EXPECTED_PRODUCTION_REVISION.
+EOF
+    exit 4
+  fi
+fi
+
+restore_no_traffic_baseline() {
+  if ! truthy "$NO_TRAFFIC_DEPLOY" || ! truthy "$RESTORE_NO_TRAFFIC_BASELINE" || [[ "$BASELINE_TRAFFIC_CAPTURED" != "true" ]]; then
+    return 0
+  fi
+  local baseline_revisions
+  baseline_revisions="$(traffic_revisions_from_file "$BASELINE_TRAFFIC_FILE")"
   if [[ -n "$baseline_revisions" ]]; then
     gcloud run services update-traffic "$SERVICE" \
       --project "$PROJECT_ID" \
       --region "$REGION" \
       --to-revisions "$baseline_revisions" \
       --quiet >/dev/null
+    local restored_file restored_revisions
+    restored_file="$(mktemp "${TMPDIR:-/tmp}/parkpulse-cloud-run-traffic-restored.XXXXXX")"
+    gcloud run services describe "$SERVICE" \
+      --project "$PROJECT_ID" \
+      --region "$REGION" \
+      --format=json > "$restored_file"
+    cp "$restored_file" "${DEPLOY_AUDIT_DIR}/${SERVICE}-traffic-restored.json"
+    restored_revisions="$(traffic_revisions_from_file "$restored_file")"
+    rm -f "$restored_file"
+    if [[ "$restored_revisions" != "$baseline_revisions" ]]; then
+      cat >&2 <<EOF
+No-traffic deploy baseline restore did not converge to the captured split.
+
+Expected: ${baseline_revisions}
+Observed: ${restored_revisions:-none}
+
+Inspect Cloud Run traffic before continuing.
+EOF
+      exit 5
+    fi
   fi
 }
 

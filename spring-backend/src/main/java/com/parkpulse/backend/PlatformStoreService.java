@@ -130,9 +130,10 @@ public class PlatformStoreService {
         Map<String, Object> result = orderedMap();
         result.put("status", "active");
         result.put("mode", "continuous_java_spring_migration");
-        result.put("current_slice", "spring_backend_gateway_plus_staff_training_authority");
+        result.put("current_slice", "spring_backend_gateway_plus_experience_studio_and_venue_profile_control_loop");
         result.put("spring_owned_routes", List.of(
             "/",
+            "/health",
             "/healthz",
             "/readyz",
             "/api/park/auth/dev-session",
@@ -142,6 +143,19 @@ public class PlatformStoreService {
             "/api/park/live-summary",
             "/api/park/cases",
             "/api/park/cases/{case_id}/brief",
+            "/api/park/signals/intake",
+            "/api/park/agent-role-run",
+            "/api/park/agent-run",
+            "/api/park/live-feed-agent-run",
+            "/api/park/operator-command",
+            "/api/park/action",
+            "/api/park/ops-chat",
+            "/api/park/copilot-chat",
+            "/api/park/agent-role-refine",
+            "/api/park/full-runtime-status",
+            "/api/park/full-runtime-warmup",
+            "/api/park/warmup-status",
+            "/api/park/agent-ops-ledger",
             "/api/park/monitor-evidence",
             "/api/park/policy-doctrine",
             "/api/park/policy-doctrine/{policy_ref}",
@@ -157,6 +171,9 @@ public class PlatformStoreService {
             "/api/park/product-learning/loop",
             "/api/park/product-learning/issue-ticket",
             "/api/park/product-learning/training-gap-ticket",
+            "/api/park/product-learning/promote-version",
+            "/api/park/product-learning/rollback-version",
+            "/api/park/product-learning/review-place-resolution",
             "/api/park/staff-training/scenarios",
             "/api/park/staff-training/policy-pack",
             "/api/park/staff-training/assignments",
@@ -170,6 +187,32 @@ public class PlatformStoreService {
             "/api/park/staff-training/turn",
             "/api/park/staff-training/finish",
             "/api/park/staff-training/analytics",
+            "/api/park/venue-profile",
+            "/api/park/venue-profile/validate",
+            "/api/park/venue-profile/import/preview",
+            "/api/park/venue-profile/import",
+            "/api/park/venue-profile/synthetic/export",
+            "/api/park/venue-profile/synthetic/activate",
+            "/api/park/accessibility/scope",
+            "/api/park/accessibility/journey",
+            "/api/park/review-label-pipeline",
+            "/api/park/review-label-pipeline/decision",
+            "/api/park/review-label-pipeline/auto-label",
+            "/api/park/review-label-pipeline/decisions",
+            "/api/park/experience-studio/conversation-plan",
+            "/api/park/experience-studio/draft",
+            "/api/park/experience-studio/section-revision",
+            "/api/park/experience-studio/layer-contract",
+            "/api/park/experience-studio/readiness",
+            "/api/park/experience-studio/memory",
+            "/api/park/experience-studio/drafts",
+            "/api/park/experience-studio/drafts/{draft_id}",
+            "/api/park/experience-studio/drafts/{draft_id}/status",
+            "/api/park/experience-studio/handoffs",
+            "/api/park/experience-studio/drafts/{draft_id}/handoff",
+            "/api/park/experience-studio/learning-rules",
+            "/api/park/experience-studio/drafts/{draft_id}/promote-rule",
+            "/api/park/experience-studio/learning-rules/{rule_id}/status",
             "/api/park/role-access-contracts",
             "/api/park/reliability",
             "/api/park/latency-diagnostics",
@@ -221,7 +264,7 @@ public class PlatformStoreService {
             "/api/park/backend-gateway/status"
         ));
         result.put("spring_gateway_routes", List.of("/api/**", "/readyz/deep"));
-        result.put("python_owned_routes", "agent orchestration, Gemini/Vertex, Mongo memory, remaining simulation surfaces, and live GCP delivery adapters are reached through the Spring gateway until each route group is migrated natively.");
+        result.put("python_owned_routes", "Gemini/Vertex deep adapter execution, heavy creative generation, remaining simulation surfaces, Mongo-only memory enrichers, and live GCP delivery adapters are reached through the Spring gateway until each route group is migrated natively.");
         result.put("handoff_rule", "Move one bounded route group at a time only after parity tests and SQLite authority checks pass.");
         result.put("rollback", "Stop the Spring service and keep Python serving the same SQLite-backed authority.");
         result.put("platform_store", compactStatus());

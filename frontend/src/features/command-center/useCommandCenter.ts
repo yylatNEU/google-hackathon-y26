@@ -30,6 +30,14 @@ export type DispatchView = {
   dispatch?: DeliveryDispatch;
 };
 
+export type StartupLoadTiming = {
+  id: string;
+  label: string;
+  elapsedMs: number;
+  status: "complete" | "deferred";
+  completedAtMs: number;
+};
+
 export type ActualTrainingStatus = {
   status?: string;
   mode?: string;
@@ -242,6 +250,10 @@ export type LiveFeedRefreshSupervisorResult = {
   after_feeds?: LiveFeedHealth["feeds"];
 };
 
+type ApiRecord = Record<string, unknown>;
+type ReviewTrainingRow = NonNullable<ReviewTrainingLedger["rows"]>[number];
+type LiveFeedRow = NonNullable<LiveFeedHealth["feeds"]>[number];
+
 export type LiveAgentsSmokeReport = {
   status?: string;
   mode?: string;
@@ -279,6 +291,150 @@ export type LiveAgentsSmokeReport = {
   };
   readiness_issues?: string[];
 };
+
+function isRecord(value: unknown): value is ApiRecord {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function formatApiValue(value: unknown) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function normalizedStringArray(value: unknown, field: string, issues: string[]) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    issues.push(`${field} expected array; received ${typeof value}.`);
+    return [];
+  }
+  return value.map(formatApiValue).filter(Boolean);
+}
+
+function normalizedRecordArray<T>(value: unknown, field: string, issues: string[], normalize: (record: ApiRecord, index: number) => T) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    issues.push(`${field} expected array; received ${typeof value}.`);
+    return [];
+  }
+  return value.flatMap((item, index) => {
+    if (!isRecord(item)) {
+      issues.push(`${field}[${index}] expected object; received ${typeof item}.`);
+      return [];
+    }
+    return [normalize(item, index)];
+  });
+}
+
+function normalizedSummary(value: unknown): LiveFeedHealth["summary"] | ReviewTrainingLedger["summary"] | undefined {
+  if (!isRecord(value)) return undefined;
+  return value as LiveFeedHealth["summary"] & ReviewTrainingLedger["summary"];
+}
+
+function normalizeReviewRow(record: ApiRecord, index: number): ReviewTrainingRow {
+  const event = isRecord(record.event) ? record.event : undefined;
+  const disposition = isRecord(record.disposition) ? record.disposition : undefined;
+  return {
+    id: formatApiValue(record.id) || `review-${index}`,
+    status: formatApiValue(record.status),
+    reason: formatApiValue(record.reason),
+    priority: formatApiValue(record.priority),
+    owner: formatApiValue(record.owner),
+    training_effect: formatApiValue(record.training_effect),
+    event: event ? { source: formatApiValue(event.source), signal_type: formatApiValue(event.signal_type) } : undefined,
+    disposition: disposition ? { decision: formatApiValue(disposition.decision) } : undefined,
+  };
+}
+
+function normalizeFeedRow(record: ApiRecord, index: number): LiveFeedRow {
+  const readinessIssues: string[] = [];
+  const rowReadinessIssues = normalizedStringArray(record.readiness_issues, `feeds[${index}].readiness_issues`, readinessIssues);
+  return {
+    source: formatApiValue(record.source) || `feed-${index}`,
+    label: formatApiValue(record.label),
+    owner: formatApiValue(record.owner),
+    status: formatApiValue(record.status),
+    age_seconds: typeof record.age_seconds === "number" || record.age_seconds === null ? record.age_seconds : undefined,
+    max_stale_seconds: typeof record.max_stale_seconds === "number" ? record.max_stale_seconds : undefined,
+    confidence: typeof record.confidence === "number" ? record.confidence : undefined,
+    latest_signal_type: formatApiValue(record.latest_signal_type),
+    readiness_issues: [...rowReadinessIssues, ...readinessIssues],
+    value: record.value,
+  };
+}
+
+function normalizeReviewTrainingLedger(payload: unknown): ReviewTrainingLedger {
+  const issues: string[] = [];
+  if (!isRecord(payload)) {
+    return { status: "error", mode: "review_training_ledger", rows: [], open_reviews: [], closed_reviews: [], readiness_issues: ["review ledger response expected object."] };
+  }
+  const rows = normalizedRecordArray(payload.rows, "review ledger rows", issues, normalizeReviewRow);
+  const openReviews = normalizedRecordArray(payload.open_reviews, "review ledger open_reviews", issues, normalizeReviewRow);
+  const closedReviews = normalizedRecordArray(payload.closed_reviews, "review ledger closed_reviews", issues, normalizeReviewRow);
+  return {
+    ...payload,
+    status: formatApiValue(payload.status),
+    mode: formatApiValue(payload.mode),
+    summary: normalizedSummary(payload.summary) as ReviewTrainingLedger["summary"],
+    rows,
+    open_reviews: openReviews,
+    closed_reviews: closedReviews,
+    training_rule: formatApiValue(payload.training_rule),
+    readiness_issues: [...normalizedStringArray(payload.readiness_issues, "review ledger readiness_issues", issues), ...issues],
+  };
+}
+
+function normalizeLiveFeedHealth(payload: unknown): LiveFeedHealth {
+  const issues: string[] = [];
+  if (!isRecord(payload)) {
+    return {
+      status: "error",
+      mode: "live_feed_health_and_review_contract",
+      feeds: [],
+      open_reviews: [],
+      growth_loop: [],
+      summary: { required_feed_count: 0, ready_feed_count: 0, missing_or_weak_feed_count: 0, open_review_count: 0 },
+      readiness_issues: ["live feed health response expected object."],
+    };
+  }
+  const feeds = normalizedRecordArray(payload.feeds, "live feed health feeds", issues, normalizeFeedRow);
+  const openReviews = normalizedRecordArray(payload.open_reviews, "live feed health open_reviews", issues, normalizeReviewRow);
+  return {
+    ...payload,
+    status: formatApiValue(payload.status),
+    mode: formatApiValue(payload.mode),
+    cache: isRecord(payload.cache) ? (payload.cache as LiveFeedHealth["cache"]) : undefined,
+    summary: (normalizedSummary(payload.summary) as LiveFeedHealth["summary"]) ?? { required_feed_count: 0, ready_feed_count: 0, missing_or_weak_feed_count: 0, open_review_count: 0 },
+    feeds,
+    open_reviews: openReviews,
+    growth_loop: normalizedStringArray(payload.growth_loop, "live feed health growth_loop", issues),
+    readiness_issues: [...normalizedStringArray(payload.readiness_issues, "live feed health readiness_issues", issues), ...issues],
+  };
+}
+
+function normalizeLiveFeedRefreshSupervisor(payload: unknown): LiveFeedRefreshSupervisorResult {
+  const issues: string[] = [];
+  if (!isRecord(payload)) {
+    return { status: "error", mode: "live_feed_refresh_supervisor", refreshed_sources: [], queued_sources: [], readiness_issues: ["refresh supervisor response expected object."] };
+  }
+  return {
+    ...payload,
+    status: formatApiValue(payload.status),
+    mode: formatApiValue(payload.mode),
+    refreshed_sources: normalizedStringArray(payload.refreshed_sources, "refresh supervisor refreshed_sources", issues),
+    queued_sources: normalizedStringArray(payload.queued_sources, "refresh supervisor queued_sources", issues),
+    readiness_issues: [...normalizedStringArray(payload.readiness_issues, "refresh supervisor readiness_issues", issues), ...issues],
+    remaining_issues: normalizedStringArray(payload.remaining_issues, "refresh supervisor remaining_issues", issues),
+    before: normalizedSummary(payload.before) as LiveFeedHealth["summary"],
+    after: normalizedSummary(payload.after) as LiveFeedHealth["summary"],
+    after_feeds: normalizedRecordArray(payload.after_feeds, "refresh supervisor after_feeds", issues, normalizeFeedRow),
+  };
+}
 
 function normalizeRunTelemetry(payload: RunPayload): RunTelemetry {
   if (!payload.run_telemetry) return payload;
@@ -345,6 +501,7 @@ export function useCommandCenter() {
   const [isReviewLabelPipelineLoading, setIsReviewLabelPipelineLoading] = useState(false);
   const [isAutoLabelingReviewLabels, setIsAutoLabelingReviewLabels] = useState(false);
   const [isRoleAccessLoading, setIsRoleAccessLoading] = useState(false);
+  const [startupLoadTimings, setStartupLoadTimings] = useState<StartupLoadTiming[]>([]);
 
   const activeEvalScores = useMemo<EvalScore[]>(() => {
     const scorecard = runTelemetry?.eval?.scorecard;
@@ -457,8 +614,8 @@ export function useCommandCenter() {
         fetchParkPulseApi("/api/park/live-feed-health?limit=500", { headers: { "x-parkpulse-role": "ops_team" }, timeoutMs: longRunningRequestTimeoutMs }),
         fetchParkPulseApi("/api/park/review-training-ledger?limit=80", { headers: { "x-parkpulse-role": "ops_team" }, timeoutMs: longRunningRequestTimeoutMs }),
       ]);
-      setLiveFeedHealth((await healthResponse.json()) as LiveFeedHealth);
-      setReviewTrainingLedger((await ledgerResponse.json()) as ReviewTrainingLedger);
+      setLiveFeedHealth(normalizeLiveFeedHealth(await healthResponse.json()));
+      setReviewTrainingLedger(normalizeReviewTrainingLedger(await ledgerResponse.json()));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Live feed health failed.";
       setLiveFeedHealth({
@@ -490,7 +647,7 @@ export function useCommandCenter() {
   const refreshReviewLabelPipeline = useCallback(async () => {
     setIsReviewLabelPipelineLoading(true);
     try {
-      const response = await fetchParkPulseApi("/api/park/review-label-pipeline?limit=40", { timeoutMs: 12000 });
+      const response = await fetchParkPulseApi("/api/park/review-label-pipeline?limit=40", { headers: { "x-parkpulse-role": "ml_ops_admin" }, timeoutMs: 12000 });
       setReviewLabelPipeline((await response.json()) as ReviewLabelPipeline);
     } catch (error) {
       const message = commandCenterIssue(error, "Review label pipeline failed.");
@@ -537,7 +694,7 @@ export function useCommandCenter() {
         body: JSON.stringify({ stale_only: true, refresh_margin_seconds: 20 }),
         timeoutMs: Math.max(longRunningRequestTimeoutMs, 180_000),
       });
-      const payload = (await response.json()) as LiveFeedRefreshSupervisorResult;
+      const payload = normalizeLiveFeedRefreshSupervisor(await response.json());
       setLiveFeedRefreshSupervisor(payload);
       const refreshedCount = payload.refreshed_sources?.length ?? 0;
       const queuedCount = payload.queued_sources?.length ?? 0;
@@ -587,7 +744,7 @@ export function useCommandCenter() {
       try {
         const response = await fetchParkPulseApi("/api/park/review-label-pipeline/decision", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", "x-parkpulse-role": "ml_ops_admin" },
           body: JSON.stringify({
             candidate,
             candidate_id: candidate.id,
@@ -622,7 +779,7 @@ export function useCommandCenter() {
     try {
       const response = await fetchParkPulseApi("/api/park/review-label-pipeline/auto-label", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-parkpulse-role": "ml_ops_admin" },
         body: JSON.stringify({ reviewer: "parkpulse-command-center", confidence_threshold: 0.7 }),
         timeoutMs: 12000,
       });
@@ -697,29 +854,57 @@ export function useCommandCenter() {
 
   useEffect(() => {
     let cancelled = false;
+    let smokeTimeoutId: number | undefined;
+    let trainingTimeoutId: number | undefined;
+    const startedAt = Date.now();
+
+    const timeInitialLoad = async (id: string, label: string, load: () => Promise<void>) => {
+      const requestStartedAt = Date.now();
+      let status: StartupLoadTiming["status"] = "complete";
+      try {
+        await load();
+      } catch {
+        status = "deferred";
+      } finally {
+        if (!cancelled) {
+          const timing: StartupLoadTiming = {
+            id,
+            label,
+            elapsedMs: Date.now() - requestStartedAt,
+            status,
+            completedAtMs: Date.now() - startedAt,
+          };
+          setStartupLoadTimings((current) => [...current.filter((item) => item.id !== id), timing].sort((left, right) => left.completedAtMs - right.completedAtMs));
+        }
+      }
+    };
 
     const refreshInitialCommandCenterState = async () => {
-      await refreshIntegrationStatus();
-      if (cancelled) return;
-      await refreshGcpLiveReadiness();
-      if (cancelled) return;
-      await refreshOperatingLoopResilience();
-      if (cancelled) return;
-      await refreshLiveFeedHealth();
-      if (cancelled) return;
-      await refreshReviewLabelPipeline();
-      if (cancelled) return;
-      await refreshRoleAccess();
-      if (cancelled) return;
-      void refreshActualTraining();
-      window.setTimeout(() => {
-        if (!cancelled) void refreshLiveAgentsSmoke();
+      setStartupLoadTimings([]);
+      const initialLoads = [
+        timeInitialLoad("integration", "Integration", refreshIntegrationStatus),
+        timeInitialLoad("gcp_readiness", "GCP readiness", refreshGcpLiveReadiness),
+        timeInitialLoad("loop_resilience", "Loop health", refreshOperatingLoopResilience),
+        timeInitialLoad("live_feeds", "Live feeds", refreshLiveFeedHealth),
+        timeInitialLoad("review_labels", "Review labels", refreshReviewLabelPipeline),
+        timeInitialLoad("role_access", "Role access", refreshRoleAccess),
+      ];
+
+      trainingTimeoutId = window.setTimeout(() => {
+        if (!cancelled) void timeInitialLoad("actual_training", "Training", refreshActualTraining);
+      }, 250);
+      smokeTimeoutId = window.setTimeout(() => {
+        if (!cancelled) void timeInitialLoad("agent_smoke", "Agent proof", refreshLiveAgentsSmoke);
       }, 500);
+
+      await Promise.allSettled(initialLoads);
     };
 
     void refreshInitialCommandCenterState();
     return () => {
       cancelled = true;
+      if (trainingTimeoutId !== undefined) window.clearTimeout(trainingTimeoutId);
+      if (smokeTimeoutId !== undefined) window.clearTimeout(smokeTimeoutId);
     };
   }, [refreshActualTraining, refreshGcpLiveReadiness, refreshIntegrationStatus, refreshLiveAgentsSmoke, refreshLiveFeedHealth, refreshOperatingLoopResilience, refreshReviewLabelPipeline, refreshRoleAccess]);
 
@@ -851,7 +1036,7 @@ export function useCommandCenter() {
     try {
       const response = await fetchParkPulseApi("/api/park/action", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify(action),
         timeoutMs: 12000,
       });
@@ -959,6 +1144,7 @@ export function useCommandCenter() {
     liveOperatorSignalLoad,
     liveFeedRefreshSupervisor,
     liveAgentsSmoke,
+    startupLoadTimings,
     refreshActualTraining,
     refreshGcpLiveReadiness,
     refreshOperatingLoopResilience,

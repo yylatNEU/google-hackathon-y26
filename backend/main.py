@@ -439,7 +439,7 @@ def _api_capability_registry() -> dict[str, Any]:
             {
                 "id": "health_readiness",
                 "mode": "hot_path",
-                "routes": ["/", "/healthz", "/readyz", "/api/park/full-runtime-status", "/api/park/api-capabilities"],
+                "routes": ["/", "/health", "/readyz", "/api/park/full-runtime-status", "/api/park/api-capabilities"],
                 "timeout_tier": "hot_path_seconds",
             },
             {
@@ -8058,12 +8058,22 @@ def _monitor_evidence_mongo_client_ref() -> Any | None:
             if not _ensure_mongo_driver() or mongo_memory.MongoClient is None:
                 return None
             timeout_ms = max(250, _int_env("PARKPULSE_MONITOR_EVIDENCE_MONGO_TIMEOUT_MS", _int_env("MONGODB_OPERATION_TIMEOUT_MS", 1500)))
+            client_options = {
+                "serverSelectionTimeoutMS": timeout_ms,
+                "connectTimeoutMS": timeout_ms,
+                "socketTimeoutMS": timeout_ms,
+                "retryWrites": True,
+            }
+            try:
+                import certifi
+
+                client_options["tlsCAFile"] = os.getenv("MONGODB_TLS_CA_FILE") or certifi.where()
+            except Exception:
+                if os.getenv("MONGODB_TLS_CA_FILE"):
+                    client_options["tlsCAFile"] = os.getenv("MONGODB_TLS_CA_FILE")
             _monitor_evidence_mongo_client = mongo_memory.MongoClient(
                 _normalized_mongodb_uri(uri),
-                serverSelectionTimeoutMS=timeout_ms,
-                connectTimeoutMS=timeout_ms,
-                socketTimeoutMS=timeout_ms,
-                retryWrites=True,
+                **client_options,
             )
             return _monitor_evidence_mongo_client
         except Exception:
@@ -9211,7 +9221,7 @@ async def _lightweight_copilot_semantic_memory_context(
             "role_cache_only",
         )
     if selected_role == "scan" and cache_policy == "fresh_retrieval":
-        cache_policy = os.getenv("PARKPULSE_COPILOT_LIGHTWEIGHT_SCAN_SEMANTIC_MEMORY_CACHE_POLICY", "role_cache_only")
+        cache_policy = os.getenv("PARKPULSE_COPILOT_LIGHTWEIGHT_SCAN_SEMANTIC_MEMORY_CACHE_POLICY", "normal")
     cache_key = json.dumps(
         {
             "message": message,
@@ -9277,6 +9287,16 @@ async def _lightweight_copilot_semantic_memory_context(
                 _lightweight_semantic_memory_cache[cache_key] = (now + ttl, dict(payload))
         return payload
     except Exception as error:
+        timeout = max(0.2, _float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY_TIMEOUT_SECONDS", _float_env("PARKPULSE_COPILOT_SEMANTIC_MEMORY_TIMEOUT_SECONDS", 2.0)))
+        if selected_role == "scan" and isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+            return _lightweight_scan_cache_miss_fallback(
+                message=message,
+                state=state if isinstance(state, dict) else {},
+                state_summary=state_summary if isinstance(state_summary, dict) else {},
+                memory={"query": message, "cache_policy": cache_policy, "scenario_key": None},
+                started=started,
+                timeout=timeout,
+            )
         return {
             "status": "timeout" if isinstance(error, (asyncio.TimeoutError, TimeoutError)) else "error",
             "source": "mongo_operational_memory_lightweight",
@@ -10322,7 +10342,16 @@ def _role_learning_update(scenario_key: str, response: dict[str, Any], role: str
     }
 
 
-def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str, Any], scenario_key: str) -> dict[str, Any]:
+def _persist_role_receipt(
+    payload: dict[str, Any],
+    *,
+    role: str,
+    route: dict[str, Any],
+    scenario_key: str,
+    sync_persist: bool | None = None,
+    sync_memory: bool | None = None,
+    sync_analytics: bool | None = None,
+) -> dict[str, Any]:
     telemetry = payload.setdefault("run_telemetry", {})
     delivery = telemetry.get("delivery") if isinstance(telemetry.get("delivery"), dict) else payload.get("delivery", {})
     delivery = delivery if isinstance(delivery, dict) else {}
@@ -10333,6 +10362,16 @@ def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str
         eval_result = {"scorecard": eval_result}
     selected_action = telemetry.get("planner", {}).get("selected_action", {}) if isinstance(telemetry.get("planner"), dict) else {}
     decision_id = telemetry.get("decision_id") or payload.get("decision_id") or f"role_{role}_{int(time.time() * 1000)}"
+    persist_enabled = sync_persist if sync_persist is not None else _truthy_env("PARKPULSE_FAST_ROLE_SYNC_PERSIST", False)
+    memory_enabled = persist_enabled if sync_memory is None else bool(sync_memory)
+    analytics_enabled = persist_enabled if sync_analytics is None else bool(sync_analytics)
+    persistence_mode = "sync" if memory_enabled and analytics_enabled else ("sync_analytics" if analytics_enabled else ("sync_memory" if memory_enabled else "deferred"))
+    persist_started = time.time()
+    persistence_timing: dict[str, Any] = {
+        "mode": persistence_mode,
+        "mongo_ms": 0,
+        "analytics_ms": 0,
+    }
     existing_outcome = payload.get("outcome", {}) if isinstance(payload.get("outcome"), dict) else {}
     existing_telemetry_outcome = telemetry.get("outcome", {}) if isinstance(telemetry.get("outcome"), dict) else {}
     existing_state_impact = existing_telemetry_outcome.get("state_impact") or existing_outcome.get("state_impact")
@@ -10350,7 +10389,7 @@ def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str
     }
     if existing_telemetry_outcome.get("application") or existing_outcome.get("application"):
         outcome["application"] = existing_telemetry_outcome.get("application") or existing_outcome.get("application")
-    if str(os.getenv("PARKPULSE_FAST_ROLE_SYNC_PERSIST", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+    if not memory_enabled:
         outcome_id = f"fast_outcome_{hashlib.sha1(f'{decision_id}:{scenario_key}'.encode('utf-8')).hexdigest()[:12]}"
         memory = {
             "mode": "fast_role_deferred",
@@ -10359,12 +10398,8 @@ def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str
             "connected": False,
             "deferred": True,
         }
-        analytics = {
-            "status": "deferred",
-            "mode": "fast_role_deferred",
-            "row_counts": {"outcome_events": 0, "action_dispatches": len(dispatches), "eval_results": 0},
-        }
     else:
+        mongo_started = time.time()
         try:
             from mongo_memory import record_agent_decision, record_agent_learning_document, record_outcome_event
 
@@ -10396,7 +10431,17 @@ def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str
         except Exception as error:
             outcome_id = f"skipped_outcome_error_{int(time.time() * 1000)}"
             memory = {"mode": "memory_error", "decision_id": decision_id, "outcome_id": outcome_id, "connected": False, "error": str(error)[:300]}
+        finally:
+            persistence_timing["mongo_ms"] = int((time.time() - mongo_started) * 1000)
 
+    if not analytics_enabled:
+        analytics = {
+            "status": "deferred",
+            "mode": "fast_role_deferred",
+            "row_counts": {"outcome_events": 0, "action_dispatches": len(dispatches), "eval_results": 0},
+        }
+    else:
+        analytics_started = time.time()
         try:
             from bigquery_analytics import build_analytics_rows, export_analytics_rows
 
@@ -10412,18 +10457,23 @@ def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str
             analytics = export_analytics_rows(analytics_rows)
         except Exception as error:
             analytics = {"status": "error", "mode": "analytics_error", "row_counts": {}, "readiness_issues": [str(error)[:300]]}
+        finally:
+            persistence_timing["analytics_ms"] = int((time.time() - analytics_started) * 1000)
+    persistence_timing["total_ms"] = int((time.time() - persist_started) * 1000)
 
     telemetry["decision_id"] = decision_id
     telemetry["outcome_id"] = outcome_id
     telemetry["delivery"] = {"summary": delivery.get("summary", {}), "response": response, "dispatches": dispatches}
     telemetry["outcome"] = outcome
     telemetry["analytics"] = analytics
+    telemetry["persistence_timing"] = persistence_timing
     telemetry["memory"] = {"retrieved_learnings": [outcome["learning"]], "write": memory}
     payload["decision_id"] = decision_id
     payload["outcome_id"] = outcome_id
     payload["outcome"] = {**payload.get("outcome", {}), **outcome}
     payload["memory"] = {**(payload.get("memory") if isinstance(payload.get("memory"), dict) else {}), **memory}
     payload["analytics"] = analytics
+    payload["persistence_timing"] = persistence_timing
     payload["learning_proof"] = {
         **(payload.get("learning_proof") if isinstance(payload.get("learning_proof"), dict) else {}),
         "mode": "observed_response_learning",
@@ -12407,7 +12457,67 @@ def _lazy_operator_intents(message: str) -> dict[str, bool]:
     }
 
 
-def _lazy_operator_payload(message: str, mode: str = "auto", reason: str = "lazy_bounded_response") -> dict[str, Any]:
+def _deferred_live_policy_gate(source: str, status_key: str) -> dict[str, Any]:
+    return {
+        "allowed": True,
+        "gate_status": "deferred_hot_path",
+        status_key: "deferred_hot_path",
+        "findings": [f"Live {source} gate was deferred on the fast first response; no external mutation is executed from this fallback receipt."],
+        "evidence": {
+            "status": "deferred",
+            "source": "fast_first_response",
+            "trusted": False,
+            "reason": "Deep live-feed evidence is checked by the full/refinement path to keep the first response bounded.",
+        },
+    }
+
+
+def _deferred_live_training_gate(source: str, required: list[str]) -> dict[str, Any]:
+    return {
+        "eligible": False,
+        "status": "deferred_hot_path",
+        "reason": f"{source} training admission is deferred until the full live-feed gate checks fresh evidence.",
+        "evidence": {
+            "status": "deferred",
+            "source": "fast_first_response",
+            "trusted": False,
+        },
+        "required_for_training": required,
+    }
+
+
+def _deferred_live_gate_bundle() -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    return (
+        {
+            "live_weather_gate": _deferred_live_policy_gate("weather", "weather_gate_status"),
+            "live_ride_ops_gate": _deferred_live_policy_gate("ride_ops", "ride_ops_gate_status"),
+            "live_guest_flow_gate": _deferred_live_policy_gate("guest_flow", "guest_flow_gate_status"),
+            "live_staffing_gate": _deferred_live_policy_gate("staffing", "staffing_gate_status"),
+            "live_food_ops_gate": _deferred_live_policy_gate("food_ops", "food_ops_gate_status"),
+            "live_operator_signal_gate": _deferred_live_policy_gate("operator_signal", "operator_signal_gate_status"),
+        },
+        {
+            "live_weather": _deferred_live_training_gate("weather", ["fresh live weather or explicit fallback mode", "no open review on weather event", "measured outcome reward"]),
+            "live_ride_ops": _deferred_live_training_gate("ride_ops", ["fresh ride_ops feed", "no open review on ride_ops event", "measured post-action queue/downtime outcome"]),
+            "live_guest_flow": _deferred_live_training_gate("guest_flow", ["fresh guest_flow feed", "no open review on guest_flow event", "measured post-action density/path outcome"]),
+            "live_staffing": _deferred_live_training_gate("staffing", ["fresh staffing feed", "no open review on staffing event", "measured post-action coverage outcome"]),
+            "live_food_ops": _deferred_live_training_gate("food_ops", ["fresh food_ops feed", "no open review on food_ops event", "measured post-action backlog/ETA outcome"]),
+            "live_operator_signal": _deferred_live_training_gate("operator_signal", ["fresh operator_signal feed", "no open review on sensitive report", "measured post-action guest-care outcome"]),
+        },
+    )
+
+
+def _lazy_operator_payload(
+    message: str,
+    mode: str = "auto",
+    reason: str = "lazy_bounded_response",
+    *,
+    sync_persist: bool | None = None,
+    sync_memory: bool | None = None,
+    sync_analytics: bool | None = None,
+    fast_live_gates: bool | None = None,
+) -> dict[str, Any]:
+    payload_started = time.time()
     route = _lazy_operator_route(message, mode)
     scenario_key = route["scenario_key"]
     now_id = int(time.time() * 1000)
@@ -12849,6 +12959,7 @@ def _lazy_operator_payload(message: str, mode: str = "auto", reason: str = "lazy
     for dispatch in dispatches:
         if dispatch["channel"] in summary:
             summary[dispatch["channel"]] += 1
+    dispatch_plan_ms = int((time.time() - payload_started) * 1000)
     run_telemetry = {
         "scenario_key": scenario_key,
         "planner": {"runtime": "bounded_action_engine", "model": "fast_operating_policy", "gemini_ready": False, "attempted_gemini": True, "selected_action": selected, "confidence_score": 0.62, "analysis": f"Returned bounded custom actions from the fast operating policy while Gemini refinement runs asynchronously: {reason}."},
@@ -12858,62 +12969,77 @@ def _lazy_operator_payload(message: str, mode: str = "auto", reason: str = "lazy
         "eval": {"scorecard": {"overall": 78, "policy_guidance_score": 86, "policy_gate_status": "allowed", "policy_violation": False, "needs_human_approval": route["requires_human_review"]}},
         "optimization": {"operator_constraints": constraints, "operator_candidate_frame": {"primary_action": selected, "rejected_options": [{"reason": constraints["rejected_option"]}]}},
     }
-    weather_gate = live_weather_policy_gate(selected)
-    if not weather_gate.get("allowed"):
-        run_telemetry["governance"] = {
-            "allowed": False,
-            "gate_status": weather_gate.get("gate_status") or "review",
-            "findings": [*weather_gate.get("findings", []), "Receiver dispatch remains operator-review-only until weather gate is cleared."],
-            "live_weather_gate": weather_gate,
-        }
-        run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
-        run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
+    gates_started = time.time()
+    use_live_gates = True if fast_live_gates is None else bool(fast_live_gates)
+    if not use_live_gates:
+        deferred_gates, deferred_training = _deferred_live_gate_bundle()
+        run_telemetry["governance"].update(deferred_gates)
+        run_telemetry["governance"]["findings"].append("Deep live-feed gates were deferred on this fast first response; full-runtime refinement remains responsible for fresh live-feed gate proof before promotion or training.")
+        run_telemetry["training_eligibility"] = deferred_training
     else:
-        run_telemetry["governance"]["findings"].extend(weather_gate.get("findings", [])[:1])
-        run_telemetry["governance"]["live_weather_gate"] = weather_gate
-    ride_ops_gate = live_ride_ops_policy_gate(selected)
-    run_telemetry["governance"]["live_ride_ops_gate"] = ride_ops_gate
-    if not ride_ops_gate.get("allowed"):
-        run_telemetry["governance"]["allowed"] = False
-        run_telemetry["governance"]["gate_status"] = ride_ops_gate.get("gate_status") or "review"
-        run_telemetry["governance"]["findings"].extend(ride_ops_gate.get("findings", []))
-        run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
-        run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
-    else:
-        run_telemetry["governance"]["findings"].extend(ride_ops_gate.get("findings", [])[:1])
-    guest_flow_gate = live_guest_flow_policy_gate(selected)
-    run_telemetry["governance"]["live_guest_flow_gate"] = guest_flow_gate
-    if not guest_flow_gate.get("allowed"):
-        run_telemetry["governance"]["allowed"] = False
-        run_telemetry["governance"]["gate_status"] = guest_flow_gate.get("gate_status") or "review"
-        run_telemetry["governance"]["findings"].extend(guest_flow_gate.get("findings", []))
-        run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
-        run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
-    else:
-        run_telemetry["governance"]["findings"].extend(guest_flow_gate.get("findings", [])[:1])
-    remaining_gates = {
-        "live_staffing_gate": live_staffing_policy_gate(selected),
-        "live_food_ops_gate": live_food_ops_policy_gate(selected),
-        "live_operator_signal_gate": live_operator_signal_policy_gate(selected),
-    }
-    for gate_name, gate in remaining_gates.items():
-        run_telemetry["governance"][gate_name] = gate
-        if not gate.get("allowed"):
-            run_telemetry["governance"]["allowed"] = False
-            run_telemetry["governance"]["gate_status"] = gate.get("gate_status") or "review"
-            run_telemetry["governance"]["findings"].extend(gate.get("findings", []))
+        weather_gate = live_weather_policy_gate(selected)
+        if not weather_gate.get("allowed"):
+            run_telemetry["governance"] = {
+                "allowed": False,
+                "gate_status": weather_gate.get("gate_status") or "review",
+                "findings": [*weather_gate.get("findings", []), "Receiver dispatch remains operator-review-only until weather gate is cleared."],
+                "live_weather_gate": weather_gate,
+            }
             run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
             run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
         else:
-            run_telemetry["governance"]["findings"].extend(gate.get("findings", [])[:1])
-    run_telemetry["training_eligibility"] = {
-        "live_weather": live_weather_training_gate(),
-        "live_ride_ops": live_ride_ops_training_gate(),
-        "live_guest_flow": live_guest_flow_training_gate(),
-        "live_staffing": live_staffing_training_gate(),
-        "live_food_ops": live_food_ops_training_gate(),
-        "live_operator_signal": live_operator_signal_training_gate(),
+            run_telemetry["governance"]["findings"].extend(weather_gate.get("findings", [])[:1])
+            run_telemetry["governance"]["live_weather_gate"] = weather_gate
+        ride_ops_gate = live_ride_ops_policy_gate(selected)
+        run_telemetry["governance"]["live_ride_ops_gate"] = ride_ops_gate
+        if not ride_ops_gate.get("allowed"):
+            run_telemetry["governance"]["allowed"] = False
+            run_telemetry["governance"]["gate_status"] = ride_ops_gate.get("gate_status") or "review"
+            run_telemetry["governance"]["findings"].extend(ride_ops_gate.get("findings", []))
+            run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
+            run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
+        else:
+            run_telemetry["governance"]["findings"].extend(ride_ops_gate.get("findings", [])[:1])
+        guest_flow_gate = live_guest_flow_policy_gate(selected)
+        run_telemetry["governance"]["live_guest_flow_gate"] = guest_flow_gate
+        if not guest_flow_gate.get("allowed"):
+            run_telemetry["governance"]["allowed"] = False
+            run_telemetry["governance"]["gate_status"] = guest_flow_gate.get("gate_status") or "review"
+            run_telemetry["governance"]["findings"].extend(guest_flow_gate.get("findings", []))
+            run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
+            run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
+        else:
+            run_telemetry["governance"]["findings"].extend(guest_flow_gate.get("findings", [])[:1])
+        remaining_gates = {
+            "live_staffing_gate": live_staffing_policy_gate(selected),
+            "live_food_ops_gate": live_food_ops_policy_gate(selected),
+            "live_operator_signal_gate": live_operator_signal_policy_gate(selected),
+        }
+        for gate_name, gate in remaining_gates.items():
+            run_telemetry["governance"][gate_name] = gate
+            if not gate.get("allowed"):
+                run_telemetry["governance"]["allowed"] = False
+                run_telemetry["governance"]["gate_status"] = gate.get("gate_status") or "review"
+                run_telemetry["governance"]["findings"].extend(gate.get("findings", []))
+                run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
+                run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
+            else:
+                run_telemetry["governance"]["findings"].extend(gate.get("findings", [])[:1])
+        run_telemetry["training_eligibility"] = {
+            "live_weather": live_weather_training_gate(),
+            "live_ride_ops": live_ride_ops_training_gate(),
+            "live_guest_flow": live_guest_flow_training_gate(),
+            "live_staffing": live_staffing_training_gate(),
+            "live_food_ops": live_food_ops_training_gate(),
+            "live_operator_signal": live_operator_signal_training_gate(),
+        }
+    fast_path_timing = {
+        "mode": "lazy_operator_payload",
+        "dispatch_plan_ms": dispatch_plan_ms,
+        "policy_and_training_gates_ms": int((time.time() - gates_started) * 1000),
+        "pre_persist_ms": int((time.time() - payload_started) * 1000),
     }
+    run_telemetry["fast_path_timing"] = fast_path_timing
     payload = {
         "status": "complete",
         "command": message,
@@ -12924,7 +13050,20 @@ def _lazy_operator_payload(message: str, mode: str = "auto", reason: str = "lazy
         "operator_response": {"headline": selected["label"], "summary": run_telemetry["planner"]["analysis"], "next_step": "Receiver payloads are visible on the map; rerun the full Gemini path when ready."},
         "run_telemetry": run_telemetry,
     }
-    return _persist_role_receipt(payload, role=str(route.get("selected_role") or "react"), route=route, scenario_key=scenario_key)
+    result = _persist_role_receipt(
+        payload,
+        role=str(route.get("selected_role") or "react"),
+        route=route,
+        scenario_key=scenario_key,
+        sync_persist=sync_persist,
+        sync_memory=sync_memory,
+        sync_analytics=sync_analytics,
+    )
+    timing = result.setdefault("run_telemetry", {}).setdefault("fast_path_timing", fast_path_timing)
+    if isinstance(timing, dict):
+        timing["total_before_receipt_ms"] = int((time.time() - payload_started) * 1000)
+        result["fast_path_timing"] = timing
+    return result
 
 
 async def _get_full_module(timeout: float | None = None):
@@ -13217,23 +13356,46 @@ async def _build_agent_run_payload_with_runtime(request_payload: dict[str, Any],
     tiers = _timeout_tiers()
     load_timeout = float(tiers["agent_run_full_load_seconds"])
     run_timeout = float(tiers["agent_run_seconds"])
-    if _parkpulse_app is not None and not _sync_full_response_enabled():
+
+    def fast_fallback(reason_text: str, fallback_reason: str, next_step: str) -> dict[str, Any]:
         _metric("agent_run_fallback")
-        fallback = _lazy_operator_payload(message, "auto", "fast_first_response: full runtime refinement scheduled outside the request path")
+        fallback = _lazy_operator_payload(
+            message,
+            "auto",
+            reason_text,
+            sync_persist=_truthy_env("PARKPULSE_AGENT_RUN_FAST_SYNC_PERSIST", True),
+            sync_memory=_truthy_env("PARKPULSE_AGENT_RUN_FAST_SYNC_MONGO", False),
+            sync_analytics=_truthy_env("PARKPULSE_AGENT_RUN_FAST_SYNC_ANALYTICS", True),
+            fast_live_gates=_truthy_env("PARKPULSE_AGENT_RUN_FAST_LIVE_GATES", False),
+        )
         fallback["status"] = "bounded_fallback"
         if scenario_key:
             fallback["scenario_key"] = scenario_key
             fallback.setdefault("run_telemetry", {})["requested_scenario_key"] = scenario_key
-        fallback.setdefault("runtime_proof", {})["fallback_reason"] = "Full runtime is loaded; running refinement outside the first response."
+        fallback.setdefault("runtime_proof", {})["fallback_reason"] = fallback_reason
         fallback["runtime_proof"]["full_runtime"] = _full_runtime_status()
         fallback["runtime_proof"]["timeout_tiers"] = tiers
         fallback["runtime_proof"]["receipt_upgrade_status"] = "pending"
-        fallback["operator_response"]["next_step"] = "Fast hybrid receiver payloads are available now; full-runtime refinement is tracked on the receipt."
-        stored = _store_run_receipt(fallback, message=message, mode=scenario_key or "agent_run", kind="agent_run", upgrade_status="pending")
+        fallback["operator_response"]["next_step"] = next_step
+        stored = _store_run_receipt(
+            fallback,
+            message=message,
+            mode=scenario_key or "agent_run",
+            kind="agent_run",
+            upgrade_status="pending",
+            agent_ops_inline=False,
+        )
         receipt_id = stored.get("run_receipt", {}).get("id")
         if receipt_id:
             _schedule_agent_run_refinement(request_payload, receipt_id, message=message, mode=scenario_key or "agent_run")
         return stored
+
+    if not _sync_full_response_enabled():
+        return fast_fallback(
+            "fast_first_response: full runtime refinement scheduled outside the request path",
+            "Synchronous full agent run is disabled for the first response.",
+            "Fast hybrid receiver payloads are available now; full-runtime refinement is tracked on the receipt.",
+        )
     try:
         module = await _get_full_module_for_first_response(load_timeout)
         request = _build_full_agent_run_request(module, fields)
@@ -13257,15 +13419,13 @@ async def _build_agent_run_payload_with_runtime(request_payload: dict[str, Any],
             return _store_run_receipt(payload, message=message, mode=scenario_key or "agent_run", kind="agent_run")
         return payload
     except Exception as error:
-        _metric("agent_run_fallback")
         error_detail = str(error) or type(error).__name__
-        fallback = _lazy_operator_payload(message, "auto", f"{reason}: {type(error).__name__}: {error_detail}")
-        fallback["status"] = "bounded_fallback"
-        if scenario_key:
-            fallback["scenario_key"] = scenario_key
-            fallback.setdefault("run_telemetry", {})["requested_scenario_key"] = scenario_key
-        fallback.setdefault("runtime_proof", {})["fallback_reason"] = error_detail
-        fallback["runtime_proof"]["full_runtime"] = _full_runtime_status()
+        stored = fast_fallback(
+            f"{reason}: {type(error).__name__}: {error_detail}",
+            error_detail,
+            "Fast hybrid receiver payloads were emitted because the full agent-run path did not finish before the API budget.",
+        )
+        fallback = stored
         fallback.setdefault("live_feed_evidence", {})["weather"] = live_weather_state_evidence()
         fallback.setdefault("live_feed_evidence", {})["ride_ops"] = live_ride_ops_state_evidence()
         fallback.setdefault("live_feed_evidence", {})["guest_flow"] = live_guest_flow_state_evidence()
@@ -13279,14 +13439,7 @@ async def _build_agent_run_payload_with_runtime(request_payload: dict[str, Any],
         fallback.setdefault("training_eligibility", {})["live_food_ops"] = live_food_ops_training_gate()
         fallback.setdefault("training_eligibility", {})["live_operator_signal"] = live_operator_signal_training_gate()
         _attach_live_weather_gate_to_payload(fallback)
-        fallback["runtime_proof"]["timeout_tiers"] = tiers
-        fallback["runtime_proof"]["receipt_upgrade_status"] = "pending"
-        fallback["operator_response"]["next_step"] = "Fast hybrid receiver payloads were emitted because the full agent-run path did not finish before the API budget."
-        stored = _store_run_receipt(fallback, message=message, mode=scenario_key or "agent_run", kind="agent_run", upgrade_status="pending")
-        receipt_id = stored.get("run_receipt", {}).get("id")
-        if receipt_id:
-            _schedule_agent_run_refinement(request_payload, receipt_id, message=message, mode=scenario_key or "agent_run")
-        return stored
+        return fallback
 
 
 def _schedule_operator_command_refinement(message: str, mode: str, execute: bool, receipt_id: str) -> None:
@@ -13744,11 +13897,12 @@ async def app(scope, receive, send):
         await send({"type": "http.response.body", "body": b""})
         return
 
-    if path in {"/", "/healthz", "/readyz"}:
+    if path in {"/", "/health", "/healthz", "/readyz"}:
         payload = (
             {
                 "service": "parkpulse-api",
                 "status": "ok",
+                "mode": "health_fast",
                 "entrypoint": "lazy-main",
                 "build_id": LAZY_ROUTER_BUILD_ID,
                 "uptime_ms": int((time.time() - _started_at) * 1000),
@@ -13756,7 +13910,7 @@ async def app(scope, receive, send):
                 "full_runtime": _full_runtime_status(),
                 "load_error": _load_error,
             }
-            if path in {"/", "/healthz"}
+            if path in {"/", "/health", "/healthz"}
             else (
                 await _cached_hot_endpoint("readyz", _hot_endpoint_ttls()["readyz"], _readiness_payload_bounded)
                 if _truthy_env("PARKPULSE_READYZ_DEEP", False)
@@ -18450,6 +18604,8 @@ async def app(scope, receive, send):
         try:
             payload = json.loads(body.decode("utf-8") or "{}")
         except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
             payload = {}
         message = str(payload.get("message") or payload.get("prompt") or "Production reliability QA review for ParkPulse.").strip()
         result = await _qa_role_payload(message, "qa", route_agent_role(message, "qa"))

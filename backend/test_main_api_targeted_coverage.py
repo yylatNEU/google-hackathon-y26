@@ -553,15 +553,21 @@ def test_main_agent_role_and_refinement_fast_fallbacks(monkeypatch):
 
 def test_main_runtime_wrappers_use_fast_fallback_and_schedule_refinement(monkeypatch):
     scheduled = []
+    stored_receipts = []
 
     monkeypatch.setattr(main, "_parkpulse_app", object())
     monkeypatch.setattr(main, "_sync_full_response_enabled", lambda: False)
     monkeypatch.setattr(main, "_timeout_tiers", lambda: {"operator_full_load_seconds": 0.1, "operator_command_seconds": 0.1, "agent_run_full_load_seconds": 0.1, "agent_run_seconds": 0.1})
     monkeypatch.setattr(main, "_full_runtime_status", lambda: {"loaded": True})
+
+    def fake_store_run_receipt(payload, **kwargs):
+        stored_receipts.append(kwargs)
+        return {**payload, "run_receipt": {"id": f"receipt-{kwargs.get('kind')}"}}
+
     monkeypatch.setattr(
         main,
         "_store_run_receipt",
-        lambda payload, **kwargs: {**payload, "run_receipt": {"id": f"receipt-{kwargs.get('kind')}"}},
+        fake_store_run_receipt,
     )
     monkeypatch.setattr(main, "_schedule_operator_command_refinement", lambda message, mode, execute, receipt_id: scheduled.append(("operator", receipt_id, message)))
     monkeypatch.setattr(main, "_schedule_agent_run_refinement", lambda payload, receipt_id, **kwargs: scheduled.append(("agent", receipt_id, kwargs.get("message"))))
@@ -590,21 +596,88 @@ def test_main_runtime_wrappers_use_fast_fallback_and_schedule_refinement(monkeyp
     assert operator["runtime_proof"]["receipt_upgrade_status"] == "pending"
     assert agent["status"] == "bounded_fallback"
     assert agent["scenario_key"] == "ride_down"
+    assert agent["run_telemetry"]["governance"]["live_weather_gate"]["gate_status"] == "deferred_hot_path"
+    assert agent["run_telemetry"]["training_eligibility"]["live_ride_ops"]["status"] == "deferred_hot_path"
     assert scheduled == [
         ("operator", "receipt-operator_command", "food court backlog"),
         ("agent", "receipt-agent_run", "coaster down"),
     ]
+    assert stored_receipts[0].get("agent_ops_inline") is None
+    assert stored_receipts[1]["agent_ops_inline"] is False
 
     async def fail_full_module(timeout):
         raise RuntimeError("full runtime cold")
 
     monkeypatch.setattr(main, "_parkpulse_app", None)
     monkeypatch.setattr(main, "_get_full_module_for_first_response", fail_full_module)
+    monkeypatch.setattr(main, "_sync_full_response_enabled", lambda: True)
     scheduled.clear()
     error_fallback = run(main._build_agent_run_payload_with_runtime({"message": "staff callout", "scenario_key": "staff_shortage"}, "timeout"))
     assert error_fallback["status"] == "bounded_fallback"
     assert "full runtime cold" in error_fallback["runtime_proof"]["fallback_reason"]
     assert scheduled and scheduled[0][0] == "agent"
+
+
+def test_main_agent_fast_persist_can_export_analytics_without_sync_mongo(monkeypatch):
+    mongo_calls = []
+    analytics_calls = []
+
+    def fail_mongo(*args, **kwargs):
+        mongo_calls.append((args, kwargs))
+        raise AssertionError("mongo should not be called")
+
+    def fake_build_analytics_rows(**kwargs):
+        analytics_calls.append(kwargs)
+        return {
+            "outcome_events": [{"decision_id": kwargs["decision_id"]}],
+            "action_dispatches": [{"decision_id": kwargs["decision_id"]}],
+            "eval_results": [{"decision_id": kwargs["decision_id"]}],
+        }
+
+    def fake_export(rows_by_table):
+        return {"status": "exported", "inserted": {table: len(rows) for table, rows in rows_by_table.items()}}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "mongo_memory",
+        SimpleNamespace(
+            record_agent_decision=fail_mongo,
+            record_outcome_event=fail_mongo,
+            record_agent_learning_document=fail_mongo,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "bigquery_analytics", SimpleNamespace(build_analytics_rows=fake_build_analytics_rows, export_analytics_rows=fake_export))
+
+    payload = {
+        "operator_response": {"headline": "Reroute guests"},
+        "run_telemetry": {
+            "decision_id": "decision-unit",
+            "delivery": {
+                "response": {"takeRate": 0.42, "reactiveFollowThroughRate": 0.31},
+                "dispatches": [{"channel": "guest_app", "id": "dispatch-1"}],
+            },
+            "eval": {"scorecard": {"overall": 0.9}},
+            "planner": {"selected_action": {"label": "Reroute guests"}},
+        },
+    }
+
+    result = main._persist_role_receipt(
+        payload,
+        role="react",
+        route={"required_tools": []},
+        scenario_key="ride_down",
+        sync_persist=True,
+        sync_memory=False,
+        sync_analytics=True,
+    )
+
+    assert mongo_calls == []
+    assert analytics_calls and analytics_calls[0]["decision_id"] == "decision-unit"
+    assert result["memory"]["mode"] == "fast_role_deferred"
+    assert result["analytics"]["status"] == "exported"
+    assert result["analytics"]["inserted"]["outcome_events"] == 1
+    assert result["persistence_timing"]["mode"] == "sync_analytics"
+    assert result["persistence_timing"]["mongo_ms"] == 0
 
 
 def test_parkpulse_api_live_feed_agent_run_blocked_and_complete(monkeypatch):
@@ -1624,6 +1697,7 @@ def test_main_live_episode_export_policy_gate_understanding_and_runtime_success(
 
     monkeypatch.setattr(main, "_parkpulse_app", None)
     monkeypatch.setattr(main, "_get_full_module_for_first_response", fake_full_module)
+    monkeypatch.setattr(main, "_sync_full_response_enabled", lambda: True)
     monkeypatch.setattr(main, "_store_run_receipt", lambda payload, **kwargs: {**payload, "run_receipt": {"id": "receipt-1", "kind": kwargs.get("kind")}})
     monkeypatch.setattr(main, "_metric", lambda name: None)
     monkeypatch.setattr(main, "_full_runtime_status", lambda: {"loaded": True})
@@ -2558,6 +2632,9 @@ def test_main_reliability_qa_and_monitor_evidence_routes(monkeypatch):
     assert qa["status"] == "ready"
     assert qa["receipt"]["kind"] == "reliability_qa"
     assert qa["route"]["role"] == "qa"
+
+    _, invalid_body = run(_asgi_json("POST", "/api/park/reliability-qa-run", "not-json-object"))
+    assert invalid_body["receipt"]["message"] == "Production reliability QA review for ParkPulse."
 
     _, graph = run(_asgi_json("GET", "/api/park/monitor-evidence", query_string=b"caseId=case-1&limit=bad&refresh=true"))
     assert graph == {"status": "ready", "case_id": "case-1", "limit": 30, "force_refresh": True}

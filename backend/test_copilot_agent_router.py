@@ -1,17 +1,53 @@
 import asyncio
+import copy
 import os
 from types import SimpleNamespace
 
 os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
+os.environ.setdefault("ENABLE_BIGQUERY_ANALYTICS", "false")
+os.environ.setdefault("PARKPULSE_ENABLE_OTEL_SPANS", "false")
+os.environ.setdefault("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
+os.environ.setdefault("PARKPULSE_COPILOT_SEMANTIC_MEMORY", "false")
 
 import parkpulse_api
+
+
+_CACHED_CHAT_STATE = None
+_ORIGINAL_PARK_SIMULATION_GET_STATE = parkpulse_api.park_simulation.get_state
 
 
 def run(coro):
     return asyncio.run(coro)
 
 
+def _ensure_chat_state():
+    global _CACHED_CHAT_STATE
+    if _CACHED_CHAT_STATE is None:
+        _CACHED_CHAT_STATE = run(_ORIGINAL_PARK_SIMULATION_GET_STATE())
+    return _CACHED_CHAT_STATE
+
+
+async def _fake_branch_comparison(*args, **kwargs):
+    return {
+        "mode": "three_branch_realism_comparison",
+        "branches": [
+            {"id": "no_action", "verdict": "watch"},
+            {"id": "bad_metric_action", "verdict": "blocked"},
+            {"id": "governed_agent_action", "verdict": "preferred"},
+        ],
+    }
+
+
 def _disable_llm(monkeypatch):
+    cached_state = _ensure_chat_state()
+    monkeypatch.setenv("PARKPULSE_COPILOT_SEMANTIC_MEMORY", "false")
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
+    monkeypatch.setattr(
+        parkpulse_api.park_simulation,
+        "get_state",
+        lambda: asyncio.sleep(0, result=copy.deepcopy(cached_state)),
+    )
+    monkeypatch.setattr(parkpulse_api.park_simulation, "run_action_branch_comparison", _fake_branch_comparison)
     monkeypatch.setattr(
         parkpulse_api,
         "get_gemini_agent_properties",

@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
+os.environ.setdefault("ENABLE_BIGQUERY_ANALYTICS", "false")
+os.environ.setdefault("PARKPULSE_ENABLE_OTEL_SPANS", "false")
+os.environ.setdefault("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
+
 from digital_twin_tools import build_digital_twin_tool_trace, list_digital_twin_tools, run_digital_twin_tool
 from park_simulation import ParkSimulation
 

@@ -55,7 +55,7 @@ public class ReliabilityDiagnosticsService {
         payload.put("checked_at", Instant.now().toString());
         payload.put("refresh", refresh);
         payload.put("hot_path", Map.of(
-            "native_spring", List.of("/healthz", "/readyz", "/api/park/auth/status", "/api/park/reliability", "/api/park/latency-diagnostics"),
+            "native_spring", List.of("/health", "/readyz", "/api/park/auth/status", "/api/park/reliability", "/api/park/latency-diagnostics"),
             "fallback_gateway", "/api/** and /readyz/deep for unmigrated route groups",
             "sqlite_authority", "local_sqlite_wal"
         ));

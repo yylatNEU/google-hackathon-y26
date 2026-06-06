@@ -8,6 +8,7 @@ Spring is the intended backend entrypoint during migration: native Spring routes
 Spring owns only the first safe migration slice:
 
 - `GET /`
+- `GET /health`
 - `GET /healthz`
 - `GET /readyz`
 - `GET /api/park/auth/dev-session`
@@ -74,6 +75,8 @@ Spring also forwards unmigrated traffic while route groups are migrated:
 The fallback gateway enforces a method-aware owned-route gate. Routes listed as Spring-owned are blocked from Python fallback with a controlled `spring_owned_route_fallback_gate` response if they ever reach the catch-all proxy.
 
 Python remains the implementation backend for agent orchestration, Gemini/Vertex calls, Mongo operational memory, live feeds, delivery, simulation, and all unmigrated `/api/*` routes. Clients should call Spring first so the handoff can happen one route group at a time.
+
+For Cloud Run `run.app` URLs, use `/health` for external health checks and `/readyz` for readiness. `/healthz` remains a local/Spring compatibility alias, but the exact path can be intercepted by Google Front End before the Python Cloud Run app receives it.
 
 ## Data Authority
 

@@ -1087,7 +1087,7 @@ export function ExperienceStudio() {
     try {
       const response = await fetchParkPulseApi("/api/park/experience-studio/draft", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify({
           ...overridePayload,
           templateId: currentTemplateId,
@@ -1139,7 +1139,7 @@ export function ExperienceStudio() {
     try {
       const response = await fetchParkPulseApi("/api/park/experience-studio/conversation-plan", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify({
           message: conversationInput,
           templateId,
@@ -1206,7 +1206,7 @@ export function ExperienceStudio() {
     try {
       const response = await fetchParkPulseApi("/api/park/experience-studio/drafts", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify({
           templateId,
           draft,
@@ -1287,7 +1287,7 @@ export function ExperienceStudio() {
     try {
       const response = await fetchParkPulseApi(`/api/park/experience-studio/drafts/${encodeURIComponent(activeDraftId)}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify({ draft, note: reviewNote, actor: "experience_designer" }),
         timeoutMs: 7000,
       });
@@ -1351,7 +1351,7 @@ export function ExperienceStudio() {
     try {
       const response = await fetchParkPulseApi(`/api/park/experience-studio/drafts/${encodeURIComponent(activeDraftId)}/status`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify({ status: nextStatus, note: reviewNote, actor: "experience_reviewer" }),
         timeoutMs: 6000,
       });
@@ -1383,7 +1383,7 @@ export function ExperienceStudio() {
     try {
       const response = await fetchParkPulseApi(`/api/park/experience-studio/drafts/${encodeURIComponent(activeDraftId)}/handoff`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify({ actor: "experience_studio", note: reviewNote }),
         timeoutMs: 6000,
       });
@@ -1418,7 +1418,7 @@ export function ExperienceStudio() {
     try {
       const response = await fetchParkPulseApi(`/api/park/experience-studio/drafts/${encodeURIComponent(activeDraftId)}/promote-rule`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify({
           candidateId: "complete_package_shape",
           actor: "experience_reviewer",
@@ -1452,7 +1452,7 @@ export function ExperienceStudio() {
     try {
       const response = await fetchParkPulseApi("/api/park/experience-studio/section-revision", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ops_team" },
         body: JSON.stringify({
           draft,
           sectionId: revisionSection,

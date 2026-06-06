@@ -223,6 +223,10 @@ function requestWithXhr(url: string, init?: RequestInit, timeoutMs = defaultRequ
 function request(url: string, init?: RequestInit, timeoutMs = defaultRequestTimeoutMs) {
   if (
     url.includes("/api/park/staff-training") ||
+    url.includes("/api/park/venue-profile") ||
+    url.includes("/api/park/accessibility") ||
+    url.includes("/api/park/experience-studio") ||
+    url.includes("/api/park/review-label-pipeline") ||
     url.includes("/api/park/guest-message-triage") ||
     url.includes("/api/park/product-learning") ||
     url.includes("/api/park/auth/dev-session")
@@ -244,6 +248,14 @@ function request(url: string, init?: RequestInit, timeoutMs = defaultRequestTime
     });
   }
   return requestWithXhr(url, init, timeoutMs);
+}
+
+function defaultRoleForPath(path: string, method: string) {
+  if (path.startsWith("/api/park/accessibility")) return "customer";
+  if (path === "/api/park/venue-profile" && method === "GET") return "ops_team";
+  if (path.startsWith("/api/park/experience-studio") && method === "GET") return "ops_team";
+  if (path.startsWith("/api/park/review-label-pipeline")) return "ml_ops_admin";
+  return "";
 }
 
 function isTransportError(error: Error) {
@@ -296,7 +308,7 @@ export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestIni
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         const headerEntries = headersToEntries(requestInit.headers);
-        const requestedRole = headerValue(headerEntries, "x-parkpulse-role");
+        const requestedRole = headerValue(headerEntries, "x-parkpulse-role") || defaultRoleForPath(path, method);
         const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
         const hasRoleToken = Boolean(headerValue(headerEntries, "x-parkpulse-role-token"));
         const storedRoleToken = !hasAuthorization && !hasRoleToken && path !== "/api/park/auth/dev-session" ? getParkPulseRoleSessionToken() : "";
