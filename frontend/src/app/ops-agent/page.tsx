@@ -7,7 +7,7 @@ import { useParkPulseState } from "@/hooks/useParkPulseState";
 
 type ChatRole = "user" | "assistant";
 type TurnMode = "auto" | "answer" | "propose" | "apply";
-type AgentMode = "auto" | "scan" | "react" | "proact";
+type AgentMode = "auto" | "scan" | "react" | "proact" | "customer" | "qa";
 
 type ChatMessage = {
   role: ChatRole;
@@ -17,6 +17,7 @@ type ChatMessage = {
 type CopilotReceipt = {
   status?: string;
   mode?: string;
+  selected_role?: string;
   message?: string;
   answer?: string;
   conversation_response?: {
@@ -123,6 +124,8 @@ const agentModes: Array<{ id: AgentMode; label: string }> = [
   { id: "scan", label: "Scan" },
   { id: "react", label: "React" },
   { id: "proact", label: "Proact" },
+  { id: "customer", label: "Customer" },
+  { id: "qa", label: "QA" },
 ];
 
 const copilotCacheTtlMs = 45_000;
@@ -337,10 +340,10 @@ export default function OpsAgentPage() {
         <section className="grid gap-2 md:grid-cols-5">
           {[
             ["Connection", isConnected ? "live" : "offline"],
+            ["Agent", latestReceipt?.selected_role ?? latestReceipt?.recommended_action?.role],
             ["Intent", latestReceipt?.chat_brain?.intent ?? latestReceipt?.conversation_memory?.conversation_intent],
             ["Mode", latestReceipt?.mode ?? "--"],
             ["Gate", latestReceipt?.recommended_action?.gate ?? latestReceipt?.object_action_plan?.overall_gate],
-            ["Mutation", latestReceipt?.turn_contract?.state_mutation ? "yes" : "no"],
           ].map(([label, value]) => (
             <div key={label} className="rounded border border-slate-800 bg-slate-900 p-3">
               <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</div>

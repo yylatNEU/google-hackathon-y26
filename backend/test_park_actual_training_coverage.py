@@ -190,3 +190,42 @@ def test_actual_training_low_level_row_and_audit_helpers(tmp_path, monkeypatch):
     assert model["reasoning_feature_policy"]["enabled"] is True
     assert model["reasoning_feature_policy"]["matched_rows"] == 1
     assert model["reasoning_context_values"][0]["context"] == "ride_down|risk_lift_success"
+
+
+def test_promotion_evaluation_excludes_risk_guardrail_rows():
+    rows = [
+        _row("controlled", "ride_down", 72, "controlled_low_risk"),
+        {
+            **_row("normal-risk", "ride_down", 91, "live_feed_risk_lift_approve_ride_failure"),
+            "source": "live_feed_case_bank_risk_lift_reward_vectors",
+            "risk_lift_label": "risk_lift_success",
+            "risk_escalation_validation_mode": "normal",
+            "training_partition": "operational_policy",
+            "promotion_eval_eligible": True,
+        },
+        {
+            **_row("regression-risk", "ride_down", 45, "live_feed_risk_lift_block_after_regression_ride_failure"),
+            "source": "live_feed_case_bank_risk_lift_reward_vectors",
+            "risk_lift_label": "risk_lift_regression",
+            "risk_escalation_validation_mode": "impact_regression",
+            "training_partition": "qa_guardrail",
+            "promotion_eval_eligible": False,
+        },
+        {
+            **_row("missing-controls", "food_spike", 15, "live_feed_risk_lift_block_missing_controls_food_spike"),
+            "source": "live_feed_case_bank_risk_lift_reward_vectors",
+            "risk_lift_label": "risk_lift_blocked_missing_controls",
+            "risk_escalation_validation_mode": "missing_controls",
+        },
+    ]
+
+    promotion_rows = training._promotion_evaluation_rows(rows)
+    summary = training._guardrail_validation_summary(rows, promotion_rows)
+
+    assert [row["row_id"] for row in promotion_rows] == ["controlled", "normal-risk"]
+    assert summary["guardrail_case_count"] == 2
+    assert summary["promotion_excluded_count"] == 2
+    assert summary["validation_mode_counts"] == {"impact_regression": 1, "missing_controls": 1}
+    assert summary["risk_lift_label_counts"]["risk_lift_regression"] == 1
+    assert summary["blocked_or_held_count"] == 1
+    assert summary["regression_count"] == 1

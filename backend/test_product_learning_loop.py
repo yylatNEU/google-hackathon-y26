@@ -612,6 +612,96 @@ def test_sqlite_event_store_indexes_product_learning_events(monkeypatch, tmp_pat
     assert store["event_type_counts"]["park_issue_ticket_created"] == 1
 
 
+def test_guest_message_triage_scores_urgency_and_creates_gated_ticket(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+
+    result = loop.triage_guest_message(
+        message="I cannot find my six-year-old. She was beside me near the carousel and now she is gone.",
+        guest_name="Parent",
+        location="Carousel",
+        channel="sms",
+    )
+    status = loop.product_learning_loop_status()
+
+    assert result["status"] == "triaged"
+    assert result["classification"]["issue_type"] == "lost_child_report"
+    assert result["classification"]["urgency"] == "critical"
+    assert result["classification"]["urgency_score"] >= 90
+    assert result["routing"]["assigned_team"] == "security"
+    assert result["routing"]["human_ack_required"] is True
+    assert result["ticket_result"]["ticket"]["live_ops_authority"] is True
+    assert result["reaction"]["guest_reply_draft"].startswith("Stay with me")
+    assert any(ticket["issue_type"] == "lost_child_report" for ticket in status["park_issue_tickets"])
+    assert any(event.get("event") == "guest_message_triaged" for event in loop._read_events(20))
+
+
+def test_guest_message_triage_keeps_accessibility_context_out_of_injury(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+
+    result = loop.triage_guest_message(
+        message="My father cannot stand in this sun for the queue. We need accessibility help but do not want to explain medical history in public.",
+        location="Coaster queue",
+    )
+
+    assert result["classification"]["issue_type"] == "accessibility_accommodation"
+    assert result["classification"]["urgency"] == "high"
+    assert result["routing"]["assigned_team"] == "accessibility"
+    assert result["reaction"]["guest_reply_draft"].startswith("You do not need to share private medical details")
+
+
+def test_guest_message_triage_answers_park_profile_questions(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        loop,
+        "_load_guest_triage_venue_profile",
+        lambda: {
+            "venueIdentity": {"name": "Demo Park", "profileType": "test_profile"},
+            "readiness": {"status": "studio_ready"},
+            "realInputs": {
+                "locationDetails": {
+                    "Food Court A": {"name": "Food Court A", "kind": "food", "dietaryTags": ["vegetarian options", "kids meals"]},
+                    "Coaster Plaza": {"name": "Coaster Plaza", "kind": "attraction"},
+                },
+                "agentContext": {"knownGaps": ["live restaurant inventory not connected"]},
+            },
+        },
+    )
+
+    result = loop.triage_guest_message(message="Where is the closest vegetarian food near the coaster?")
+
+    assert result["classification"]["issue_type"] == "profile_information_request"
+    assert result["understanding"]["status"] == "profile_grounded"
+    assert result["profile_context"]["status"] == "answered_from_profile"
+    assert result["profile_context"]["category"] == "food_dietary"
+    assert result["profile_context"]["matched_locations"][0]["name"] == "Food Court A"
+    assert "Food Court A" in result["reaction"]["guest_reply_draft"]
+    assert result["routing"]["human_ack_required"] is False
+
+
+def test_guest_message_triage_routes_unclear_niche_questions_to_human(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        loop,
+        "_load_guest_triage_venue_profile",
+        lambda: {
+            "venueIdentity": {"name": "Demo Park", "profileType": "test_profile"},
+            "readiness": {"status": "studio_ready"},
+            "realInputs": {"locationDetails": {}},
+        },
+    )
+
+    result = loop.triage_guest_message(message="Can I bring a drone for filming behind the theater?")
+
+    assert result["classification"]["issue_type"] == "unclear_guest_request"
+    assert result["understanding"]["status"] == "needs_human_review"
+    assert result["profile_context"]["status"] == "needs_human_review"
+    assert result["profile_context"]["matched_locations"] == []
+    assert result["routing"]["human_review_place"] == "guest_services_information_desk"
+    assert result["routing"]["human_ack_required"] is True
+    assert result["ticket_result"]["ticket"]["requires_human_ack"] is True
+    assert result["reaction"]["guest_reply_draft"].startswith("I am not fully certain")
+
+
 def test_review_place_resolution_updates_human_review_queue(monkeypatch, tmp_path):
     reset_loop(monkeypatch, tmp_path)
     backlog = {
@@ -802,6 +892,27 @@ def test_product_learning_api_promotes_and_rolls_back_learning_version(monkeypat
     assert rollback_status == 200
     assert rolled_back["status"] == "rolled_back"
     assert rolled_back["version"]["can_rollback_live_ops"] is False
+
+
+def test_guest_message_triage_api_route(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    worker_token = sign_role_session("test-worker", "onsite_worker", main._role_auth_secret())
+
+    route_status, payload = asyncio.run(
+        _call_app(
+            "POST",
+            "/api/park/guest-message-triage",
+            {"message": "My friend is dizzy and looks pale in the sun. I think she might faint.", "location": "West Plaza"},
+            token=worker_token,
+        )
+    )
+
+    assert route_status == 200
+    assert payload["status"] == "triaged"
+    assert payload["classification"]["issue_type"] == "heat_exhaustion_concern"
+    assert payload["routing"]["human_ack_required"] is True
+    assert payload["ticket_result"]["ticket"]["issue_type"] == "heat_exhaustion_concern"
+    assert payload["reaction"]["forbidden_auto_actions"]
 
 
 def test_passed_roleplay_does_not_create_training_gap_ticket(monkeypatch, tmp_path):

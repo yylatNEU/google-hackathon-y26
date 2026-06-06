@@ -770,7 +770,7 @@ def _infer_conversation_template(text: str) -> str:
     lowered = text.lower()
     if any(term in lowered for term in ("rainy-day", "rainy day", "rain journey", "rain route", "storm route")):
         return "rainy-day"
-    if any(term in lowered for term in ("halloween route", "halloween event", "spooky route")):
+    if any(term in lowered for term in ("halloween route", "halloween event", "halloween party", "holloween", "spooky route", "haunted route", "haunted party")):
         return "halloween-route"
     if any(term in lowered for term in ("kid quest", "child quest", "kids quest")):
         return "kid-quest"
@@ -786,7 +786,7 @@ def _infer_conversation_template(text: str) -> str:
         "attraction-copy": sum(1 for term in ("description", "attraction copy", "rewrite attraction", "ride copy") if term in lowered),
         "safety-signage": sum(1 for term in ("safety", "sign", "signage", "instruction", "warning") if term in lowered),
         "vip-tour": sum(1 for term in ("vip", "premium", "host", "tour", "concierge") if term in lowered),
-        "halloween-route": sum(1 for term in ("halloween", "spooky", "fall", "pumpkin", "mystery") if term in lowered),
+        "halloween-route": sum(1 for term in ("halloween", "holloween", "spooky", "haunted", "fall", "pumpkin", "mystery", "costume", "party") if term in lowered),
     }
     explicit = max(scored.items(), key=lambda item: item[1])
     if explicit[1] > 0:
@@ -1726,6 +1726,7 @@ def _real_inputs(payload: dict[str, Any]) -> dict[str, Any]:
     channel_owners = raw.get("channelOwners") if isinstance(raw.get("channelOwners"), dict) else {}
     venue_identity = raw.get("venueIdentity") if isinstance(raw.get("venueIdentity"), dict) else {}
     location_details = raw.get("locationDetails") if isinstance(raw.get("locationDetails"), dict) else {}
+    zone_details = raw.get("zoneDetails") if isinstance(raw.get("zoneDetails"), dict) else {}
     profile_intelligence = raw.get("profileIntelligence") if isinstance(raw.get("profileIntelligence"), dict) else {}
     guest_segments = raw.get("guestSegments") if isinstance(raw.get("guestSegments"), list) else []
     spatial_model = raw.get("spatialModel") if isinstance(raw.get("spatialModel"), dict) else {}
@@ -1750,6 +1751,7 @@ def _real_inputs(payload: dict[str, Any]) -> dict[str, Any]:
         "safetyInstructions": safety,
         "channelOwners": {str(key): str(value) for key, value in channel_owners.items() if str(value or "").strip()},
         "locationDetails": {str(key): value for key, value in location_details.items() if isinstance(value, dict)},
+        "zoneDetails": {str(key): value for key, value in zone_details.items() if isinstance(value, dict)},
         "profileIntelligence": profile_intelligence,
         "guestSegments": [item for item in guest_segments if isinstance(item, dict)],
         "spatialModel": spatial_model,
@@ -2836,6 +2838,8 @@ def _creative_concepts_for_template(template_id: str, route_names: list[str], au
     pattern_key, route_pattern = _route_pattern_for_template(intelligence, template_id)
     selected_segment = planning_profile.get("targetSegment") if isinstance(planning_profile.get("targetSegment"), dict) else {}
     segment_label = str(selected_segment.get("label") or audience)
+    if template_id == "halloween-route" and "rain" in segment_label.lower():
+        segment_label = audience
     rain_terms = _lexicon_terms(brand_bible, "rain")
     dragon_terms = _lexicon_terms(brand_bible, "dragon")
     lagoon_terms = _lexicon_terms(brand_bible, "lagoon")
@@ -2927,6 +2931,34 @@ def _creative_concepts_for_template(template_id: str, route_names: list[str], au
                 "whyItWorks": "It gives VIP copy a premium shape while staying inside approved public facts.",
             }
         ]
+    if template_id == "halloween-route":
+        halloween_terms = list(dict.fromkeys(dragon_terms[:3] + lagoon_terms[:3] + ["lantern", "mystery", "costume", "glow", "moonlit clue"]))
+        return [
+            {
+                "id": "lantern_mystery_party_path",
+                "name": "Lantern Mystery Party Path",
+                "positioning": f"A spooky-but-friendly Halloween party route for {segment_label} that turns verified photo, lagoon, story, show, and covered plaza stops into optional mystery beats.",
+                "guestPromise": "Families get a playful Halloween route with photo moments, gentle clues, plain access notes, and no gore, jump scares, or access guarantees.",
+                "storyArc": pattern_arc or ["arrival photo", "lantern clue", "storybook reveal", "show pause", "covered finale"],
+                "heroTerms": halloween_terms[:6],
+                "route": route_names,
+                "channelFocus": channel_targets,
+                "reviewRisks": ["gore or fear-based language", "guaranteed access", "reward fulfillment", "outdoor availability", "crowd-control wording"],
+                "whyItWorks": "It gives the party a named story spine while keeping every stop optional, non-graphic, and grounded in approved venue facts.",
+            },
+            {
+                "id": "pumpkin_clue_parade",
+                "name": "Pumpkin Clue Parade",
+                "positioning": f"A lighter family Halloween route for {segment_label} built around short clues, photo pauses, and a covered regroup.",
+                "guestPromise": "Guests can follow a festive clue trail, skip any beat, and close the route without losing the party feeling.",
+                "storyArc": ["photo start", "pumpkin clue", "gentle reveal", "rest pause", "party close"],
+                "heroTerms": ["pumpkin", "glow", "clue", "lantern", "costume", "covered finale"],
+                "route": route_names,
+                "channelFocus": ["guest_app", "signage", "staff_cue", "email"],
+                "reviewRisks": ["prize promise", "age suitability", "line or wait claims", "unsafe crowding language"],
+                "whyItWorks": "It reads more like a party activity than a route checklist while preserving reviewable boundaries.",
+            },
+        ]
     return [
         {
             "id": "profile_backed_story_path",
@@ -2972,6 +3004,28 @@ def _channel_copy_variants(selected: dict[str, Any], route: list[dict[str, Any]]
     concept_name = str(selected.get("name") or "Creative route")
     approved = _as_text_list(brand_bible.get("approvedPhrases"))
     current_options = next((item for item in approved if "current" in item.lower()), "check the app for current options")
+    if template_id == "halloween-route":
+        return {
+            "guestApp": {
+                "headline": concept_name,
+                "body": f"Start at {first_stop}. Follow the next friendly clue when you are ready, pause at any stop, and keep the party route optional.",
+                "microcopy": current_options,
+            },
+            "signage": [
+                {"placement": first_stop, "headline": "Your first clue glows", "body": "Begin the party path when you are ready. Every clue is optional."},
+                {"placement": final_stop, "headline": "Final glow stop", "body": "Regroup, take a photo, or choose your next current option in the app."},
+            ],
+            "email": {
+                "subject": f"Your Halloween party route: {concept_name}",
+                "previewText": "A spooky-friendly route with optional clues, photo moments, and current-options reminders.",
+                "body": f"Before arrival, look for {concept_name}. It begins at {first_stop}, follows playful non-graphic clues, and closes at {final_stop}. Costumes and photo moments are welcome; attraction availability and access details should be checked in the app.",
+            },
+            "staffCue": {
+                "opening": f"Welcome guests to {concept_name} as a playful optional Halloween party path, not a schedule or access promise.",
+                "transition": "Point to the next visible clue and remind guests they can pause, skip a beat, or choose another current option.",
+                "boundary": current_options,
+            },
+        }
     return {
         "guestApp": {
             "headline": concept_name,
@@ -3486,18 +3540,27 @@ def _high_craft_artifacts(
         lead = f"Rain can change the shape of the day without taking the day away. {selected_name} starts at {first_stop}, keeps the next step visible, and gives families a dry place to choose what feels right."
         moment = f"At {middle_stop}, invite guests to find the {motif} detail, take a breath, and decide whether to continue toward {final_stop} or stay with current indoor options."
         sign = "A dry little detour starts here."
+        signage_review_gate = "Signage owner confirms placement, contrast, line length, and rain readability."
+    elif template_id == "halloween-route":
+        lead = f"{selected_name} starts at {first_stop} with a friendly glow, not a scare. Follow each optional clue, pause whenever you like, and keep current options in view."
+        moment = f"At {middle_stop}, invite guests to spot the {motif} detail, take a photo if they want, then choose whether to continue toward {final_stop} or skip ahead."
+        sign = "Your first clue glows."
+        signage_review_gate = "Signage owner confirms placement, contrast, line length, and Halloween crowd readability."
     elif template_id == "kid-quest":
         lead = f"{selected_name} gives kids a small mission and caregivers a simple way to keep the pace. Start at {first_stop}; every clue is optional."
         moment = f"At {middle_stop}, ask kids to spot one {motif} clue before the group decides whether to continue or pause."
         sign = "Your next clue is close."
+        signage_review_gate = "Signage owner confirms placement, contrast, line length, and caregiver readability."
     elif template_id == "low-sensory":
         lead = f"{selected_name} keeps the visit quiet, predictable, and easy to leave. Start at {first_stop}, then use each stop as a choice point."
         moment = f"At {middle_stop}, keep the cue short: look for the {motif} marker, check comfort, then continue only if the group is ready."
         sign = "Quiet route choice point."
+        signage_review_gate = "Signage owner confirms placement, contrast, line length, and low-stimulus readability."
     else:
         lead = f"{selected_name} turns verified park stops into a clear guest story. Start at {first_stop}, follow the visible cue, and close at {final_stop}."
         moment = f"At {middle_stop}, use the {motif} cue as a small story beat before guests choose the next step."
         sign = "Your next story cue starts here."
+        signage_review_gate = "Signage owner confirms placement, contrast, line length, and guest readability."
     return {
         "status": "review_ready_samples",
         "purpose": "Concrete sample copy for a creative lead to judge craft, not just package completeness.",
@@ -3524,7 +3587,7 @@ def _high_craft_artifacts(
                 "channel": "signage",
                 "copy": sign,
                 "whyItHelps": "Gives the signage team a short, inspectable headline instead of a generic instruction.",
-                "reviewGate": "Signage owner confirms placement, contrast, line length, and rain readability.",
+                "reviewGate": signage_review_gate,
             },
         ],
         "craftNotes": [
@@ -3532,6 +3595,202 @@ def _high_craft_artifacts(
             f"Use '{current_options_phrase}' only where current status matters; avoid repeating it in every sentence.",
             "Keep operational promises out of creative copy and in owner review notes.",
         ],
+    }
+
+
+def _count_score(count: int, target: int, floor: float = 45.0, ceiling: float = 100.0) -> float:
+    if target <= 0:
+        return ceiling
+    return round(min(ceiling, floor + (max(0, count) / target) * (ceiling - floor)), 1)
+
+
+def _dimension_gate(dimension: dict[str, Any]) -> dict[str, Any]:
+    score = float(dimension.get("score") or 0)
+    status = "pass" if score >= 85 else "review" if score >= 65 else "block"
+    return {
+        "id": f"venue_{dimension.get('id')}",
+        "status": status,
+        "severity": "critical" if status == "block" else "high" if status == "review" else "medium",
+        "evidence": f"{dimension.get('label')}: {dimension.get('evidence')}",
+        "reflectionScore": score,
+        "missing": dimension.get("missing", []),
+    }
+
+
+def _venue_reflection_eval(real_inputs: dict[str, Any], route: list[dict[str, Any]], package: dict[str, Any], venue_gap_analysis: dict[str, Any]) -> dict[str, Any]:
+    details = real_inputs.get("locationDetails") if isinstance(real_inputs.get("locationDetails"), dict) else {}
+    zones = real_inputs.get("zoneDetails") if isinstance(real_inputs.get("zoneDetails"), dict) else {}
+    spatial = real_inputs.get("spatialModel") if isinstance(real_inputs.get("spatialModel"), dict) else {}
+    intelligence = _profile_intelligence(real_inputs)
+    coverage = intelligence.get("coverage") if isinstance(intelligence.get("coverage"), dict) else {}
+    readiness = intelligence.get("readiness") if isinstance(intelligence.get("readiness"), dict) else {}
+    venue = real_inputs.get("venueIdentity") if isinstance(real_inputs.get("venueIdentity"), dict) else {}
+    current_status = real_inputs.get("currentStatus") if isinstance(real_inputs.get("currentStatus"), dict) else {}
+    path_status = real_inputs.get("pathStatus") if isinstance(real_inputs.get("pathStatus"), dict) else {}
+    signage_inventory = real_inputs.get("signageInventory") if isinstance(real_inputs.get("signageInventory"), dict) else {}
+    channel_templates = real_inputs.get("channelTemplates") if isinstance(real_inputs.get("channelTemplates"), dict) else {}
+    operating_calendar = real_inputs.get("operatingCalendar") if isinstance(real_inputs.get("operatingCalendar"), dict) else {}
+    weather_policy = real_inputs.get("weatherPolicy") if isinstance(real_inputs.get("weatherPolicy"), dict) else {}
+    learning_context = real_inputs.get("learningContext") if isinstance(real_inputs.get("learningContext"), dict) else {}
+    agent_context = real_inputs.get("agentContext") if isinstance(real_inputs.get("agentContext"), dict) else {}
+    brand_bible = _brand_bible(real_inputs)
+    experience_rules = _experience_rules(real_inputs)
+    guest_segments = real_inputs.get("guestSegments") if isinstance(real_inputs.get("guestSegments"), list) else []
+    live_feed_bindings = intelligence.get("liveFeedBindings") if isinstance(intelligence.get("liveFeedBindings"), dict) else {}
+    segment_needs = intelligence.get("segmentNeeds") if isinstance(intelligence.get("segmentNeeds"), dict) else {}
+    field_source_rows = (intelligence.get("fieldSourceLedger") or {}).get("rows") if isinstance(intelligence.get("fieldSourceLedger"), dict) else []
+    field_source_count = len(field_source_rows) if isinstance(field_source_rows, list) else 0
+
+    route_rows = [item for item in route if isinstance(item, dict)]
+    route_names = [str(item.get("stop") or "") for item in route_rows if str(item.get("stop") or "").strip()]
+    route_detail_rows = [details[name] for name in route_names if isinstance(details.get(name), dict)]
+    route_zone_ids = {str(item.get("zoneId")) for item in route_detail_rows if str(item.get("zoneId") or "").strip()}
+    route_zone_coverage = len(route_zone_ids) / max(1, len(route_names))
+    route_access_notes = sum(1 for item in route_rows if item.get("accessibilityNote"))
+    route_sources = sum(1 for item in route_rows if item.get("source"))
+    route_care_anchor = any(str(item.get("kind") or "") in {"food", "guest_services", "first_aid", "family_service", "restrooms"} for item in route_detail_rows)
+    route_shelter_anchor = any(item.get("indoor") is True or item.get("covered") is True or str(item.get("kind") or "") in {"show", "quiet_or_cooling"} for item in route_detail_rows)
+    route_attraction_anchor = any(str(item.get("kind") or "") in {"attraction", "show"} for item in route_detail_rows)
+
+    kind_counts: dict[str, int] = {}
+    for item in details.values():
+        if isinstance(item, dict):
+            kind = str(item.get("kind") or "unknown")
+            kind_counts[kind] = kind_counts.get(kind, 0) + 1
+    service_count = sum(kind_counts.get(kind, 0) for kind in ("guest_services", "first_aid", "family_service", "restrooms", "water_refill", "quiet_or_cooling"))
+    dining_count = kind_counts.get("food", 0)
+    attraction_show_count = kind_counts.get("attraction", 0) + kind_counts.get("show", 0)
+    certified_paths = [item for item in (intelligence.get("certifiedPaths") if isinstance(intelligence.get("certifiedPaths"), list) else []) if isinstance(item, dict)]
+    capacity_rows = ((intelligence.get("capacityModel") or {}).get("zoneComfort") or []) if isinstance(intelligence.get("capacityModel"), dict) else []
+    timing = intelligence.get("timingModel") if isinstance(intelligence.get("timingModel"), dict) else {}
+    operating_coverage = venue_gap_analysis.get("syntheticOperatingCoverage") if isinstance(venue_gap_analysis.get("syntheticOperatingCoverage"), dict) else {}
+    current_options = int(coverage.get("currentOptions") or operating_coverage.get("currentOptions") or len(current_status.get("attractions") if isinstance(current_status.get("attractions"), list) else []))
+    facility_statuses = int(operating_coverage.get("facilityStatuses") or len(current_status.get("facilityStatus") if isinstance(current_status.get("facilityStatus"), list) else []))
+    path_segments = int(coverage.get("pathStatusSegments") or operating_coverage.get("pathStatusSegments") or len(path_status.get("routeSegments") if isinstance(path_status.get("routeSegments"), list) else []))
+    signage_placements = int(coverage.get("signagePlacements") or operating_coverage.get("signagePlacements") or len(signage_inventory.get("placements") if isinstance(signage_inventory.get("placements"), list) else []))
+    channel_template_count = int(coverage.get("channelTemplates") or operating_coverage.get("channelTemplates") or len(channel_templates.get("templates") if isinstance(channel_templates.get("templates"), dict) else {}))
+    approval_rows = int(operating_coverage.get("approvalWorkflowRows") or len(channel_templates.get("approvalWorkflow") if isinstance(channel_templates.get("approvalWorkflow"), list) else []))
+    event_windows = int(coverage.get("operatingEventWindows") or operating_coverage.get("eventWindows") or len(operating_calendar.get("eventWindows") if isinstance(operating_calendar.get("eventWindows"), list) else []))
+    weather_policy_rows = int(operating_coverage.get("weatherPolicies") or sum(1 for value in weather_policy.values() if value not in (None, "", [], {})))
+    feedback_labels = _as_text_list(learning_context.get("feedbackLabels"))
+    if not feedback_labels and isinstance(intelligence.get("learningSchema"), dict):
+        feedback_labels = _as_text_list((intelligence.get("learningSchema") or {}).get("feedbackLabels"))
+
+    dimensions = [
+        {
+            "id": "source_depth",
+            "label": "Venue source depth",
+            "score": min(100, _count_score(len(details), 12, 45) + min(field_source_count, 5) * 2 + (8 if readiness.get("status") else 0)),
+            "evidence": f"{len(details)} public location detail row(s), {field_source_count} field-source row(s), profile readiness {readiness.get('status') or 'unknown'}.",
+            "missing": [] if details and readiness else ["venue source ledger or public location details"],
+        },
+        {
+            "id": "spatial_model",
+            "label": "Spatial and zone model",
+            "score": round((_count_score(len(zones), 8, 45) * 0.35) + (_count_score(len(spatial.get("paths") if isinstance(spatial.get("paths"), list) else []), 8, 45) * 0.3) + (route_zone_coverage * 35), 1),
+            "evidence": f"{len(zones)} zone(s), {len(spatial.get('paths') if isinstance(spatial.get('paths'), list) else [])} path(s), route touches {len(route_zone_ids)} zone(s).",
+            "missing": [] if zones and spatial.get("paths") else ["zone roles or path graph"],
+        },
+        {
+            "id": "attractions_shows",
+            "label": "Attractions and shows",
+            "score": min(100, _count_score(attraction_show_count, 7, 45) + (10 if route_attraction_anchor else 0) + min(current_options, 5) * 2),
+            "evidence": f"{attraction_show_count} attraction/show row(s), {current_options} current option row(s), route attraction anchor={route_attraction_anchor}.",
+            "missing": [] if attraction_show_count and route_attraction_anchor else ["route attraction/show anchor"],
+        },
+        {
+            "id": "dining_care_services",
+            "label": "Dining, care, and recovery services",
+            "score": min(100, _count_score(dining_count + service_count, 8, 45) + (10 if route_care_anchor else 0) + min(facility_statuses, 4) * 3),
+            "evidence": f"{dining_count} dining row(s), {service_count} care/service row(s), {facility_statuses} facility status row(s), route care anchor={route_care_anchor}.",
+            "missing": [] if route_care_anchor else ["route food, restroom, guest-service, family-service, or recovery anchor"],
+        },
+        {
+            "id": "guest_segment_fit",
+            "label": "Guest segment fit",
+            "score": min(100, _count_score(len(guest_segments), 5, 45) + min(len(segment_needs), 5) * 4 + (8 if package.get("ownerQuestions") else 0)),
+            "evidence": f"{len(guest_segments)} guest segment(s), {len(segment_needs)} segment-need model(s), owner questions attached={bool(package.get('ownerQuestions'))}.",
+            "missing": [] if guest_segments and segment_needs else ["guest segment needs"],
+        },
+        {
+            "id": "accessibility_safety",
+            "label": "Accessibility and safety grounding",
+            "score": min(100, _count_score(len(certified_paths), 4, 45) * 0.35 + _count_score(len(real_inputs.get("safetyInstructions") or []), 4, 45) * 0.25 + (route_access_notes / max(1, len(route_rows))) * 25 + min(path_segments, 4) * 4),
+            "evidence": f"{len(certified_paths)} certified path row(s), {route_access_notes}/{len(route_rows)} route accessibility note(s), {len(real_inputs.get('safetyInstructions') or [])} safety instruction(s), {path_segments} path-status segment(s).",
+            "missing": [] if certified_paths and route_access_notes == len(route_rows) else ["certified paths or per-stop accessibility notes"],
+        },
+        {
+            "id": "operations_currentness",
+            "label": "Current operating context",
+            "score": min(100, _count_score(current_options + facility_statuses + path_segments, 12, 45) + (8 if current_status.get("weather") else 0) + (6 if operating_calendar else 0)),
+            "evidence": f"{current_options} current option(s), {facility_statuses} facility status row(s), {path_segments} path status segment(s), weather snapshot={bool(current_status.get('weather'))}.",
+            "missing": [] if current_options and path_segments else ["live/current options or path status feed"],
+        },
+        {
+            "id": "weather_timing",
+            "label": "Weather and event timing",
+            "score": min(100, _count_score(event_windows + weather_policy_rows, 5, 45) + (10 if timing.get("status") else 0) + (6 if operating_calendar.get("blackoutPolicy") else 0)),
+            "evidence": f"{event_windows} event window(s), {weather_policy_rows} weather policy row(s), timing status {timing.get('status') or 'unknown'}.",
+            "missing": [] if event_windows and weather_policy_rows else ["weather policy or operating event windows"],
+        },
+        {
+            "id": "channel_signage_governance",
+            "label": "Channel and signage governance",
+            "score": min(100, _count_score(len(real_inputs.get("channelOwners") or {}), 4, 45) * 0.25 + _count_score(channel_template_count, 4, 45) * 0.25 + _count_score(approval_rows, 4, 45) * 0.25 + _count_score(signage_placements, 4, 45) * 0.25),
+            "evidence": f"{len(real_inputs.get('channelOwners') or {})} owner(s), {channel_template_count} template(s), {approval_rows} approval row(s), {signage_placements} signage placement(s).",
+            "missing": [] if channel_template_count and approval_rows and signage_placements else ["channel templates, approval workflow, or signage inventory"],
+        },
+        {
+            "id": "brand_localization",
+            "label": "Brand, language, and claim policy",
+            "score": min(100, _count_score(len(_as_text_list(brand_bible.get("approvedPhrases"))) + len(_as_text_list(brand_bible.get("bannedClaims"))) + len(_as_text_list(brand_bible.get("supportedLocales"))), 12, 45) + (8 if brand_bible.get("tone") else 0)),
+            "evidence": f"{len(_as_text_list(brand_bible.get('approvedPhrases')))} approved phrase(s), {len(_as_text_list(brand_bible.get('bannedClaims')))} banned claim(s), {len(_as_text_list(brand_bible.get('supportedLocales')))} supported locale(s).",
+            "missing": [] if brand_bible.get("bannedClaims") else ["brand claim policy"],
+        },
+        {
+            "id": "learning_feed_boundaries",
+            "label": "Learning and live-feed boundaries",
+            "score": min(100, _count_score(len(feedback_labels), 8, 45) * 0.35 + _count_score(len(live_feed_bindings), 4, 45) * 0.35 + _count_score(len(agent_context.get("humanReviewTriggers") or []), 5, 45) * 0.3),
+            "evidence": f"{len(feedback_labels)} feedback label(s), {len(live_feed_bindings)} live-feed binding group(s), {len(agent_context.get('humanReviewTriggers') or [])} human review trigger(s).",
+            "missing": [] if feedback_labels and live_feed_bindings else ["learning labels or live-feed binding map"],
+        },
+        {
+            "id": "experience_rules",
+            "label": "Experience-rule coverage",
+            "score": min(100, _count_score(len(experience_rules), 10, 45) + (8 if route_shelter_anchor else 0) + (6 if experience_rules.get("noGoPairings") else 0)),
+            "evidence": f"{len(experience_rules)} experience-rule group(s), route shelter/reset anchor={route_shelter_anchor}, no-go pairings={len(experience_rules.get('noGoPairings') or []) if isinstance(experience_rules.get('noGoPairings'), list) else 0}.",
+            "missing": [] if experience_rules else ["experience rules"],
+        },
+    ]
+    score = round(sum(float(item["score"]) for item in dimensions) / max(1, len(dimensions)), 1)
+    gates = [_dimension_gate(item) for item in dimensions]
+    blocked = sum(1 for gate in gates if gate["status"] == "block")
+    review = sum(1 for gate in gates if gate["status"] == "review")
+    profile_type = str(venue.get("profileType") or "unknown")
+    status = "venue_reflection_ready" if blocked == 0 and review <= 1 else "venue_reflection_review_required" if blocked == 0 else "venue_reflection_blocked"
+    return {
+        "status": status,
+        "score": score,
+        "profileType": profile_type,
+        "productionRealVenueReady": bool(venue_gap_analysis.get("productionRealVenueReady")),
+        "summary": f"Venue reflection scored {score} across {len(dimensions)} venue dimensions using {profile_type} profile data.",
+        "dimensions": dimensions,
+        "gateSummary": {"passed": len(gates) - blocked - review, "review": review, "blocked": blocked},
+        "gates": gates,
+        "routeCoverage": {
+            "routeStops": route_names,
+            "matchedLocationDetails": len(route_detail_rows),
+            "routeZones": sorted(route_zone_ids),
+            "routeHasAttractionOrShowAnchor": route_attraction_anchor,
+            "routeHasDiningCareAnchor": route_care_anchor,
+            "routeHasShelterOrResetAnchor": route_shelter_anchor,
+            "routeSourceEvidence": f"{route_sources}/{len(route_rows)}",
+        },
+        "productionBoundary": {
+            "status": "production_ready" if venue_gap_analysis.get("productionRealVenueReady") else "demo_reflection_only",
+            "reason": "Venue reflection can use synthetic-approved coverage for demo reasoning, but production publish still requires real venue feeds." if profile_type == "synthetic_approved" else "Production readiness follows venue gap analysis.",
+            "missingForProduction": venue_gap_analysis.get("missingForProduction", []),
+        },
     }
 
 
@@ -3645,6 +3904,7 @@ def _studio_quality_eval(
     memory_application: dict[str, Any],
     venue_gap_analysis: dict[str, Any],
     quality_gaps: list[str],
+    real_inputs: dict[str, Any],
 ) -> dict[str, Any]:
     craft = package.get("craftArtifacts") if isinstance(package.get("craftArtifacts"), dict) else {}
     craft_samples = craft.get("samples") if isinstance(craft.get("samples"), list) else []
@@ -3672,6 +3932,8 @@ def _studio_quality_eval(
     review_ratio = review_gate_count / max(1, len(section_dossiers))
     reviewer_panel = _experience_reviewer_panel(route, channel_matrix, section_dossiers, package, memory_application, venue_gap_analysis, banned_hits)
     reviewer_consensus = float(reviewer_panel.get("consensusScore") or 0)
+    venue_reflection = _venue_reflection_eval(real_inputs, route, package, venue_gap_analysis)
+    venue_reflection_score = float(venue_reflection.get("score") or 0)
     scores = {
         "specificity": 92 if route_rows and all(item.get("guestCopy") and item.get("staffNote") for item in route_rows) else 58,
         "sourceEvidence": round(60 + source_ratio * 35 + min(len(synthetic_filled), 5), 1) if route_rows else 45,
@@ -3683,21 +3945,25 @@ def _studio_quality_eval(
         "claimSafety": 96 if not banned_hits else 45,
         "productionBoundary": 100 if venue_gap_analysis.get("productionRealVenueReady") else 72 if production_missing == ["real venue source feed instead of approved synthetic profile"] else 45,
         "reviewerConsensus": reviewer_consensus,
+        "venueReflection": venue_reflection_score,
     }
     weights = {
-        "specificity": 0.1,
-        "sourceEvidence": 0.12,
-        "routeAndAccessGovernance": 0.11,
-        "channelOwnerReadiness": 0.09,
-        "craftDepth": 0.11,
-        "reviewGovernance": 0.1,
-        "memoryAndLearningAuthority": 0.1,
-        "claimSafety": 0.09,
-        "productionBoundary": 0.07,
-        "reviewerConsensus": 0.11,
+        "specificity": 0.08,
+        "sourceEvidence": 0.1,
+        "routeAndAccessGovernance": 0.1,
+        "channelOwnerReadiness": 0.08,
+        "craftDepth": 0.1,
+        "reviewGovernance": 0.09,
+        "memoryAndLearningAuthority": 0.08,
+        "claimSafety": 0.08,
+        "productionBoundary": 0.06,
+        "reviewerConsensus": 0.1,
+        "venueReflection": 0.13,
     }
     total = round(sum(scores[key] * weights[key] for key in weights), 1)
-    production_score = round((scores["sourceEvidence"] * 0.2) + (scores["routeAndAccessGovernance"] * 0.18) + (scores["channelOwnerReadiness"] * 0.16) + (scores["claimSafety"] * 0.18) + (scores["productionBoundary"] * 0.28), 1)
+    production_score = round((scores["sourceEvidence"] * 0.16) + (scores["routeAndAccessGovernance"] * 0.16) + (scores["channelOwnerReadiness"] * 0.14) + (scores["claimSafety"] * 0.16) + (scores["productionBoundary"] * 0.24) + (scores["venueReflection"] * 0.14), 1)
+    if not venue_gap_analysis.get("productionRealVenueReady"):
+        production_score = min(production_score, 82.0 if production_missing == ["real venue source feed instead of approved synthetic profile"] else 74.0)
     gate_results = [
         {"id": "guest_facing_claim_safety", "status": "pass" if not banned_hits else "block", "severity": "critical", "evidence": "No banned claims found in guest-facing copy." if not banned_hits else f"Banned claims found: {', '.join(banned_hits)}."},
         {"id": "source_backed_route", "status": "pass" if source_ratio >= 0.95 else "review", "severity": "high", "evidence": f"{source_backed_stops}/{len(route_rows)} route stops include source evidence."},
@@ -3727,6 +3993,15 @@ def _studio_quality_eval(
             "evidence": reviewer_panel.get("summary"),
         }
     )
+    gate_results.extend(venue_reflection.get("gates", []))
+    gate_results.append(
+        {
+            "id": "venue_reflection_consensus",
+            "status": "pass" if venue_reflection.get("status") == "venue_reflection_ready" else "review" if venue_reflection.get("status") == "venue_reflection_review_required" else "block",
+            "severity": "high",
+            "evidence": venue_reflection.get("summary"),
+        }
+    )
     block_count = sum(1 for gate in gate_results if gate["status"] == "block")
     review_count = sum(1 for gate in gate_results if gate["status"] == "review")
     findings = []
@@ -3739,6 +4014,7 @@ def _studio_quality_eval(
     if scores["craftDepth"] >= 90:
         findings.append("Creative craft evidence includes inspectable samples with review gates.")
     findings.append(str(reviewer_panel.get("summary") or "Internal reviewer panel completed."))
+    findings.append(str(venue_reflection.get("summary") or "Venue reflection completed."))
     return {
         "status": "demo_ready_production_blocked" if total >= 82 and block_count == 1 and not banned_hits else "strong_review_draft" if total >= 80 and not banned_hits else "needs_review_work",
         "score": total,
@@ -3749,6 +4025,7 @@ def _studio_quality_eval(
         "gateSummary": {"passed": len(gate_results) - block_count - review_count, "review": review_count, "blocked": block_count},
         "gateResults": gate_results,
         "reviewerPanel": reviewer_panel,
+        "venueReflection": venue_reflection,
         "reviewLoop": {
             "status": reviewer_panel.get("status"),
             "consensusScore": reviewer_panel.get("consensusScore"),
@@ -3764,6 +4041,7 @@ def _studio_quality_eval(
             {"check": "creative craft samples", "status": "pass" if craft_sample_count >= 3 else "review"},
             {"check": "human-approved learning authority", "status": "pass" if approved_rules.get("authority") == "human_promoted_rules_only" else "review"},
             {"check": "internal reviewer panel", "status": "pass" if reviewer_panel.get("status") == "panel_passed" else "review"},
+            {"check": "full venue reflection", "status": "pass" if venue_reflection.get("status") == "venue_reflection_ready" else "review"},
             {"check": "production-real venue ready", "status": "pass" if venue_gap_analysis.get("productionRealVenueReady") else "blocked"},
         ],
         "recommendedNextActions": [
@@ -3809,6 +4087,218 @@ def _creative_package_variants(
             }
         )
     return variants
+
+
+def _vertex_provider_readiness() -> dict[str, Any]:
+    try:
+        from gemini_provider import get_gemini_agent_properties
+
+        props = get_gemini_agent_properties()
+        public = props.public_dict()
+        return {
+            "provider": public.get("provider"),
+            "platform": public.get("platform"),
+            "ready": bool(public.get("ready")),
+            "projectConfigured": bool(public.get("has_project")),
+            "locationConfigured": bool(public.get("has_location")),
+            "credentialsMode": public.get("credentials_mode"),
+            "readinessIssues": public.get("readiness_issues", []),
+            "requiredEnv": public.get("required_env", []),
+        }
+    except Exception as error:
+        return {
+            "provider": "Vertex AI",
+            "platform": "vertex_ai",
+            "ready": False,
+            "projectConfigured": False,
+            "locationConfigured": False,
+            "credentialsMode": "adc_or_service_account",
+            "readinessIssues": [str(error)[:240]],
+            "requiredEnv": ["GOOGLE_GENAI_USE_VERTEXAI=true", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"],
+        }
+
+
+def _orchestration_slot(slot_id: str, label: str, model: str, status: str, purpose: str, prompt: dict[str, Any], outputs: list[str], guardrails: list[str], provider_ready: bool) -> dict[str, Any]:
+    return {
+        "id": slot_id,
+        "label": label,
+        "model": model,
+        "status": status if provider_ready else "prompt_ready_provider_not_configured",
+        "purpose": purpose,
+        "prompt": prompt,
+        "expectedOutputs": outputs,
+        "guardrails": guardrails,
+        "llmControlsPublishOrOperations": False,
+    }
+
+
+def _vertex_model_orchestration(package: dict[str, Any], route: list[dict[str, Any]], template_id: str, audience: str, tone: str, real_inputs: dict[str, Any], creative_brief: dict[str, str]) -> dict[str, Any]:
+    provider = _vertex_provider_readiness()
+    provider_ready = bool(provider.get("ready")) and str(provider.get("platform")) in {"vertex_ai", "gemini_enterprise"}
+    concept = package.get("executiveConcept") if isinstance(package.get("executiveConcept"), dict) else {}
+    synthesis = package.get("creativeSynthesis") if isinstance(package.get("creativeSynthesis"), dict) else {}
+    venue_reflection = (package.get("studioQualityEval") or {}).get("venueReflection") if isinstance(package.get("studioQualityEval"), dict) else {}
+    route_rows = [
+        {
+            "stop": item.get("stop"),
+            "guestCopy": item.get("guestCopy"),
+            "staffNote": item.get("staffNote"),
+            "accessibilityNote": item.get("accessibilityNote"),
+            "source": item.get("source"),
+        }
+        for item in route
+        if isinstance(item, dict)
+    ]
+    route_names = [str(item.get("stop") or "") for item in route_rows]
+    package_context = {
+        "templateId": template_id,
+        "audience": audience,
+        "tone": tone,
+        "conceptName": concept.get("name"),
+        "guestPromise": concept.get("guestPromise"),
+        "routeStops": route_names,
+        "copyVoice": package.get("copyVoice", {}),
+        "venuePattern": package.get("venuePattern", {}),
+        "productionBoundary": package.get("venueDataGapAnalysis", {}),
+    }
+    models = {
+        "planner": os.getenv("PARKPULSE_EXPERIENCE_STUDIO_VERTEX_PLANNER_MODEL", "gemini-2.5-pro"),
+        "writer": os.getenv("PARKPULSE_EXPERIENCE_STUDIO_VERTEX_WRITER_MODEL", "gemini-2.5-flash"),
+        "critic": os.getenv("PARKPULSE_EXPERIENCE_STUDIO_VERTEX_CRITIC_MODEL", "gemini-2.5-pro"),
+        "embedding": os.getenv("PARKPULSE_EXPERIENCE_STUDIO_VERTEX_EMBEDDING_MODEL", "gemini-embedding-001"),
+        "image": os.getenv("PARKPULSE_EXPERIENCE_STUDIO_VERTEX_IMAGE_MODEL", "gemini-2.5-flash-image"),
+        "video": os.getenv("PARKPULSE_EXPERIENCE_STUDIO_VERTEX_VIDEO_MODEL", "veo-3.1-generate-001"),
+    }
+    owner_question_text = " ".join(
+        f"{item.get('owner')}: {item.get('question')}"
+        for item in (package.get("ownerQuestions") if isinstance(package.get("ownerQuestions"), list) else [])
+        if isinstance(item, dict) and (item.get("owner") or item.get("question"))
+    )
+    media_mood = "friendly Halloween party route, lantern glow, non-graphic, family-safe" if template_id == "halloween-route" else f"{tone} {template_id} park experience route, guest-friendly, venue-grounded"
+    first_stop = route_names[0] if route_names else "the start"
+    slots = [
+        _orchestration_slot(
+            "planner_reasoning",
+            "Planner reasoning",
+            models["planner"],
+            "configured_ready" if provider_ready else "prompt_ready_provider_not_configured",
+            "Deep route strategy, guest segment fit, concept alternatives, and owner-review risks.",
+            {
+                "task": "Reflect on this Experience Studio package and propose stronger route/story strategy without changing verified stops.",
+                "packageContext": package_context,
+                "venueReflection": venue_reflection,
+                "returnJson": {"strategyNotes": ["..."], "routeTradeoffs": ["..."], "strongerConceptName": "...", "blockedClaims": ["..."]},
+            },
+            ["strategyNotes", "routeTradeoffs", "conceptAlternatives", "ownerReviewRisks"],
+            ["Do not change stop names/order.", "Do not invent live state.", "Do not publish."],
+            provider_ready,
+        ),
+        _orchestration_slot(
+            "package_writer",
+            "Package writer",
+            models["writer"],
+            "connected_when_useLlm_true" if provider_ready else "prompt_ready_provider_not_configured",
+            "Generate richer app, signage, email, staff cue, and clue-copy variants.",
+            {
+                "task": "Rewrite guest-facing and staff-facing copy with stronger craft while preserving exact route and safety boundaries.",
+                "packageContext": package_context,
+                "lockedRoute": route_rows,
+                "existingCopyVariants": synthesis.get("copyVariants", {}),
+                "returnJson": {"guestApp": {}, "signage": [], "email": {}, "staffCue": {}, "clues": []},
+            },
+            ["guestApp", "signage", "email", "staffCue", "clueVariants"],
+            ["Keep movement optional.", "No access/wait/reward guarantees.", "Accessibility wording stays plain."],
+            provider_ready,
+        ),
+        _orchestration_slot(
+            "reviewer_critic",
+            "Reviewer critic",
+            models["critic"],
+            "configured_ready" if provider_ready else "prompt_ready_provider_not_configured",
+            "Second-pass creative, safety, accessibility, and channel-owner critique.",
+            {
+                "task": "Act as creative director, accessibility reviewer, safety reviewer, and channel owner. Critique the package.",
+                "packageContext": package_context,
+                "qa": package.get("studioQualityEval", {}),
+                "returnJson": {"findings": [], "requiredRevisions": [], "gateAdjustments": []},
+            },
+            ["findings", "requiredRevisions", "gateAdjustments", "approvalRecommendation"],
+            ["Critique cannot approve production publish.", "Flag unsupported venue claims.", "Use source evidence."],
+            provider_ready,
+        ),
+        _orchestration_slot(
+            "embedding_memory",
+            "Embedding memory retrieval",
+            models["embedding"],
+            "retrieval_plan_ready",
+            "Embed finished packages, route concepts, reviewer edits, and venue rules for future retrieval.",
+            {
+                "task": "Embed approved finished-work chunks for similarity retrieval.",
+                "chunks": [
+                    {"type": "concept", "text": f"{concept.get('name')}: {concept.get('guestPromise')}"},
+                    {"type": "route", "text": " -> ".join(route_names)},
+                    {"type": "review", "text": owner_question_text[:1000]},
+                    {"type": "voice", "text": " ".join(_as_text_list((package.get("copyVoice") or {}).get("approvedPhrases")))[:1000]},
+                ],
+                "targetCollections": ["experience_studio_drafts", "experience_studio_learning_rules", "venue_profile_chunks"],
+            },
+            ["embeddingVectors", "retrievalMatches", "memoryReceipts"],
+            ["Only embed approved/finished work for reusable patterns.", "Exclude private guest identity.", "Memory cannot override venue facts."],
+            True,
+        ),
+        _orchestration_slot(
+            "image_concept_board",
+            "Image concept board",
+            models["image"],
+            "prompt_ready_provider_not_configured" if not provider_ready else "configured_ready",
+            "Generate visual concept boards, signage mockups, route cards, and clue-card art direction.",
+            {
+                "task": "Generate review-safe image prompts, not final production artwork.",
+                "imagePrompts": [
+                    f"Concept board for {concept.get('name')}: {media_mood}, verified park photo stops, signage-ready, review-safe.",
+                    f"Signage mockup at {first_stop} with short headline, high contrast, readable in expected visit conditions, no operational claims.",
+                    f"Route clue card set for {template_id}: optional clues, accessible typography, no gore, no guaranteed reward.",
+                ],
+                "styleGuardrails": ["No realistic emergency scenes.", "No crowd panic.", "No copyrighted characters.", "No gore or frightening imagery."],
+            },
+            ["conceptBoardImages", "signageMockups", "routeCards", "clueCards"],
+            ["Images are drafts for owner review.", "Do not imply final sign placement.", "No unsafe or fear-based imagery."],
+            provider_ready,
+        ),
+        _orchestration_slot(
+            "video_preview",
+            "Video preview",
+            models["video"],
+            "prompt_ready_provider_not_configured" if not provider_ready else "configured_ready",
+            "Generate a short Veo teaser or staff-training animatic prompt for the route.",
+            {
+                "task": "Generate short text-to-video prompts for a review-only preview.",
+                "videoPrompts": [
+                    f"8-second teaser: guests begin {concept.get('name')} at {first_stop}, route cue appears, families choose an optional next beat, {media_mood}.",
+                    f"Staff-training animatic: host explains {concept.get('name')} as optional, points to next marker, reminds guests to check current options, no crowd control or access promises.",
+                ],
+                "shotList": package.get("routeBlueprint", [])[:5],
+            },
+            ["routeTeaser", "staffTrainingAnimatic", "reviewStoryboard"],
+            ["Review-only preview.", "No depiction of real emergency or unsafe operations.", "No production publish authority."],
+            provider_ready,
+        ),
+    ]
+    ready_count = sum(1 for slot in slots if str(slot.get("status")) in {"configured_ready", "connected_when_useLlm_true", "retrieval_plan_ready"})
+    return {
+        "status": "configured" if provider_ready else "prompt_ready_provider_not_configured",
+        "mode": "vertex_ai_multi_model_enrichment_v1",
+        "providerReadiness": provider,
+        "slotCount": len(slots),
+        "readyOrPlannedSlotCount": ready_count,
+        "slots": slots,
+        "activation": {
+            "useLiveTextWriter": "Set useLlm=true or PARKPULSE_EXPERIENCE_STUDIO_USE_LLM=true.",
+            "vertexEnv": ["GOOGLE_GENAI_USE_VERTEXAI=true", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"],
+            "mediaEnv": ["Enable Vertex AI Model Garden access for selected image/video models.", "Use Cloud Storage output buckets for generated media."],
+        },
+        "boundary": "Model orchestration enriches draft artifacts and review prompts only. It cannot publish, dispatch, change operations, or override venue facts.",
+    }
 
 
 def _experience_review_agent(package: dict[str, Any], draft_context: dict[str, Any] | None = None, revision_request: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -4237,7 +4727,8 @@ def _creative_package(route: list[dict[str, Any]], messages: list[dict[str, Any]
         "designReasoning": experience_reasoning or {},
         "creativeSynthesis": synthesis,
     }
-    package["studioQualityEval"] = _studio_quality_eval(route, channel_matrix, section_dossiers, package, memory_application, venue_gap_analysis, quality_gaps)
+    package["studioQualityEval"] = _studio_quality_eval(route, channel_matrix, section_dossiers, package, memory_application, venue_gap_analysis, quality_gaps, real_inputs)
+    package["vertexModelOrchestration"] = _vertex_model_orchestration(package, route, template_id, audience, tone, real_inputs, creative_brief)
     package["reviewAgentReview"] = _experience_review_agent(package)
     return package
 
@@ -4250,7 +4741,14 @@ def _draft_from_payload(payload: dict[str, Any], state: dict[str, Any] | None = 
     constraints = _text(payload.get("constraints"), "Keep the draft accurate, accessible, and reviewable before publishing.")
     real_inputs = _real_inputs(payload)
     context = _park_context(state)
-    context_hint = f"Caller-supplied context: {'; '.join(context['facts'])}." if context["facts"] else "No park facts are attached; do not infer locations, wait times, weather, staffing, or availability."
+    if context["facts"]:
+        context_hint = f"Caller-supplied context: {'; '.join(context['facts'])}."
+    elif real_inputs.get("hasRealInputs"):
+        venue = real_inputs.get("venueIdentity") if isinstance(real_inputs.get("venueIdentity"), dict) else {}
+        venue_name = _text(venue.get("name"), "the active venue profile")
+        context_hint = f"Grounded in {venue_name} profile facts; do not infer wait times, staffing, rewards, or live availability."
+    else:
+        context_hint = "No park facts are attached; do not infer locations, wait times, weather, staffing, or availability."
     creative_brief = _creative_brief(payload, template_id)
     route_names = _route_from_real_inputs(template_id, template, real_inputs)
     route = [_make_stop(template_id, stop, index, audience, tone, context_hint, real_inputs, creative_brief) for index, stop in enumerate(route_names)]

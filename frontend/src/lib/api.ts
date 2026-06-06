@@ -223,6 +223,7 @@ function requestWithXhr(url: string, init?: RequestInit, timeoutMs = defaultRequ
 function request(url: string, init?: RequestInit, timeoutMs = defaultRequestTimeoutMs) {
   if (
     url.includes("/api/park/staff-training") ||
+    url.includes("/api/park/guest-message-triage") ||
     url.includes("/api/park/product-learning") ||
     url.includes("/api/park/auth/dev-session")
   ) {

@@ -10945,6 +10945,9 @@ def _live_feed_reward_layers(
     held_count = int(executor.get("held_count") or 0)
     held_disposition_count = int(executor.get("held_disposition_count") or 0)
     ownerless_count = int(follow_through.get("unresolved_without_owner_count") or 0)
+    substitute_count = int(alternative_negotiation.get("substitute_count") or 0)
+    safe_substitute_count = int(alternative_negotiation.get("safe_executable_substitute_count") or 0)
+    unresolved_without_safe_substitute_count = int(alternative_negotiation.get("unresolved_without_safe_substitute_count") or 0)
     public_messages = int(receiver_delivery.get("public_guest_messages_sent") or 0)
     material_mutation = bool(receiver_delivery.get("material_state_mutation"))
     delivered_count = int(receiver_delivery.get("delivered_count") or 0)
@@ -11041,6 +11044,38 @@ def _live_feed_reward_layers(
         if risk_requested_count == 0 or risk_approved_count == 0
         else "risk_lift_pending_measurement"
     )
+    hard_decision_required = bool(risk_requested_count > 0 or held_count > 0 or substitute_count > 0)
+    hard_decision_process_score = _bounded_reward(
+        (0.12 if risk_requested_count > 0 else 0.0)
+        + (0.12 if risk_requested_count > 0 and risk_approved_count == risk_requested_count else 0.0)
+        + (0.14 if risk_executed_count > 0 and risk_executed_count == risk_approved_count else 0.0)
+        + (0.1 if risk_delivery.get("status") == "proven_escalated" and risk_acknowledged_count == risk_executed_count and risk_executed_count > 0 else 0.0)
+        + (0.12 if substitute_count > 0 and safe_substitute_count > 0 and unresolved_without_safe_substitute_count == 0 else 0.0)
+        + (0.1 if held_count == 0 or held_disposition_count == held_count else 0.0)
+        + (0.06 if follow_through.get("status") == "routed" and ownerless_count == 0 else 0.0)
+        + (0.04 if measurement_available and attribution_confidence >= 0.7 else 0.0)
+    )
+    if not hard_decision_required:
+        hard_decision_activation_reward = 0.5
+        hard_decision_activation_label = "hard_decision_not_required"
+    elif risk_lift_measured_regression:
+        hard_decision_activation_reward = min(hard_decision_process_score, 0.45)
+        hard_decision_activation_label = "hard_decision_lifted_regression"
+    else:
+        hard_decision_activation_reward = _bounded_reward(
+            hard_decision_process_score
+            + (0.18 * risk_lift_effect_score if risk_impact_applied else 0.0)
+            + (0.04 if risk_impact_applied and risk_lift_effect_score > 0 else 0.0)
+        )
+        hard_decision_activation_label = (
+            "hard_decision_lifted_success"
+            if risk_executed_count > 0 and risk_impact_applied and hard_decision_activation_reward >= 0.7
+            else "hard_decision_safe_substitute"
+            if safe_substitute_count > 0 and unresolved_without_safe_substitute_count == 0
+            else "hard_decision_held_with_owner"
+            if held_count > 0 and held_disposition_count == held_count and ownerless_count == 0
+            else "hard_decision_avoided"
+        )
 
     memory_applied = int(memory_prior_use.get("applied_count") or 0)
     memory_prior_count = int(memory_priors.get("prior_count") or 0)
@@ -11063,10 +11098,11 @@ def _live_feed_reward_layers(
     )
     composite_reward = _bounded_reward(
         0.1 * trace_reward
-        + 0.2 * policy_reward
-        + 0.2 * execution_reward
-        + 0.4 * operational_reward
+        + 0.18 * policy_reward
+        + 0.17 * execution_reward
+        + 0.35 * operational_reward
         + 0.1 * learning_reward
+        + 0.1 * hard_decision_activation_reward
     )
     return {
         "version": "live_feed_reward_vector_v1",
@@ -11077,6 +11113,8 @@ def _live_feed_reward_layers(
         "controlled_low_risk_reward": controlled_low_risk_reward,
         "risk_lift_reward": risk_lift_reward,
         "risk_lift_label": risk_lift_label,
+        "hard_decision_activation_reward": hard_decision_activation_reward,
+        "hard_decision_activation_label": hard_decision_activation_label,
         "learning_reward": learning_reward,
         "composite_reward": composite_reward,
         "promotion_eligible": promotion_eligible,
@@ -11087,9 +11125,13 @@ def _live_feed_reward_layers(
             "evidence_argument_count": evidence_argument_count,
             "concrete_policy_count": concrete_policy_count,
             "negotiation_round_count": len(negotiation_rounds),
-            "alternative_substitute_count": int(alternative_negotiation.get("substitute_count") or 0),
-            "safe_executable_substitute_count": int(alternative_negotiation.get("safe_executable_substitute_count") or 0),
-            "unresolved_without_safe_substitute_count": int(alternative_negotiation.get("unresolved_without_safe_substitute_count") or 0),
+            "alternative_substitute_count": substitute_count,
+            "safe_executable_substitute_count": safe_substitute_count,
+            "unresolved_without_safe_substitute_count": unresolved_without_safe_substitute_count,
+            "hard_decision_required": hard_decision_required,
+            "hard_decision_process_score": hard_decision_process_score,
+            "hard_decision_activation_reward": hard_decision_activation_reward,
+            "hard_decision_activation_label": hard_decision_activation_label,
             "executed_department_count": len(executed_departments),
             "executed_count": executed_count,
             "held_count": held_count,
@@ -11147,6 +11189,16 @@ def _live_feed_reward_layers(
                 "effect_score": risk_lift_effect_score,
                 "policy": "Credits only approval-scoped lifted actions that execute, receive acknowledgement, and produce measured simulated impact.",
             },
+            "hard_decision_activation": {
+                "reward": hard_decision_activation_reward,
+                "label": hard_decision_activation_label,
+                "required": hard_decision_required,
+                "risk_lift_reward": risk_lift_reward,
+                "safe_substitute_count": safe_substitute_count,
+                "unresolved_without_safe_substitute_count": unresolved_without_safe_substitute_count,
+                "held_disposition_count": held_disposition_count,
+                "policy": "Credits controlled courage: lift a risky action only with approval, delivery, measured impact, rollback, or provide a safe substitute with an owner.",
+            },
         },
         "commerce_action_attribution": commerce_attribution,
         "substitute_outcome_attribution": substitute_attribution,
@@ -11173,6 +11225,51 @@ def _live_feed_rows_by_source(health_or_refresh: dict[str, Any]) -> dict[str, di
     if not isinstance(rows, list):
         return {}
     return {str(row.get("source")): row for row in rows if isinstance(row, dict) and row.get("source")}
+
+
+@app.get("/api/park/reward-model/status")
+async def park_reward_model_status():
+    return {
+        "status": "ready",
+        "mode": "parkpulse_reward_model_status",
+        "build_id": RUNTIME_BUILD_ID,
+        "live_feed_reward_vector_version": "live_feed_reward_vector_v1",
+        "hard_decision_activation": {
+            "enabled": True,
+            "reward_field": "hard_decision_activation_reward",
+            "label_field": "hard_decision_activation_label",
+            "composite_weight": 0.1,
+            "regression_cap": 0.45,
+            "neutral_not_required_score": 0.5,
+            "success_threshold": 0.7,
+            "labels": [
+                "hard_decision_not_required",
+                "hard_decision_lifted_success",
+                "hard_decision_safe_substitute",
+                "hard_decision_held_with_owner",
+                "hard_decision_lifted_regression",
+                "hard_decision_avoided",
+            ],
+            "credits": [
+                "approval_requested",
+                "approval_granted",
+                "tool_executor_ran_approved_action",
+                "receiver_delivery_acknowledged",
+                "measured_material_impact",
+                "safe_executable_substitute",
+                "held_action_has_owner_and_follow_through",
+            ],
+        },
+        "composite_reward_weights": {
+            "trace_reward": 0.1,
+            "policy_reward": 0.18,
+            "execution_reward": 0.17,
+            "operational_reward": 0.35,
+            "learning_reward": 0.1,
+            "hard_decision_activation_reward": 0.1,
+        },
+        "promotion_boundary": "Hard-decision activation contributes to composite reward, but policy, measurement, attribution, operational reward, and regression gates still control promotion.",
+    }
 
 
 def _build_live_feed_outcome_measurement(payload: dict[str, Any], post_action_refresh: dict[str, Any] | None) -> dict[str, Any]:

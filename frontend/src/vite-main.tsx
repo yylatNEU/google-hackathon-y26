@@ -13,6 +13,8 @@ const MonitorPage = lazy(() => import("./app/monitor/page"));
 const ExecutivePage = lazy(() => import("./app/executive/page"));
 const HumanEnhancementPage = lazy(() => import("./app/human/page"));
 const StaffTrainingPage = lazy(() => import("./app/staff-training/page"));
+const GuestTriagePage = lazy(() => import("./app/guest-triage/page"));
+const LaunchPage = lazy(() => import("./app/launch/page"));
 const ExperienceStudioPage = lazy(() => import("./app/experience-studio/page"));
 const VenueProfilePage = lazy(() => import("./app/venue-profile/page"));
 const AccessibilityJourneyPage = lazy(() => import("./app/accessibility-journey/page"));
@@ -24,6 +26,8 @@ const routes: Array<{ prefix: string; page: ComponentType }> = [
   { prefix: "/monitor", page: MonitorPage },
   { prefix: "/human", page: HumanEnhancementPage },
   { prefix: "/staff-training", page: StaffTrainingPage },
+  { prefix: "/guest-triage", page: GuestTriagePage },
+  { prefix: "/launch", page: LaunchPage },
   { prefix: "/experience-studio", page: ExperienceStudioPage },
   { prefix: "/venue-profile", page: VenueProfilePage },
   { prefix: "/accessibility-journey", page: AccessibilityJourneyPage },

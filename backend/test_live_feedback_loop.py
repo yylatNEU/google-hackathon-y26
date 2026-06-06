@@ -780,6 +780,8 @@ def test_actual_training_exports_live_feed_case_bank_reward_vectors(monkeypatch,
     assert row["take_rate"] == 1.0
     assert row["follow_through_rate"] == 0.95
     assert row["promotion_eligible"] is True
+    assert row["promotion_eval_eligible"] is True
+    assert row["training_partition"] == "operational_policy"
     assert row["executed_tools"] == ["pause_launch_promo", "shift_adjustment_recommendation"]
     assert row["reasoning_context"] == "storm_response|controlled_low_risk"
     assert row["risk_lift_label"] == "risk_lift_success"
@@ -789,6 +791,8 @@ def test_actual_training_exports_live_feed_case_bank_reward_vectors(monkeypatch,
     assert risk_row["policy_key"] == "live_feed_risk_lift_approve_lightning_delay"
     assert risk_row["reward"] == 91.0
     assert risk_row["reward_label"] == "risk_lift_success"
+    assert risk_row["promotion_eval_eligible"] is True
+    assert risk_row["training_partition"] == "operational_policy"
     assert risk_row["reasoning_context"] == "storm_response|risk_lift_success"
     assert {"risk_lift_success", "risk_controls_approved", "risk_lift_executed", "impact:applied"} <= set(risk_row["reasoning_feature_tags"])
     assert risk_row["reasoning_feature_source"] == "live_feed_case_bank_llm_trace"
@@ -1111,7 +1115,11 @@ def test_risk_lift_reward_is_separate_from_controlled_reward():
     assert branch_rewards["risk_lift"]["reward"] > 0
     assert branch_rewards["risk_lift"]["executed_count"] == 1
     assert branch_rewards["risk_lift"]["material_state_mutation"] is True
+    assert branch_rewards["hard_decision_activation"]["label"] == "hard_decision_lifted_success"
+    assert branch_rewards["hard_decision_activation"]["reward"] >= 0.7
     assert result["metrics"]["risk_escalation_effect_score"] > 0
+    assert result["metrics"]["hard_decision_required"] is True
+    assert result["hard_decision_activation_label"] == "hard_decision_lifted_success"
     assert branch_rewards["risk_lift"]["reward"] != branch_rewards["controlled_low_risk"]["reward"]
 
 
@@ -1174,7 +1182,10 @@ def test_risk_lift_regression_is_not_promoted_by_process_completion():
 
     assert result["risk_lift_label"] == "risk_lift_regression"
     assert result["risk_lift_reward"] <= 0.45
+    assert result["hard_decision_activation_label"] == "hard_decision_lifted_regression"
+    assert result["hard_decision_activation_reward"] <= 0.45
     assert result["branch_rewards"]["risk_lift"]["label"] == "risk_lift_regression"
+    assert result["branch_rewards"]["hard_decision_activation"]["label"] == "hard_decision_lifted_regression"
     assert "risk_lift_regression_detected" in result["promotion_blockers"]
 
 

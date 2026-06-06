@@ -27,6 +27,9 @@ export function CommandCenter() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              <a href="/launch" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-white transition hover:border-white hover:text-cyan-100">
+                Launch
+              </a>
               <a href="/human" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
                 Human view
               </a>

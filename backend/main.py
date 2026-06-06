@@ -101,6 +101,7 @@ from product_learning_loop import (
     promote_learning_version,
     resolve_review_place_queue,
     rollback_learning_version,
+    triage_guest_message,
 )
 from live_feedback_loop import (
     apply_live_food_ops_to_state,
@@ -178,6 +179,7 @@ _load_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_nam
 _load_task: concurrent.futures.Future[Any] | None = None
 _refinement_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="parkpulse-refinement")
 _role_auth_audit_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-role-auth-audit")
+_fast_state_sync_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-fast-state-sync")
 _load_started_at: float | None = None
 _load_completed_at: float | None = None
 _load_duration_ms: int | None = None
@@ -228,6 +230,14 @@ _live_feed_refresh_worker_last_result: dict[str, Any] = {
 _live_feed_refresh_worker_iteration = 0
 _last_fast_park_step_at = 0.0
 _fast_park_step_interval_seconds = 1.5
+_fast_state_sync_lock = threading.Lock()
+_fast_state_sync_inflight = False
+_last_fast_state_sync_at = 0.0
+_fast_state_sync_status: dict[str, Any] = {
+    "status": "not_started",
+    "mode": "fast_state_mongo_sync",
+    "enabled": True,
+}
 _runtime_metrics: dict[str, int] = {
     "full_runtime_load_started": 0,
     "full_runtime_load_succeeded": 0,
@@ -403,6 +413,14 @@ def _heartbeat_controller_enabled() -> bool:
 
 def _sync_full_response_enabled() -> bool:
     return _truthy_env("PARKPULSE_SYNC_FULL_RESPONSE_ENABLED", False)
+
+
+def _fast_state_mongo_sync_enabled() -> bool:
+    return _truthy_env("PARKPULSE_FAST_STATE_MONGO_SYNC_ENABLED", True)
+
+
+def _fast_state_mongo_sync_interval_seconds() -> float:
+    return max(5.0, _float_env("PARKPULSE_FAST_STATE_MONGO_SYNC_INTERVAL_SECONDS", 45.0))
 
 
 def _metric(name: str, amount: int = 1) -> None:
@@ -1515,7 +1533,98 @@ def _live_feed_refresh_worker_status() -> dict[str, Any]:
         "interval_seconds": _live_feed_refresh_worker_interval_seconds(),
         "refresh_margin_seconds": _live_feed_refresh_worker_margin_seconds(),
         "auto_label_confidence_threshold": _live_feed_auto_label_threshold(),
+        "fast_state_mongo_sync": _fast_state_mongo_sync_status(),
     }
+
+
+def _fast_state_mongo_sync_status() -> dict[str, Any]:
+    with _fast_state_sync_lock:
+        return {
+            **_fast_state_sync_status,
+            "enabled": _fast_state_mongo_sync_enabled(),
+            "inflight": _fast_state_sync_inflight,
+            "interval_seconds": _fast_state_mongo_sync_interval_seconds(),
+        }
+
+
+def _fast_state_sync_done(future: concurrent.futures.Future[Any]) -> None:
+    global _fast_state_sync_inflight, _fast_state_sync_status
+    try:
+        result = future.result()
+        status = {
+            "status": result.get("status", "complete") if isinstance(result, dict) else "complete",
+            "mode": "fast_state_mongo_sync",
+            "completed_at": _now_iso(),
+            "result": result if isinstance(result, dict) else {"value": str(result)[:240]},
+        }
+    except Exception as error:
+        status = {
+            "status": "error",
+            "mode": "fast_state_mongo_sync",
+            "completed_at": _now_iso(),
+            "readiness_issues": [str(error)[:240]],
+        }
+    with _fast_state_sync_lock:
+        _fast_state_sync_inflight = False
+        _fast_state_sync_status = {
+            **status,
+            "enabled": _fast_state_mongo_sync_enabled(),
+            "inflight": False,
+            "interval_seconds": _fast_state_mongo_sync_interval_seconds(),
+        }
+
+
+def _schedule_fast_state_mongo_sync(state: dict[str, Any], *, reason: str = "fast_state", force: bool = False) -> dict[str, Any]:
+    global _fast_state_sync_inflight, _last_fast_state_sync_at, _fast_state_sync_status
+    if not _fast_state_mongo_sync_enabled():
+        return {"status": "disabled", "mode": "fast_state_mongo_sync"}
+    if not isinstance(state, dict) or state.get("status") == "simulation_unavailable":
+        return {"status": "skipped", "mode": "fast_state_mongo_sync", "reason": "state_unavailable"}
+    now = time.monotonic()
+    interval = _fast_state_mongo_sync_interval_seconds()
+    with _fast_state_sync_lock:
+        if _fast_state_sync_inflight and not force:
+            return {"status": "skipped", "mode": "fast_state_mongo_sync", "reason": "sync_inflight"}
+        age = now - _last_fast_state_sync_at if _last_fast_state_sync_at else None
+        if not force and age is not None and age < interval:
+            return {"status": "skipped", "mode": "fast_state_mongo_sync", "reason": "throttled", "age_seconds": round(age, 2)}
+        _fast_state_sync_inflight = True
+        _last_fast_state_sync_at = now
+        _fast_state_sync_status = {
+            "status": "queued",
+            "mode": "fast_state_mongo_sync",
+            "enabled": True,
+            "inflight": True,
+            "queued_at": _now_iso(),
+            "reason": reason,
+            "interval_seconds": interval,
+        }
+    try:
+        state_snapshot = json.loads(json.dumps(state, default=str))
+
+        def operation() -> dict[str, Any]:
+            from mongo_memory import sync_park_state
+
+            result = sync_park_state(state_snapshot)
+            return {
+                **(result if isinstance(result, dict) else {"status": "complete", "result": result}),
+                "sync_reason": reason,
+            }
+
+        future = _fast_state_sync_executor.submit(operation)
+        future.add_done_callback(_fast_state_sync_done)
+        return {"status": "queued", "mode": "fast_state_mongo_sync", "reason": reason}
+    except Exception as error:
+        with _fast_state_sync_lock:
+            _fast_state_sync_inflight = False
+            _fast_state_sync_status = {
+                "status": "error",
+                "mode": "fast_state_mongo_sync",
+                "enabled": True,
+                "inflight": False,
+                "readiness_issues": [str(error)[:240]],
+            }
+        return _fast_state_sync_status
 
 
 def _review_ledger_with_label_decisions(review_ledger: dict[str, Any]) -> dict[str, Any]:
@@ -1927,11 +2036,15 @@ async def _cached_hot_endpoint(cache_key: str, ttl_seconds: float, builder, *, b
     now = time.monotonic()
     cached = _hot_endpoint_cache.get(cache_key)
     if cached and cached[0] > now:
+        if cache_key in {"park_state", "park_state_lite"} and isinstance(cached[1], dict):
+            _schedule_fast_state_mongo_sync(cached[1], reason=f"{cache_key}_cache_hit")
         return cached[1]
     if cached:
         if background_refresh and cache_key not in _hot_endpoint_refreshing:
             _hot_endpoint_refreshing.add(cache_key)
             asyncio.create_task(_refresh_hot_endpoint(cache_key, ttl_seconds, builder))
+        if cache_key in {"park_state", "park_state_lite"} and isinstance(cached[1], dict):
+            _schedule_fast_state_mongo_sync(cached[1], reason=f"{cache_key}_cache_stale")
         return cached[1]
 
     value = await _resolve_hot_builder(builder)
@@ -2134,6 +2247,7 @@ async def _fast_park_state() -> dict[str, Any]:
             "policy_refs": ["PARK-SAFE-001", "PARK-OPS-001", "PARK-CARE-001"],
         },
     )
+    _schedule_fast_state_mongo_sync(state, reason="fast_park_state")
     return state
 
 
@@ -2171,6 +2285,7 @@ async def _fast_park_state_lite() -> dict[str, Any]:
     )
     state["heartbeatController"] = _heartbeat_controller_status(include_logs=False)
     state["heartbeatExplanation"] = _heartbeat_explanation_preview_payload()
+    _schedule_fast_state_mongo_sync(state, reason="fast_park_state_lite")
     return state
 
 
@@ -9183,6 +9298,8 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
                 "guestFlow": {"rides": [], "zones": [], "paths": []},
             }
             mark("state_fallback")
+    if isinstance(state, dict):
+        _schedule_fast_state_mongo_sync(state, reason="lightweight_copilot_state")
     route = route_agent_role(message, mode)
     mark("route")
     state_summary = _lightweight_copilot_state_summary(state if isinstance(state, dict) else {})
@@ -13802,6 +13919,27 @@ async def app(scope, receive, send):
             await _send_json(send, 200, staff_training_analytics(limit=int(limit_raw) if limit_raw else 200))
         except Exception as error:
             await _send_json(send, 200, {"status": "error", "mode": "staff_roleplay_analytics", "readiness_issues": [str(error)[:240]]})
+        return
+
+    if method == "POST" and path == "/api/park/guest-message-triage":
+        try:
+            request_payload = await _read_json_body(receive)
+            if not await _authorize_or_send(send, scope, "create_park_issue_ticket", "guest_message_triage", request_payload, default_role="onsite_worker"):
+                return
+            create_ticket_raw = request_payload.get("create_ticket") if "create_ticket" in request_payload else request_payload.get("createTicket")
+            await _send_json(
+                send,
+                200,
+                triage_guest_message(
+                    message=request_payload.get("message"),
+                    guest_name=request_payload.get("guest_name") or request_payload.get("guestName"),
+                    location=request_payload.get("location"),
+                    channel=request_payload.get("channel"),
+                    create_ticket=_truthy(None if create_ticket_raw is None else str(create_ticket_raw), True),
+                ),
+            )
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "guest_message_triage", "readiness_issues": [str(error)[:240]]})
         return
 
     if method == "POST" and path == "/api/park/product-learning/issue-ticket":

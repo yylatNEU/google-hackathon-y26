@@ -379,6 +379,38 @@ type ExperienceDraft = {
       nextProfileImports?: string[];
       routeChecks?: Array<{ stop?: string; hasAccessibilityNote?: boolean; hasProfileFact?: boolean; stillNeeds?: string[] }>;
     };
+    vertexModelOrchestration?: {
+      status?: string;
+      mode?: string;
+      slotCount?: number;
+      readyOrPlannedSlotCount?: number;
+      providerReadiness?: {
+        provider?: string;
+        platform?: string;
+        ready?: boolean;
+        projectConfigured?: boolean;
+        locationConfigured?: boolean;
+        credentialsMode?: string;
+        readinessIssues?: string[];
+        requiredEnv?: string[];
+      };
+      slots?: Array<{
+        id?: string;
+        label?: string;
+        model?: string;
+        status?: string;
+        purpose?: string;
+        expectedOutputs?: string[];
+        guardrails?: string[];
+        llmControlsPublishOrOperations?: boolean;
+      }>;
+      activation?: {
+        useLiveTextWriter?: string;
+        vertexEnv?: string[];
+        mediaEnv?: string[];
+      };
+      boundary?: string;
+    };
     studioQualityEval?: {
       status?: string;
       score?: number;
@@ -393,6 +425,16 @@ type ExperienceDraft = {
         summary?: string;
         reviewers?: Array<{ reviewerId?: string; role?: string; score?: number; gateStatus?: string; finding?: string; requiredRevision?: string }>;
         revisionQueue?: Array<{ reviewerId?: string; role?: string; status?: string; requiredRevision?: string }>;
+      };
+      venueReflection?: {
+        status?: string;
+        score?: number;
+        summary?: string;
+        profileType?: string;
+        gateSummary?: { passed?: number; review?: number; blocked?: number };
+        dimensions?: Array<{ id?: string; label?: string; score?: number; evidence?: string; missing?: string[] }>;
+        routeCoverage?: Record<string, unknown>;
+        productionBoundary?: { status?: string; reason?: string; missingForProduction?: string[] };
       };
       reviewLoop?: {
         status?: string;
@@ -2041,6 +2083,13 @@ export function ExperienceStudio() {
                                   <div className="mt-1 text-slate-400">{compactList((creativePackage.studioQualityEval.reviewerPanel.reviewers ?? []).map((reviewer) => `${reviewer.role}: ${formatStatus(reviewer.gateStatus)} ${reviewer.finding ?? ""}`), 2)}</div>
                                 </div>
                               ) : null}
+                              {creativePackage.studioQualityEval.venueReflection ? (
+                                <div className="mt-2 rounded border border-emerald-300/15 bg-[#0d1115] p-2 text-[11px] leading-relaxed text-slate-300">
+                                  <div className="text-[10px] font-black uppercase tracking-widest text-emerald-100">Venue reflection</div>
+                                  <div className="mt-1">{formatStatus(creativePackage.studioQualityEval.venueReflection.status)} / score {creativePackage.studioQualityEval.venueReflection.score ?? "n/a"}</div>
+                                  <div className="mt-1 text-slate-400">{compactList((creativePackage.studioQualityEval.venueReflection.dimensions ?? []).map((dimension) => `${dimension.label}: ${dimension.score} - ${dimension.evidence ?? ""}`), 3)}</div>
+                                </div>
+                              ) : null}
                               {creativePackage.studioQualityEval.gateResults?.length ? (
                                 <div className="mt-2 text-[11px] leading-relaxed text-slate-300">
                                   {compactList(creativePackage.studioQualityEval.gateResults.map((gate) => `${formatStatus(gate.status)} / ${formatStatus(gate.id)}: ${gate.evidence ?? ""}`), 3)}
@@ -2100,6 +2149,44 @@ export function ExperienceStudio() {
                             {creativePackage.craftArtifacts.craftNotes?.length ? (
                               <div className="mt-2 text-[11px] leading-relaxed text-slate-500">Notes: {compactList(creativePackage.craftArtifacts.craftNotes, 3)}</div>
                             ) : null}
+                          </div>
+                        ) : null}
+                        {creativePackage.vertexModelOrchestration ? (
+                          <div className="mt-3 rounded border border-sky-300/25 bg-sky-950/10 p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <div className="text-[10px] font-black uppercase tracking-widest text-sky-100">Vertex AI enrichment</div>
+                                <div className="mt-1 text-xs leading-relaxed text-slate-300">{creativePackage.vertexModelOrchestration.boundary}</div>
+                              </div>
+                              <div className="rounded border border-sky-300/30 bg-sky-950/20 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-sky-100">
+                                {creativePackage.vertexModelOrchestration.readyOrPlannedSlotCount ?? 0} / {creativePackage.vertexModelOrchestration.slotCount ?? 0} slots
+                              </div>
+                            </div>
+                            <div className="mt-2 grid gap-2 text-[11px] leading-relaxed text-slate-300 md:grid-cols-3">
+                              <div className="rounded border border-sky-300/15 bg-[#0d1115] p-2">
+                                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Provider</div>
+                                <div className="mt-1">{creativePackage.vertexModelOrchestration.providerReadiness?.provider ?? "Vertex AI"}</div>
+                                <div className="mt-1 text-slate-500">{formatStatus(creativePackage.vertexModelOrchestration.providerReadiness?.platform)} / {creativePackage.vertexModelOrchestration.providerReadiness?.ready ? "ready" : "not configured"}</div>
+                              </div>
+                              <div className="rounded border border-sky-300/15 bg-[#0d1115] p-2 md:col-span-2">
+                                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Activation</div>
+                                <div className="mt-1 text-slate-400">{compactList(creativePackage.vertexModelOrchestration.activation?.vertexEnv ?? [], 3)}</div>
+                                <div className="mt-1 text-amber-100">{compactList(creativePackage.vertexModelOrchestration.providerReadiness?.readinessIssues ?? [], 2)}</div>
+                              </div>
+                            </div>
+                            <div className="mt-2 grid gap-2 lg:grid-cols-3">
+                              {(creativePackage.vertexModelOrchestration.slots ?? []).map((slot) => (
+                                <div key={slot.id ?? slot.label} className="rounded border border-slate-800 bg-[#0d1115] p-2">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="text-xs font-black text-slate-100">{slot.label ?? formatStatus(slot.id)}</div>
+                                    <div className="rounded border border-slate-700 px-2 py-1 text-[9px] font-black uppercase tracking-widest text-slate-400">{formatStatus(slot.status)}</div>
+                                  </div>
+                                  <div className="mt-1 text-[10px] font-black uppercase tracking-widest text-sky-100">{slot.model}</div>
+                                  <div className="mt-2 text-[11px] leading-relaxed text-slate-400">{slot.purpose}</div>
+                                  <div className="mt-2 text-[11px] leading-relaxed text-slate-500">Outputs: {compactList(slot.expectedOutputs ?? [], 3)}</div>
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         ) : null}
                         {hasAdvancedReview ? (

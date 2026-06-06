@@ -188,8 +188,44 @@ def test_conversation_plan_creates_generator_ready_brief_without_learning_loop(m
     assert package["venueDataGapAnalysis"]["missingForProduction"]
     assert package["studioQualityEval"]["score"] > 0
     assert package["studioQualityEval"]["qaChecklist"]
+    venue_reflection = package["studioQualityEval"]["venueReflection"]
+    assert venue_reflection["score"] > 0
+    assert venue_reflection["gateSummary"]["passed"] >= 8
+    assert {item["id"] for item in venue_reflection["dimensions"]} >= {
+        "source_depth",
+        "spatial_model",
+        "attractions_shows",
+        "dining_care_services",
+        "guest_segment_fit",
+        "accessibility_safety",
+        "operations_currentness",
+        "weather_timing",
+        "channel_signage_governance",
+        "brand_localization",
+        "learning_feed_boundaries",
+        "experience_rules",
+    }
+    assert package["studioQualityEval"]["scores"]["venueReflection"] == venue_reflection["score"]
     assert package["creativePackageVariants"]
     assert len(package["craftArtifacts"]["samples"]) >= 3
+    vertex = package["vertexModelOrchestration"]
+    assert vertex["mode"] == "vertex_ai_multi_model_enrichment_v1"
+    assert vertex["slotCount"] == 6
+    assert "providerReadiness" in vertex
+    assert "cannot publish" in vertex["boundary"].lower()
+    slots = {slot["id"]: slot for slot in vertex["slots"]}
+    assert set(slots) == {
+        "planner_reasoning",
+        "package_writer",
+        "reviewer_critic",
+        "embedding_memory",
+        "image_concept_board",
+        "video_preview",
+    }
+    assert slots["embedding_memory"]["prompt"]["chunks"][2]["text"]
+    assert slots["image_concept_board"]["prompt"]["imagePrompts"]
+    assert slots["video_preview"]["prompt"]["videoPrompts"]
+    assert all(slot["llmControlsPublishOrOperations"] is False for slot in slots.values())
     assert package["reviewAgentReview"]["agentId"] == "experience_studio_review_agent"
     assert generated["draft"]["experienceReviewAgent"]["agentId"] == "experience_studio_review_agent"
     route_copy = [stop["guestCopy"] for stop in generated["draft"]["route"]]

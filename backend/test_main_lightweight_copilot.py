@@ -1,10 +1,78 @@
 import asyncio
+import sys
+import time
+import types
 
 import main
 
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def test_fast_state_mongo_sync_schedules_background_writer(monkeypatch):
+    calls = []
+
+    def fake_sync_park_state(state):
+        calls.append(state)
+        return {"status": "stored", "collection": "park_state", "updatedAt": "2026-06-06T00:00:00Z"}
+
+    monkeypatch.setitem(sys.modules, "mongo_memory", types.SimpleNamespace(sync_park_state=fake_sync_park_state))
+    monkeypatch.setenv("PARKPULSE_FAST_STATE_MONGO_SYNC_ENABLED", "true")
+    monkeypatch.setenv("PARKPULSE_FAST_STATE_MONGO_SYNC_INTERVAL_SECONDS", "5")
+    with main._fast_state_sync_lock:
+        main._fast_state_sync_inflight = False
+        main._last_fast_state_sync_at = 0.0
+        main._fast_state_sync_status = {"status": "not_started", "mode": "fast_state_mongo_sync", "enabled": True}
+
+    result = main._schedule_fast_state_mongo_sync(
+        {"guestFlow": {"activeScenario": {"key": "ride_down"}}, "operationsAudit": {"ready": True}},
+        reason="unit_test",
+        force=True,
+    )
+
+    assert result["status"] == "queued"
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        status = main._fast_state_mongo_sync_status()
+        if status["status"] == "stored":
+            break
+        time.sleep(0.02)
+
+    status = main._fast_state_mongo_sync_status()
+    assert calls and calls[0]["guestFlow"]["activeScenario"]["key"] == "ride_down"
+    assert status["status"] == "stored"
+    assert status["result"]["collection"] == "park_state"
+    assert status["result"]["sync_reason"] == "unit_test"
+
+
+def test_cached_hot_state_hit_schedules_background_sync(monkeypatch):
+    calls = []
+
+    def fake_schedule(state, *, reason="fast_state", force=False):
+        calls.append({"state": state, "reason": reason, "force": force})
+        return {"status": "queued"}
+
+    async def fail_builder():
+        raise AssertionError("fresh cache should not call builder")
+
+    monkeypatch.setattr(main, "_schedule_fast_state_mongo_sync", fake_schedule)
+    main._hot_endpoint_cache.clear()
+    main._hot_endpoint_cache["park_state_lite"] = (
+        time.monotonic() + 60,
+        {"guestFlow": {"activeScenario": {"key": "ride_down"}}, "operationsAudit": {"ready": True}},
+    )
+
+    payload = run(main._cached_hot_endpoint("park_state_lite", 60, fail_builder))
+
+    assert payload["guestFlow"]["activeScenario"]["key"] == "ride_down"
+    assert calls == [
+        {
+            "state": {"guestFlow": {"activeScenario": {"key": "ride_down"}}, "operationsAudit": {"ready": True}},
+            "reason": "park_state_lite_cache_hit",
+            "force": False,
+        }
+    ]
 
 
 def test_lightweight_copilot_returns_complete_contract(monkeypatch):

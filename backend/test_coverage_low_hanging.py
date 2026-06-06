@@ -20,9 +20,12 @@ def test_agent_role_routing_and_registry_are_copy_safe():
     assert role_modes["customer"]["permissions"]["dispatch"] is False
     assert "customer_send_to_phone" in role_modes["customer"]["mcp_tools"]
     assert roles.route_agent_role("customer support station recommends a family route")["selected_role"] == "customer"
+    assert roles.route_agent_role("A family is asking where to go with a wheelchair and a long wait.")["selected_role"] == "customer"
     assert roles.route_agent_role("run production reliability qa before deploy")["selected_role"] == "qa"
     assert roles.route_agent_role("prevent crowd issue before it starts")["selected_role"] == "proact"
     assert roles.route_agent_role("guest note says dizzy near the queue")["selected_role"] == "proact"
+    assert roles.route_agent_role("What weak signal should we watch right now?")["selected_role"] == "scan"
+    assert roles.route_agent_role("The coaster queue is too long near the parade. What should operations do?")["selected_role"] == "react"
     assert roles.route_agent_role("ride is down send maintenance")["selected_role"] == "react"
     assert roles.route_agent_role("what is happening in the park")["selected_role"] == "scan"
     assert roles.route_agent_role("anything", mode="react")["selected_role"] == "react"

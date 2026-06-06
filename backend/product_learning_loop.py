@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -21,6 +22,8 @@ ISSUE_TYPES = {
     "line_cutting_conflict",
     "safety_rule_refusal",
     "weather_evacuation_confusion",
+    "profile_information_request",
+    "unclear_guest_request",
 }
 
 ISSUE_TYPE_ALIASES = {
@@ -33,6 +36,8 @@ ISSUE_TYPE_ALIASES = {
     "line_conflict": "line_cutting_conflict",
     "safety_refusal": "safety_rule_refusal",
     "weather_evacuation": "weather_evacuation_confusion",
+    "guest_question": "profile_information_request",
+    "unknown": "unclear_guest_request",
 }
 
 TEAM_BY_ISSUE = {
@@ -47,10 +52,12 @@ TEAM_BY_ISSUE = {
     "safety_rule_refusal": "ride_ops",
     "weather_evacuation_confusion": "ops_lead",
     "language_barrier": "guest_services",
+    "profile_information_request": "guest_services",
+    "unclear_guest_request": "guest_services",
 }
 
 HIGH_RISK_ISSUES = {"lost_child_report", "heat_exhaustion_concern", "injury_or_safety_incident", "safety_rule_refusal", "weather_evacuation_confusion"}
-HUMAN_EXCEPTION_ISSUES = HIGH_RISK_ISSUES | {"accessibility_accommodation", "refund_request"}
+HUMAN_EXCEPTION_ISSUES = HIGH_RISK_ISSUES | {"accessibility_accommodation", "refund_request", "unclear_guest_request"}
 AUTO_LEARNING_MIN_EVIDENCE = 2
 AUTO_LEARNING_MIN_CONFIDENCE = 0.74
 HUMAN_REVIEW_PLACES = {
@@ -60,6 +67,7 @@ HUMAN_REVIEW_PLACES = {
     "lost_child_report": "security_command",
     "refund_request": "guest_services_refund_policy",
     "safety_rule_refusal": "ride_safety_lead",
+    "unclear_guest_request": "guest_services_information_desk",
 }
 TICKET_DEDUPE_WINDOW_MINUTES = 120
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -83,6 +91,120 @@ BACKLOG_ISSUE_MAP = {
     "planning-horizon-risk": "weather_evacuation_confusion",
     "customer-experience-trust-risk": "angry_parent",
 }
+
+GUEST_TRIAGE_RULES = [
+    {
+        "issue_type": "lost_child_report",
+        "terms": ("lost child", "missing child", "can't find my child", "cannot find my child", "my kid is gone", "missing kid", "lost my son", "lost my daughter"),
+        "urgency": "critical",
+        "score": 98,
+        "sla": 1,
+    },
+    {
+        "issue_type": "heat_exhaustion_concern",
+        "terms": ("faint", "dizzy", "pale", "heat", "dehydrated", "passed out", "heat exhaustion", "too hot", "medical"),
+        "urgency": "critical",
+        "score": 94,
+        "sla": 2,
+    },
+    {
+        "issue_type": "injury_or_safety_incident",
+        "terms": ("injured", "hurt", "bleeding", "fell", "slipped", "accident", "collision", "broken", "can't stand", "cannot stand"),
+        "urgency": "critical",
+        "score": 96,
+        "sla": 1,
+    },
+    {
+        "issue_type": "weather_evacuation_confusion",
+        "terms": ("storm", "lightning", "evacuation", "shelter", "where do we go", "weather", "tornado", "severe weather"),
+        "urgency": "high",
+        "score": 86,
+        "sla": 3,
+    },
+    {
+        "issue_type": "safety_rule_refusal",
+        "terms": ("won't follow", "refuses", "refusing", "safety rule", "restraint", "seatbelt", "lap bar", "loose item"),
+        "urgency": "high",
+        "score": 84,
+        "sla": 3,
+    },
+    {
+        "issue_type": "line_cutting_conflict",
+        "terms": ("line cutting", "cut the line", "argument", "fight", "pushing", "queue conflict", "threatening"),
+        "urgency": "high",
+        "score": 82,
+        "sla": 5,
+    },
+    {
+        "issue_type": "accessibility_accommodation",
+        "terms": ("wheelchair", "accessibility", "accessible", "mobility", "accommodation", "medical history", "can't stand", "cannot stand"),
+        "urgency": "high",
+        "score": 78,
+        "sla": 8,
+    },
+    {
+        "issue_type": "refund_request",
+        "terms": ("refund", "money back", "compensation", "paid for", "wasted money", "credit"),
+        "urgency": "medium",
+        "score": 56,
+        "sla": 20,
+    },
+    {
+        "issue_type": "ride_closure_complaint",
+        "terms": ("ride closed", "closed ride", "closure", "waited and closed", "not operating", "down"),
+        "urgency": "medium",
+        "score": 52,
+        "sla": 15,
+    },
+    {
+        "issue_type": "language_barrier",
+        "terms": ("no english", "do not understand", "don't understand", "language", "translator", "interpreter", "ticket problem"),
+        "urgency": "medium",
+        "score": 50,
+        "sla": 10,
+    },
+    {
+        "issue_type": "profile_information_request",
+        "terms": (
+            "where is",
+            "where are",
+            "closest",
+            "nearest",
+            "restroom",
+            "bathroom",
+            "toilet",
+            "first aid",
+            "guest services",
+            "lost and found",
+            "food",
+            "eat",
+            "vegetarian",
+            "vegan",
+            "water refill",
+            "water fountain",
+            "quiet",
+            "sensory",
+            "shade",
+            "cooling",
+            "height requirement",
+            "how tall",
+            "show time",
+            "duration",
+            "locker",
+            "stroller",
+        ),
+        "urgency": "low",
+        "score": 42,
+        "sla": 20,
+    },
+    {
+        "issue_type": "angry_parent",
+        "terms": ("angry", "upset", "crying", "ridiculous", "manager", "complaint", "frustrated", "family"),
+        "urgency": "medium",
+        "score": 48,
+        "sla": 15,
+    },
+]
 
 
 def _now_iso() -> str:
@@ -376,6 +498,449 @@ def create_park_issue_ticket(
     }
     _write_event(ticket)
     return {"status": "created", "mode": "park_issue_ticket", "ticket": ticket, "feeds_training_model": "via_product_learning_signal_only"}
+
+
+def triage_guest_message(
+    *,
+    message: str | None = None,
+    guest_name: str | None = None,
+    location: str | None = None,
+    channel: str | None = None,
+    create_ticket: bool = True,
+) -> dict[str, Any]:
+    text = str(message or "").strip()
+    if not text:
+        return {"status": "invalid", "mode": "guest_message_triage", "readiness_issues": ["message is required."]}
+    classification = _classify_guest_message(text)
+    issue_type = classification["issue_type"]
+    profile_context = _guest_triage_profile_context(text, issue_type)
+    if issue_type == "profile_information_request" and profile_context.get("status") != "answered_from_profile":
+        issue_type = "unclear_guest_request"
+        classification = {
+            **classification,
+            "issue_type": issue_type,
+            "urgency": "medium",
+            "urgency_score": max(int(classification.get("urgency_score") or 0), 55),
+            "sla_minutes": 10,
+            "confidence": min(float(classification.get("confidence") or 0.5), 0.52),
+        }
+    severity = _severity_for_triage(classification["urgency"])
+    review_place = _human_review_place(issue_type, severity)
+    staff_checklist = _guest_triage_staff_checklist(issue_type)
+    reply_draft = str(profile_context.get("guest_reply_draft") or _guest_reply_draft(issue_type)) if issue_type == "profile_information_request" else _guest_reply_draft(issue_type)
+    human_ack_required = bool(review_place) or severity in {"high", "critical"} or bool(profile_context.get("human_review_required")) or float(classification.get("confidence") or 0) < 0.55
+    ticket_result = None
+    if create_ticket:
+        ticket_result = create_park_issue_ticket(
+            source="guest",
+            issue_type=issue_type,
+            summary=text[:1000],
+            severity=severity,
+            location=location,
+            reporter_role="guest_message",
+            required_action=staff_checklist[0] if staff_checklist else _default_required_action(issue_type),
+            assigned_team=TEAM_BY_ISSUE.get(issue_type) or "ops_lead",
+        )
+        ticket = ticket_result.get("ticket") if isinstance(ticket_result, dict) and isinstance(ticket_result.get("ticket"), dict) else None
+        if ticket and human_ack_required and not ticket.get("requires_human_ack"):
+            ticket["requires_human_ack"] = True
+            ticket["human_review_required"] = True
+            ticket["human_review_place"] = review_place or str(profile_context.get("human_review_place") or "guest_services_information_desk")
+    event = {
+        "event": "guest_message_triaged",
+        "id": _id("guest-triage", {"message": text[:200], "issue_type": issue_type}),
+        "message_excerpt": text[:1000],
+        "guest_name": str(guest_name or "")[:120] or None,
+        "location": str(location or "")[:120] or None,
+        "channel": str(channel or "guest_message")[:80],
+        "issue_type": issue_type,
+        "urgency": classification["urgency"],
+        "urgency_score": classification["urgency_score"],
+        "matched_terms": classification["matched_terms"],
+        "severity": severity,
+        "assigned_team": TEAM_BY_ISSUE.get(issue_type) or "ops_lead",
+        "human_review_place": review_place,
+        "human_ack_required": human_ack_required,
+        "sla_minutes": classification["sla_minutes"],
+        "guest_reply_draft": reply_draft,
+        "staff_checklist": staff_checklist,
+        "understanding": {
+            "status": "profile_grounded" if profile_context.get("status") == "answered_from_profile" else "needs_human_review" if human_ack_required and issue_type == "unclear_guest_request" else "rule_classified",
+            "category": profile_context.get("category") or issue_type,
+            "confidence": classification["confidence"],
+        },
+        "profile_context": profile_context,
+        "ticket_id": (ticket_result or {}).get("ticket", {}).get("id") if isinstance(ticket_result, dict) else None,
+        "created_at": _now_iso(),
+        "live_ops_authority": False,
+        "boundary": "Guest message triage can create a routed issue ticket and response draft, but high-risk action requires human acknowledgement.",
+    }
+    _write_event(event)
+    return {
+        "status": "triaged",
+        "mode": "guest_message_triage",
+        "classification": {
+            "issue_type": issue_type,
+            "urgency": classification["urgency"],
+            "urgency_score": classification["urgency_score"],
+            "severity": severity,
+            "matched_terms": classification["matched_terms"],
+            "confidence": classification["confidence"],
+        },
+        "understanding": event["understanding"],
+        "profile_context": profile_context,
+        "routing": {
+            "assigned_team": event["assigned_team"],
+            "human_review_place": review_place,
+            "human_ack_required": event["human_ack_required"],
+            "sla_minutes": event["sla_minutes"],
+        },
+        "reaction": {
+            "guest_reply_draft": reply_draft,
+            "staff_checklist": staff_checklist,
+            "forbidden_auto_actions": ["dispatch_security_or_medical", "approve_refund", "override_safety_policy", "change_live_operations"],
+        },
+        "ticket_result": ticket_result,
+        "triage_event": event,
+        "boundary": event["boundary"],
+    }
+
+
+def _classify_guest_message(message: str) -> dict[str, Any]:
+    text = message.lower()
+    contextual = _classify_guest_message_context(text)
+    if contextual:
+        return contextual
+    best: dict[str, Any] | None = None
+    for rule in GUEST_TRIAGE_RULES:
+        matched = [term for term in rule["terms"] if _guest_term_matches(text, term)]
+        if not matched:
+            continue
+        score = int(rule["score"]) + min(8, (len(matched) - 1) * 3)
+        candidate = {
+            "issue_type": rule["issue_type"],
+            "urgency": rule["urgency"],
+            "urgency_score": min(100, score),
+            "sla_minutes": rule["sla"],
+            "matched_terms": matched[:8],
+            "confidence": round(_bounded(0.66 + min(len(matched), 4) * 0.08, 0.66, 0.94), 2),
+        }
+        if best is None or candidate["urgency_score"] > best["urgency_score"]:
+            best = candidate
+    if best:
+        return best
+    return {
+        "issue_type": "unclear_guest_request",
+        "urgency": "low",
+        "urgency_score": 24,
+        "sla_minutes": 20,
+        "matched_terms": [],
+        "confidence": 0.34,
+    }
+
+
+def _guest_term_matches(text: str, term: str) -> bool:
+    clean = str(term or "").strip().lower()
+    if not clean:
+        return False
+    prefix = r"\b" if clean[0].isalnum() else ""
+    suffix = r"\b" if clean[-1].isalnum() else ""
+    return bool(re.search(f"{prefix}{re.escape(clean)}{suffix}", text))
+
+
+GUEST_PROFILE_QUERY_CATEGORIES = {
+    "restrooms": {
+        "terms": ("restroom", "bathroom", "toilet"),
+        "kinds": ("restrooms",),
+    },
+    "first_aid": {
+        "terms": ("first aid", "medical station", "nurse", "health center"),
+        "kinds": ("first_aid",),
+    },
+    "guest_services": {
+        "terms": ("guest services", "lost and found", "ticket help", "information desk", "stroller", "locker"),
+        "kinds": ("guest_services",),
+        "services": ("lost and found", "ticket help", "accessibility help", "separated-party support"),
+    },
+    "food_dietary": {
+        "terms": ("food", "eat", "restaurant", "vegetarian", "vegan", "kids meal", "dietary", "quick pickup"),
+        "kinds": ("food",),
+        "dietary": ("vegetarian", "vegan", "kids meals", "quick pickup", "lighter options"),
+    },
+    "water_cooling_quiet": {
+        "terms": ("water", "water refill", "shade", "cooling", "quiet", "sensory", "overstimulated", "break"),
+        "kinds": ("water_refill", "quiet_or_cooling"),
+    },
+    "accessibility_map": {
+        "terms": ("accessible", "accessibility", "wheelchair", "step-free", "step free", "elevator", "transfer", "accessible entrance"),
+        "fields": ("accessibilityNote",),
+    },
+    "attraction_facts": {
+        "terms": ("ride", "coaster", "show", "height requirement", "how tall", "duration", "indoor", "theater"),
+        "kinds": ("attraction", "quiet_or_cooling"),
+    },
+}
+
+
+def _load_guest_triage_venue_profile() -> dict[str, Any]:
+    try:
+        from venue_profile import build_venue_profile
+
+        profile = build_venue_profile()
+        return profile if isinstance(profile, dict) else {}
+    except Exception as error:
+        return {"status": "unavailable", "readiness_issues": [str(error)[:240]]}
+
+
+def _guest_triage_profile_context(message: str, issue_type: str) -> dict[str, Any]:
+    profile = _load_guest_triage_venue_profile()
+    real_inputs = profile.get("realInputs") if isinstance(profile.get("realInputs"), dict) else {}
+    identity = profile.get("venueIdentity") if isinstance(profile.get("venueIdentity"), dict) else {}
+    readiness = profile.get("readiness") if isinstance(profile.get("readiness"), dict) else {}
+    location_details = real_inputs.get("locationDetails") if isinstance(real_inputs.get("locationDetails"), dict) else {}
+    category = _profile_query_category(message)
+    location_matches = _profile_location_matches(message, location_details)
+    category_matches = _profile_category_location_matches(category, location_details) if issue_type in {"profile_information_request", "accessibility_accommodation"} else []
+    matches = _dedupe_profile_matches([*location_matches, *category_matches])[:5]
+    can_answer = issue_type in {"profile_information_request", "accessibility_accommodation"} and bool(matches) and bool(category)
+    if can_answer:
+        status = "answered_from_profile"
+    elif issue_type == "unclear_guest_request":
+        status = "needs_human_review"
+    elif issue_type not in {"profile_information_request", "accessibility_accommodation"} and not location_matches:
+        status = "not_applicable"
+    else:
+        status = "needs_human_review"
+    venue_name = str(identity.get("name") or "active park profile").strip()
+    context = {
+        "status": status,
+        "venue_name": venue_name,
+        "profile_type": identity.get("profileType"),
+        "readiness_status": readiness.get("status"),
+        "category": category,
+        "matched_locations": matches,
+        "human_review_required": status == "needs_human_review",
+        "human_review_place": "guest_services_information_desk" if status == "needs_human_review" else None,
+        "limitations": _profile_context_limitations(profile),
+    }
+    if can_answer:
+        context["guest_reply_draft"] = _profile_grounded_reply(category, matches, venue_name)
+        context["evidence"] = [f"{item.get('name')} ({item.get('kind') or item.get('category') or 'profile place'})" for item in matches[:3]]
+    elif status == "needs_human_review":
+        context["guest_reply_draft"] = "I am not fully certain from the park profile. I will route this to Guest Services so a team member can confirm the right answer."
+        context["evidence"] = []
+    return context
+
+
+def _profile_query_category(text: str) -> str | None:
+    lowered = text.lower()
+    best_category = None
+    best_score = 0
+    for category, config in GUEST_PROFILE_QUERY_CATEGORIES.items():
+        score = sum(1 for term in config.get("terms", ()) if _guest_term_matches(lowered, str(term)))
+        if score > best_score:
+            best_score = score
+            best_category = category
+    return best_category
+
+
+def _profile_location_matches(text: str, location_details: dict[str, Any]) -> list[dict[str, Any]]:
+    lowered = text.lower()
+    matches: list[dict[str, Any]] = []
+    for key, detail in location_details.items():
+        if not isinstance(detail, dict):
+            continue
+        name = str(detail.get("name") or key or "").strip()
+        if name and name.lower() in lowered:
+            matches.append(_compact_profile_location(name, detail, "name_match"))
+    return matches
+
+
+def _profile_category_location_matches(category: str | None, location_details: dict[str, Any]) -> list[dict[str, Any]]:
+    if not category:
+        return []
+    config = GUEST_PROFILE_QUERY_CATEGORIES.get(category) or {}
+    kinds = {str(item).lower() for item in config.get("kinds", ())}
+    services = tuple(str(item).lower() for item in config.get("services", ()))
+    dietary = tuple(str(item).lower() for item in config.get("dietary", ()))
+    fields = tuple(str(item) for item in config.get("fields", ()))
+    matches: list[dict[str, Any]] = []
+    for key, detail in location_details.items():
+        if not isinstance(detail, dict):
+            continue
+        kind = str(detail.get("kind") or detail.get("category") or "").lower()
+        service_values = " ".join(str(item).lower() for item in _as_list(detail.get("services")))
+        dietary_values = " ".join(str(item).lower() for item in _as_list(detail.get("dietaryTags")))
+        has_field = any(str(detail.get(field) or "").strip() for field in fields)
+        if kind in kinds or any(term in service_values for term in services) or any(term in dietary_values for term in dietary) or has_field:
+            matches.append(_compact_profile_location(str(detail.get("name") or key), detail, "category_match"))
+    return matches
+
+
+def _compact_profile_location(name: str, detail: dict[str, Any], match_type: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "kind": detail.get("kind") or detail.get("category"),
+        "zone_id": detail.get("zoneId") or detail.get("zone_id"),
+        "match_type": match_type,
+        "services": _as_list(detail.get("services"))[:4],
+        "dietary_tags": _as_list(detail.get("dietaryTags"))[:4],
+        "accessibility_note": str(detail.get("accessibilityNote") or "")[:220] or None,
+        "sensory_note": str(detail.get("sensoryNote") or "")[:220] or None,
+    }
+
+
+def _dedupe_profile_matches(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in matches:
+        key = str(item.get("name") or "").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _profile_grounded_reply(category: str, matches: list[dict[str, Any]], venue_name: str) -> str:
+    names = ", ".join(str(item.get("name")) for item in matches[:3] if item.get("name"))
+    lead = {
+        "restrooms": "The park profile shows restroom options at",
+        "first_aid": "The park profile shows First Aid at",
+        "guest_services": "The park profile routes this to",
+        "food_dietary": "The park profile shows food options at",
+        "water_cooling_quiet": "The park profile shows comfort options at",
+        "accessibility_map": "The park profile has accessibility notes for",
+        "attraction_facts": "The park profile has attraction information for",
+    }.get(category, "The park profile shows")
+    suffix = " Please confirm live availability with a nearby team member if conditions look different."
+    return f"{lead} {names or venue_name}.{suffix}"
+
+
+def _profile_context_limitations(profile: dict[str, Any]) -> list[str]:
+    limitations = ["Profile facts are not live wait, closure, staffing, or emergency authority."]
+    real_inputs = profile.get("realInputs") if isinstance(profile.get("realInputs"), dict) else {}
+    agent_context = real_inputs.get("agentContext") if isinstance(real_inputs.get("agentContext"), dict) else {}
+    limitations.extend(str(item)[:180] for item in _as_list(agent_context.get("knownGaps"))[:2])
+    return limitations
+
+
+def _classify_guest_message_context(text: str) -> dict[str, Any] | None:
+    if _is_lost_child_context(text):
+        return {
+            "issue_type": "lost_child_report",
+            "urgency": "critical",
+            "urgency_score": 99,
+            "sla_minutes": 1,
+            "matched_terms": _matched_context_terms(
+                text,
+                (
+                    "cannot find",
+                    "can't find",
+                    "missing",
+                    "lost",
+                    "gone",
+                    "separated",
+                    "year-old",
+                    "year old",
+                    "child",
+                    "kid",
+                    "son",
+                    "daughter",
+                ),
+            ),
+            "confidence": 0.92,
+        }
+    if _is_accessibility_context(text):
+        return {
+            "issue_type": "accessibility_accommodation",
+            "urgency": "high",
+            "urgency_score": 84,
+            "sla_minutes": 8,
+            "matched_terms": _matched_context_terms(
+                text,
+                (
+                    "accessibility",
+                    "accessible",
+                    "accommodation",
+                    "wheelchair",
+                    "mobility",
+                    "medical history",
+                    "cannot stand",
+                    "can't stand",
+                    "queue",
+                ),
+            ),
+            "confidence": 0.88,
+        }
+    return None
+
+
+def _is_lost_child_context(text: str) -> bool:
+    separation_terms = ("cannot find", "can't find", "missing", "lost", "gone", "separated")
+    child_terms = ("child", "kid", "son", "daughter", "boy", "girl", "toddler")
+    has_separation = any(term in text for term in separation_terms)
+    has_child_term = any(term in text for term in child_terms)
+    has_minor_age = bool(re.search(r"\b(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen)\s*[- ]\s*year\s*[- ]\s*old\b", text))
+    return has_separation and (has_child_term or has_minor_age)
+
+
+def _is_accessibility_context(text: str) -> bool:
+    accessibility_terms = ("accessibility", "accessible", "accommodation", "wheelchair", "mobility", "medical history")
+    injury_terms = ("injured", "hurt", "bleeding", "fell", "slipped", "accident", "collision", "broken")
+    if any(term in text for term in injury_terms):
+        return False
+    return any(term in text for term in accessibility_terms)
+
+
+def _matched_context_terms(text: str, terms: tuple[str, ...]) -> list[str]:
+    return [term for term in terms if term in text][:8]
+
+
+def _severity_for_triage(urgency: str) -> str:
+    if urgency == "critical":
+        return "critical"
+    if urgency == "high":
+        return "high"
+    if urgency == "medium":
+        return "medium"
+    return "low"
+
+
+def _guest_reply_draft(issue_type: str) -> str:
+    return {
+        "lost_child_report": "Stay with me here. I am contacting Security now. Please tell me the child's name, age, clothing, and last place you saw them.",
+        "heat_exhaustion_concern": "I am getting First Aid involved now. If it is safe, move with me to shade and stay with your friend while help comes.",
+        "injury_or_safety_incident": "I am calling the safety team now. Please stay where you are if it is safe, and tell me what happened and whether anyone is hurt.",
+        "weather_evacuation_confusion": "I can help route you calmly. Please follow the nearest staff direction to shelter, and tell me if anyone in your group needs accessibility support.",
+        "safety_rule_refusal": "For safety, the ride cannot proceed unless the rule is followed. I can bring a ride lead to help explain the requirement.",
+        "line_cutting_conflict": "I hear this is frustrating. Please stay separated from the other party while I get a lead to help resolve the queue issue.",
+        "accessibility_accommodation": "You do not need to share private medical details here. I will connect you with accessibility support and find a safe waiting option.",
+        "refund_request": "I understand why you want this reviewed. I can collect the details and route you to Guest Services, but I cannot promise a refund from here.",
+        "ride_closure_complaint": "I am sorry you waited through that closure. I can check current alternatives and route refund or compensation questions to Guest Services.",
+        "language_barrier": "I can help one step at a time. I will find translation support and help confirm where your family is.",
+        "angry_parent": "I hear how frustrating this has been for your family. I can help confirm what happened and get you a clear next step.",
+        "profile_information_request": "I can answer from the active park profile and flag anything that needs a live team confirmation.",
+        "unclear_guest_request": "I am not fully certain what you need yet. I will route this to Guest Services so a team member can clarify and help.",
+    }.get(issue_type, "I can help. I will collect the details and route this to the right park team.")
+
+
+def _guest_triage_staff_checklist(issue_type: str) -> list[str]:
+    return {
+        "lost_child_report": ["Radio Security/Ops immediately.", "Keep guardian at a fixed meeting point.", "Collect child name, age, clothing, and last seen location.", "Do not send guardian searching alone."],
+        "heat_exhaustion_concern": ["Contact First Aid immediately.", "Move guest to shade/cooling only if safe.", "Avoid medical diagnosis.", "Stay with party until care team arrives."],
+        "injury_or_safety_incident": ["Notify safety/medical lead.", "Preserve scene if needed.", "Ask what happened and whether anyone is hurt.", "Do not assign fault or diagnose."],
+        "weather_evacuation_confusion": ["Use calm shelter routing.", "Protect accessibility routes.", "Avoid panic language.", "Escalate blocked or confused flow to Ops Command."],
+        "safety_rule_refusal": ["Stop ride progression until compliant.", "State the rule clearly.", "Explain safety reason without bargaining.", "Escalate persistent refusal to ride lead/security."],
+        "line_cutting_conflict": ["Separate parties if safe.", "Acknowledge frustration.", "Call lead/security if escalating.", "Document queue location and witnesses."],
+        "accessibility_accommodation": ["Protect privacy.", "Do not ask for diagnosis.", "Offer accessibility support or safe waiting option.", "Route to accessibility lead."],
+        "refund_request": ["Empathize.", "Do not promise refund.", "Collect ticket/receipt and issue summary.", "Route to Guest Services policy owner."],
+        "ride_closure_complaint": ["Acknowledge wait impact.", "Do not promise reopen time.", "Offer current alternatives.", "Route compensation requests to Guest Services."],
+        "language_barrier": ["Use simple language.", "Find translation support.", "Confirm whether party is separated.", "Give one clear next step."],
+        "angry_parent": ["Acknowledge impact.", "Confirm what happened.", "Offer concrete next step.", "Escalate compensation or supervisor request."],
+        "profile_information_request": ["Answer only from active park profile evidence.", "Name the matched place or category.", "Do not claim live availability, wait, closure, staffing, or emergency authority.", "Escalate if profile evidence is missing or stale."],
+        "unclear_guest_request": ["Do not invent a park fact or policy.", "Ask one clarifying question if safe.", "Route to Guest Services information desk.", "Capture the exact guest wording for review."],
+    }.get(issue_type, ["Collect details.", "Route to responsible owner.", "Avoid promises outside policy."])
 
 
 def generate_park_issue_tickets_from_operational_backlog(backlog: dict[str, Any] | None, *, limit: int = 12) -> list[dict[str, Any]]:
@@ -760,6 +1325,8 @@ def _default_required_action(issue_type: str) -> str:
         "weather_evacuation_confusion": "Route to ops lead and give a covered accessible shelter path.",
         "accessibility_accommodation": "Route to Accessibility or Guest Services while preserving privacy.",
         "refund_request": "Route to Guest Services for policy review.",
+        "profile_information_request": "Answer only from the active park profile and remind guest to confirm live conditions.",
+        "unclear_guest_request": "Route to Guest Services for human clarification; do not invent park facts.",
     }.get(issue_type, "Route to responsible owner and capture resolution receipt.")
 
 
