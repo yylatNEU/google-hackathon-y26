@@ -23,6 +23,119 @@ def sample_state():
     return run(ParkSimulation().get_state())
 
 
+def test_parkpulse_api_identity_agent_and_handshake_wrappers(monkeypatch):
+    calls = []
+
+    monkeypatch.setenv("PARKPULSE_BAD_FLOAT_FOR_TEST", "not-a-number")
+    assert parkpulse_api._float_env("PARKPULSE_BAD_FLOAT_FOR_TEST", 2.5) == 2.5
+
+    monkeypatch.setenv("PARKPULSE_REQUIRE_SIGNED_ROLE_TOKEN", "false")
+    monkeypatch.setattr(parkpulse_api, "verify_external_role_identity", lambda headers, default_role="ops_team": {"authenticated": False, "status": "missing"})
+    monkeypatch.setattr(parkpulse_api, "verify_role_session", lambda token, secret: {"authenticated": False, "status": "missing", "reason": "no token"})
+    request = SimpleNamespace(headers={})
+    context = parkpulse_api._request_role_context(request, {"actorRole": "supervisor"}, default="ops_team")
+    assert context["auth_method"] == "unsigned_dev_role_header"
+    assert context["role"] == "supervisor"
+
+    monkeypatch.setattr(parkpulse_api, "agent_contract", lambda: {"status": "contract"})
+    monkeypatch.setattr(parkpulse_api, "agent_handshake_scenario_catalog", lambda: {"status": "scenarios"})
+    monkeypatch.setattr(parkpulse_api, "agent_handshake_protocol_docs", lambda: {"status": "docs"})
+    monkeypatch.setattr(parkpulse_api, "agent_handshake_live_state_feed", lambda body: {"body": body})
+    monkeypatch.setattr(parkpulse_api, "issue_agent_consent_grant", lambda body: {"grant": body})
+    monkeypatch.setattr(parkpulse_api, "run_agent_handshake_scenario_evaluations", lambda body: {"eval": body})
+    monkeypatch.setattr(parkpulse_api, "run_agent_handshake_policy_challenges", lambda body: {"challenge": body})
+    monkeypatch.setattr(parkpulse_api, "run_external_client_agent_demo", lambda body: {"external": body})
+    monkeypatch.setattr(parkpulse_api, "run_passport_second_run_demo", lambda body: {"passport": body})
+    monkeypatch.setattr(parkpulse_api, "verify_protocol_artifact", lambda body: {"artifact": body})
+    monkeypatch.setattr(parkpulse_api, "issue_delegation_token", lambda body: {"token": body})
+    monkeypatch.setattr(parkpulse_api, "register_agent_onboarding", lambda body: {"registered": body})
+    monkeypatch.setattr(parkpulse_api, "certification_issuer_metadata", lambda: {"issuer": "unit"})
+    monkeypatch.setattr(parkpulse_api, "verify_agent_certification_credential", lambda body: {"verified": body})
+    monkeypatch.setattr(parkpulse_api, "revoke_agent_certification_credential", lambda body: {"revoked": body})
+    monkeypatch.setattr(parkpulse_api, "agent_trust_registry_status", lambda: {"registry": "ready"})
+    monkeypatch.setattr(parkpulse_api, "list_agent_trust_partners", lambda: [{"partner": "p1"}])
+    monkeypatch.setattr(parkpulse_api, "upsert_agent_trust_partner", lambda body: {"partner": body})
+    monkeypatch.setattr(parkpulse_api, "list_agent_trust_keys", lambda: [{"kid": "k1"}])
+    monkeypatch.setattr(parkpulse_api, "rotate_agent_certification_key", lambda body: {"rotated": body})
+    monkeypatch.setattr(parkpulse_api, "list_agent_credential_revocations", lambda limit=100: [{"limit": limit}])
+    monkeypatch.setattr(parkpulse_api, "list_agent_trust_audit_events", lambda limit=100: [{"audit_limit": limit}])
+    monkeypatch.setattr(parkpulse_api, "get_agent_onboarding", lambda agent_id: {"agent_id": agent_id})
+    monkeypatch.setattr(parkpulse_api, "_identity_readiness_payload", lambda: {"identity": "ready"})
+    monkeypatch.setattr(
+        parkpulse_api,
+        "_require_role_action",
+        lambda request, action, name, body=None, default_role=None: calls.append((action, name, body, default_role)) or {"allowed": True},
+    )
+
+    assert run(parkpulse_api.park_agent_contract())["status"] == "contract"
+    assert run(parkpulse_api.park_agent_handshake_scenarios())["status"] == "scenarios"
+    assert run(parkpulse_api.park_agent_handshake_docs())["status"] == "docs"
+    assert run(parkpulse_api.park_agent_handshake_live_state({"state": 1}))["body"]["state"] == 1
+    assert run(parkpulse_api.park_agent_handshake_consent_grant({"grant": 1}))["grant"]["grant"] == 1
+    assert run(parkpulse_api.park_agent_handshake_scenario_eval({"case": 1}))["eval"]["case"] == 1
+    assert run(parkpulse_api.park_agent_handshake_policy_challenges({"case": 2}))["challenge"]["case"] == 2
+    assert run(parkpulse_api.park_agent_handshake_external_client_demo({"client": 1}))["external"]["client"] == 1
+    assert run(parkpulse_api.park_agent_handshake_passport_second_run_demo({"run": 2}))["passport"]["run"] == 2
+    assert run(parkpulse_api.park_agent_handshake_verify_artifact({"artifact": 1}))["artifact"]["artifact"] == 1
+    assert run(parkpulse_api.park_agent_delegation_token({"scope": "read"}))["token"]["scope"] == "read"
+    assert run(parkpulse_api.park_agent_onboarding_register({"agent": "a"}))["registered"]["agent"] == "a"
+    assert run(parkpulse_api.park_agent_onboarding_issuer())["issuer"] == "unit"
+    assert run(parkpulse_api.park_agent_onboarding_verify_credential({"credential": "c"}))["verified"]["credential"] == "c"
+    assert run(parkpulse_api.park_agent_onboarding_revoke_credential(object(), {"credential": "c"}))["revoked"]["credential"] == "c"
+    assert run(parkpulse_api.park_agent_trust_status(object()))["auth_boundary"]["identity"] == "ready"
+    assert run(parkpulse_api.park_agent_trust_partners(object()))[0]["partner"] == "p1"
+    assert run(parkpulse_api.park_agent_trust_partner_upsert(object(), {"id": "p"}))["partner"]["id"] == "p"
+    assert run(parkpulse_api.park_agent_trust_keys(object()))[0]["kid"] == "k1"
+    assert run(parkpulse_api.park_agent_trust_key_rotate(object(), {"kid": "k1"}))["rotated"]["kid"] == "k1"
+    assert run(parkpulse_api.park_agent_trust_revocations(object(), limit=3))[0]["limit"] == 3
+    assert run(parkpulse_api.park_agent_trust_audit(object(), limit=4))[0]["audit_limit"] == 4
+    assert run(parkpulse_api.park_agent_onboarding_get("agent-1"))["agent_id"] == "agent-1"
+    assert any(call[1] == "agent_certification_revocation" for call in calls)
+
+
+def test_parkpulse_api_agent_wrapper_error_translations(monkeypatch):
+    class FailingLiteSimulation:
+        async def get_state_lite(self):
+            raise RuntimeError("state unavailable")
+
+    class SuccessfulLiteSimulation:
+        async def get_state_lite(self):
+            return {"guestFlow": {"rides": []}}
+
+    monkeypatch.setattr(parkpulse_api, "park_simulation", FailingLiteSimulation())
+    monkeypatch.setattr(parkpulse_api, "_require_role_action", lambda *args, **kwargs: {"allowed": True})
+    monkeypatch.setattr(parkpulse_api, "certify_agent_onboarding", lambda agent_id, body, **kwargs: {"agent_id": agent_id, "has_state": "park_state" in kwargs})
+    certified = run(parkpulse_api.park_agent_onboarding_certify("agent-1", object(), {"ok": True}))
+    assert certified == {"agent_id": "agent-1", "has_state": False}
+
+    monkeypatch.setattr(parkpulse_api, "get_agent_onboarding", lambda agent_id: (_ for _ in ()).throw(KeyError(agent_id)))
+    with pytest.raises(Exception) as get_error:
+        run(parkpulse_api.park_agent_onboarding_get("missing"))
+    assert getattr(get_error.value, "status_code", None) == 404
+
+    monkeypatch.setattr(parkpulse_api, "commerce_agent_evaluate", lambda session_id, body: (_ for _ in ()).throw(KeyError(session_id)))
+    with pytest.raises(Exception) as commerce_missing:
+        run(parkpulse_api.park_commerce_agent_evaluate({"session_id": "missing"}))
+    assert getattr(commerce_missing.value, "status_code", None) == 404
+    monkeypatch.setattr(parkpulse_api, "commerce_agent_evaluate", lambda session_id, body: (_ for _ in ()).throw(PermissionError("forbidden")))
+    with pytest.raises(Exception) as commerce_forbidden:
+        run(parkpulse_api.park_commerce_agent_evaluate({"session_id": "s1"}))
+    assert getattr(commerce_forbidden.value, "status_code", None) == 403
+
+    monkeypatch.setattr(parkpulse_api, "queue_agent_reroute", lambda session_id, body, **kwargs: {"session_id": session_id, "has_state": "park_state" in kwargs})
+    reroute = run(parkpulse_api.park_queue_agent_reroute({"sessionId": "s1"}))
+    assert reroute == {"session_id": "s1", "has_state": False}
+    monkeypatch.setattr(parkpulse_api, "park_simulation", SuccessfulLiteSimulation())
+    monkeypatch.setattr(parkpulse_api, "queue_agent_reroute", lambda session_id, body, **kwargs: (_ for _ in ()).throw(KeyError(session_id)))
+    with pytest.raises(Exception) as queue_missing:
+        run(parkpulse_api.park_queue_agent_reroute({"session_id": "missing"}))
+    assert getattr(queue_missing.value, "status_code", None) == 404
+    monkeypatch.setattr(parkpulse_api, "queue_agent_reroute", lambda session_id, body, **kwargs: (_ for _ in ()).throw(PermissionError("forbidden")))
+    with pytest.raises(Exception) as queue_forbidden:
+        run(parkpulse_api.park_queue_agent_reroute({"session_id": "s1"}))
+    assert getattr(queue_forbidden.value, "status_code", None) == 403
+
+
 def test_find_industrial_dossier_accepts_live_conflict_alias():
     payload = {
         "dossiers": [
