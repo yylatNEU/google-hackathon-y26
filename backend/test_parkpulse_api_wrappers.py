@@ -136,6 +136,150 @@ def test_parkpulse_api_agent_wrapper_error_translations(monkeypatch):
     assert getattr(queue_forbidden.value, "status_code", None) == 403
 
 
+def test_parkpulse_api_session_wrappers_success_errors_and_fallback(monkeypatch):
+    class SuccessfulLiteSimulation:
+        async def get_state_lite(self):
+            return {"guestFlow": {"rides": []}}
+
+    class FailingLiteSimulation:
+        async def get_state_lite(self):
+            raise RuntimeError("state unavailable")
+
+    monkeypatch.setattr(parkpulse_api, "park_simulation", SuccessfulLiteSimulation())
+    monkeypatch.setattr(parkpulse_api, "get_agent_session", lambda session_id: {"mode": "get", "session_id": session_id})
+    monkeypatch.setattr(parkpulse_api, "capability_handshake", lambda session_id, body: {"mode": "capabilities", "body": body})
+    monkeypatch.setattr(parkpulse_api, "intent_handshake", lambda session_id, body: {"mode": "intent", "body": body})
+    monkeypatch.setattr(parkpulse_api, "propose_plan", lambda session_id, body, **kwargs: {"mode": "propose", "has_state": "park_state" in kwargs})
+    monkeypatch.setattr(parkpulse_api, "counter_proposal", lambda session_id, body, **kwargs: {"mode": "counter", "has_state": "park_state" in kwargs})
+    monkeypatch.setattr(parkpulse_api, "commit_plan", lambda session_id, body: {"mode": "commit", "body": body})
+    monkeypatch.setattr(parkpulse_api, "evaluate_policy_action", lambda session_id, body: {"mode": "policy", "body": body})
+    monkeypatch.setattr(parkpulse_api, "monitor_session", lambda session_id, body, **kwargs: {"mode": "monitor", "event": body["event"], "has_state": "park_state" in kwargs})
+    monkeypatch.setattr(parkpulse_api, "escalate_agent_session", lambda session_id, body: {"mode": "escalate", "body": body})
+    monkeypatch.setattr(parkpulse_api, "session_protocol_receipt", lambda session_id, body: {"mode": "receipt", "body": body})
+    monkeypatch.setattr(parkpulse_api, "close_agent_session", lambda session_id, body: {"mode": "close", "body": body})
+
+    assert run(parkpulse_api.park_agent_session("s1"))["session_id"] == "s1"
+    assert run(parkpulse_api.park_agent_capability_handshake("s1", {"cap": True}))["mode"] == "capabilities"
+    assert run(parkpulse_api.park_agent_intent_handshake("s1", {"intent": "queue"}))["mode"] == "intent"
+    assert run(parkpulse_api.park_agent_propose("s1", {"x": 1})) == {"mode": "propose", "has_state": True}
+    assert run(parkpulse_api.park_agent_counter("s1", {"x": 1})) == {"mode": "counter", "has_state": True}
+    assert run(parkpulse_api.park_agent_commit("s1", {"ok": True}))["mode"] == "commit"
+    assert run(parkpulse_api.park_agent_policy_check("s1", {"action": "reroute"}))["mode"] == "policy"
+    assert run(parkpulse_api.park_agent_monitor("s1", None)) == {"mode": "monitor", "event": "live", "has_state": True}
+    assert run(parkpulse_api.park_agent_escalate("s1", {"why": "unit"}))["mode"] == "escalate"
+    assert run(parkpulse_api.park_agent_receipt("s1", {"receipt": True}))["mode"] == "receipt"
+    assert run(parkpulse_api.park_agent_close("s1", {"done": True}))["mode"] == "close"
+
+    monkeypatch.setattr(parkpulse_api, "park_simulation", FailingLiteSimulation())
+    assert run(parkpulse_api.park_agent_propose("s1", {"x": 1})) == {"mode": "propose", "has_state": False}
+    assert run(parkpulse_api.park_agent_counter("s1", {"x": 1})) == {"mode": "counter", "has_state": False}
+    assert run(parkpulse_api.park_agent_monitor("s1", {"event": "heartbeat"})) == {"mode": "monitor", "event": "heartbeat", "has_state": False}
+
+    monkeypatch.setattr(parkpulse_api, "park_simulation", SuccessfulLiteSimulation())
+    error_cases = [
+        ("get", "missing", lambda: monkeypatch.setattr(parkpulse_api, "get_agent_session", lambda session_id: (_ for _ in ()).throw(KeyError(session_id))), lambda: parkpulse_api.park_agent_session("missing"), 404),
+        ("capability_missing", "missing", lambda: monkeypatch.setattr(parkpulse_api, "capability_handshake", lambda session_id, body: (_ for _ in ()).throw(KeyError(session_id))), lambda: parkpulse_api.park_agent_capability_handshake("missing", {}), 404),
+        ("capability_forbidden", "s1", lambda: monkeypatch.setattr(parkpulse_api, "capability_handshake", lambda session_id, body: (_ for _ in ()).throw(PermissionError("forbidden"))), lambda: parkpulse_api.park_agent_capability_handshake("s1", {}), 403),
+        ("intent_missing", "missing", lambda: monkeypatch.setattr(parkpulse_api, "intent_handshake", lambda session_id, body: (_ for _ in ()).throw(KeyError(session_id))), lambda: parkpulse_api.park_agent_intent_handshake("missing", {}), 404),
+        ("intent_forbidden", "s1", lambda: monkeypatch.setattr(parkpulse_api, "intent_handshake", lambda session_id, body: (_ for _ in ()).throw(PermissionError("forbidden"))), lambda: parkpulse_api.park_agent_intent_handshake("s1", {}), 403),
+        ("propose_missing", "missing", lambda: monkeypatch.setattr(parkpulse_api, "propose_plan", lambda session_id, body, **kwargs: (_ for _ in ()).throw(KeyError(session_id))), lambda: parkpulse_api.park_agent_propose("missing", {}), 404),
+        ("propose_forbidden", "s1", lambda: monkeypatch.setattr(parkpulse_api, "propose_plan", lambda session_id, body, **kwargs: (_ for _ in ()).throw(PermissionError("forbidden"))), lambda: parkpulse_api.park_agent_propose("s1", {}), 403),
+        ("counter_missing", "missing", lambda: monkeypatch.setattr(parkpulse_api, "counter_proposal", lambda session_id, body, **kwargs: (_ for _ in ()).throw(KeyError(session_id))), lambda: parkpulse_api.park_agent_counter("missing", {}), 404),
+        ("counter_forbidden", "s1", lambda: monkeypatch.setattr(parkpulse_api, "counter_proposal", lambda session_id, body, **kwargs: (_ for _ in ()).throw(PermissionError("forbidden"))), lambda: parkpulse_api.park_agent_counter("s1", {}), 403),
+        ("commit_missing", "missing", lambda: monkeypatch.setattr(parkpulse_api, "commit_plan", lambda session_id, body: (_ for _ in ()).throw(KeyError(session_id))), lambda: parkpulse_api.park_agent_commit("missing", {}), 404),
+        ("commit_forbidden", "s1", lambda: monkeypatch.setattr(parkpulse_api, "commit_plan", lambda session_id, body: (_ for _ in ()).throw(PermissionError("forbidden"))), lambda: parkpulse_api.park_agent_commit("s1", {}), 403),
+        ("policy_missing", "missing", lambda: monkeypatch.setattr(parkpulse_api, "evaluate_policy_action", lambda session_id, body: (_ for _ in ()).throw(KeyError(session_id))), lambda: parkpulse_api.park_agent_policy_check("missing", {}), 404),
+        ("policy_forbidden", "s1", lambda: monkeypatch.setattr(parkpulse_api, "evaluate_policy_action", lambda session_id, body: (_ for _ in ()).throw(PermissionError("forbidden"))), lambda: parkpulse_api.park_agent_policy_check("s1", {}), 403),
+        ("monitor_missing", "missing", lambda: monkeypatch.setattr(parkpulse_api, "monitor_session", lambda session_id, body, **kwargs: (_ for _ in ()).throw(KeyError(session_id))), lambda: parkpulse_api.park_agent_monitor("missing", {}), 404),
+        ("monitor_forbidden", "s1", lambda: monkeypatch.setattr(parkpulse_api, "monitor_session", lambda session_id, body, **kwargs: (_ for _ in ()).throw(PermissionError("forbidden"))), lambda: parkpulse_api.park_agent_monitor("s1", {}), 403),
+        ("escalate_missing", "missing", lambda: monkeypatch.setattr(parkpulse_api, "escalate_agent_session", lambda session_id, body: (_ for _ in ()).throw(KeyError(session_id))), lambda: parkpulse_api.park_agent_escalate("missing", {}), 404),
+        ("escalate_forbidden", "s1", lambda: monkeypatch.setattr(parkpulse_api, "escalate_agent_session", lambda session_id, body: (_ for _ in ()).throw(PermissionError("forbidden"))), lambda: parkpulse_api.park_agent_escalate("s1", {}), 403),
+        ("receipt_missing", "missing", lambda: monkeypatch.setattr(parkpulse_api, "session_protocol_receipt", lambda session_id, body: (_ for _ in ()).throw(KeyError(session_id))), lambda: parkpulse_api.park_agent_receipt("missing", {}), 404),
+        ("receipt_forbidden", "s1", lambda: monkeypatch.setattr(parkpulse_api, "session_protocol_receipt", lambda session_id, body: (_ for _ in ()).throw(PermissionError("forbidden"))), lambda: parkpulse_api.park_agent_receipt("s1", {}), 403),
+        ("close_missing", "missing", lambda: monkeypatch.setattr(parkpulse_api, "close_agent_session", lambda session_id, body: (_ for _ in ()).throw(KeyError(session_id))), lambda: parkpulse_api.park_agent_close("missing", {}), 404),
+        ("close_forbidden", "s1", lambda: monkeypatch.setattr(parkpulse_api, "close_agent_session", lambda session_id, body: (_ for _ in ()).throw(PermissionError("forbidden"))), lambda: parkpulse_api.park_agent_close("s1", {}), 403),
+    ]
+    for label, _session_id, configure, call, expected_status in error_cases:
+        configure()
+        with pytest.raises(Exception) as error:
+            run(call())
+        assert getattr(error.value, "status_code", None) == expected_status, label
+
+
+def test_parkpulse_api_demo_autodream_and_callable_agent_wrappers(monkeypatch):
+    state = {
+        "guestFlow": {
+            "activeScenario": {"key": "parade_pressure"},
+            "paths": [{"id": "p1", "congestionLevel": "91"}, {"id": "p2", "congestionLevel": 40}],
+            "zones": [{"id": "z1", "density": 88}, {"id": "bad", "density": "n/a"}],
+            "rides": [{"id": "r1", "waitMins": "65"}, {"id": "r2", "waitMins": 12}],
+        },
+        "operatingClock": {"eventSchedule": {"eventTrafficRiskPct": 77, "nextEvent": {"id": "show"}}},
+        "planningAgent": {"waves": 2},
+        "showtimeLearningLoop": {"summary": {"rows": 6}, "rows": [{"id": i} for i in range(8)]},
+    }
+
+    class SuccessfulSimulation:
+        async def get_state(self):
+            return state
+
+        async def get_state_lite(self):
+            return state
+
+    class FailingLiteSimulation:
+        async def get_state_lite(self):
+            raise RuntimeError("state unavailable")
+
+    monkeypatch.setattr(parkpulse_api, "park_simulation", SuccessfulSimulation())
+    monkeypatch.setattr(parkpulse_api, "demo_handshake", lambda current_state=None: {"has_state": current_state is not None})
+    monkeypatch.setattr(parkpulse_api, "demo_supply_chain_handshake", lambda scenario_mode: {"scenario_mode": scenario_mode})
+    monkeypatch.setattr(parkpulse_api, "identity_handshake", lambda body: {"identity": body})
+
+    assert run(parkpulse_api.park_agent_handshake_demo()) == {"has_state": True}
+    monkeypatch.setattr(parkpulse_api, "park_simulation", FailingLiteSimulation())
+    assert run(parkpulse_api.park_agent_handshake_demo()) == {"has_state": False}
+    assert run(parkpulse_api.park_supply_chain_handshake_demo({"scenarioMode": "cold_chain"}))["scenario_mode"] == "cold_chain"
+    assert run(parkpulse_api.park_supply_chain_handshake_demo(None))["scenario_mode"] == "supply_replenishment"
+    assert run(parkpulse_api.park_identity_handshake({"agent": "a1"}))["identity"]["agent"] == "a1"
+
+    monkeypatch.setattr(parkpulse_api, "run_autodream_benchmark", lambda state, **kwargs: {"status": "complete", "kwargs": kwargs})
+    monkeypatch.setattr(parkpulse_api, "record_mongo_autodream_benchmark", lambda benchmark: {"status": "stored", "benchmark_status": benchmark["status"]})
+    benchmark = run(parkpulse_api.park_autodream_benchmark(parkpulse_api.AutoDreamBenchmarkRequest(scenario_key="ride_down", seeds=1)))
+    assert benchmark["storage"]["status"] == "stored"
+
+    monkeypatch.setattr(parkpulse_api, "park_simulation", SuccessfulSimulation())
+    monkeypatch.setattr(
+        parkpulse_api,
+        "run_agent_tool",
+        lambda agent, tool, context, executor: {"agent": agent, "tool": tool, "context": context, "result": executor()},
+    )
+    monkeypatch.setattr(parkpulse_api, "latest_dispatches", lambda limit: [{"id": "d1"}, {"id": "d2"}])
+    monkeypatch.setattr(parkpulse_api, "delivery_summary", lambda dispatches: {"count": len(dispatches)})
+    monkeypatch.setattr(parkpulse_api, "response_summary", lambda dispatches: {"responses": len(dispatches)})
+    monkeypatch.setattr(parkpulse_api, "delivery_outbox_status", lambda: {"ready": True})
+    monkeypatch.setattr(parkpulse_api, "enforce_agent_tool_boundary", lambda agent, tool, payload: {"allowed": True, "tool": tool})
+    monkeypatch.setattr(parkpulse_api, "init_operational_memory", lambda force=False: {"refreshed": force})
+    monkeypatch.setattr(parkpulse_api, "get_operational_memory_dashboard", lambda query: {"query": query})
+    monkeypatch.setattr(parkpulse_api, "build_memory_ops_report", lambda query: {"overall_status": "healthy", "query": query})
+
+    request = parkpulse_api.CallableAgentRunRequest(context={"operator": "unit"}, horizon_minutes=30, policy_gate_checked=True)
+    planning = run(parkpulse_api.park_planning_agent_run(request))
+    traffic = run(parkpulse_api.park_traffic_agent_run(request))
+    safety = run(parkpulse_api.park_safety_agent_check(request))
+    delivery = run(parkpulse_api.park_delivery_agent_proof(request))
+    memory = run(parkpulse_api.park_memory_agent_status_post(parkpulse_api.CallableAgentRunRequest(context={"query": "ride", "refresh": "yes"})))
+
+    assert planning["agent"] == "planning_agent"
+    assert planning["result"]["showtimeLearning"]["rows"] == [{"id": i} for i in range(5)]
+    assert traffic["result"]["topCongestedPaths"][0]["id"] == "p1"
+    assert safety["result"]["evidence"]["highWaitRideCount"] == 1
+    assert delivery["result"]["summary"]["count"] == 2
+    assert memory["refreshStatus"] == {"refreshed": True}
+    assert parkpulse_api._safe_int("bad", default=7) == 7
+    assert parkpulse_api._guest_flow_from_state({"guestFlow": []}) == {}
+    assert parkpulse_api._operating_clock_from_state({"operatingClock": []}) == {}
+
+
 def test_find_industrial_dossier_accepts_live_conflict_alias():
     payload = {
         "dossiers": [
