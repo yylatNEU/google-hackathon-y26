@@ -118,13 +118,48 @@ def test_guest_triage_persists_guest_message_memory_for_training_recommendations
 def test_guest_triage_parsing_acknowledgement_and_learning_version_branches(monkeypatch, tmp_path):
     reset_loop(monkeypatch, tmp_path)
 
+    monkeypatch.delenv("PARKPULSE_PRODUCT_LEARNING_DB_PATH", raising=False)
+    monkeypatch.setenv("PARKPULSE_PRODUCT_LEARNING_LOG_PATH", str(tmp_path / "fallback-ledger.jsonl"))
+    assert loop._event_db_path().endswith("fallback-ledger.sqlite")
+    assert loop._event_storage_id({"event": "no-explicit-id"}).startswith("event-")
+    assert loop._read_events_jsonl(limit=1) == []
+
+    ledger = tmp_path / "fallback-ledger.jsonl"
+    ledger.write_text(
+        "\n".join(
+            [
+                "{bad json}",
+                json.dumps(["not", "a", "dict"]),
+                json.dumps({"id": "event-1", "event": "guest_message_triaged", "created_at": "2026-06-10T12:00:00Z"}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert [row["id"] for row in loop._read_events_jsonl(limit=10)] == ["event-1"]
+
+    monkeypatch.setattr(loop.sqlite3, "connect", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("db unavailable")))
+    assert loop._read_events_sqlite(limit=2) == []
+
     assert loop._first_json_object("") is None
     assert loop._first_json_object("[1, 2]") is None
     assert loop._first_json_object("prefix {\"reply\":\"ok\", \"nested\":{\"a\":\"}\"}} suffix") == {"reply": "ok", "nested": {"a": "}"}}
+    assert loop._first_json_object("prefix {\"reply\":\"unterminated\"") is None
     assert loop._first_json_object("prefix {bad json}") is None
     assert loop._first_json_object("no object here") is None
 
+    assert loop._sanitize_guest_triage_llm_reply("", "fallback") == "fallback"
+    assert loop._sanitize_guest_triage_llm_reply("As an AI trainer, refund approved.", "fallback") == "fallback"
+    assert loop._sanitize_guest_triage_llm_reply("Safe reply. " * 80, "fallback") == ("Safe reply. " * 80)[:520]
+    assert loop._conversational_guest_reply("refund", "refund_request", "", {}) == "I hear that you want help with a refund review."
+    assert loop._conversational_guest_reply(
+        "refund",
+        "refund_request",
+        "I hear that you want help with a refund review. Please visit Guest Services.",
+        {},
+    ).endswith("Guest Services.")
+
     assert loop._guest_message_acknowledgement("Where is vegetarian food?", "profile_information_request", {"category": "food_dietary"}) == "You are looking for vegetarian food options in the park."
+    assert loop._guest_message_acknowledgement("Where is vegetarian food near the coaster?", "profile_information_request", {"category": "food_dietary"}) == "You are looking for vegetarian food near the coaster."
     assert loop._guest_message_acknowledgement("Need water", "profile_information_request", {"category": "water_cooling_quiet"}).startswith("You are looking")
     assert loop._guest_message_acknowledgement("Need map", "profile_information_request", {"category": "accessibility_map"}).startswith("You are asking")
     assert loop._guest_message_acknowledgement("Need info", "profile_information_request", {"category": "unknown"}).startswith("You are asking")

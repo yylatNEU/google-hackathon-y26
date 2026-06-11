@@ -40,6 +40,38 @@ def test_staff_roleplay_session_persistence_helpers_and_assignment_reads(monkeyp
     assert roleplay._iso_timestamp("bad") == 0.0
     assert roleplay._iso_timestamp("2026-06-10T12:00:00Z") > 0
     assert roleplay._read_jsonl() == []
+    assert roleplay._get_staff_training_session("") is None
+
+    roleplay._persist_staff_training_session({"id": ""})
+    persisted_documents = []
+
+    class FakeCollection:
+        def replace_one(self, query, document, upsert=False):
+            persisted_documents.append((query, document, upsert))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "mongo_memory",
+        types.SimpleNamespace(
+            _clean_for_bson=lambda value: value,
+            _ensure_memory_initialized=lambda: None,
+            _memory=types.SimpleNamespace(_collection=lambda name: FakeCollection()),
+        ),
+    )
+    roleplay._persist_staff_training_session({"id": "mongo-session", "scenario_id": "refund_request", "trainee_name": "Mongo QA"})
+    assert persisted_documents[0][0] == {"_id": "mongo-session"}
+    assert persisted_documents[0][2] is True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "mongo_memory",
+        types.SimpleNamespace(
+            _clean_for_bson=lambda value: value,
+            _ensure_memory_initialized=lambda: (_ for _ in ()).throw(RuntimeError("mongo down")),
+            _memory=types.SimpleNamespace(_collection=lambda name: FakeCollection()),
+        ),
+    )
+    roleplay._persist_staff_training_session({"id": "ignored-session", "scenario_id": "refund_request"})
 
     log_path = tmp_path / "staff_training_sessions.jsonl"
     log_path.write_text(
@@ -57,6 +89,14 @@ def test_staff_roleplay_session_persistence_helpers_and_assignment_reads(monkeyp
     assignments = roleplay.list_staff_training_assignments()
     assert assignments["status"] == "ready"
     assert assignments["assignments"][0]["status"] in {"ready_for_shadowing", "complete", "assigned"}
+    assert roleplay.staff_training_certification_packet(assignment_id="missing")["status"] == "not_found"
+    assert roleplay.review_staff_training_receipt(decision="bad")["status"] == "invalid"
+    assert roleplay.review_staff_training_receipt(session_id="missing", decision="hold")["status"] == "not_found"
+    assert roleplay.finish_staff_training_session("missing")["status"] == "not_found"
+    empty_analytics_path = tmp_path / "empty_staff_training_sessions.jsonl"
+    monkeypatch.setenv("PARKPULSE_STAFF_TRAINING_LOG_PATH", str(empty_analytics_path))
+    assert roleplay.staff_training_analytics()["status"] == "empty"
+    monkeypatch.setenv("PARKPULSE_STAFF_TRAINING_LOG_PATH", str(log_path))
 
     normalized = roleplay._normalize_staff_training_session({"id": "session-1", "scenario_id": "missing", "trainee_name": "A" * 200})
     assert normalized["scenario_id"] == "lost_child_report"
@@ -82,6 +122,154 @@ def test_staff_roleplay_session_persistence_helpers_and_assignment_reads(monkeyp
     assert loaded["id"] == "persisted-session"
     assert roleplay._SESSIONS["persisted-session"]["scenario_id"] == "refund_request"
     assert roleplay._load_persisted_staff_training_session("") is None
+
+    monkeypatch.setitem(sys.modules, "mongo_memory", types.SimpleNamespace(get_memory_document=lambda collection, session_id: None))
+    log_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"event": "session_started", "id": "other-session", "scenario_id": "refund_request"}),
+                json.dumps(
+                    {
+                        "event": "session_finished",
+                        "session_id": "fallback-session",
+                        "scenario_id": "refund_request",
+                        "trainee_name": "Fallback QA",
+                        "assignment_id": "assign-2",
+                        "status": "finished",
+                        "turn_count": 2,
+                        "scorecard": {"overall": 84},
+                        "critical_miss": False,
+                        "active_learning_versions": [{"version_id": "v2", "summary": "refund escalation"}],
+                        "active_learning_version_ids": ["v2"],
+                        "learning_version_guidance": ["Escalate refund policy review."],
+                        "retrieved_training_context": {"counts": {"prior_sessions": 1}},
+                        "agent_contract": {"mode": "training_only"},
+                        "agent_tool_manifest": [{"id": "staff_training.retrieve_context"}],
+                        "tool_trace": [{"tool": "staff_training.retrieve_context"}],
+                        "completed_objectives": ["Acknowledge"],
+                        "missing_objectives": [],
+                        "created_at": "2026-06-10T12:30:00Z",
+                        "transcript": [{"speaker": "guest", "message": "The ride closed and I want a refund."}],
+                        "scores": [{"overall": 84}],
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    fallback = roleplay._load_persisted_staff_training_session("fallback-session")
+    assert fallback["id"] == "fallback-session"
+    assert fallback["scenario_id"] == "refund_request"
+    assert fallback["scorecard"]["overall"] == 84
+    assert fallback["agent_tool_manifest"][0]["id"] == "staff_training.retrieve_context"
+    assert roleplay._SESSIONS["fallback-session"]["assignment_id"] == "assign-2"
+
+
+def test_staff_roleplay_optional_dependency_error_fallbacks(monkeypatch, tmp_path):
+    reset_roleplay(monkeypatch, tmp_path)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "product_learning_loop",
+        types.SimpleNamespace(
+            active_learning_versions_for_scenario=lambda scenario_id, target_surface=None: (_ for _ in ()).throw(RuntimeError("version lookup failed")),
+            guest_triage_training_memory=lambda scenario_id, limit=80: (_ for _ in ()).throw(RuntimeError("memory lookup failed")),
+            recommended_training_scenarios_from_guest_triage=lambda limit=12: (_ for _ in ()).throw(RuntimeError("recommendation failed")),
+        ),
+    )
+    assert roleplay._active_learning_versions_for_scenario("refund_request") == []
+    memory = roleplay._guest_triage_training_memory("refund_request")
+    assert memory["status"] == "error"
+    assert "memory lookup failed" in memory["readiness_issues"][0]
+    assert roleplay._guest_triage_assignment_recommendations("guest_services") == []
+
+    monkeypatch.setitem(
+        sys.modules,
+        "gemini_provider",
+        types.SimpleNamespace(
+            get_gemini_agent_properties=lambda: (_ for _ in ()).throw(RuntimeError("provider config failed")),
+            get_gemini_model=lambda: "unused",
+        ),
+    )
+    provider = roleplay._llm_guest_provider_status()
+    assert provider["ready"] is False
+    assert provider["provider"] == "unknown"
+    assert "provider config failed" in provider["readiness_issues"][0]
+
+
+def test_staff_roleplay_json_sanitize_and_gemini_worker_branches(monkeypatch, tmp_path):
+    reset_roleplay(monkeypatch, tmp_path)
+
+    assert roleplay._first_json_object("") is None
+    assert roleplay._first_json_object("[1]") is None
+    assert roleplay._first_json_object("prefix {\"x\": 1} suffix") == {"x": 1}
+    assert roleplay._first_json_object("prefix {bad} suffix") is None
+    assert roleplay._first_json_object("no object") is None
+
+    assert roleplay._sanitize_llm_guest_reply("", "fallback") == "fallback"
+    assert roleplay._sanitize_llm_guest_reply("As an AI trainer, your score needs work.", "fallback") == "fallback"
+    long_reply = "Safe guest reply. " * 40
+    assert roleplay._sanitize_llm_guest_reply(long_reply, "fallback") == ("Safe guest reply. " * 40)[:420]
+
+    calls = []
+
+    def run_success(args, **kwargs):
+        calls.append((args, kwargs))
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "guest_reply": "Thanks"}), stderr="")
+
+    monkeypatch.setattr(roleplay.subprocess, "run", run_success)
+    payload = roleplay._generate_gemini_json_sync_hard_timeout(
+        {"task": "guest-reply"},
+        timeout_seconds=0.1,
+        max_output_tokens=32,
+        temperature=0.0,
+    )
+    assert payload["guest_reply"] == "Thanks"
+    assert calls[0][1]["check"] is False
+    assert json.loads(calls[0][1]["input"])["max_output_tokens"] == 32
+
+    monkeypatch.setattr(
+        roleplay.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(returncode=7, stdout="", stderr="worker stderr"),
+    )
+    try:
+        roleplay._generate_gemini_json_sync_hard_timeout({}, timeout_seconds=0.1, max_output_tokens=8, temperature=0.0)
+        assert False, "expected nonzero worker exit to raise"
+    except RuntimeError as error:
+        assert "worker stderr" in str(error)
+
+    monkeypatch.setattr(
+        roleplay.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout="not-json", stderr=""),
+    )
+    try:
+        roleplay._generate_gemini_json_sync_hard_timeout({}, timeout_seconds=0.1, max_output_tokens=8, temperature=0.0)
+        assert False, "expected invalid worker JSON to raise"
+    except RuntimeError as error:
+        assert "invalid JSON" in str(error)
+
+    monkeypatch.setattr(
+        roleplay.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout=json.dumps({"ok": False, "error": "provider unavailable"}), stderr=""),
+    )
+    try:
+        roleplay._generate_gemini_json_sync_hard_timeout({}, timeout_seconds=0.1, max_output_tokens=8, temperature=0.0)
+        assert False, "expected provider failure payload to raise"
+    except RuntimeError as error:
+        assert "provider unavailable" in str(error)
+
+    def run_timeout(*args, **kwargs):
+        raise roleplay.subprocess.TimeoutExpired(cmd=["gemini-worker"], timeout=0.6)
+
+    monkeypatch.setattr(roleplay.subprocess, "run", run_timeout)
+    try:
+        roleplay._generate_gemini_json_sync_hard_timeout({}, timeout_seconds=0.1, max_output_tokens=8, temperature=0.0)
+        assert False, "expected timeout to raise"
+    except TimeoutError as error:
+        assert "hard timeout" in str(error)
 
 
 def test_policy_pack_exposes_governed_training_contract(monkeypatch, tmp_path):
