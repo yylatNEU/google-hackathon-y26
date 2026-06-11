@@ -87,7 +87,7 @@ test("command center exposes the current production operating-loop contract", as
   await expect(page.getByRole("link", { name: "Executive" })).toHaveAttribute("href", "/executive");
   await expect(page.getByRole("button", { name: "Run incident review" })).toBeEnabled({ timeout: 20000 });
   await expect(page.getByRole("button", { name: "Live-feed case" })).toBeEnabled({ timeout: 20000 });
-  await expect(page.getByText("Operating decision")).toBeVisible();
+  await expect(page.getByText("Operating decision", { exact: true })).toBeVisible();
   await expect(page.getByText("Decision audit receipt")).toBeVisible();
   await expect(page.getByRole("heading", { name: /Bounded dispatch ready|Human approval required/i })).toBeVisible();
   await expect(page.getByTestId("api-targets")).toHaveAttribute("data-api-targets", API_URL);
@@ -141,8 +141,8 @@ test("staff training roleplay keeps the employee turn and returns coaching", asy
   await sendReply.click();
 
   await expect(page.getByText(employeeReply)).toBeVisible({ timeout: 30000 });
-  await expect(page.getByText(/Strong response|Continue the conversation|Say next/)).toBeVisible({ timeout: 30000 });
-  await expect(page.getByText(/strong|passing/)).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText(/Strong response|Continue the conversation|Say next/).first()).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText(/strong|passing/).first()).toBeVisible({ timeout: 30000 });
   await expect(page.getByText("Scores: deterministic")).toBeVisible({ timeout: 30000 });
   await expect(page.locator("body")).not.toContainText(/Training session was not found|has expired/i);
   await expectNoAuthOrTransportRegression(page);
