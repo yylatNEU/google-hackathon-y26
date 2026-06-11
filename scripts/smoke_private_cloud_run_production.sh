@@ -77,7 +77,23 @@ echo "Checking service revision..."
 gcloud run services describe "$SERVICE" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
-  --format='value(status.latestReadyRevisionName,status.traffic[0].revisionName,status.traffic[0].percent)'
+  --format=json > "$TMP_DIR/service.json"
+python3 - "$TMP_DIR/service.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1]))
+status = payload.get("status") or {}
+traffic = status.get("traffic") or []
+production = [row for row in traffic if int(row.get("percent") or 0) == 100]
+if len(production) != 1:
+    raise SystemExit(f"Expected exactly one 100% traffic revision, got: {traffic}")
+print("production revision:", {
+    "revision": production[0].get("revisionName"),
+    "latest_ready": status.get("latestReadyRevisionName"),
+    "latest_created": status.get("latestCreatedRevisionName"),
+})
+PY
 
 echo "Stabilizing readiness hot path..."
 fast_readyz_count=0

@@ -6,9 +6,13 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
+os.environ.setdefault("ENABLE_BIGQUERY_ANALYTICS", "false")
+os.environ.setdefault("PARKPULSE_ENABLE_OTEL_SPANS", "false")
 os.environ.setdefault("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
+os.environ.setdefault("PARKPULSE_COPILOT_SEMANTIC_MEMORY", "false")
 
 import pytest
+from starlette.requests import Request
 
 import main
 import agent_ops_ledger
@@ -28,6 +32,16 @@ import training_readiness
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def signed_request(role: str = "ml_ops_admin") -> Request:
+    token = parkpulse_api.sign_role_session(
+        f"unit-{role}",
+        role,
+        "parkpulse-local-dev-secret-change-before-production",
+        ttl_seconds=900,
+    )
+    return Request({"type": "http", "headers": [(b"authorization", f"Bearer {token}".encode("latin-1"))]})
 
 
 def compact_state():
@@ -435,7 +449,7 @@ def test_main_customer_public_details_and_review_label_summary(monkeypatch):
     assert main._customer_agent_tool_for_mode("phone") == "customer_send_to_phone"
 
 
-async def _asgi_json(method, path, payload=None, query_string=b""):
+async def _asgi_json(method, path, payload=None, query_string=b"", headers=None):
     body = json.dumps(payload or {}).encode("utf-8")
     sent = []
     received = False
@@ -450,13 +464,17 @@ async def _asgi_json(method, path, payload=None, query_string=b""):
     async def send(message):
         sent.append(message)
 
+    header_rows = [(b"content-type", b"application/json")]
+    for key, value in (headers or {}).items():
+        header_rows.append((str(key).lower().encode("utf-8"), str(value).encode("utf-8")))
+
     await main.app(
         {
             "type": "http",
             "method": method,
             "path": path,
             "query_string": query_string if isinstance(query_string, bytes) else str(query_string).encode("utf-8"),
-            "headers": [(b"content-type", b"application/json")],
+            "headers": header_rows,
         },
         receive,
         send,
@@ -602,7 +620,7 @@ def test_main_runtime_wrappers_use_fast_fallback_and_schedule_refinement(monkeyp
         ("operator", "receipt-operator_command", "food court backlog"),
         ("agent", "receipt-agent_run", "coaster down"),
     ]
-    assert stored_receipts[0].get("agent_ops_inline") is None
+    assert stored_receipts[0].get("agent_ops_inline") is not True
     assert stored_receipts[1]["agent_ops_inline"] is False
 
     async def fail_full_module(timeout):
@@ -1167,6 +1185,46 @@ def test_main_heartbeat_controller_review_and_execution(monkeypatch):
 
     monkeypatch.setattr(main, "_heartbeat_controller_running", True)
     assert run(main._maybe_run_heartbeat_controller(advanced_steps=1)) is None
+
+
+def test_main_live_tick_blocks_when_park_is_closed(monkeypatch):
+    class ClosedSimulation:
+        def __init__(self):
+            self.steps = 0
+
+        async def get_state(self):
+            return {
+                "status": "ready",
+                "simTime": {"hour": 23, "minute": 15},
+                "operatingClock": {
+                    "phase": {
+                        "id": "post_close_drain",
+                        "label": "Post-close operations reset",
+                        "isOpenToGuests": False,
+                    }
+                },
+                "guestFlow": {"activeScenario": {"key": "closed"}},
+            }
+
+        async def step(self):
+            self.steps += 1
+
+    async def controller_should_not_run(advanced_steps=1):
+        raise AssertionError("heartbeat controller should not run while park is closed")
+
+    fake_simulation = ClosedSimulation()
+    monkeypatch.setattr(park_simulation, "park_simulation", fake_simulation)
+    monkeypatch.setattr(main, "_maybe_run_heartbeat_controller", controller_should_not_run)
+    headers = {"x-parkpulse-role-token": main.sign_role_session("closed-hour-test", "ops_team", main._role_auth_secret())}
+
+    status, payload = run(_asgi_json("POST", "/api/park/tick", {"minutes": 5, "controller": True}, headers=headers))
+
+    assert status == 200
+    assert payload["status"] == "park_closed"
+    assert payload["minutes"] == 0
+    assert payload["requested_minutes"] == 5
+    assert payload["heartbeat_controller"]["status"] == "not_run"
+    assert fake_simulation.steps == 0
 
 
 def test_api_session_wrappers_hot_cache_and_customer_emergency(monkeypatch):
@@ -2486,15 +2544,19 @@ def test_main_digital_twin_war_room_routes(monkeypatch):
     )
     monkeypatch.setattr(mongo_memory, "record_agent_learning_document", lambda document: document.get("_id") or "learning-1")
 
-    _, dashboard = run(_asgi_json("GET", "/api/park/digital-twin-war-room"))
+    ops_headers = {"x-parkpulse-role-token": main.sign_role_session("unit-ops", "ops_team", main._role_auth_secret())}
+    _, blocked = run(_asgi_json("GET", "/api/park/digital-twin-war-room"))
+    assert blocked["mode"] == "role_authorization_gate"
+
+    _, dashboard = run(_asgi_json("GET", "/api/park/digital-twin-war-room", headers=ops_headers))
     assert dashboard["status"] == "ready"
     assert dashboard["liveSignals"]["topZones"][0]["density"] == 91
 
-    _, exercise = run(_asgi_json("POST", "/api/park/digital-twin-war-room/run", {"scenarioId": "food_staff_crunch", "seed": "unit"}))
+    _, exercise = run(_asgi_json("POST", "/api/park/digital-twin-war-room/run", {"scenarioId": "food_staff_crunch", "seed": "unit"}, headers=ops_headers))
     assert exercise["status"] == "exercise_complete"
     assert exercise["agentOpsLedger"]["status"] == "recorded"
 
-    _, remediated = run(_asgi_json("POST", "/api/park/digital-twin-war-room/remediate", {"scenarioId": "food_spike", "seed": "unit"}))
+    _, remediated = run(_asgi_json("POST", "/api/park/digital-twin-war-room/remediate", {"scenarioId": "food_spike", "seed": "unit"}, headers=ops_headers))
     assert remediated["status"] == "remediation_complete"
     assert remediated["remediationLoop"]["promotion"]["status"] == "candidate_ready"
     assert remediated["remediationLoop"]["memoryWrite"]["status"] == "stored"
@@ -2665,7 +2727,11 @@ def test_api_agent_wrapper_fallback_and_error_branches(monkeypatch):
         return {"status": "certified", "park_state_attached": park_state is not None}
 
     monkeypatch.setattr(parkpulse_api, "certify_agent_onboarding", certify)
-    certified = run(parkpulse_api.park_agent_onboarding_certify("agent-1", {"scope": "ops"}))
+    with pytest.raises(parkpulse_api.HTTPException) as denied_certify:
+        run(parkpulse_api.park_agent_onboarding_certify("agent-1", signed_request("ops_team"), {"scope": "ops"}))
+    assert denied_certify.value.status_code == 403
+
+    certified = run(parkpulse_api.park_agent_onboarding_certify("agent-1", signed_request("ml_ops_admin"), {"scope": "ops"}))
     assert certified == {"status": "certified", "park_state_attached": False}
     assert certify_calls[-1]["park_state"] is None
 
@@ -2677,7 +2743,7 @@ def test_api_agent_wrapper_fallback_and_error_branches(monkeypatch):
     monkeypatch.setattr(parkpulse_api, "park_simulation", GoodLiteSimulation())
     monkeypatch.setattr(parkpulse_api, "certify_agent_onboarding", lambda agent_id, body, park_state=None: (_ for _ in ()).throw(KeyError(agent_id)))
     with pytest.raises(parkpulse_api.HTTPException) as missing_certify:
-        run(parkpulse_api.park_agent_onboarding_certify("agent-missing", {}))
+        run(parkpulse_api.park_agent_onboarding_certify("agent-missing", signed_request("ml_ops_admin"), {}))
     assert missing_certify.value.status_code == 404
     monkeypatch.setattr(parkpulse_api, "park_simulation", BrokenLiteSimulation())
 
@@ -2766,3 +2832,498 @@ def test_api_executive_and_synthetic_routes(monkeypatch):
     assert injected["status"] == "injected"
     assert injected["example"]["id"] == "synthetic-1"
     assert injected["state"]["status"] == "ready"
+
+
+def test_main_qa_gap_cache_slice_candidate_and_counterfactual_helpers(monkeypatch):
+    main._evidence_endpoint_cache.clear()
+    main._evidence_endpoint_refreshing.clear()
+
+    async def builder():
+        return {"status": "ready", "value": 1}
+
+    filled = run(main._cached_evidence_endpoint("qa-cache", 30, builder))
+    assert filled["evidence_cache"]["state"] == "miss_filled"
+    fresh = run(main._cached_evidence_endpoint("qa-cache", 30, builder))
+    assert fresh["evidence_cache"]["state"] == "fresh"
+    warming = run(main._cached_evidence_endpoint("qa-cache-miss", 30, builder, wait_on_miss=False, background_refresh=False))
+    assert warming["evidence_cache"]["state"] == "miss_refresh_deferred"
+
+    snapshot = {
+        "status": "ready",
+        "sample_count": 50,
+        "promoted_slice_policy": {
+            "status": "ready",
+            "id": "slice-artifact",
+            "slices": {
+                "food_spike": {"runtime_status": "promoted_challenger", "decision": "promote"},
+                "ride_down": {"runtime_status": "held", "decision": "hold_slice", "reason": "thin data"},
+            },
+        },
+        "model": {
+            "context_values": [
+                {
+                    "context": "food_spike",
+                    "ranked_policies": [{"policy_id": "live_complex_park_episode", "q_value": 88, "sample_count": 12}],
+                }
+            ],
+            "ranked_policies": [{"policy_id": "live_complex_park_episode", "average_reward": 66, "sample_count": 50}],
+        },
+    }
+    assert main._scenario_slice_gate(None, "food_spike")["status"] == "no_snapshot"
+    assert main._scenario_slice_gate(snapshot, "food_spike")["allowed"] is True
+    assert main._scenario_slice_gate(snapshot, "ride_down")["allowed"] is False
+    assert main._model_context_value(snapshot, "food_spike")["source"] == "context_policy_slice_promoted"
+    assert main._model_context_value(snapshot, "unknown")["source"] == "global_policy"
+
+    state = compact_state()
+    state["guestFlow"]["activeScenario"] = {"key": "food_spike", "name": "Food pressure"}
+    state["chaosEngine"] = {
+        "activeUnexpectedEvents": [
+            {"kind": "food_spike", "targetId": "foodCourt1", "intensity": 82, "signalReliabilityPct": 58, "visibility": "partial"},
+            {"kind": "payment_outage", "targetId": "foodCourt1", "intensity": 70},
+        ]
+    }
+    candidates = main._heartbeat_optimizer_candidates(state, snapshot)
+    assert candidates[0]["id"] == "food_redirect"
+    assert candidates[0]["slice_gate"]["status"] == "slice_promotable"
+
+    specs = main._counterfactual_mutation_specs_for_record(
+        {
+            "scenario_key": "food_spike",
+            "candidate": {"target": "food", "action": "redirect_food_demand"},
+            "active_incidents": state["chaosEngine"]["activeUnexpectedEvents"],
+        }
+    )
+    mutation_types = {spec["mutation_type"] for spec in specs}
+    assert {"food_pressure_resolved", "payment_outage_worsened", "signal_conflict_intensified"} <= mutation_types
+
+
+def test_main_qa_gap_ops_chat_context_payload_and_policy_refs(monkeypatch):
+    state = compact_state()
+    state["guestFlow"]["activeScenario"] = {"key": "ride_down", "name": "Ride down"}
+    state["chaosEngine"] = {
+        "activeUnexpectedEvents": [{"kind": "sensor_anomaly", "targetId": "dragonCoaster", "intensity": 77, "signalReliabilityPct": 62}]
+    }
+
+    class FastSimulation:
+        async def get_state_lite(self):
+            return state
+
+    monkeypatch.setattr(main, "_fast_park_simulation", FastSimulation())
+    monkeypatch.setattr(
+        main,
+        "_latest_heartbeat_action_record",
+        lambda action_id=None: {
+            "id": action_id or "action-1",
+            "status": "review",
+            "executed": False,
+            "scenario_key": "ride_down",
+            "candidate": {"target": "ride", "action": "reroute_down_ride"},
+            "policy_gate": {"allowed": False, "gate_status": "review", "findings": ["maintenance hold"]},
+            "active_incidents": state["chaosEngine"]["activeUnexpectedEvents"],
+        },
+    )
+    light = run(main._ops_chat_light_context_snapshot())
+    assert light["live_state"]["scenario"]["key"] == "ride_down"
+    assert light["latest_action"]["policy_gate"]["gate_status"] == "review"
+
+    async def explanation(action_id, use_llm=False):
+        return {"status": "ready", "explanation": {"headline": f"why {action_id}", "why_action": ["queue pressure"]}}
+
+    async def memory_payload(**kwargs):
+        return {
+            "status": "ready",
+            "park_understanding_score": {
+                "park_understanding_score": 74,
+                "grade": "B",
+                "evidence_confidence": "directional",
+                "mutation_consistency": {"score": 0.7},
+                "evidence_caps": {"executed_actions_in_window": 0, "score_cap": 72},
+                "dimensions": {"grounding": 80},
+            },
+        }
+
+    monkeypatch.setattr(main, "_heartbeat_explanation_payload", explanation)
+    monkeypatch.setattr(main, "_park_understanding_memory_payload", memory_payload)
+    monkeypatch.setattr(main, "_outcome_error_ledger_payload", lambda limit=8: {"summary": {"fail_count": 1}})
+    monkeypatch.setattr(main, "_delayed_outcome_attribution_payload", lambda limit=24: {"summary": {"eligible_training_rows": 2}})
+    monkeypatch.setattr(main, "_latest_counterfactual_mutation_rows", lambda limit=90: [{"status": "review", "scenario_key": "ride_down", "mutation_type": "ride_marked_safe"}])
+    monkeypatch.setattr(main, "_policy_trap_eval_payload", lambda limit=90: {"summary": {"fail_count": 1, "critical_trap_count": 0, "failure_modes": [{"key": "weak_grounding", "count": 1}]}})
+    monkeypatch.setattr(main, "_retrieval_quality_eval_payload", lambda limit=120: {"summary": {"pass_rate": 0.81, "miss_count": 1}})
+    context = run(main._ops_chat_context_snapshot())
+    assert context["explanation"]["headline"] == "why action-1"
+    assert context["park_understanding_score"]["grade"] == "B"
+    assert context["readiness_issues"] == []
+
+    monkeypatch.setattr(
+        main,
+        "park_ops_mcp_compact_context",
+        lambda tool_results: {
+            "memory_retrieval": {"retrieval_quality": {"miss_count": 2}},
+            "counterfactual_failures": {"policy_traps": {"fail_count": 1}},
+            "latest_action": {"id": "tool-action"},
+            "policy_gate": {"policy_gate": {"gate_status": "review", "allowed": False}},
+            "outcome_ledger": {"delayed_outcomes": {"eligible_training_rows": 3}},
+        },
+    )
+    tool_context = main._ops_chat_context_from_mcp_results(
+        [
+            {
+                "tool": "heartbeat",
+                "readiness_issues": ["needs more outcome rows"],
+            }
+        ]
+    )
+    assert tool_context["latest_action"]["policy_gate"]["gate_status"] == "review"
+    assert tool_context["readiness_issues"] == ["needs more outcome rows"]
+
+    async def fake_tools(message):
+        return [
+            {
+                "tool": "heartbeat",
+                "latest_action": {"id": "tool-action", "candidate": {"target": "ride", "action": "reroute_down_ride"}},
+                "policy_gate": {"gate_status": "review", "allowed": False},
+                "memory_retrieval": {"retrieval_quality": {"miss_count": 1}},
+                "counterfactual_failures": {"policy_traps": {"fail_count": 1}},
+                "live_state": {"scenario": {"key": "ride_down"}, "active_incidents": state["chaosEngine"]["activeUnexpectedEvents"]},
+            }
+        ]
+
+    async def attach_quality(payload, prompt, started_monotonic):
+        payload["quality"] = {"score": 92, "checks": {}, "mcp_tools": payload.get("mcp", {}).get("selected_tools", [])}
+        return payload
+
+    monkeypatch.setattr(main, "_ops_mcp_tool_results", fake_tools)
+    monkeypatch.setattr(main, "_attach_ops_chat_quality", attach_quality)
+    monkeypatch.setattr(main, "_write_jsonl_event", lambda path, payload: {"status": "written", "path": path, "id": payload.get("id")})
+    monkeypatch.setattr(main, "_ops_chat_blocked_intent", lambda message: "dispatch" if "dispatch" in message.lower() else None)
+    assert run(main._park_ops_chat_payload(""))["status"] == "error"
+    blocked = run(main._park_ops_chat_payload("dispatch this ride action"))
+    assert blocked["answer"]["headline"] == "I cannot take that authority."
+    structured = run(main._park_ops_chat_payload("status of the park", history=[{"role": "user", "content": "ride down?"}]))
+    assert structured["llm_used"] is False
+    assert structured["quality"]["score"] == 92
+
+    monkeypatch.setattr(main, "_fast_get_policy_books", None)
+    assert main._policy_ref_detail("PARK-SAFE-001")["status"] == "unavailable"
+    monkeypatch.setattr(
+        main,
+        "_fast_get_policy_books",
+        lambda: {
+            "policy_books": [
+                {
+                    "content": {
+                        "policy_book_id": "book-1",
+                        "decision_rules": [{"id": "PARK-SAFE-001", "name": "Safety rule", "required_evidence": ["maintenance"]}],
+                        "judges": {"safety": {"policy_ref": "PARK-SAFE-001", "name": "Safety judge"}},
+                        "action_cases": [{"id": "case-1", "title": "Ride hold", "policy_refs": ["PARK-SAFE-001"]}],
+                    }
+                }
+            ]
+        },
+    )
+    detail = main._policy_ref_detail("PARK-SAFE-001")
+    assert detail["status"] == "found"
+    assert detail["match_count"] == 2
+
+
+def test_main_qa_gap_live_cycles_and_weather_gate(monkeypatch):
+    class FakeSimulation:
+        def __init__(self):
+            self.steps = 0
+
+        async def step(self):
+            self.steps += 1
+
+        async def get_state(self):
+            return {"simTime": {"minute": self.steps}, "guestFlow": {"activeScenario": {"key": "ride_down"}}}
+
+    fake_simulation = FakeSimulation()
+    monkeypatch.setattr(park_simulation, "park_simulation", fake_simulation)
+
+    async def controller(advanced_steps=1):
+        return {"status": "review", "id": f"controller-{fake_simulation.steps}", "executed": False, "scenario_key": "ride_down"}
+
+    monkeypatch.setattr(main, "_maybe_run_heartbeat_controller", controller)
+    monkeypatch.setattr(main, "_delayed_outcome_attribution_payload", lambda limit=80: {"summary": {"eligible_training_rows": 1}})
+    monkeypatch.setattr(main, "_outcome_error_ledger_payload", lambda limit=80: {"summary": {"fail_count": 0}})
+
+    payload = run(main._live_outcome_cycles_payload(cycles=2, minutes_per_cycle=2))
+    assert payload["status"] == "completed"
+    assert payload["cycles"] == 2
+    assert len(payload["cycle_rows"]) == 2
+    assert fake_simulation.steps == 4
+
+    monkeypatch.setattr(main, "live_weather_policy_gate", lambda selected, state=None: {"allowed": False, "gate_status": "review", "findings": ["storm risk"]})
+    monkeypatch.setattr(main, "live_ride_ops_policy_gate", lambda selected, state=None: {"allowed": True, "gate_status": "allowed", "findings": ["ride ok"]})
+    monkeypatch.setattr(main, "live_guest_flow_policy_gate", lambda selected, state=None: {"allowed": True, "gate_status": "allowed", "findings": []})
+    monkeypatch.setattr(main, "live_staffing_policy_gate", lambda selected, state=None: {"allowed": True})
+    monkeypatch.setattr(main, "live_food_ops_policy_gate", lambda selected, state=None: {"allowed": True})
+    monkeypatch.setattr(main, "live_operator_signal_policy_gate", lambda selected, state=None: {"allowed": True})
+    gated = main._attach_live_weather_gate_to_payload({"run_telemetry": {"planner": {"selected_action": {"target": "ride", "action": "reroute"}}}})
+    governance = gated["run_telemetry"]["governance"]
+    assert governance["allowed"] is False
+    assert governance["gate_status"] == "review"
+    assert gated["run_telemetry"]["eval"]["scorecard"]["needs_human_approval"] is True
+
+
+def test_main_qa_gap_quality_memory_integration_weather_and_customer_boundaries(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "park_role_access_audit",
+        SimpleNamespace(
+            role_access_audit_status=lambda limit=5: {
+                "storage": "jsonl",
+                "events": [
+                    {
+                        "_id": "auth-1",
+                        "event_type": "mutation_denied",
+                        "resource": "operator_command",
+                        "role": "ops_team",
+                        "status": "denied",
+                        "reason": "policy",
+                        "subject": "operator-1",
+                    },
+                    {"_id": "auth-2", "event_type": "role_session_issued", "resource": "session", "status": "issued"},
+                    {"_id": "auth-3", "event_type": "other", "resource": "analytics"},
+                    "bad-row",
+                ],
+            }
+        ),
+    )
+    auth_rows = main._durable_role_authorization_rows(5)
+    assert auth_rows[0]["allowed"] is False
+    assert auth_rows[0]["path"] == "/api/park/operator-command"
+    assert auth_rows[0]["identity"] == {"subject": "operator-1"}
+    assert auth_rows[1]["allowed"] is True
+    assert auth_rows[2]["allowed"] is None
+
+    class StatusObj:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def public_dict(self):
+            return self.payload
+
+    monkeypatch.setitem(sys.modules, "gcp_trace_eval", SimpleNamespace(get_gcp_trace_eval_status=lambda: StatusObj({"ready": True, "platform": "trace"})))
+    monkeypatch.setitem(sys.modules, "arize_config", SimpleNamespace(get_arize_status=lambda: StatusObj({"ready": True, "enabled": True})))
+    monkeypatch.setitem(sys.modules, "evaluator_loop", SimpleNamespace(evaluator_loop_status=lambda: {"status": "ready"}))
+    integration = main._fast_integration_status()
+    assert integration["gcp_trace_eval"]["ready"] is True
+    assert integration["arize"]["enabled"] is True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "arize_config",
+        SimpleNamespace(get_arize_status=lambda: (_ for _ in ()).throw(RuntimeError("status down"))),
+    )
+    degraded = main._fast_integration_status()
+    assert degraded["gcp_trace_eval"]["mode"] == "status_error"
+    assert degraded["evaluator_loop"]["status"] == "status_error"
+
+    record = {
+        "prompt": "status",
+        "quality": {
+            "score": 92,
+            "headline": "grounded",
+            "checks": {"grounded": True, "latency": False},
+            "mcp_tools": ["get_park_state", "validate_policy"],
+        },
+        "boundary": "read-only",
+    }
+    assert main._ops_chat_quality_mongo_status(record, False)["status"] == "not_requested"
+    monkeypatch.setitem(sys.modules, "mongo_memory", SimpleNamespace(record_agent_learning_document=lambda document: "learning-1"))
+    assert main._ops_chat_quality_mongo_status(record, True)["status"] == "written"
+    monkeypatch.setitem(
+        sys.modules,
+        "mongo_memory",
+        SimpleNamespace(record_agent_learning_document=lambda document: (_ for _ in ()).throw(RuntimeError("mongo down"))),
+    )
+    assert main._ops_chat_quality_mongo_status(record, True)["status"] == "error"
+
+    monkeypatch.setenv("PARKPULSE_OPS_CHAT_QUALITY_MONGO", "false")
+    monkeypatch.setattr(
+        main,
+        "score_chat_payload",
+        lambda prompt, payload, latency_ms=0, max_latency_ms=8000: {
+            "score": 91,
+            "headline": "good",
+            "checks": {"grounded": True},
+            "mcp_tools": ["get_park_state"],
+        },
+    )
+    monkeypatch.setattr(main, "_write_jsonl_event", lambda path, payload: {"status": "written", "path": path, "id": payload.get("id")})
+    attached = run(main._attach_ops_chat_quality({"id": "chat-1", "created_at": "now", "answer": {"headline": "ok"}}, "status", 0.0))
+    assert attached["quality"]["score"] == 91
+    assert attached["quality_memory"]["mongo_memory"]["status"] == "not_requested"
+
+    monkeypatch.setattr(
+        main,
+        "_recent_jsonl_records",
+        lambda path, limit=40: [
+            {
+                "id": "quality-1",
+                "created_at": "now",
+                "prompt": "status",
+                "quality": {
+                    "score": 92,
+                    "headline": "ok",
+                    "checks": {"grounded": True, "latency": False},
+                    "mcp_tools": ["get_park_state", "validate_policy"],
+                },
+                "mcp_tools": ["get_park_state"],
+                "mongo_memory": {"status": "written"},
+            },
+            {"id": "bad-quality", "quality": "bad"},
+        ],
+    )
+    report = main._ops_chat_quality_report_payload(limit=2)
+    assert report["mode"] == "ops_chat_quality_memory_report"
+    assert report["recent_rows"][0]["failed_checks"] == ["latency"]
+    assert [item["tool"] for item in report["tool_coverage"]] == ["get_park_state", "validate_policy"]
+
+    fallback = {
+        "headline": "Fallback",
+        "answer": "This fallback answer is long enough to use safely.",
+        "evidence": ["live state"],
+        "uncertainty": ["memory sparse"],
+        "next_checks": ["policy"],
+        "cannot_do": ["custom"],
+    }
+    assert main._ops_chat_normalized_answer("bad", fallback) is fallback
+    normalized = main._ops_chat_normalized_answer({"headline": "H", "answer": "unknown command", "cannot_do": ["custom"]}, fallback)
+    assert normalized["answer"] == fallback["answer"]
+    assert {"dispatch", "promote_model", "load_bigquery_per_tick"} <= set(normalized["cannot_do"])
+
+    parsed = main._parse_gemini_json_text('```json\n{"answer":"ok",}\n```')
+    assert parsed == {"answer": "ok"}
+    assert main._parse_gemini_json_text('prefix {"answer":"ok"} suffix') == {"answer": "ok"}
+    with pytest.raises(json.JSONDecodeError):
+        main._parse_gemini_json_text("not json")
+
+    main._hot_endpoint_cache["park_state"] = (1.0, {"stale": True})
+    main._hot_endpoint_cache["park_state_lite"] = (1.0, {"stale": True})
+    monkeypatch.setattr(main, "ingest_live_weather_feed", lambda: {"status": "loaded", "provider": "unit"})
+    run(main._run_live_weather_refresh_background("unit"))
+    assert main._live_feed_weather_refresh_status["status"] == "loaded"
+    assert "park_state" not in main._hot_endpoint_cache
+    assert "park_state_lite" not in main._hot_endpoint_cache
+
+    monkeypatch.setattr(main, "ingest_live_weather_feed", lambda: (_ for _ in ()).throw(RuntimeError("weather down")))
+    run(main._run_live_weather_refresh_background("unit-error"))
+    assert main._live_feed_weather_refresh_status["status"] == "error"
+    assert main._live_feed_weather_refresh_status["readiness_issues"] == ["weather down"]
+
+    safe_actions = main._customer_agent_safe_actions(
+        [{"id": "show_route", "label": "Show route", "status": "ready"}, {"id": "unsafe", "label": "Dispatch"}]
+    )
+    assert safe_actions == [{"id": "show_route", "label": "Show route", "status": "ready"}]
+    assert {item["id"] for item in main._customer_agent_safe_actions("bad")} == {"show_route", "send_to_phone"}
+
+    async def fast_state():
+        return compact_state()
+
+    async def fake_generate(*args, **kwargs):
+        return {
+            "text": json.dumps(
+                {
+                    "answer": "Go to Indoor Hub and use the quieter route.",
+                    "actions": [{"id": "show_route", "label": "Show route"}, {"id": "unsafe", "label": "Dispatch"}],
+                    "recommendation": {"primary": "Indoor Hub"},
+                    "customer_action": {"label": "Route ready", "mode": "route"},
+                    "guardrails": ["No private data."],
+                }
+            ),
+            "transport": "unit",
+        }
+
+    class ReadyGemini:
+        def public_dict(self):
+            return {"ready": True, "provider": "Gemini", "model": "unit-model"}
+
+    monkeypatch.setattr(main, "_fast_park_state", fast_state)
+    monkeypatch.setitem(
+        sys.modules,
+        "park_multi_agent",
+        SimpleNamespace(
+            build_agent_builder_boundary_contract=lambda: {
+                "agents": [
+                    {
+                        "id": "customer_support_agent",
+                        "name": "Customer Support Agent",
+                        "allowed_tools": ["get_park_state", "customer_show_route"],
+                        "blocked_tools": ["dispatch_worker_task"],
+                        "decision_rights": ["answer_customer", "show_route"],
+                    }
+                ]
+            },
+            enforce_agent_tool_boundary=lambda agent_id, requested_tool, context: {"status": "allowed", "allowed": True, "tool": requested_tool},
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "gemini_provider", SimpleNamespace(get_gemini_agent_properties=lambda: ReadyGemini()))
+    monkeypatch.setitem(sys.modules, "gemini_hard_timeout", SimpleNamespace(generate_gemini_json_hard_timeout=fake_generate))
+    customer = run(main._customer_support_agent_payload({"question": "Where next?", "mode": "route", "station": {"id": "k1", "title": "Kiosk"}}))
+    assert customer["status"] == "ok"
+    assert customer["actions"] == [{"id": "show_route", "label": "Show route", "status": "ready"}]
+    assert customer["runtime"]["provider"] == "unit"
+
+    class NotReadyGemini:
+        def public_dict(self):
+            return {"ready": False, "provider": "Gemini", "readiness_issues": ["missing key"]}
+
+    monkeypatch.setitem(sys.modules, "gemini_provider", SimpleNamespace(get_gemini_agent_properties=lambda: NotReadyGemini()))
+    fallback_customer = run(main._customer_support_agent_payload({"question": "Help", "mode": "route"}))
+    assert fallback_customer["status"] == "fallback"
+    assert fallback_customer["runtime"]["fallbackReason"] == "missing key"
+
+
+def test_api_policy_regulation_judgment_allows_bounded_reroute_boundary_language(monkeypatch):
+    monkeypatch.setattr(parkpulse_api, "retrieve_operational_doctrine", lambda query, state: {"status": "ready", "query": query})
+    monkeypatch.setattr(
+        parkpulse_api,
+        "interpret_policy_for_action",
+        lambda query, state, doctrine: {
+            "status": "interpreted",
+            "approval_required": True,
+            "policy_refs": ["PARK-SAFE-001"],
+            "required_evidence": ["ride status"],
+            "blocked_actions": ["restart ride", "promise reopening time"],
+            "allowed_actions": ["reroute guests"],
+        },
+    )
+    governance = {
+        "allowed": True,
+        "gate_status": "allowed",
+        "policy_contract": {"status": "clean", "policy_refs": ["PARK-SAFE-001"]},
+        "findings": [],
+    }
+    state = compact_state()
+    safe = parkpulse_api._build_policy_regulation_judgment(
+        state=state,
+        scenario_key="ride_down",
+        selected_action={
+            "target": "ride",
+            "action": "reroute",
+            "label": "Hold affected queue intake and avoid any promise of reopening before clearance",
+        },
+        governance=governance,
+    )
+    assert safe["status"] == "allowed"
+    assert safe["human_review_reasons"] == []
+
+    reopen = parkpulse_api._build_policy_regulation_judgment(
+        state=state,
+        scenario_key="ride_down",
+        selected_action={"target": "ride", "action": "reopen", "label": "Reopen ride after quick check"},
+        governance=governance,
+    )
+    assert reopen["status"] == "review_required"
+    assert reopen["approval_owner"] == "park_operations_executive"
+
+    medical = parkpulse_api._build_policy_regulation_judgment(
+        state=state,
+        scenario_key="guest_care",
+        selected_action={"target": "medical", "action": "dispatch", "label": "Dispatch medical team"},
+        governance=governance,
+    )
+    assert medical["status"] == "review_required"

@@ -206,6 +206,13 @@ class PythonFallbackProxyServiceTests {
         assertThat(new String(liveFeedHealthResponse.getBody(), StandardCharsets.UTF_8))
             .contains("GET /api/park/live-feed-health");
 
+        MockHttpServletRequest liveFeedHealthSummaryRequest = new MockHttpServletRequest("GET", "/api/park/live-feed-health/summary");
+        ResponseEntity<byte[]> liveFeedHealthSummaryResponse = service.forward(liveFeedHealthSummaryRequest, new byte[0]);
+
+        assertThat(liveFeedHealthSummaryResponse.getStatusCode().value()).isEqualTo(409);
+        assertThat(new String(liveFeedHealthSummaryResponse.getBody(), StandardCharsets.UTF_8))
+            .contains("GET /api/park/live-feed-health/summary");
+
         MockHttpServletRequest liveFeedConfigRequest = new MockHttpServletRequest("GET", "/api/park/live-feeds/weather");
         ResponseEntity<byte[]> liveFeedConfigResponse = service.forward(liveFeedConfigRequest, new byte[0]);
 
@@ -316,6 +323,16 @@ class PythonFallbackProxyServiceTests {
         assertSpringOwnedRouteBlocked(service, "POST", "/api/park/review-label-pipeline/decision", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/review-label-pipeline/decision");
         assertSpringOwnedRouteBlocked(service, "POST", "/api/park/review-label-pipeline/auto-label", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/review-label-pipeline/auto-label");
         assertSpringOwnedRouteBlocked(service, "GET", "/api/park/review-label-pipeline/decisions", new byte[0], "GET /api/park/review-label-pipeline/decisions");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/tick", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/tick");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/time", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/time");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/causal-impact-demo", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/causal-impact-demo");
+        assertSpringOwnedRouteBlocked(service, "GET", "/api/park/episode-fitness", new byte[0], "GET /api/park/episode-fitness");
+        assertSpringOwnedRouteBlocked(service, "GET", "/api/park/digital-twin-war-room", new byte[0], "GET /api/park/digital-twin-war-room");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/digital-twin-war-room", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/digital-twin-war-room");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/digital-twin-war-room/run", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/digital-twin-war-room/run");
+        assertSpringOwnedRouteBlocked(service, "POST", "/api/park/digital-twin-war-room/remediate", "{}".getBytes(StandardCharsets.UTF_8), "POST /api/park/digital-twin-war-room/remediate");
+        assertSpringOwnedRouteBlocked(service, "GET", "/api/park/simulation-facade/ledger", new byte[0], "GET /api/park/simulation-facade/ledger");
+        assertSpringOwnedRouteBlocked(service, "GET", "/api/park/simulation-facade/health", new byte[0], "GET /api/park/simulation-facade/health");
 
         MockHttpServletRequest studioDraftsRequest = new MockHttpServletRequest("GET", "/api/park/experience-studio/drafts");
         ResponseEntity<byte[]> studioDraftsResponse = service.forward(studioDraftsRequest, new byte[0]);

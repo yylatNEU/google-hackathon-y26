@@ -381,6 +381,18 @@ def test_optimizer_custom_mixes_learning_and_revision_paths():
     }
     optimization = park_optimizer.optimize_park_response(state, "ride_down", sample_context(), llm_plan)
     assert optimization["mode"] == "gemini_plan_tournament"
+    from park_twin_engine import simulate_action_plan
+
+    selected_projection = simulate_action_plan(
+        state,
+        optimization["selected_plan"],
+        horizon_minutes=optimization["selected_plan"]["digital_twin_projection"]["horizon_minutes"],
+        seed=optimization["selected_plan"]["digital_twin_projection"]["seed"],
+    )
+    assert optimization["selected_plan"]["scorecard"]["score_source"] == "digital_twin_simulation"
+    assert optimization["selected_plan"]["scorecard"]["physics_overall"] == selected_projection["scorecard"]["overall"]
+    assert optimization["selected_plan"]["projected_impact"] == selected_projection["projected_impact"]
+    assert "projected_impact" in optimization["selected_plan"]["optimizer_estimate"]
     assert park_optimizer.revise_plan_after_response(optimization, {"score": 90}) is None
     revision = park_optimizer.revise_plan_after_response(optimization, {"score": 41, "takeRate": 0.2, "reactiveFollowThroughRate": 0.12})
     assert revision["selected_action"]["action"] == "reroute"
@@ -2178,6 +2190,19 @@ def test_agent_role_run_is_custom_and_persists_receipt():
     assert all(item.get("durable") is True for item in dispatches)
 
 
+def test_agent_role_mixed_ride_outage_keeps_ride_domain():
+    payload = run(
+        lazy_main._agent_role_run_payload(
+            "Thunder Loop goes down. Crowd pressure increases near Zone B, nearby food pickup is backed up, and staff availability is limited.",
+            "auto",
+        )
+    )
+    assert payload["selected_role"] == "react"
+    assert payload["role_receipt"]["scenario_key"] == "ride_down"
+    assert payload["unified_receipt"]["domain"] == "ride"
+    assert "Ride queue" in payload["run_telemetry"]["outcome"]["state_impact"]["before_after_line"]
+
+
 def test_agent_role_scan_never_dispatches_and_medical_stays_bounded():
     scan = run(lazy_main._agent_role_run_payload("scan vague guest complaints and worker taps for early crowd risk", "scan"))
     assert scan["selected_role"] == "scan"
@@ -2189,7 +2214,7 @@ def test_agent_role_scan_never_dispatches_and_medical_stays_bounded():
     assert medical["selected_role"] == "react"
     serialized = json.dumps(medical).lower()
     assert "medical" in serialized or "first aid" in serialized
-    assert "diagnose medical condition" in serialized
+    assert "infer medical condition" in serialized
     assert "broadcast sensitive guest details" in serialized
     assert medical["role_receipt"]["learning_update"]["validity"] in {"observed_response", "needs_response_before_policy_change"}
 

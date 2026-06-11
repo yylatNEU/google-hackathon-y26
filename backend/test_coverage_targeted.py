@@ -117,6 +117,9 @@ def test_gemini_hard_timeout_subprocess_success_errors_and_worker(monkeypatch, c
             self.killed = True
 
     async def create_success(*args, **kwargs):
+        assert kwargs["close_fds"] is False
+        assert "cwd" not in kwargs
+        assert kwargs["env"]["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] == "YES"
         return FakeProcess()
 
     monkeypatch.setattr(gemini_hard_timeout.asyncio, "create_subprocess_exec", create_success)
@@ -197,6 +200,9 @@ def test_gemini_worker_request_carries_timeout(monkeypatch):
     def fake_run(*args, **kwargs):
         captured["request"] = json.loads(kwargs["input"])
         captured["timeout"] = kwargs["timeout"]
+        captured["close_fds"] = kwargs.get("close_fds")
+        captured["cwd_present"] = "cwd" in kwargs
+        captured["fork_safety"] = kwargs["env"].get("OBJC_DISABLE_INITIALIZE_FORK_SAFETY")
         return SimpleNamespace(returncode=0, stdout='{"ok":true,"text":"{}"}', stderr="")
 
     monkeypatch.setenv("PARKPULSE_DISABLE_GEMINI_REST_FAST_PATH", "1")
@@ -208,6 +214,9 @@ def test_gemini_worker_request_carries_timeout(monkeypatch):
     assert _generate_gemini_json_sync_hard_timeout({}, timeout_seconds=9, max_output_tokens=100, temperature=0.2)["ok"] is True
     assert captured["request"]["timeout_seconds"] == 9
     assert captured["timeout"] == 9.5
+    assert captured["close_fds"] is False
+    assert captured["cwd_present"] is False
+    assert captured["fork_safety"] == "YES"
 
 
 def test_gcp_trace_eval_exporter_and_flush_paths(monkeypatch):

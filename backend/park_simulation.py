@@ -167,16 +167,25 @@ class ParkSimulation:
                 ("ride", "reroute_down_ride"): ("ride", "reroute"),
                 ("food", "redirect_food_demand"): ("traffic", "redirect_food"),
                 ("staff", "redeploy_staff"): ("staff", "redeploy"),
+                ("staff", "redeploy_food_staff"): ("staff", "redeploy_food_certified"),
                 ("crowd_safety", "calm_reroute"): ("ride", "reroute"),
                 ("guest_care", "family_care_reroute"): ("ride", "reroute"),
                 ("equipment", "hold_equipment_changes"): ("energy", "protect_hvac"),
+                ("traffic", "capacity_staged_reroute"): ("traffic", "staged_reroute"),
+                ("ride", "hold_queue_intake"): ("queue_gate", "hold_intake"),
             }
             target, action = action_aliases.get((target, action), (target, action))
             accepted = {
                 ("traffic", "redirect_food"): "Guest app routing shifted demand toward Food Court B and Arcade Zone.",
                 ("ride", "reroute"): "Dragon Coaster queue intake paused; guests are split across Sky Drop, Theater B, Arcade Zone, and Food Court B.",
                 ("staff", "redeploy"): "Two crowd-control staff moved to Coaster Plaza while protected ride-operator breaks remain intact.",
+                ("staff", "redeploy_food_certified"): "Food-certified staff moved to Food Court A pickup and prep bottlenecks while protected breaks remain intact.",
                 ("food", "suppress_item"): "Chicken tenders suppressed in mobile order at Food Court A; pizza combo promoted at Food Court B.",
+                ("food", "pause_mobile_order_intake"): "New mobile-order intake paused at Food Court A while the pickup backlog is recovered.",
+                ("food", "open_temp_pickup"): "Temporary Food Court A pickup lane opened with food-certified staff support.",
+                ("food", "open_satellite_cart"): "Satellite food cart opened outside the pressure zone to add service capacity and absorb simple orders.",
+                ("food", "throttle_mobile_pickup_windows"): "Mobile pickup windows paced to smooth demand while existing paid orders continue.",
+                ("traffic", "staged_reroute"): "Guest app nudges staged guests through multiple lower-pressure destinations with capacity-aware shares.",
                 ("energy", "protect_hvac"): "HVAC reduction blocked in indoor shelter zones while guest density remains high.",
                 ("medical", "dispatch"): "Medical team dispatched to the reported zone; guest privacy is protected and crowd flow is softened nearby.",
                 ("accessibility", "assist"): "Accessibility support dispatched and nearby routing adjusted for mobility needs.",
@@ -1729,6 +1738,7 @@ def _enrich_realistic_operating_state(
     open_callouts = int(staffing.get("openCallouts", 0) or 0)
     total_guests = int(flow.get("representedGuests", 0) or 0)
     phase = clock.get("phase", {}) if isinstance(clock.get("phase"), dict) else {}
+    closed_to_guests = _closed_to_guests_phase(str(phase.get("id", ""))) or phase.get("isOpenToGuests") is False
     demand_pressure = int(phase.get("demandPressurePct", 0) or 0)
     food_backlog = int(food_a.get("mobileOrderBacklog", 0) or 0)
     food_eta = int(food_a.get("pickupEtaMinutes", 0) or 0)
@@ -1821,6 +1831,8 @@ def _enrich_realistic_operating_state(
                 "likelyResponse": "moves only to verified indoor capacity",
             }
         )
+    if closed_to_guests:
+        guest_segments = []
 
     external_systems = [
         {
@@ -18178,9 +18190,10 @@ def _operating_clock(hour: int, minute: int, scenario_key: str, active_policy: s
         phase_id, label, demand, intent = "closing_exit", "Closing exit pressure", 72, "front gate, lockers, transit, stroller return, guest recovery"
         event_wave = "exit_wave"
     else:
-        phase_id, label, demand, intent = "post_close_drain", "Post-close guest drain and recovery", 26, "remaining exits, lost items, cleaning, restock, incident closeout"
+        phase_id, label, demand, intent = "post_close_drain", "Post-close operations reset", 0, "closed park, lost items, cleaning, restock, incident closeout"
         event_wave = "post_close_drain"
-    if showtime_schedule.get("activeEvents"):
+    open_to_guests = 9 * 60 <= total < 23 * 60
+    if open_to_guests and showtime_schedule.get("activeEvents"):
         active_event = showtime_schedule["activeEvents"][0]
         label = f"{label} + {active_event['name']}"
         event_wave = str(active_event["id"])
@@ -18200,10 +18213,9 @@ def _operating_clock(hour: int, minute: int, scenario_key: str, active_policy: s
         "storm_response": 10,
     }.get(scenario_key, 4)
     policy_relief = 8 if active_policy in {"reroute", "redirect_food", "suppress_item", "redeploy", "protect_hvac", "proactive_commit"} else 0
-    open_to_guests = 9 * 60 <= total < 23 * 60
-    low_guest_phase = phase_id in {"overnight_maintenance", "pre_open_staffing", "post_close_drain"}
-    scenario_load = 0 if phase_id == "overnight_maintenance" else max(2, scenario_pressure // 2) if low_guest_phase else scenario_pressure
-    phase_base_pressure = demand if low_guest_phase else max(demand, showtime_pressure)
+    low_guest_phase = _closed_to_guests_phase(phase_id)
+    scenario_load = 0 if low_guest_phase else scenario_pressure
+    phase_base_pressure = 0 if low_guest_phase else max(demand, showtime_pressure)
     peak_pressure = _clamp(phase_base_pressure + scenario_load - policy_relief, 0, 100)
     lunch_pressure_by_phase = {
         "overnight_maintenance": 6,
@@ -18244,7 +18256,11 @@ def _operating_clock(hour: int, minute: int, scenario_key: str, active_policy: s
     lunch_pressure = lunch_pressure_by_phase.get(phase_id, 38)
     ride_pressure = ride_pressure_by_phase.get(phase_id, 60)
     exit_pressure = exit_pressure_by_phase.get(phase_id, 22)
-    if str(next_showtime.get("kind")) in {"fireworks_release", "closing"} and int(next_showtime.get("minutesUntilStart", 999) or 999) <= 45:
+    if low_guest_phase:
+        lunch_pressure = 0
+        ride_pressure = 0
+        exit_pressure = 0
+    if open_to_guests and str(next_showtime.get("kind")) in {"fireworks_release", "closing"} and int(next_showtime.get("minutesUntilStart", 999) or 999) <= 45:
         exit_pressure = max(exit_pressure, 72)
     staff_fatigue = _clamp(12 if phase_id == "overnight_maintenance" else 24 if phase_id == "pre_open_staffing" else 34 + max(0, total - 11 * 60) / 7 + (12 if phase_id in {"lunch_peak", "afternoon_heat", "closing_exit"} else 0))
     dispatch_friction = _clamp((4 if phase_id == "overnight_maintenance" else 10 if phase_id in {"pre_open_staffing", "post_close_drain"} else 18) + peak_pressure * 0.28 + (18 if scenario_key == "ride_down" and open_to_guests else 0) + (8 if phase_id == "afternoon_heat" else 0) - policy_relief)
@@ -18265,6 +18281,7 @@ def _operating_clock(hour: int, minute: int, scenario_key: str, active_policy: s
             "nextPhaseInMinutes": _next_phase_minutes(total),
             "expectedHotspots": hotspots,
             "isOpenToGuests": open_to_guests,
+            "trafficWaveMultiplier": _traffic_wave_multiplier(phase_id, peak_pressure, open_to_guests),
         },
         "heartbeat": {
             "tickLabel": f"{hour:02d}:{minute:02d}",
@@ -18280,9 +18297,9 @@ def _operating_clock(hour: int, minute: int, scenario_key: str, active_policy: s
             "dominantIntent": intent,
             "rideSeekingPct": _clamp(ride_pressure),
             "foodSeekingPct": _clamp(lunch_pressure),
-            "restSeekingPct": _clamp(12 if phase_id == "overnight_maintenance" else 18 if phase_id == "pre_open_staffing" else 26 + (18 if phase_id in {"afternoon_heat", "storm_response", "night_show"} else 0) if isinstance(phase_id, str) else 26),
+            "restSeekingPct": 0 if low_guest_phase else _clamp(26 + (18 if phase_id in {"afternoon_heat", "storm_response", "night_show"} else 0) if isinstance(phase_id, str) else 26),
             "exitSeekingPct": _clamp(exit_pressure),
-            "offerSensitivityPct": _clamp(32 + peak_pressure * 0.25 - feedback_lag),
+            "offerSensitivityPct": 0 if low_guest_phase else _clamp(32 + peak_pressure * 0.25 - feedback_lag),
         },
         "staffLifecycle": {
             "shiftBlock": "overnight" if phase_id == "overnight_maintenance" else "pre_open" if phase_id == "pre_open_staffing" else "opening" if total < 11 * 60 else "midday" if total < 16 * 60 else "closeout" if phase_id in {"closing_exit", "post_close_drain"} else "evening",
@@ -18318,6 +18335,49 @@ def _operating_clock(hour: int, minute: int, scenario_key: str, active_policy: s
         },
         "accessFairness": fast_lane_fairness,
     }
+
+
+def _closed_to_guests_phase(phase_id: str) -> bool:
+    return phase_id in {"overnight_maintenance", "pre_open_staffing", "post_close_drain"}
+
+
+def _represented_guests_from_zones(zones: list[dict[str, Any]] | None) -> int:
+    return sum(max(0, int(zone.get("currentGuests", 0) or 0)) for zone in zones or [] if isinstance(zone, dict))
+
+
+def _cap_ride_queues_to_zone_load(rides: list[dict[str, Any]], zones: list[dict[str, Any]]) -> None:
+    zone_guests = {str(zone.get("id")): max(0, int(zone.get("currentGuests", 0) or 0)) for zone in zones if isinstance(zone, dict)}
+    rides_by_zone: dict[str, list[dict[str, Any]]] = {}
+    for ride in rides:
+        if isinstance(ride, dict):
+            rides_by_zone.setdefault(str(ride.get("zone") or ""), []).append(ride)
+    for zone_id, zone_rides in rides_by_zone.items():
+        local_guests = zone_guests.get(zone_id, 0)
+        max_queue = max(0, round(local_guests * 0.72))
+        total_queue = sum(max(0, int(ride.get("queueGuests", 0) or 0)) for ride in zone_rides)
+        if total_queue <= max_queue:
+            continue
+        scale = max_queue / max(1, total_queue)
+        for ride in zone_rides:
+            ride["queueGuests"] = max(0, round(int(ride.get("queueGuests", 0) or 0) * scale))
+            if ride["queueGuests"] == 0:
+                ride["waitMins"] = 0
+
+
+def _traffic_wave_multiplier(phase_id: str, demand_pressure: int, open_to_guests: bool) -> float:
+    if not open_to_guests or _closed_to_guests_phase(phase_id):
+        return 0.0
+    base_by_phase = {
+        "opening": 0.72,
+        "morning_peak": 0.94,
+        "lunch_peak": 1.05,
+        "afternoon_heat": 1.1,
+        "evening_event": 1.0,
+        "night_show": 1.08,
+        "closing_exit": 0.78,
+    }
+    pressure_adjustment = (max(0, min(100, int(demand_pressure or 0))) - 75) / 240
+    return round(max(0.45, min(1.24, base_by_phase.get(phase_id, 0.9) + pressure_adjustment)), 3)
 
 
 def _next_phase_minutes(total: int) -> int:
@@ -18359,6 +18419,8 @@ def _apply_operating_clock(
     fairness = operating_clock.get("accessFairness", {}) if isinstance(operating_clock.get("accessFairness"), dict) else {}
     active_events = event_schedule.get("activeEvents", []) if isinstance(event_schedule.get("activeEvents"), list) else []
     phase_id = str(phase.get("id", "morning_peak"))
+    open_to_guests = bool(phase.get("isOpenToGuests", True))
+    traffic_wave_multiplier = float(phase.get("trafficWaveMultiplier", 1.0) or 0.0)
     ride_seek = int(intent.get("rideSeekingPct", 60) or 60)
     food_seek = int(intent.get("foodSeekingPct", 40) or 40)
     rest_seek = int(intent.get("restSeekingPct", 30) or 30)
@@ -18371,42 +18433,41 @@ def _apply_operating_clock(
     fairness_risk = int(fairness.get("publicComplaintRiskPct", 0) or 0)
     fairness_solved = bool(fairness.get("solvedByPolicy"))
 
-    low_guest_zone_loads = {
-        "overnight_maintenance": {
-            "entrancePlaza": (42, "closed gate security patrol"),
-            "coasterPlaza": (18, "maintenance lockout and inspection access"),
-            "indoorHub": (28, "overnight cleaning crew"),
-            "arcadeZone": (14, "closed arcade walkthrough"),
-            "foodCourt1": (55, "restock and deep clean"),
-            "coveredPlaza": (24, "security sweep and route cleaning"),
-        },
-        "pre_open_staffing": {
-            "entrancePlaza": (180, "team member arrival and gate setup"),
-            "coasterPlaza": (85, "ride test queue and safety checks"),
-            "indoorHub": (70, "pre-open systems check"),
-            "arcadeZone": (40, "vendor opening checklist"),
-            "foodCourt1": (140, "breakfast prep and inventory staging"),
-            "coveredPlaza": (72, "parade route setup and custodial sweep"),
-        },
-        "post_close_drain": {
-            "entrancePlaza": (520, "remaining exits, lockers, transit"),
-            "coasterPlaza": (70, "queue closed and sweep complete"),
-            "indoorHub": (86, "show exit tail and cleaning handoff"),
-            "arcadeZone": (50, "last guests leaving arcade"),
-            "foodCourt1": (145, "closed pickup tail and restock"),
-            "coveredPlaza": (180, "post-show crowd drain"),
-        },
-    }
-    if phase_id in low_guest_zone_loads:
-        loads = low_guest_zone_loads[phase_id]
+    if _closed_to_guests_phase(phase_id) or not open_to_guests:
+        closed_labels = {
+            "overnight_maintenance": {
+                "entrancePlaza": "closed gate security patrol",
+                "coasterPlaza": "maintenance lockout and inspection access",
+                "indoorHub": "overnight cleaning crew",
+                "arcadeZone": "closed arcade walkthrough",
+                "foodCourt1": "restock and deep clean",
+                "coveredPlaza": "security sweep and route cleaning",
+            },
+            "pre_open_staffing": {
+                "entrancePlaza": "team member arrival and gate setup",
+                "coasterPlaza": "ride test and safety checks",
+                "indoorHub": "pre-open systems check",
+                "arcadeZone": "vendor opening checklist",
+                "foodCourt1": "breakfast prep and inventory staging",
+                "coveredPlaza": "parade route setup and custodial sweep",
+            },
+            "post_close_drain": {
+                "entrancePlaza": "closed gate egress complete",
+                "coasterPlaza": "queue closed and sweep complete",
+                "indoorHub": "show exit cleared and cleaning handoff",
+                "arcadeZone": "arcade closed and swept",
+                "foodCourt1": "closed pickup complete and restock",
+                "coveredPlaza": "post-show crowd cleared",
+            },
+        }
+        labels = closed_labels.get(phase_id, {})
         for zone in zones:
             zone_id = str(zone.get("id", ""))
-            guests, label = loads.get(zone_id, (35, "low-load operating support"))
-            zone["currentGuests"] = guests
-            zone["density"] = _clamp(round(guests / max(1, int(zone.get("capacity", 1) or 1)) * 100), 0, 118)
-            zone["waitMins"] = 0 if phase_id == "overnight_maintenance" else 2 if phase_id == "pre_open_staffing" else max(1, round(guests / 115))
-            zone["comfortScore"] = 92 if phase_id == "overnight_maintenance" else 84 if phase_id == "pre_open_staffing" else 78
-            zone["dominantIntent"] = label
+            zone["currentGuests"] = 0
+            zone["density"] = 0
+            zone["waitMins"] = 0
+            zone["comfortScore"] = 92 if phase_id == "overnight_maintenance" else 86 if phase_id == "pre_open_staffing" else 82
+            zone["dominantIntent"] = labels.get(zone_id, "closed to guests")
         for ride in rides:
             ride_id = str(ride.get("id", ""))
             if phase_id == "overnight_maintenance":
@@ -18423,8 +18484,8 @@ def _apply_operating_clock(
                 ride["downtimeRisk"] = _clamp(int(ride.get("downtimeRisk", 0) or 0) + (4 if ride_id == "dragonCoaster" else 1), 0, 100)
             else:
                 ride["status"] = "closed_sweep" if ride_id in {"dragonCoaster", "indoorLaunch", "skyDrop"} else "closing"
-                ride["queueGuests"] = 0 if ride_id != "theaterB" else 45
-                ride["waitMins"] = 0 if ride_id != "theaterB" else 4
+                ride["queueGuests"] = 0
+                ride["waitMins"] = 0
                 ride["effectiveThroughput"] = 0
         return rides, zones
 
@@ -18475,7 +18536,9 @@ def _apply_operating_clock(
     for zone in zones:
         zone_id = str(zone.get("id", ""))
         delta = zone_adjustments.get(zone_id, 0)
-        zone["currentGuests"] = max(80, int(zone.get("currentGuests", 0) or 0) + delta)
+        base_guests = int(zone.get("currentGuests", 0) or 0)
+        wave_guests = round(base_guests * traffic_wave_multiplier)
+        zone["currentGuests"] = max(40, wave_guests + delta)
         zone["density"] = _clamp(round((zone["currentGuests"] / max(1, int(zone.get("capacity", 1) or 1))) * 100), 0, 118)
         wait_delta = max(0, round(delta / 80)) + (4 if zone_id == "foodCourt1" and food_pressure >= 75 else 0)
         zone["waitMins"] = max(0, int(zone.get("waitMins", 0) or 0) + wait_delta)
@@ -18487,6 +18550,7 @@ def _apply_operating_clock(
 
     for ride in rides:
         ride_id = str(ride.get("id", ""))
+        ride["queueGuests"] = max(0, round(int(ride.get("queueGuests", 0) or 0) * traffic_wave_multiplier))
         if ride_id in {"dragonCoaster", "indoorLaunch", "skyDrop"}:
             queue_delta = round((ride_seek - 55) * (4.0 if ride_id == "dragonCoaster" else 2.6) + dispatch_friction * 1.7)
             ride["queueGuests"] = max(0, int(ride.get("queueGuests", 0) or 0) + queue_delta)
@@ -18505,6 +18569,7 @@ def _apply_operating_clock(
             ride["queueGuests"] = int(ride.get("queueGuests", 0) or 0) + 55
             ride["waitMins"] = int(ride.get("waitMins", 0) or 0) + 3
 
+    _cap_ride_queues_to_zone_load(rides, zones)
     return rides, zones
 
 
@@ -19268,16 +19333,27 @@ def _physical_map(
     fairness = (operating_clock or {}).get("accessFairness", {}) if isinstance((operating_clock or {}).get("accessFairness"), dict) else {}
     phase = (operating_clock or {}).get("phase", {}) if isinstance((operating_clock or {}).get("phase"), dict) else {}
     phase_id = str(phase.get("id", ""))
-    low_guest_phase = phase_id in {"overnight_maintenance", "pre_open_staffing", "post_close_drain"}
+    low_guest_phase = _closed_to_guests_phase(phase_id)
+    closed_to_guests = low_guest_phase
     active_events = event_schedule.get("activeEvents", []) if isinstance(event_schedule.get("activeEvents"), list) else []
     fireworks_active = any(isinstance(event, dict) and str(event.get("kind")) in {"fireworks", "fireworks_release"} for event in active_events)
     parade_active = any(isinstance(event, dict) and event.get("kind") == "parade" for event in active_events)
     show_active = any(isinstance(event, dict) and event.get("kind") == "show" for event in active_events)
     closing_active = any(isinstance(event, dict) and event.get("kind") == "closing" for event in active_events)
     fairness_risk = int(fairness.get("publicComplaintRiskPct", 0) or 0)
+    represented_guests = _represented_guests_from_zones(zones)
 
     def zone_density(zone_id: str) -> int:
         return int((zone_by_id.get(zone_id) or {}).get("density", 0) or 0)
+
+    def zone_guests(*zone_ids: str) -> int:
+        return sum(max(0, int((zone_by_id.get(zone_id) or {}).get("currentGuests", 0) or 0)) for zone_id in zone_ids)
+
+    def bounded_guest_count(base: int, *zone_ids: str, share: float = 0.35) -> int:
+        if closed_to_guests or represented_guests <= 0:
+            return 0
+        local_pool = zone_guests(*zone_ids) if zone_ids else represented_guests
+        return max(0, min(int(base), represented_guests, round(local_pool * share)))
 
     map_payload = {
         "scale": {"widthMeters": 820, "heightMeters": 540, "north": "top"},
@@ -19322,7 +19398,7 @@ def _physical_map(
                 "name": "Dragon Fast Lane merge",
                 "rideId": "dragonCoaster",
                 "points": [[815, 184], [780, 210], [746, 236], [706, 256]],
-                "guests": 0 if low_guest_phase else round(int(fairness.get("premiumLaneSharePct", 0) or 0) * 7.5),
+                "guests": bounded_guest_count(round(int(fairness.get("premiumLaneSharePct", 0) or 0) * 7.5), "coasterPlaza", share=0.22),
                 "waitMins": 0 if low_guest_phase else max(5, round(int((ride_by_id.get("dragonCoaster") or {}).get("waitMins", 0) or 0) * 0.38)),
                 "status": "closed" if low_guest_phase else "constrained" if fairness_risk >= 62 else "normal",
                 "shadePct": 30,
@@ -19348,8 +19424,8 @@ def _physical_map(
                 "name": "Food pickup line",
                 "rideId": "foodCourtA",
                 "points": [[596, 462], [620, 430], [678, 432], [733, 452]],
-                "guests": 12 if phase_id == "overnight_maintenance" else 35 if phase_id == "pre_open_staffing" else 38 if phase_id == "post_close_drain" else 210 if food_spike else 116,
-                "waitMins": 0 if phase_id == "overnight_maintenance" else 2 if phase_id in {"pre_open_staffing", "post_close_drain"} else 31 if food_spike else 18,
+                "guests": bounded_guest_count(210 if food_spike else 116, "foodCourt1", share=0.22),
+                "waitMins": 0 if closed_to_guests else 31 if food_spike else 18,
                 "status": "closed" if phase_id == "overnight_maintenance" else "prep" if phase_id == "pre_open_staffing" else "closing" if phase_id == "post_close_drain" else "constrained" if food_spike else "normal",
                 "shadePct": 54,
                 "lengthM": 115,
@@ -19361,7 +19437,7 @@ def _physical_map(
                 "name": "Parade crossing hold",
                 "rideId": "paradeRoute",
                 "points": [[330, 424], [390, 408], [462, 414], [535, 394], [596, 374]],
-                "guests": 0 if low_guest_phase else 420 if parade_active else 140,
+                "guests": bounded_guest_count(420 if parade_active else 140, "entrancePlaza", "coveredPlaza", share=0.18),
                 "waitMins": 0 if low_guest_phase else 12 if parade_active else 4,
                 "status": "closed" if low_guest_phase else "constrained" if parade_active else "normal",
                 "shadePct": 44,
@@ -19374,8 +19450,8 @@ def _physical_map(
                 "name": "Fireworks exit wave",
                 "rideId": "fireworksViewing",
                 "points": [[748, 402], [700, 442], [628, 474], [526, 506], [386, 532], [238, 548]],
-                "guests": 18 if phase_id == "overnight_maintenance" else 45 if phase_id == "pre_open_staffing" else 180 if phase_id == "post_close_drain" else 980 if fireworks_active or closing_active else 180,
-                "waitMins": 0 if phase_id == "overnight_maintenance" else 1 if phase_id == "pre_open_staffing" else 5 if phase_id == "post_close_drain" else 28 if fireworks_active or closing_active else 5,
+                "guests": bounded_guest_count(980 if fireworks_active or closing_active else 180, "coveredPlaza", "entrancePlaza", share=0.36),
+                "waitMins": 0 if closed_to_guests else 28 if fireworks_active or closing_active else 5,
                 "status": "closed" if phase_id == "overnight_maintenance" else "setup" if phase_id == "pre_open_staffing" else "draining" if phase_id == "post_close_drain" else "congested" if fireworks_active or closing_active else "normal",
                 "shadePct": 24,
                 "lengthM": 520,
@@ -19387,7 +19463,7 @@ def _physical_map(
             {
                 "id": "familyExitDragon",
                 "segment": "standby families watching Fast Lane merge",
-                "count": 0 if low_guest_phase else 260 if not rerouted else 150,
+                "count": bounded_guest_count(260 if not rerouted else 150, "coasterPlaza", share=0.18),
                 "x": 708,
                 "y": 300,
                 "destination": "Theater B",
@@ -19397,7 +19473,7 @@ def _physical_map(
             {
                 "id": "premiumReturnGuests",
                 "segment": "Fast Lane return guests",
-                "count": 0 if low_guest_phase else round(int(fairness.get("premiumLaneSharePct", 28) or 28) * 8.2),
+                "count": bounded_guest_count(round(int(fairness.get("premiumLaneSharePct", 28) or 28) * 8.2), "coasterPlaza", share=0.22),
                 "x": 812,
                 "y": 188,
                 "destination": "Dragon Coaster",
@@ -19407,7 +19483,7 @@ def _physical_map(
             {
                 "id": "teenThrill",
                 "segment": "teen thrill riders",
-                "count": 0 if low_guest_phase else 210,
+                "count": bounded_guest_count(210, "coasterPlaza", share=0.16),
                 "x": 820,
                 "y": 218,
                 "destination": "Sky Drop",
@@ -19417,7 +19493,7 @@ def _physical_map(
             {
                 "id": "mobileOrder",
                 "segment": "mobile order guests",
-                "count": 18 if phase_id == "overnight_maintenance" else 55 if phase_id == "pre_open_staffing" else 40 if phase_id == "post_close_drain" else 300 if food_spike else 145,
+                "count": bounded_guest_count(300 if food_spike else 145, "foodCourt1", share=0.22),
                 "x": 674,
                 "y": 462,
                 "destination": "Food Court B" if rerouted else "Food Court A",
@@ -19427,7 +19503,7 @@ def _physical_map(
             {
                 "id": "strollerFamilies",
                 "segment": "stroller families",
-                "count": 0 if phase_id == "overnight_maintenance" else 18 if phase_id in {"pre_open_staffing", "post_close_drain"} else 118,
+                "count": bounded_guest_count(118, "entrancePlaza", "coveredPlaza", share=0.12),
                 "x": 306,
                 "y": 486,
                 "destination": "Shade garden" if not storm else "Indoor Ride Hub",
@@ -19437,7 +19513,7 @@ def _physical_map(
             {
                 "id": "shelterGuests",
                 "segment": "guests seeking shelter",
-                "count": 8 if phase_id == "overnight_maintenance" else 35 if phase_id in {"pre_open_staffing", "post_close_drain"} else 520 if fireworks_active else 420 if storm else 160,
+                "count": bounded_guest_count(520 if fireworks_active else 420 if storm else 160, "coveredPlaza", "indoorHub", share=0.24),
                 "x": 468,
                 "y": 356,
                 "destination": "Fireworks Viewing" if fireworks_active else "Covered Plaza",
@@ -19447,7 +19523,7 @@ def _physical_map(
             {
                 "id": "paradeFamilies",
                 "segment": "parade viewing families",
-                "count": 0 if low_guest_phase else 560 if parade_active else 120,
+                "count": bounded_guest_count(560 if parade_active else 120, "entrancePlaza", "coveredPlaza", share=0.24),
                 "x": 430,
                 "y": 410,
                 "destination": "Parade Route",
@@ -19457,7 +19533,7 @@ def _physical_map(
             {
                 "id": "fireworksExit",
                 "segment": "fireworks exit wave",
-                "count": 8 if phase_id == "overnight_maintenance" else 35 if phase_id == "pre_open_staffing" else 120 if phase_id == "post_close_drain" else 900 if fireworks_active or closing_active else 160,
+                "count": bounded_guest_count(900 if fireworks_active or closing_active else 160, "coveredPlaza", "entrancePlaza", share=0.34),
                 "x": 724,
                 "y": 414,
                 "destination": "Front Gate",
@@ -19467,7 +19543,7 @@ def _physical_map(
             {
                 "id": "showUnload",
                 "segment": "show unload guests",
-                "count": 0 if phase_id == "overnight_maintenance" else 20 if phase_id in {"pre_open_staffing", "post_close_drain"} else 430 if show_active else 95,
+                "count": bounded_guest_count(430 if show_active else 95, "indoorHub", "foodCourt1", share=0.22),
                 "x": 288,
                 "y": 350,
                 "destination": "Food Court A" if not active_policy == "proactive_commit" else "Arcade",
@@ -19477,7 +19553,7 @@ def _physical_map(
             {
                 "id": "shortStaffedOps",
                 "segment": "staff task cluster",
-                "count": 38 if staff_shortage else 16,
+                "count": bounded_guest_count(38 if staff_shortage else 16, "foodCourt1", share=0.06),
                 "x": 558,
                 "y": 518,
                 "destination": "Food Court A",
@@ -19635,10 +19711,9 @@ def _paths(active_policy: str, zones: list[dict[str, Any]] | None = None, operat
     has_fireworks = any(isinstance(event, dict) and str(event.get("kind")) in {"fireworks", "fireworks_release"} for event in active_events)
     has_closing = any(isinstance(event, dict) and event.get("kind") == "closing" for event in active_events)
     event_relief = 14 if proactive else 7 if relieved else 0
-    if phase_id in {"overnight_maintenance", "pre_open_staffing", "post_close_drain"}:
-        phase_floor = 2 if phase_id == "overnight_maintenance" else 8 if phase_id == "pre_open_staffing" else 18
+    if _closed_to_guests_phase(phase_id):
 
-        def low_path(
+        def closed_path(
             from_id: str,
             to_id: str,
             from_name: str,
@@ -19650,9 +19725,6 @@ def _paths(active_policy: str, zones: list[dict[str, Any]] | None = None, operat
             capacity: int,
             transfer_scale: float,
         ) -> dict[str, Any]:
-            endpoint_load = round((guests_by_zone.get(from_id, 0) + guests_by_zone.get(to_id, 0)) * transfer_scale)
-            current = max(0, min(capacity, endpoint_load))
-            congestion = _clamp(round((current / max(1, capacity)) * 100) + phase_floor, 0, 100)
             return {
                 "from": from_id,
                 "to": to_id,
@@ -19663,21 +19735,21 @@ def _paths(active_policy: str, zones: list[dict[str, Any]] | None = None, operat
                 "widthM": width_m,
                 "maxFlowPerMinute": max_flow,
                 "capacity": capacity,
-                "currentGuests": current,
-                "congestionLevel": congestion,
-                "status": "busy" if congestion >= 62 else "open",
-                "forwardTransfers": max(0, round(current * 0.18)),
-                "reverseTransfers": max(0, round(current * 0.06)),
+                "currentGuests": 0,
+                "congestionLevel": 0,
+                "status": "closed" if phase_id != "pre_open_staffing" else "staff_only",
+                "forwardTransfers": 0,
+                "reverseTransfers": 0,
             }
 
         return [
-            low_path("coasterPlaza", "coveredPlaza", "Coaster Plaza", "Covered Plaza", 5, 185, 4.8, 250, 900, 0.18),
-            low_path("coveredPlaza", "indoorHub", "Covered Plaza", "Indoor Ride Hub", 4, 135, 6.2, 322, 1200, 0.22),
-            low_path("indoorHub", "foodCourt1", "Indoor Ride Hub", "Food Court 1", 3, 96, 3.7, 192, 850, 0.28),
-            low_path("indoorHub", "arcadeZone", "Indoor Ride Hub", "Arcade Zone", 3, 102, 5.3, 276, 1100, 0.16),
-            low_path("entrancePlaza", "coveredPlaza", "Entrance Plaza", "Parade Route", 6, 225, 7.0, 364, 1400, 0.24),
-            low_path("coveredPlaza", "lake", "Covered Plaza", "Fireworks Viewing", 4, 155, 8.5, 442, 1700, 0.12),
-            low_path("coveredPlaza", "entrancePlaza", "Fireworks Viewing", "Front Gate", 8, 310, 6.8, 354, 1500, 0.35),
+            closed_path("coasterPlaza", "coveredPlaza", "Coaster Plaza", "Covered Plaza", 5, 185, 4.8, 250, 900, 0.18),
+            closed_path("coveredPlaza", "indoorHub", "Covered Plaza", "Indoor Ride Hub", 4, 135, 6.2, 322, 1200, 0.22),
+            closed_path("indoorHub", "foodCourt1", "Indoor Ride Hub", "Food Court 1", 3, 96, 3.7, 192, 850, 0.28),
+            closed_path("indoorHub", "arcadeZone", "Indoor Ride Hub", "Arcade Zone", 3, 102, 5.3, 276, 1100, 0.16),
+            closed_path("entrancePlaza", "coveredPlaza", "Entrance Plaza", "Parade Route", 6, 225, 7.0, 364, 1400, 0.24),
+            closed_path("coveredPlaza", "lake", "Covered Plaza", "Fireworks Viewing", 4, 155, 8.5, 442, 1700, 0.12),
+            closed_path("coveredPlaza", "entrancePlaza", "Fireworks Viewing", "Front Gate", 8, 310, 6.8, 354, 1500, 0.35),
         ]
 
     coaster_congestion = max(74 if proactive else 80 if relieved else 91, int(density_by_zone.get("coasterPlaza", 0)))
@@ -19687,22 +19759,66 @@ def _paths(active_policy: str, zones: list[dict[str, Any]] | None = None, operat
     parade_congestion = _clamp((event_risk if has_parade else 48) - event_relief)
     lake_congestion = _clamp((event_risk if has_fireworks else 42) - event_relief)
     exit_congestion = _clamp(max(int(density_by_zone.get("entrancePlaza", 0)), event_risk if has_fireworks or has_closing else 48) - event_relief)
+    total_zone_guests = sum(guests_by_zone.values())
+
+    def path_load(
+        from_id: str,
+        to_id: str,
+        capacity: int,
+        transfer_scale: float,
+        *,
+        event_boost: float = 1.0,
+    ) -> int:
+        endpoint_guests = guests_by_zone.get(from_id, 0) + guests_by_zone.get(to_id, 0)
+        current = round(endpoint_guests * transfer_scale * event_boost)
+        return max(0, min(capacity, total_zone_guests, current))
+
+    def path_status(congestion: int, current_guests: int, capacity: int) -> str:
+        if current_guests <= 0:
+            return "open"
+        utilization = round(current_guests / max(1, capacity) * 100)
+        effective = max(congestion, utilization)
+        if effective >= 86 and current_guests >= 250:
+            return "congested"
+        if effective >= 62 and current_guests >= 120:
+            return "busy"
+        return "open"
+
+    def transfers(current_guests: int, forward_share: float, reverse_share: float) -> tuple[int, int]:
+        return max(0, round(current_guests * forward_share)), max(0, round(current_guests * reverse_share))
+
+    coaster_current = path_load("coasterPlaza", "coveredPlaza", 900, 0.28)
+    indoor_current = path_load("coveredPlaza", "indoorHub", 1200, 0.29)
+    food_current = path_load("indoorHub", "foodCourt1", 850, 0.20)
+    arcade_current = path_load("indoorHub", "arcadeZone", 1100, 0.13)
+    parade_current = path_load("entrancePlaza", "coveredPlaza", 1400, 0.22, event_boost=1.08 if has_parade else 0.55)
+    lake_current = path_load("coveredPlaza", "lake", 1700, 0.12, event_boost=3.1 if has_fireworks else 0.7)
+    exit_current = path_load("coveredPlaza", "entrancePlaza", 1500, 0.28, event_boost=2.2 if has_fireworks or has_closing else 0.5)
+    coaster_forward, coaster_reverse = transfers(coaster_current, 0.22, 0.04)
+    indoor_forward, indoor_reverse = transfers(indoor_current, 0.24, 0.05)
+    food_forward, food_reverse = transfers(food_current, 0.23, 0.06)
+    arcade_forward, arcade_reverse = transfers(arcade_current, 0.21, 0.05)
+    parade_forward, parade_reverse = transfers(parade_current, 0.6 if has_parade else 0.31, 0.17 if has_parade else 0.09)
+    lake_forward, lake_reverse = transfers(lake_current, 0.49 if has_fireworks else 0.41, 0.07)
+    exit_forward, exit_reverse = transfers(exit_current, 0.61 if has_fireworks or has_closing else 0.38, 0.02)
     paths = [
-        {"from": "coasterPlaza", "to": "coveredPlaza", "fromName": "Coaster Plaza", "toName": "Covered Plaza", "walkMinutes": 5, "lengthM": 185, "widthM": 4.8, "maxFlowPerMinute": 250, "capacity": 900, "currentGuests": 650 if proactive else 720 if relieved else 820, "congestionLevel": coaster_congestion, "status": "busy" if coaster_congestion < 88 else "congested", "forwardTransfers": 180, "reverseTransfers": 32},
-        {"from": "coveredPlaza", "to": "indoorHub", "fromName": "Covered Plaza", "toName": "Indoor Ride Hub", "walkMinutes": 4, "lengthM": 135, "widthM": 6.2, "maxFlowPerMinute": 322, "capacity": 1200, "currentGuests": 870 if proactive else 980, "congestionLevel": indoor_congestion, "status": "congested" if indoor_congestion >= 80 else "busy", "forwardTransfers": 240, "reverseTransfers": 48},
-        {"from": "indoorHub", "to": "foodCourt1", "fromName": "Indoor Ride Hub", "toName": "Food Court 1", "walkMinutes": 3, "lengthM": 96, "widthM": 3.7, "maxFlowPerMinute": 192, "capacity": 850, "currentGuests": 540 if proactive else 610, "congestionLevel": food_congestion, "status": "congested" if food_congestion >= 88 else "busy", "forwardTransfers": 140, "reverseTransfers": 38},
-        {"from": "indoorHub", "to": "arcadeZone", "fromName": "Indoor Ride Hub", "toName": "Arcade Zone", "walkMinutes": 3, "lengthM": 102, "widthM": 5.3, "maxFlowPerMinute": 276, "capacity": 1100, "currentGuests": 420, "congestionLevel": arcade_congestion, "status": "busy" if arcade_congestion >= 60 else "open", "forwardTransfers": 90, "reverseTransfers": 22},
+        {"from": "coasterPlaza", "to": "coveredPlaza", "fromName": "Coaster Plaza", "toName": "Covered Plaza", "walkMinutes": 5, "lengthM": 185, "widthM": 4.8, "maxFlowPerMinute": 250, "capacity": 900, "currentGuests": coaster_current, "congestionLevel": coaster_congestion, "status": path_status(coaster_congestion, coaster_current, 900), "forwardTransfers": coaster_forward, "reverseTransfers": coaster_reverse},
+        {"from": "coveredPlaza", "to": "indoorHub", "fromName": "Covered Plaza", "toName": "Indoor Ride Hub", "walkMinutes": 4, "lengthM": 135, "widthM": 6.2, "maxFlowPerMinute": 322, "capacity": 1200, "currentGuests": indoor_current, "congestionLevel": indoor_congestion, "status": path_status(indoor_congestion, indoor_current, 1200), "forwardTransfers": indoor_forward, "reverseTransfers": indoor_reverse},
+        {"from": "indoorHub", "to": "foodCourt1", "fromName": "Indoor Ride Hub", "toName": "Food Court 1", "walkMinutes": 3, "lengthM": 96, "widthM": 3.7, "maxFlowPerMinute": 192, "capacity": 850, "currentGuests": food_current, "congestionLevel": food_congestion, "status": path_status(food_congestion, food_current, 850), "forwardTransfers": food_forward, "reverseTransfers": food_reverse},
+        {"from": "indoorHub", "to": "arcadeZone", "fromName": "Indoor Ride Hub", "toName": "Arcade Zone", "walkMinutes": 3, "lengthM": 102, "widthM": 5.3, "maxFlowPerMinute": 276, "capacity": 1100, "currentGuests": arcade_current, "congestionLevel": arcade_congestion, "status": path_status(arcade_congestion, arcade_current, 1100), "forwardTransfers": arcade_forward, "reverseTransfers": arcade_reverse},
     ]
     paths.extend(
         [
-            {"from": "entrancePlaza", "to": "coveredPlaza", "fromName": "Entrance Plaza", "toName": "Parade Route", "walkMinutes": 6, "lengthM": 225, "widthM": 7.0, "maxFlowPerMinute": 364, "capacity": 1400, "currentGuests": 520 if has_parade else 260, "congestionLevel": parade_congestion, "status": "congested" if parade_congestion >= 86 else "busy" if parade_congestion >= 62 else "open", "forwardTransfers": 310 if has_parade else 80, "reverseTransfers": 90 if has_parade else 24},
-            {"from": "coveredPlaza", "to": "lake", "fromName": "Covered Plaza", "toName": "Fireworks Viewing", "walkMinutes": 4, "lengthM": 155, "widthM": 8.5, "maxFlowPerMinute": 442, "capacity": 1700, "currentGuests": 980 if has_fireworks else 230, "congestionLevel": lake_congestion, "status": "congested" if lake_congestion >= 86 else "busy" if lake_congestion >= 62 else "open", "forwardTransfers": 480 if has_fireworks else 95, "reverseTransfers": 65},
-            {"from": "coveredPlaza", "to": "entrancePlaza", "fromName": "Fireworks Viewing", "toName": "Front Gate", "walkMinutes": 8, "lengthM": 310, "widthM": 6.8, "maxFlowPerMinute": 354, "capacity": 1500, "currentGuests": 1240 if has_fireworks or has_closing else 320, "congestionLevel": exit_congestion, "status": "congested" if exit_congestion >= 86 else "busy" if exit_congestion >= 62 else "open", "forwardTransfers": 760 if has_fireworks or has_closing else 120, "reverseTransfers": 18},
+            {"from": "entrancePlaza", "to": "coveredPlaza", "fromName": "Entrance Plaza", "toName": "Parade Route", "walkMinutes": 6, "lengthM": 225, "widthM": 7.0, "maxFlowPerMinute": 364, "capacity": 1400, "currentGuests": parade_current, "congestionLevel": parade_congestion, "status": path_status(parade_congestion, parade_current, 1400), "forwardTransfers": parade_forward, "reverseTransfers": parade_reverse},
+            {"from": "coveredPlaza", "to": "lake", "fromName": "Covered Plaza", "toName": "Fireworks Viewing", "walkMinutes": 4, "lengthM": 155, "widthM": 8.5, "maxFlowPerMinute": 442, "capacity": 1700, "currentGuests": lake_current, "congestionLevel": lake_congestion, "status": path_status(lake_congestion, lake_current, 1700), "forwardTransfers": lake_forward, "reverseTransfers": lake_reverse},
+            {"from": "coveredPlaza", "to": "entrancePlaza", "fromName": "Fireworks Viewing", "toName": "Front Gate", "walkMinutes": 8, "lengthM": 310, "widthM": 6.8, "maxFlowPerMinute": 354, "capacity": 1500, "currentGuests": exit_current, "congestionLevel": exit_congestion, "status": path_status(exit_congestion, exit_current, 1500), "forwardTransfers": exit_forward, "reverseTransfers": exit_reverse},
         ]
     )
     if has_show:
         show_congestion = _clamp(max(indoor_congestion, food_congestion, event_risk) - event_relief)
-        paths.append({"from": "theaterB", "to": "foodCourt1", "fromName": "Theater B", "toName": "Food Court 1", "walkMinutes": 4, "lengthM": 140, "widthM": 4.2, "maxFlowPerMinute": 218, "capacity": 900, "currentGuests": 620 if proactive else 760, "congestionLevel": show_congestion, "status": "congested" if show_congestion >= 86 else "busy", "forwardTransfers": 410, "reverseTransfers": 36})
+        show_current = path_load("indoorHub", "foodCourt1", 900, 0.22, event_boost=1.45)
+        show_forward, show_reverse = transfers(show_current, 0.54, 0.05)
+        paths.append({"from": "theaterB", "to": "foodCourt1", "fromName": "Theater B", "toName": "Food Court 1", "walkMinutes": 4, "lengthM": 140, "widthM": 4.2, "maxFlowPerMinute": 218, "capacity": 900, "currentGuests": show_current, "congestionLevel": show_congestion, "status": path_status(show_congestion, show_current, 900), "forwardTransfers": show_forward, "reverseTransfers": show_reverse})
     return paths
 
 
@@ -20104,6 +20220,10 @@ def _random_unexpected_event(scenario_key: str, state: dict[str, Any]) -> dict[s
     flow = state.get("guestFlow", {}) if isinstance(state.get("guestFlow"), dict) else {}
     rides = flow.get("rides", []) if isinstance(flow.get("rides"), list) else []
     zones = flow.get("zones", []) if isinstance(flow.get("zones"), list) else []
+    represented_guests = int(flow.get("representedGuests", _represented_guests_from_zones(zones)) or 0)
+    operating_clock = state.get("operatingClock", {}) if isinstance(state.get("operatingClock"), dict) else {}
+    phase = operating_clock.get("phase", {}) if isinstance(operating_clock.get("phase"), dict) else {}
+    open_to_guests = phase.get("isOpenToGuests") is not False and not _closed_to_guests_phase(str(phase.get("id", "")))
     ride_ids = [str(ride.get("id")) for ride in rides if ride.get("id") and ride.get("status") != "down"] or ["dragonCoaster"]
     food_zone = next((str(zone.get("id")) for zone in zones if zone.get("processType") == "food"), "foodCourt1")
     busiest_zone = max(zones, key=lambda zone: int(zone.get("density", 0) or 0), default={"id": "coasterPlaza"})
@@ -20159,6 +20279,21 @@ def _random_unexpected_event(scenario_key: str, state: dict[str, Any]) -> dict[s
         "storm_response": {"storm_risk", "energy_spike", "demand_spike", "water_leak", "access_lane_block", "heat_index_spike", "lightning_delay"},
     }.get(scenario_key, set())
     weighted = choices + [item for item in choices if item["kind"] in scenario_bias]
+    if not open_to_guests or represented_guests < 500:
+        guest_wave_kinds = {
+            "demand_spike",
+            "food_spike",
+            "show_dump",
+            "access_lane_block",
+            "parade_route_conflict",
+            "ticketing_gate_surge",
+            "parking_arrival_wave",
+            "restroom_closure",
+            "security_perimeter",
+            "heat_index_spike",
+            "lightning_delay",
+        }
+        weighted = [item for item in weighted if item["kind"] not in guest_wave_kinds] or choices[:1]
     return deepcopy(rng.choice(weighted))
 
 
@@ -20507,6 +20642,7 @@ def _apply_live_chaos_overlays(state: dict[str, Any], interventions: list[dict[s
             )
 
     _apply_runtime_chaos_couplings(next_state, active[:6])
+    _reconcile_runtime_state_math(next_state)
     next_state["chaosEngine"] = _chaos_engine_state(interventions)
     next_state.setdefault("digitalTwin", {})["chaosEngine"] = {
         "active": True,
@@ -20515,6 +20651,47 @@ def _apply_live_chaos_overlays(state: dict[str, Any], interventions: list[dict[s
         "ruleCount": next_state["chaosEngine"]["ruleCount"],
     }
     return next_state
+
+
+def _reconcile_runtime_state_math(state: dict[str, Any]) -> None:
+    flow = state.setdefault("guestFlow", {})
+    if not isinstance(flow, dict):
+        return
+    zones = flow.get("zones", []) if isinstance(flow.get("zones"), list) else []
+    rides = flow.get("rides", []) if isinstance(flow.get("rides"), list) else []
+    paths = flow.get("paths", []) if isinstance(flow.get("paths"), list) else []
+    operating_clock = state.get("operatingClock", {}) if isinstance(state.get("operatingClock"), dict) else {}
+    phase = operating_clock.get("phase", {}) if isinstance(operating_clock.get("phase"), dict) else {}
+    closed_to_guests = _closed_to_guests_phase(str(phase.get("id", ""))) or phase.get("isOpenToGuests") is False
+    if closed_to_guests:
+        rides, zones = _apply_operating_clock(rides, zones, operating_clock, str(flow.get("activePolicy") or "normal"))
+        flow["rides"] = rides
+        flow["zones"] = zones
+    represented_guests = _represented_guests_from_zones(zones)
+    flow["representedGuests"] = represented_guests
+    _cap_ride_queues_to_zone_load(rides, zones)
+    zone_guests = {str(zone.get("id")): max(0, int(zone.get("currentGuests", 0) or 0)) for zone in zones if isinstance(zone, dict)}
+    for path in paths:
+        if not isinstance(path, dict):
+            continue
+        capacity = max(1, int(path.get("capacity", 1) or 1))
+        endpoint_pool = zone_guests.get(str(path.get("from")), 0) + zone_guests.get(str(path.get("to")), 0)
+        current = min(max(0, int(path.get("currentGuests", 0) or 0)), represented_guests, max(endpoint_pool, represented_guests if endpoint_pool == 0 else 0))
+        path["currentGuests"] = current
+        if represented_guests < 500 or current < 250:
+            utilization = round(current / capacity * 100)
+            path["congestionLevel"] = min(int(path.get("congestionLevel", 0) or 0), utilization)
+            path["status"] = "open" if current < 120 else "busy"
+            path["forwardTransfers"] = min(max(0, int(path.get("forwardTransfers", 0) or 0)), round(current * 0.65))
+            path["reverseTransfers"] = min(max(0, int(path.get("reverseTransfers", 0) or 0)), round(current * 0.25))
+    scenario = flow.get("activeScenario", {}) if isinstance(flow.get("activeScenario"), dict) else {}
+    state["physicalMap"] = _physical_map(
+        str(scenario.get("key") or state.get("scenario_key") or "ride_down"),
+        str(flow.get("activePolicy") or "normal"),
+        rides,
+        zones,
+        operating_clock,
+    )
 
 
 def _apply_runtime_chaos_couplings(state: dict[str, Any], active: list[dict[str, Any]]) -> None:
@@ -20634,6 +20811,9 @@ def _apply_synthetic_incident_overlays(state: dict[str, Any], interventions: lis
     alerts = next_state.setdefault("alerts", [])
     readiness = next_state.setdefault("incidentReadiness", {})
     digital_twin = next_state.setdefault("digitalTwin", {})
+    operating_clock = next_state.get("operatingClock", {}) if isinstance(next_state.get("operatingClock"), dict) else {}
+    phase = operating_clock.get("phase", {}) if isinstance(operating_clock.get("phase"), dict) else {}
+    closed_to_guests = _closed_to_guests_phase(str(phase.get("id", ""))) or phase.get("isOpenToGuests") is False
     incidents: list[dict[str, Any]] = []
     point_by_target = {
         "foodCourt1": {"x": 674, "y": 462, "label": "Food Court 1"},
@@ -20669,7 +20849,7 @@ def _apply_synthetic_incident_overlays(state: dict[str, Any], interventions: lis
                 "severity": overlay["severity"],
             }
         )
-        if not any(isinstance(group, dict) and group.get("id") == f"incident_{incident_id}" for group in groups):
+        if not closed_to_guests and not any(isinstance(group, dict) and group.get("id") == f"incident_{incident_id}" for group in groups):
             groups.append(
                 {
                     "id": f"incident_{incident_id}",

@@ -1,6 +1,6 @@
 "use client";
 
-import { LLM_INTERPRETER_STAGES, PRIMARY_OPERATING_STAGES, PRODUCT_POSITIONING, productToneClass, type ProductLoopStage } from "@/lib/productOperatingModel";
+import { LLM_INTERPRETER_STAGES, PRIMARY_OPERATING_STAGES, productToneClass, type ProductLoopStage } from "@/lib/productOperatingModel";
 import type { EvalScore, RoleAgentProposal, RunTelemetry } from "@/types/platform";
 import type { ParkState } from "@/types/park";
 import type { DispatchView, LiveAgentsSmokeReport } from "./useCommandCenter";
@@ -71,7 +71,7 @@ function outcomeSummary(runTelemetry: RunTelemetry | null, memoryMode: string) {
   return [
     runTelemetry?.outcome_id ? `Outcome ${runTelemetry.outcome_id}` : "Outcome pending until dispatch or review is acknowledged",
     `Memory ${memoryMode}`,
-    "Writes trace, eval, and training rows",
+    "Writes trace, eval, and learning rows",
   ];
 }
 
@@ -341,9 +341,11 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div>
-          <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Core story</div>
-          <h2 className="mt-1 text-2xl font-black text-slate-100">Live park state becomes a controlled operating decision</h2>
-          <p className="mt-2 max-w-5xl text-sm leading-relaxed text-slate-400">{PRODUCT_POSITIONING}</p>
+          <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Runtime proof</div>
+          <h2 className="mt-1 text-2xl font-black text-slate-100">Pipeline evidence behind the operating decision</h2>
+          <p className="mt-2 max-w-5xl text-sm leading-relaxed text-slate-400">
+            Signals, features, predictors, optimizer results, policy gates, evals, receipts, and memory writes for the current run.
+          </p>
         </div>
         <div className="rounded border border-amber-400/30 bg-amber-950/20 px-3 py-2 text-xs font-black text-amber-100">
           LLM creates structured scenario, not final control
@@ -369,7 +371,7 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
         <div className="rounded border border-slate-800 bg-slate-900 p-3">
           <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Learning loop</div>
           <div className="mt-2 text-sm font-black text-slate-100">Outcome-backed</div>
-          <p className="mt-2 text-xs leading-relaxed text-slate-400">Trace, eval, and training rows are written from actual decisions and observed outcomes.</p>
+          <p className="mt-2 text-xs leading-relaxed text-slate-400">Trace, eval, and learning rows are written from actual decisions and observed outcomes.</p>
         </div>
       </div>
 
@@ -947,9 +949,9 @@ export function ProductLoopPanel(props: ProductLoopPanelProps) {
 
         <div className="rounded border border-teal-400/30 bg-teal-950/15 p-3">
           <div className="text-[10px] font-black uppercase tracking-widest text-teal-200">Outcome Tracker</div>
-          <div className="mt-2 text-lg font-black text-teal-100">Trace, eval, memory, training</div>
+          <div className="mt-2 text-lg font-black text-teal-100">Trace, eval, memory, learning</div>
           <p className="mt-2 text-xs leading-relaxed text-teal-100/80">
-            Dispatch acknowledgements and review decisions become trace rows, eval rows, MongoDB memory, and ML training labels.
+            Dispatch acknowledgements and review decisions become trace rows, eval rows, MongoDB memory, and supervised learning labels.
           </p>
         </div>
       </div>

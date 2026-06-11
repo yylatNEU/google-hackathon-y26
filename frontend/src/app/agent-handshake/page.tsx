@@ -610,6 +610,11 @@ async function readJsonWithStatus(path: string, init?: RequestInit): Promise<{ o
   throw lastError instanceof Error ? lastError : new Error(`Unable to reach ParkPulse API at ${path}`);
 }
 
+function isDemoAuthGateFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /returned (401|403)|signed role session|not authorized|forbidden|unauthorized|identity provider/i.test(message);
+}
+
 function latestEvaluation(payload: Record<string, unknown>, session?: HandshakeSession) {
   const direct = payload.case_evaluation as CaseEvaluation | undefined;
   if (direct) return direct;
@@ -833,7 +838,7 @@ function ContractPanel({ contract }: { contract: AgentContract | null }) {
             </a>
             <div className="rounded border border-slate-800 bg-[#0b1014] px-3 py-2 text-xs font-black text-slate-200">
               Conformance command
-              <code className="mt-1 block break-words text-[10px] font-bold text-slate-500">python3 scripts/run_agent_handshake_conformance.py --api http://127.0.0.1:8001</code>
+              <code className="mt-1 block break-words text-[10px] font-bold text-slate-500">python3 scripts/run_agent_handshake_conformance.py --api http://127.0.0.1:8000</code>
             </div>
           </div>
         </div>
@@ -1592,8 +1597,20 @@ export default function AgentHandshakePage() {
       if (certified.session) setSession(certified.session);
       setStatus("ready");
     } catch (apiError) {
-      setError(apiError instanceof Error ? apiError.message : "Unable to certify external agent.");
-      setStatus("error");
+      if (isDemoAuthGateFailure(apiError)) {
+        try {
+          const payload = await readJson<{ session: HandshakeSession }>("/api/park/agent-handshake/demo", { method: "POST", headers: jsonHeaders, body: "{}" });
+          setSession(payload.session);
+          setStatus("ready");
+          setError("Trust certification requires admin IAM. Loaded the scoped handshake demo so the presentation can continue.");
+        } catch (fallbackError) {
+          setError(fallbackError instanceof Error ? fallbackError.message : "Unable to load handshake demo fallback.");
+          setStatus("error");
+        }
+      } else {
+        setError(apiError instanceof Error ? apiError.message : "Unable to certify external agent.");
+        setStatus("error");
+      }
     } finally {
       setOnboardingRunning(false);
     }
@@ -1625,8 +1642,6 @@ export default function AgentHandshakePage() {
     setTrustAdminProbe({ status: "running" });
     try {
       const unauth = await readJsonWithStatus("/api/park/agent-trust/keys");
-      const readiness = await readJsonWithStatus("/api/park/agent-trust/status");
-      const authBoundary = readiness.payload.auth_boundary as { mode?: string; production_ready?: boolean; external_identity_ready?: boolean; dev_role_issuer_enabled?: boolean } | undefined;
       const adminIssued = await readJsonWithStatus("/api/park/auth/dev-session", {
         method: "POST",
         headers: jsonHeaders,
@@ -1636,10 +1651,10 @@ export default function AgentHandshakePage() {
         setTrustAdminProbe({
           status: "error",
           unauthStatus: unauth.status,
-          authMode: authBoundary?.mode,
-          productionReady: Boolean(authBoundary?.production_ready),
-          externalIdentityReady: Boolean(authBoundary?.external_identity_ready),
-          devIssuerEnabled: Boolean(authBoundary?.dev_role_issuer_enabled),
+          authMode: "unknown",
+          productionReady: false,
+          externalIdentityReady: false,
+          devIssuerEnabled: false,
           reason: "Local dev role issuer did not provide an admin token. Enable PARKPULSE_ENABLE_DEV_ROLE_ISSUER for the local demo or use a production identity provider.",
         });
         return;
@@ -1650,6 +1665,8 @@ export default function AgentHandshakePage() {
         body: JSON.stringify({ role: "ops_team", subject: "agent-handshake-ui-ops" }),
       });
       const adminHeaders = { ...jsonHeaders, "x-parkpulse-role-token": String(adminIssued.payload.token) };
+      const readiness = await readJsonWithStatus("/api/park/agent-trust/status", { headers: adminHeaders });
+      const authBoundary = readiness.payload.auth_boundary as { mode?: string; production_ready?: boolean; external_identity_ready?: boolean; dev_role_issuer_enabled?: boolean } | undefined;
       const opsHeaders = typeof opsIssued.payload.token === "string" ? { ...jsonHeaders, "x-parkpulse-role-token": String(opsIssued.payload.token) } : jsonHeaders;
       const opsProbe = await readJsonWithStatus("/api/park/agent-trust/keys", { headers: opsHeaders });
       const keys = await readJsonWithStatus("/api/park/agent-trust/keys", { headers: adminHeaders });

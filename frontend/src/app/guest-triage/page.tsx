@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { fetchParkPulseApi } from "@/lib/api";
 
 type TriageResult = {
@@ -50,6 +50,21 @@ type TriageResult = {
     staff_checklist?: string[];
     forbidden_auto_actions?: string[];
   };
+  llm_response?: {
+    status?: string;
+    source?: string;
+    reply?: string;
+    model?: string;
+    provider?: string;
+    platform?: string;
+    transport?: string;
+    tone?: string;
+    used_profile?: boolean;
+    next_step?: string;
+    confidence?: number;
+    readiness_issues?: string[];
+    llm_controls_live_ops?: boolean;
+  };
   ticket_result?: {
     status?: string;
     ticket?: {
@@ -61,18 +76,38 @@ type TriageResult = {
       live_ops_authority?: boolean;
     };
   };
+  memory_impact?: {
+    stored?: boolean;
+    storage_mode?: string | null;
+    collection?: string | null;
+    document_id?: string | null;
+    training_scenario_id?: string;
+    recommended_action?: string;
+    memory_count?: number;
+    visible_benefit?: string;
+    historical_ticket_frequency?: {
+      ticket_count?: number;
+      highest_severity?: string;
+      frequency_label?: string;
+      sources?: Record<string, number>;
+      issue_types?: Record<string, number>;
+    };
+    top_patterns?: Array<{ issue_type?: string; scenario_id?: string; count?: number; highest_severity?: string; latest_summary?: string }>;
+    recent_examples?: Array<{ id?: string; source?: string; scenario_id?: string; issue_type?: string; severity?: string; summary?: string }>;
+    boundary?: string;
+  };
   boundary?: string;
 };
 
 const examples = [
+  "Where is the closest vegetarian food near the coaster?",
+  "I want a refund. The ride was closed and nobody told us before we waited.",
   "I cannot find my six-year-old. She was next to me near the carousel and now she is gone.",
   "My friend is dizzy and looks pale. We have been in the sun for an hour and she says she might faint.",
   "A group cut the line and now people are yelling near the coaster merge.",
   "My father cannot stand in this sun for the queue. We need accessibility help but do not want to explain medical history in public.",
-  "Where is the closest vegetarian food near the coaster?",
   "Where can we find a quiet cooling place and water refill?",
   "Can I bring a drone for filming behind the theater?",
-  "I want a refund. The ride was closed and nobody told us before we waited.",
 ];
 
 function label(value?: string | null) {
@@ -87,9 +122,10 @@ function urgencyClass(value?: string) {
 }
 
 export default function GuestTriagePage() {
+  const autoDemoStartedRef = useRef(false);
   const [message, setMessage] = useState(examples[0]);
   const [guestName, setGuestName] = useState("");
-  const [location, setLocation] = useState("Carousel");
+  const [location, setLocation] = useState("Coaster");
   const [channel, setChannel] = useState("in_app_guest_message");
   const [createTicket, setCreateTicket] = useState(true);
   const [result, setResult] = useState<TriageResult | null>(null);
@@ -106,11 +142,29 @@ export default function GuestTriagePage() {
   const profileContext = result?.profile_context;
   const profileLocations = profileContext?.matched_locations ?? [];
   const profileLimitations = profileContext?.limitations ?? [];
+  const memoryImpact = result?.memory_impact;
+  const memoryFrequency = memoryImpact?.historical_ticket_frequency;
+  const memorySources = Object.entries(memoryFrequency?.sources ?? {});
+  const llmResponse = result?.llm_response;
+  const replyText = llmResponse?.reply ?? result?.reaction?.guest_reply_draft ?? "Triage a guest message to generate a response draft.";
+  const responseStatus = llmResponse?.status ?? (result ? "deterministic_ready" : "not_run");
+  const responseSource = llmResponse?.source ?? (result ? "deterministic" : "waiting");
+  const llmIsLive = responseSource === "llm_guest_triage";
+  const responseMeta = [
+    ["LLM", llmIsLive ? "Generated" : label(responseStatus)],
+    ["Source", label(responseSource)],
+    ["Provider", label(llmResponse?.provider ?? llmResponse?.platform ?? "not connected")],
+    ["Ops authority", llmResponse?.llm_controls_live_ops ? "LLM controls ops" : "Human gated"],
+  ];
+  const decisionStats = [
+    ["Issue", label(result?.classification?.issue_type)],
+    ["Urgency", `${label(urgency ?? "not triaged")} ${score ? `${score}/100` : ""}`.trim()],
+    ["Owner", label(result?.routing?.assigned_team)],
+    ["SLA", result?.routing?.sla_minutes ? `${result.routing.sla_minutes} min` : "--"],
+  ];
   const meterStyle = useMemo(() => ({ width: `${Math.max(0, Math.min(100, score))}%` }), [score]);
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    const trimmed = message.trim();
+  async function runTriage(trimmed: string, shouldCreateTicket = createTicket) {
     if (!trimmed) return;
     setIsLoading(true);
     setError("");
@@ -118,7 +172,7 @@ export default function GuestTriagePage() {
       const response = await fetchParkPulseApi("/api/park/guest-message-triage", {
         method: "POST",
         headers: { "content-type": "application/json", "x-parkpulse-role": "onsite_worker" },
-        body: JSON.stringify({ message: trimmed, guestName, location, channel, createTicket }),
+        body: JSON.stringify({ message: trimmed, guestName, location, channel, createTicket: shouldCreateTicket }),
         timeoutMs: 10000,
       });
       const payload = (await response.json()) as TriageResult;
@@ -133,192 +187,210 @@ export default function GuestTriagePage() {
     }
   }
 
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    await runTriage(message.trim(), createTicket);
+  }
+
+  useEffect(() => {
+    if (autoDemoStartedRef.current) return;
+    autoDemoStartedRef.current = true;
+    void runTriage(examples[0], false);
+  }, []);
+
   return (
-    <main className="min-h-screen bg-[#071014] px-4 py-5 font-sans text-slate-100 lg:px-8">
-      <div className="mx-auto max-w-[1450px] space-y-4">
-        <header className="rounded-lg border border-cyan-300/30 bg-[#0d171b] p-5 shadow-xl shadow-cyan-950/20">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-            <div>
-              <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">ParkPulse Guest Triage</div>
-              <h1 className="mt-2 text-3xl font-black tracking-normal text-slate-50 lg:text-5xl">Guest Message Triage</h1>
-              <p className="mt-3 max-w-4xl text-sm leading-relaxed text-slate-400">
-                Classify incoming guest text, score urgency, create a routed live issue ticket, and draft the first safe response. High-risk reactions stay human-acknowledged.
-              </p>
-            </div>
-            <nav className="flex flex-wrap gap-2">
-              <a href="/staff-training" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-teal-300">Staff training</a>
-              <a href="/" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-300">Command</a>
-            </nav>
+    <main className="min-h-screen bg-[#f5f7f3] px-4 py-5 font-sans text-slate-950 lg:px-8">
+      <div className="mx-auto max-w-6xl space-y-4">
+        <header className="flex flex-col gap-3 border-b border-slate-300 pb-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <div className="text-[11px] font-black uppercase tracking-widest text-teal-700">Guest Triage</div>
+            <h1 className="mt-1 text-3xl font-black tracking-normal text-slate-950 lg:text-5xl">Reply, route, and learn</h1>
           </div>
+          <nav className="flex flex-wrap gap-2">
+            <a href="/staff-training" className="rounded border border-slate-300 bg-white px-3 py-2 text-xs font-black text-slate-700">Staff training</a>
+            <a href="/ops" className="rounded border border-slate-300 bg-white px-3 py-2 text-xs font-black text-slate-700">Command Center</a>
+          </nav>
         </header>
 
-        <section className="grid gap-4 xl:grid-cols-[420px_1fr]">
-          <form onSubmit={(event) => void submit(event)} className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
-            <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Incoming guest message</div>
-            <label className="mt-3 grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
-              Message
-              <textarea
-                value={message}
-                onChange={(event) => setMessage(event.target.value)}
-                rows={8}
-                className="resize-y rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-semibold normal-case leading-relaxed tracking-normal text-slate-100 outline-none focus:border-cyan-300"
-              />
-            </label>
+        <section className="grid gap-4 lg:grid-cols-[minmax(320px,400px)_1fr]">
+          <form onSubmit={(event) => void submit(event)} className="rounded-lg border border-slate-300 bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Incoming message</div>
+                <div className="mt-1 text-lg font-black text-slate-950">Guest text</div>
+              </div>
+              <span className={`rounded border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${urgencyClass(urgency)}`}>{label(urgency ?? "waiting")}</span>
+            </div>
+
+            <textarea
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              rows={7}
+              className="mt-3 w-full resize-y rounded border border-slate-300 bg-slate-50 px-3 py-2 text-sm font-semibold leading-relaxed text-slate-950 outline-none focus:border-teal-500"
+            />
+
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
               <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
                 Guest
-                <input value={guestName} onChange={(event) => setGuestName(event.target.value)} placeholder="Optional" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-cyan-300" />
+                <input value={guestName} onChange={(event) => setGuestName(event.target.value)} placeholder="Optional" className="rounded border border-slate-300 bg-white px-3 py-2 text-xs font-bold normal-case tracking-normal text-slate-950 outline-none focus:border-teal-500" />
               </label>
               <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
                 Location
-                <input value={location} onChange={(event) => setLocation(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-cyan-300" />
+                <input value={location} onChange={(event) => setLocation(event.target.value)} className="rounded border border-slate-300 bg-white px-3 py-2 text-xs font-bold normal-case tracking-normal text-slate-950 outline-none focus:border-teal-500" />
               </label>
             </div>
-            <label className="mt-3 grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
-              Channel
-              <select value={channel} onChange={(event) => setChannel(event.target.value)} className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-bold normal-case tracking-normal text-slate-100 outline-none focus:border-cyan-300">
-                <option value="in_app_guest_message">In-app guest message</option>
-                <option value="sms">SMS</option>
-                <option value="kiosk">Kiosk</option>
-                <option value="staff_entered">Staff entered</option>
-              </select>
-            </label>
-            <label className="mt-3 flex items-center gap-2 text-xs font-bold text-slate-300">
-              <input type="checkbox" checked={createTicket} onChange={(event) => setCreateTicket(event.target.checked)} className="h-4 w-4 accent-cyan-300" />
-              Create routed live issue ticket
-            </label>
+
+            <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+              <label className="grid gap-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                Channel
+                <select value={channel} onChange={(event) => setChannel(event.target.value)} className="rounded border border-slate-300 bg-white px-3 py-2 text-xs font-bold normal-case tracking-normal text-slate-950 outline-none focus:border-teal-500">
+                  <option value="in_app_guest_message">In-app guest message</option>
+                  <option value="sms">SMS</option>
+                  <option value="kiosk">Kiosk</option>
+                  <option value="staff_entered">Staff entered</option>
+                </select>
+              </label>
+              <label className="flex min-h-9 items-center gap-2 rounded border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700">
+                <input type="checkbox" checked={createTicket} onChange={(event) => setCreateTicket(event.target.checked)} className="h-4 w-4 accent-teal-600" />
+                Ticket
+              </label>
+            </div>
+
             <button
               type="submit"
               disabled={isLoading || !message.trim()}
-              className="mt-4 w-full rounded border border-cyan-300 bg-cyan-300 px-3 py-2 text-xs font-black uppercase tracking-widest text-slate-950 transition hover:bg-cyan-200 disabled:opacity-50"
+              className="mt-4 w-full rounded border border-slate-950 bg-slate-950 px-3 py-2 text-xs font-black uppercase tracking-widest text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500"
             >
-              {isLoading ? "Triaging..." : "Triage message"}
+              {isLoading ? "Triaging" : "Generate reply"}
             </button>
-            {error && <div className="mt-3 rounded border border-rose-300/40 bg-rose-300/10 p-3 text-sm font-bold text-rose-100">{error}</div>}
-            <div className="mt-4 grid gap-2">
-              {examples.map((item) => (
-                <button key={item} type="button" onClick={() => setMessage(item)} className="rounded border border-slate-800 bg-slate-950 p-2 text-left text-xs font-semibold leading-relaxed text-slate-400 transition hover:border-cyan-300 hover:text-slate-100">
-                  {item}
-                </button>
-              ))}
+            {error ? <div className="mt-3 rounded border border-rose-300 bg-rose-50 p-3 text-sm font-bold text-rose-800">{error}</div> : null}
+
+            <div className="mt-4 border-t border-slate-200 pt-3">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Try a case</div>
+              <div className="mt-2 grid gap-2">
+                {examples.slice(0, 5).map((item) => (
+                  <button key={item} type="button" onClick={() => setMessage(item)} className="rounded border border-slate-200 bg-slate-50 p-2 text-left text-xs font-semibold leading-relaxed text-slate-600 transition hover:border-teal-500 hover:bg-white hover:text-slate-950">
+                    {item}
+                  </button>
+                ))}
+              </div>
             </div>
           </form>
 
           <div className="space-y-4">
-            <section className="grid gap-3 md:grid-cols-4">
-              <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4 md:col-span-2">
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Classification</div>
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <span className={`rounded border px-3 py-2 text-xs font-black uppercase tracking-widest ${urgencyClass(urgency)}`}>{label(urgency ?? "not triaged")}</span>
-                  <span className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200">{label(result?.classification?.issue_type)}</span>
-                  <span className="rounded border border-lime-300/30 bg-lime-300/10 px-3 py-2 text-xs font-black uppercase tracking-widest text-lime-100">{label(result?.understanding?.status ?? "not checked")}</span>
-                </div>
-                <div className="mt-4 h-2 overflow-hidden rounded bg-slate-950">
-                  <div style={meterStyle} className="h-full bg-cyan-300" />
-                </div>
-                <div className="mt-2 flex justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
-                  <span>Urgency {score}/100</span>
-                  <span>Confidence {confidence}%</span>
-                </div>
-                <div className="mt-3 text-xs font-bold text-slate-500">Category {label(result?.understanding?.category)}</div>
-              </div>
-              <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Owner</div>
-                <div className="mt-3 text-xl font-black text-slate-50">{label(result?.routing?.assigned_team)}</div>
-                <div className="mt-2 text-xs font-bold text-slate-500">{label(result?.routing?.human_review_place ?? "auto route")}</div>
-              </div>
-              <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">SLA</div>
-                <div className="mt-3 text-xl font-black text-slate-50">{result?.routing?.sla_minutes ?? "--"} min</div>
-                <div className="mt-2 text-xs font-bold text-slate-500">Human ack {result?.routing?.human_ack_required ? "required" : "not required"}</div>
-              </div>
-            </section>
-
-            <section className="rounded-lg border border-lime-300/20 bg-[#0d171b] p-4">
+            <section className="rounded-lg border border-slate-300 bg-white p-4 shadow-sm">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                <div>
-                  <div className="text-[10px] font-black uppercase tracking-widest text-lime-300">Park profile grounding</div>
-                  <h2 className="mt-1 text-xl font-black text-slate-50">{profileContext?.venue_name ?? "No profile answer yet"}</h2>
-                  <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest">
-                    <span className="rounded border border-lime-300/30 bg-lime-300/10 px-2 py-1 text-lime-100">{label(profileContext?.status ?? "pending")}</span>
-                    <span className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300">{label(profileContext?.category)}</span>
-                    <span className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-slate-300">{label(profileContext?.readiness_status)}</span>
-                    {profileContext?.human_review_required ? <span className="rounded border border-amber-300/40 bg-amber-300/10 px-2 py-1 text-amber-100">Human review</span> : null}
-                  </div>
+                <div className="min-w-0">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-teal-700">LLM response</div>
+                  <h2 className="mt-1 text-2xl font-black text-slate-950">Suggested guest reply</h2>
                 </div>
-                <a href="/venue-profile" className="rounded border border-lime-300/40 bg-slate-950 px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-200">Venue profile</a>
-              </div>
-              <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_340px]">
-                <div className="grid gap-2">
-                  {(profileLocations.length ? profileLocations : [{ name: "No matched profile place yet.", kind: "triage pending" }]).slice(0, 5).map((place, index) => (
-                    <div key={`${place.name}-${index}`} className="rounded border border-slate-800 bg-slate-950 p-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <div className="text-sm font-black text-slate-100">{place.name}</div>
-                        <span className="rounded border border-slate-700 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">{label(place.kind)}</span>
-                        {place.zone_id ? <span className="rounded border border-slate-700 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">{label(place.zone_id)}</span> : null}
-                      </div>
-                      {place.accessibility_note ? <div className="mt-2 text-xs font-semibold leading-relaxed text-slate-400">{place.accessibility_note}</div> : null}
-                      {place.sensory_note ? <div className="mt-2 text-xs font-semibold leading-relaxed text-slate-400">{place.sensory_note}</div> : null}
-                      {place.services?.length || place.dietary_tags?.length ? (
-                        <div className="mt-2 text-[10px] font-black uppercase tracking-widest text-lime-200">{[...(place.services ?? []), ...(place.dietary_tags ?? [])].join(" | ")}</div>
-                      ) : null}
-                    </div>
+                <div className="flex flex-wrap gap-2">
+                  {responseMeta.map(([key, value]) => (
+                    <span key={key} className="rounded border border-slate-300 bg-slate-50 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-600">
+                      {key}: {value}
+                    </span>
                   ))}
                 </div>
-                <div className="rounded border border-slate-800 bg-slate-950 p-3">
-                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Limits and handoff</div>
-                  <div className="mt-2 space-y-2">
-                    {(profileLimitations.length ? profileLimitations : ["Profile context appears after triage."]).slice(0, 4).map((item) => (
-                      <div key={item} className="text-xs font-semibold leading-relaxed text-slate-400">{item}</div>
-                    ))}
-                  </div>
-                  {profileContext?.human_review_place ? <div className="mt-3 rounded border border-amber-300/30 bg-amber-300/10 p-2 text-xs font-black uppercase tracking-widest text-amber-100">{label(profileContext.human_review_place)}</div> : null}
-                </div>
               </div>
+
+              <div className="mt-4 rounded border border-teal-200 bg-teal-50 p-4">
+                <p className="text-lg font-semibold leading-relaxed text-slate-950">{replyText}</p>
+                {llmResponse?.next_step ? <div className="mt-3 text-xs font-black uppercase tracking-widest text-teal-800">Next step: {llmResponse.next_step}</div> : null}
+              </div>
+
+              {!llmIsLive && result ? (
+                <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-3 text-xs font-semibold leading-relaxed text-amber-900">
+                  LLM response object is present, but the provider returned {label(responseStatus)}. The UI is showing the safe deterministic reply from the same triage contract.
+                </div>
+              ) : null}
+
+              <div className="mt-4 grid gap-2 md:grid-cols-4">
+                {decisionStats.map(([key, value]) => (
+                  <div key={key} className="rounded border border-slate-200 bg-slate-50 p-3">
+                    <div className="text-[9px] font-black uppercase tracking-widest text-slate-500">{key}</div>
+                    <div className="mt-1 text-sm font-black text-slate-950">{value}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-3 h-2 overflow-hidden rounded bg-slate-100">
+                <div style={meterStyle} className="h-full bg-teal-600" />
+              </div>
+              <div className="mt-2 flex justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
+                <span>Confidence {confidence}%</span>
+                <span>{label(result?.understanding?.status ?? "not checked")}</span>
+              </div>
+              {matchedTerms.length ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {matchedTerms.slice(0, 6).map((term) => (
+                    <span key={term} className="rounded border border-teal-200 bg-white px-2 py-1 text-[10px] font-black uppercase tracking-widest text-teal-800">
+                      {label(term)}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </section>
 
             <section className="grid gap-4 lg:grid-cols-2">
-              <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
-                <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Guest reply draft</div>
-                <p className="mt-3 text-sm font-semibold leading-relaxed text-slate-200">{result?.reaction?.guest_reply_draft ?? "Triage a guest message to generate a safe first response."}</p>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {matchedTerms.map((term) => <span key={term} className="rounded border border-cyan-300/30 bg-cyan-300/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-cyan-100">{term}</span>)}
+              <div className="rounded-lg border border-slate-300 bg-white p-4 shadow-sm">
+                <div className="text-[10px] font-black uppercase tracking-widest text-amber-700">Human handoff</div>
+                <h2 className="mt-1 text-xl font-black text-slate-950">{result?.routing?.human_ack_required ? "Review required" : "Standard route"}</h2>
+                <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Ticket</div>
+                  <div className="mt-1 text-sm font-black text-slate-950">{ticket?.id ?? "No ticket created"}</div>
+                  <div className="mt-1 text-xs font-bold text-slate-500">{ticket ? `${label(ticket.issue_type)} / ${label(ticket.severity)} / ${label(ticket.assigned_team)}` : "Enable ticket creation and submit to create one."}</div>
                 </div>
-              </div>
-              <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
-                <div className="text-[10px] font-black uppercase tracking-widest text-amber-300">Staff checklist</div>
-                <div className="mt-3 space-y-2">
-                  {(checklist.length ? checklist : ["Triage a message to generate a checklist."]).map((item, index) => (
-                    <div key={`${item}-${index}`} className="rounded border border-slate-800 bg-slate-950 p-2 text-xs font-semibold text-slate-300">{item}</div>
+                <div className="mt-3 grid gap-2">
+                  {(checklist.length ? checklist : ["Checklist appears after triage."]).slice(0, 4).map((item, index) => (
+                    <div key={`${item}-${index}`} className="rounded border border-slate-200 bg-white p-2 text-xs font-semibold leading-relaxed text-slate-700">{item}</div>
                   ))}
                 </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-300 bg-white p-4 shadow-sm">
+                <div className="text-[10px] font-black uppercase tracking-widest text-rose-700">Boundaries</div>
+                <h2 className="mt-1 text-xl font-black text-slate-950">Blocked auto actions</h2>
+                <div className="mt-3 grid gap-2">
+                  {(forbidden.length ? forbidden : ["High-risk actions stay gated."]).slice(0, 4).map((item) => (
+                    <div key={item} className="rounded border border-rose-200 bg-rose-50 p-2 text-xs font-black uppercase tracking-widest text-rose-800">{label(item)}</div>
+                  ))}
+                </div>
+                <div className="mt-3 text-xs font-semibold leading-relaxed text-slate-500">{result?.boundary ?? "Guest triage can draft and route; humans approve high-risk action."}</div>
               </div>
             </section>
 
-            <section className="grid gap-4 lg:grid-cols-[1fr_320px]">
-              <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
-                <div className="text-[10px] font-black uppercase tracking-widest text-emerald-300">Live ticket</div>
-                {ticket ? (
-                  <div className="mt-3 rounded border border-emerald-300/20 bg-emerald-300/5 p-3 text-sm">
-                    <div className="font-black text-slate-100">{ticket.id}</div>
-                    <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest text-emerald-200">
-                      <span>{label(ticket.issue_type)}</span>
-                      <span>{label(ticket.severity)}</span>
-                      <span>{label(ticket.assigned_team)}</span>
-                      <span>Live ops ticket {ticket.live_ops_authority ? "yes" : "no"}</span>
-                      <span>Human ack {ticket.requires_human_ack ? "yes" : "no"}</span>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="mt-3 rounded border border-dashed border-slate-700 bg-slate-950 p-3 text-sm font-bold text-slate-500">No ticket created yet.</div>
-                )}
+            <section className="rounded-lg border border-slate-300 bg-white p-4 shadow-sm">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <div className="text-[10px] font-black uppercase tracking-widest text-emerald-700">Grounding</div>
+                  <h2 className="mt-1 text-xl font-black text-slate-950">{profileContext?.venue_name ?? "Venue profile pending"}</h2>
+                </div>
+                <a href="/venue-profile" className="rounded border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-black text-slate-700">Venue profile</a>
               </div>
-              <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
-                <div className="text-[10px] font-black uppercase tracking-widest text-rose-300">Blocked auto actions</div>
-                <div className="mt-3 space-y-2">
-                  {(forbidden.length ? forbidden : ["High-risk actions stay gated."]).map((item) => (
-                    <div key={item} className="rounded border border-rose-300/20 bg-rose-300/5 p-2 text-xs font-black uppercase tracking-widest text-rose-100">{label(item)}</div>
+
+              <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_280px]">
+                <div className="grid gap-2 md:grid-cols-2">
+                  {(profileLocations.length ? profileLocations : [{ name: "No matched profile place yet.", kind: "triage pending" }]).slice(0, 4).map((place, index) => (
+                    <div key={`${place.name}-${index}`} className="rounded border border-slate-200 bg-slate-50 p-3">
+                      <div className="text-sm font-black text-slate-950">{place.name}</div>
+                      <div className="mt-1 text-[10px] font-black uppercase tracking-widest text-slate-500">{label(place.kind)}{place.zone_id ? ` / ${label(place.zone_id)}` : ""}</div>
+                      {place.accessibility_note ? <div className="mt-2 text-xs font-semibold leading-relaxed text-slate-600">{place.accessibility_note}</div> : null}
+                      {place.sensory_note ? <div className="mt-2 text-xs font-semibold leading-relaxed text-slate-600">{place.sensory_note}</div> : null}
+                    </div>
                   ))}
+                </div>
+                <div className="rounded border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Memory</div>
+                  <div className="mt-1 text-lg font-black text-slate-950">{memoryImpact?.memory_count ?? 0} signals</div>
+                  <div className="mt-1 text-xs font-semibold leading-relaxed text-slate-600">{memoryImpact?.visible_benefit ?? "Stored triage memory can feed staff training scenarios."}</div>
+                  {memorySources.length ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {memorySources.slice(0, 3).map(([source, count]) => (
+                        <span key={source} className="rounded border border-slate-300 bg-white px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-600">{label(source)} {count}</span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {profileLimitations.length ? <div className="mt-3 text-xs font-semibold leading-relaxed text-slate-500">{profileLimitations.slice(0, 2).join(" ")}</div> : null}
                 </div>
               </div>
             </section>

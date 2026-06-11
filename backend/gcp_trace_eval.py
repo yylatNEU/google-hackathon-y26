@@ -118,7 +118,7 @@ def setup_gcp_cloud_trace_exporter() -> Any | None:
     global _gcp_trace_exporter, _gcp_trace_provider, _gcp_trace_startup_error
 
     status = get_gcp_trace_eval_status()
-    if not status.trace_enabled or not status.trace_export_configured:
+    if not status.trace_export_configured:
         return None
     if _gcp_trace_exporter is not None:
         return _gcp_trace_provider

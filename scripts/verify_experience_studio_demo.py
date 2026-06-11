@@ -437,10 +437,16 @@ def _one_learning_loop(
     }
 
 
+DEFAULT_CNY_SCENARIO_MESSAGE = (
+    "Create a Chinese New Year festival plan that runs for a month with food, craft, "
+    "signage, email, and staff cues."
+)
+
+
 def run(
     base_url: str,
     use_llm: bool = False,
-    scenario_message: str = "Create a rainy-day family journey with verified indoor stops, calm guest copy, app, signage, email, and staff cue artifacts.",
+    scenario_message: str = DEFAULT_CNY_SCENARIO_MESSAGE,
     refinement_input: str = (
         "Success metric is pre-arrival clarity. Guest commitment is a short optional moment. "
         "Approved comfort claims are indoor stop, covered path, seating, and step-free access. "
@@ -1184,7 +1190,7 @@ def main() -> None:
     parser.add_argument("--use-llm", action="store_true", help="Request live LLM creative polish; deterministic verification remains the default.")
     parser.add_argument(
         "--scenario-message",
-        default="Create a rainy-day family journey with verified indoor stops, calm guest copy, app, signage, email, and staff cue artifacts.",
+        default=DEFAULT_CNY_SCENARIO_MESSAGE,
         help="Designer request used for the Experience Studio planner.",
     )
     parser.add_argument(

@@ -34,6 +34,12 @@ async function openCommandCenter(page: Page) {
   await expect(page.getByRole("heading", { name: "Operational data contract" })).toBeVisible({ timeout: 20000 });
 }
 
+async function openStaffTraining(page: Page) {
+  await page.goto(`${APP_URL}/staff-training?api=${encodeURIComponent(API_URL)}`, { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "Roleplay Trainer" })).toBeVisible({ timeout: 20000 });
+  await expect(page.getByRole("heading", { name: "Lost Child Report" })).toBeVisible({ timeout: 20000 });
+}
+
 async function expectNoAuthOrTransportRegression(page: Page) {
   const body = page.locator("body");
   await expect(body).not.toContainText(/auth\/dev-session returned 403|Missing signed role session token/i);
@@ -107,6 +113,38 @@ test("live-feed review and training panels use signed local role sessions", asyn
   await page.getByRole("button", { name: "Refresh training" }).click({ noWaitAfter: true });
   await expect(page.getByRole("heading", { name: "Observed outcome reward model" })).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("GCP ML path")).toBeVisible({ timeout: 20000 });
+  await expectNoAuthOrTransportRegression(page);
+
+  expect(runtimeErrors).toEqual([]);
+  expect(failedResponses).toEqual([]);
+});
+
+test("staff training roleplay keeps the employee turn and returns coaching", async ({ page }) => {
+  test.setTimeout(90000);
+  const { runtimeErrors, failedResponses } = watchRuntime(page);
+
+  await openStaffTraining(page);
+  await expectNoAuthOrTransportRegression(page);
+  const vertexGuest = page.getByLabel("Vertex AI guest");
+  if (await vertexGuest.isChecked()) {
+    await vertexGuest.uncheck();
+  }
+
+  await page.getByRole("button", { name: "Start roleplay" }).click();
+  await expect(page.getByText("Session active. Read the guest message below, then reply as the employee.")).toBeVisible({ timeout: 20000 });
+
+  const employeeReply =
+    "I am sorry, I will help right now. Please stay here while I call security. What is she wearing, and where did you last see her near the carousel?";
+  await page.getByLabel("Employee response").fill(employeeReply);
+  const sendReply = page.getByRole("button", { name: "Send reply" });
+  await expect(sendReply).toBeEnabled();
+  await sendReply.click();
+
+  await expect(page.getByText(employeeReply)).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText(/Strong response|Continue the conversation|Say next/)).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText(/strong|passing/)).toBeVisible({ timeout: 30000 });
+  await expect(page.getByText("Scores: deterministic")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("body")).not.toContainText(/Training session was not found|has expired/i);
   await expectNoAuthOrTransportRegression(page);
 
   expect(runtimeErrors).toEqual([]);

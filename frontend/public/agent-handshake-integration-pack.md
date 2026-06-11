@@ -15,7 +15,7 @@ This pack is for an external personal agent that wants to negotiate with ParkPul
 Start the ParkPulse API and frontend, then run:
 
 ```bash
-python3 examples/certified_agent_demo.py --api http://127.0.0.1:8001
+python3 examples/certified_agent_demo.py --api http://127.0.0.1:8000
 ```
 
 Expected result:
@@ -33,7 +33,7 @@ Expected result:
 ## Run Conformance
 
 ```bash
-python3 scripts/run_agent_handshake_conformance.py --api http://127.0.0.1:8001
+python3 scripts/run_agent_handshake_conformance.py --api http://127.0.0.1:8000
 ```
 
 For a production-style auth check with the dev issuer disabled and an upstream-verified admin identity:

@@ -212,6 +212,62 @@ type PromotionQueueItem = {
   can_promote_live_ops?: boolean;
 };
 
+type TrainingAgentTool = {
+  id?: string;
+  owner_agent?: string;
+  allowed?: boolean;
+  authority?: string;
+  constraints?: string[];
+};
+
+type RetrievedTrainingContext = {
+  mode?: string;
+  retrieval_method?: string;
+  counts?: {
+    policy_refs?: number;
+    policy_snippets?: number;
+    active_learning_versions?: number;
+    prior_sessions?: number;
+    training_gap_patterns?: number;
+    guest_triage_patterns?: number;
+    guest_triage_examples?: number;
+    historical_ticket_frequency?: number;
+    manager_reviews?: number;
+  };
+  retrieved?: {
+    policy_refs?: Array<{ id?: string; label?: string; type?: string }>;
+    policy_snippets?: Array<{ id?: string; title?: string; book_id?: string; summary?: string; policy_refs?: string[]; blocked_actions?: string[] }>;
+    active_learning_guidance?: string[];
+    prior_sessions?: Array<{ session_id?: string; overall?: number; critical_miss?: boolean; mastery_level?: string; summary?: string; open_gaps?: string[] }>;
+    training_gap_patterns?: Array<{ gap_type?: string; count?: number; highest_severity?: string; latest_summary?: string }>;
+    guest_triage_patterns?: Array<{ issue_type?: string; scenario_id?: string; count?: number; highest_severity?: string; latest_summary?: string; recommended_action?: string }>;
+    guest_triage_examples?: Array<{ id?: string; source?: string; scenario_id?: string; issue_type?: string; severity?: string; summary?: string; staff_checklist?: string[]; created_at?: string }>;
+    historical_ticket_frequency?: Array<{ scenario_id?: string; ticket_count?: number; highest_severity?: string; latest_summary?: string; frequency_label?: string; sources?: Record<string, number>; issue_types?: Record<string, number> }>;
+    scenario_recommendation?: { issue_type?: string; scenario_id?: string; count?: number; highest_severity?: string; recommended_action?: string } | null;
+    manager_reviews?: Array<{ review_id?: string; decision?: string; reviewer?: string; notes?: string }>;
+    trainee_profile?: {
+      status?: string;
+      session_count?: number;
+      average_score?: number | null;
+      critical_miss_count?: number;
+      manager_review_count?: number;
+      coaching_priority?: string | null;
+      recurring_gaps?: Array<{ label?: string; count?: number }>;
+    };
+  };
+  blocked_tools?: string[];
+  boundary?: string;
+};
+
+type TrainingToolTrace = {
+  tool?: string;
+  agent?: string;
+  status?: string;
+  score_authority?: boolean;
+  live_ops_authority?: boolean;
+  output?: Record<string, unknown>;
+};
+
 type TrainingSession = {
   id?: string;
   assignment_id?: string;
@@ -227,6 +283,9 @@ type TrainingSession = {
   missing_objectives?: string[];
   guest_simulator?: GuestSimulator;
   mastery_tracker?: MasteryTracker;
+  retrieved_training_context?: RetrievedTrainingContext;
+  agent_tool_manifest?: TrainingAgentTool[];
+  tool_trace?: TrainingToolTrace[];
   debrief?: Debrief;
   training_gap_ticket?: ProductLearningTicketResult | null;
 };
@@ -262,6 +321,8 @@ type Assignment = {
   staff_role?: string;
   scenario_ids?: string[];
   scenarios?: Scenario[];
+  source?: string;
+  source_signals?: Array<{ scenario_id?: string; issue_types?: string[]; evidence_count?: number; highest_severity?: string; latest_summary?: string; source?: string }>;
   status?: string;
   completed_count?: number;
   required_count?: number;
@@ -537,11 +598,12 @@ export function StaffTrainingPage() {
   const [activeView, setActiveView] = useState<"roleplay" | "manager">("roleplay");
   const [managerLoaded, setManagerLoaded] = useState(false);
   const [scenarios, setScenarios] = useState<Scenario[]>(fallbackScenarios);
-  const [selectedScenarioId, setSelectedScenarioId] = useState("lost_child_report");
+  const [selectedScenarioId, setSelectedScenarioId] = useState("language_barrier");
   const [traineeName, setTraineeName] = useState("Seasonal staff trainee");
   const [useLlmGuest, setUseLlmGuest] = useState(true);
   const [useShadowEval, setUseShadowEval] = useState(false);
   const [session, setSession] = useState<TrainingSession | null>(null);
+  const [previewTrainingContext, setPreviewTrainingContext] = useState<RetrievedTrainingContext | null>(null);
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [readiness, setReadiness] = useState<ReadinessRow[]>([]);
@@ -584,10 +646,16 @@ export function StaffTrainingPage() {
   const scorecard = session?.scorecard;
   const turnCoaching = lastTurnScore?.turn_coaching;
   const masteryTracker = session?.mastery_tracker;
+  const retrievedContext = session?.retrieved_training_context ?? previewTrainingContext;
+  const contextRetrieved = retrievedContext?.retrieved;
   const objectives = session?.scenario?.objectives ?? selectedScenario?.objectives ?? [];
   const completedObjectives = new Set(session?.completed_objectives ?? []);
   const activeAssignment = assignments.find((assignment) => assignment.id === activeAssignmentId);
   const readinessByAssignment = useMemo(() => new Map(readiness.map((row) => [row.assignment_id, row])), [readiness]);
+  const memoryPrioritizedAssignments = useMemo(
+    () => assignments.filter((assignment) => assignment.source === "guest_triage_memory_prioritized" || (assignment.source_signals?.length ?? 0) > 0),
+    [assignments],
+  );
 
   async function loadScenarios() {
     const response = await fetchParkPulseApi("/api/park/staff-training/scenarios", {
@@ -616,6 +684,18 @@ export function StaffTrainingPage() {
       timeoutMs: 8000,
     });
     setProductLearning((await response.json()) as ProductLearningLoop);
+  }
+
+  async function loadTrainingContextPreview(scenarioId = selectedScenarioId, trainee = traineeName) {
+    const query = new URLSearchParams({
+      scenario_id: scenarioId,
+      trainee_name: trainee || "Seasonal staff trainee",
+    });
+    const response = await fetchParkPulseApi(`/api/park/staff-training/agent-context?${query.toString()}`, {
+      headers: { "x-parkpulse-role": "ops_team" },
+      timeoutMs: 8000,
+    });
+    setPreviewTrainingContext((await response.json()) as RetrievedTrainingContext);
   }
 
   async function loadManagerWorkflow() {
@@ -675,20 +755,34 @@ export function StaffTrainingPage() {
     }
   }
 
-  useEffect(() => {
-    let cancelled = false;
-    setIsLoading(true);
-    loadScenarios()
-      .catch((nextError: Error) => {
-        if (!cancelled) setError(nextError.message);
-      })
+	  useEffect(() => {
+	    let cancelled = false;
+	    setIsLoading(true);
+	    Promise.all([loadScenarios(), loadManagerWorkflow(), loadTrainingContextPreview()])
+	      .then(() => {
+	        if (!cancelled) setManagerLoaded(true);
+	      })
+	      .catch((nextError: Error) => {
+	        if (!cancelled) setError(nextError.message);
+	      })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+	  }, []);
+
+	  useEffect(() => {
+	    let cancelled = false;
+	    loadTrainingContextPreview(selectedScenarioId, traineeName)
+	      .catch((nextError: Error) => {
+	        if (!cancelled) setError(nextError.message);
+	      });
+	    return () => {
+	      cancelled = true;
+	    };
+	  }, [selectedScenarioId]);
 
   useEffect(() => {
     if (activeView !== "manager" || managerLoaded) return;
@@ -814,7 +908,7 @@ export function StaffTrainingPage() {
       }
       if (payload.readiness_issues?.length) setError(payload.readiness_issues.join(" "));
       await loadManagerWorkflow();
-      setStatus("Training assignment created.");
+      setStatus(payload.assignment?.source === "guest_triage_memory_prioritized" ? "Training assignment created from memory signals." : "Training assignment created.");
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Unable to create assignment.");
     } finally {
@@ -1011,7 +1105,7 @@ export function StaffTrainingPage() {
               >
                 Manager review
               </button>
-              <a href="/" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-teal-300">Command</a>
+              <a href="/ops" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-teal-300">Command</a>
               <a href="/human" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-teal-300">Human view</a>
             </nav>
           </div>
@@ -1061,9 +1155,9 @@ export function StaffTrainingPage() {
                 <option value="security">Security</option>
                 <option value="food">Food</option>
               </select>
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <button
-                  type="button"
+	              <div className="grid grid-cols-2 gap-2 pt-1">
+	                <button
+	                  type="button"
                   onClick={() => void createAssignment()}
                   disabled={isLoading || !newAssignmentName.trim()}
                   className="rounded border border-teal-300 bg-teal-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-teal-200 disabled:opacity-50"
@@ -1076,11 +1170,39 @@ export function StaffTrainingPage() {
                   disabled={isLoading}
                   className="rounded border border-amber-300 bg-amber-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-amber-200 disabled:opacity-50"
                 >
-                  Seed demo
-                </button>
-              </div>
-            </div>
-          </div>
+	                  Seed demo
+	                </button>
+	              </div>
+	              <div className="mt-4 rounded border border-teal-300/25 bg-slate-950 p-3">
+	                <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Memory-picked assignments</div>
+	                <div className="mt-2 space-y-2">
+	                  {(memoryPrioritizedAssignments.length ? memoryPrioritizedAssignments.slice(-4).reverse() : assignments.slice(-2).reverse()).map((assignment) => {
+	                    const signal = assignment.source_signals?.[0];
+	                    return (
+	                      <button
+	                        key={assignment.id}
+	                        type="button"
+	                        onClick={() => startAssignmentRoleplay(assignment)}
+	                        className={`w-full rounded border p-2 text-left transition ${activeAssignmentId === assignment.id ? "border-teal-300 bg-teal-300/10" : "border-slate-800 bg-[#0d171b] hover:border-teal-300"}`}
+	                      >
+	                        <div className="flex items-start justify-between gap-2">
+	                          <div className="min-w-0">
+	                            <div className="truncate text-xs font-black text-slate-100">{assignment.trainee_name}</div>
+	                            <div className="mt-1 text-[10px] font-black uppercase tracking-widest text-teal-100">{label(assignment.scenario_ids?.[0] ?? "no scenario")}</div>
+	                          </div>
+	                          <span className="shrink-0 rounded border border-slate-700 px-2 py-1 text-[9px] font-black uppercase tracking-widest text-slate-300">{label(assignment.source ?? "manual")}</span>
+	                        </div>
+	                        <div className="mt-2 text-xs font-semibold leading-relaxed text-slate-400">
+	                          {signal ? `${signal.evidence_count ?? 0} signals, ${label(signal.highest_severity)} severity: ${signal.latest_summary ?? "memory evidence loaded"}` : "No memory source signal attached yet."}
+	                        </div>
+	                      </button>
+	                    );
+	                  })}
+	                  {!assignments.length && <div className="rounded border border-slate-800 bg-[#0d171b] p-2 text-xs font-bold text-slate-500">Create an assignment after guest triage to see memory priority.</div>}
+	                </div>
+	              </div>
+	            </div>
+	          </div>
 
           <div>
             <div className="flex items-center justify-between gap-2">
@@ -1686,11 +1808,12 @@ export function StaffTrainingPage() {
               </div>
             </div>
 
-            <div className="hidden rounded-lg border border-slate-800 bg-[#0d171b] p-4" style={{ display: "none" }}>
-              <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Assignment launcher</div>
+            <div className="rounded-lg border border-teal-300/20 bg-[#0d171b] p-4">
+              <div className="text-[10px] font-black uppercase tracking-widest text-teal-300">Memory assignment launcher</div>
               <div className="mt-3 space-y-2">
-                {assignments.slice(-6).reverse().map((assignment) => {
+                {(memoryPrioritizedAssignments.length ? memoryPrioritizedAssignments : assignments).slice(-6).reverse().map((assignment) => {
                   const row = readinessByAssignment.get(assignment.id);
+                  const signal = assignment.source_signals?.[0];
                   return (
                     <button
                       key={assignment.id}
@@ -1703,10 +1826,13 @@ export function StaffTrainingPage() {
                         <span className="shrink-0 rounded border border-slate-700 bg-[#0d171b] px-2 py-1 text-[10px] font-black uppercase text-slate-300">{label(row?.status ?? assignment.status)}</span>
                       </div>
                       <div className="mt-1 text-xs font-bold text-slate-500">{label(assignment.staff_role)} / {row?.completed_count ?? assignment.completed_count ?? 0} of {row?.required_count ?? assignment.required_count ?? assignment.scenario_ids?.length ?? 0}</div>
+                      <div className="mt-2 text-xs font-semibold leading-relaxed text-slate-400">
+                        {signal ? `${label(assignment.scenario_ids?.[0])} was prioritized from ${signal.evidence_count ?? 0} memory signals.` : "Role default assignment."}
+                      </div>
                     </button>
                   );
                 })}
-                {!assignments.length && <div className="rounded border border-slate-800 bg-slate-950 p-3 text-sm font-bold text-slate-500">Create or seed assignments first.</div>}
+                {!assignments.length && <div className="rounded border border-slate-800 bg-slate-950 p-3 text-sm font-bold text-slate-500">Create an assignment after guest triage memory is loaded.</div>}
               </div>
             </div>
 
@@ -1965,6 +2091,98 @@ export function StaffTrainingPage() {
                 <div className="rounded border border-slate-800 bg-slate-950 p-2">Source: {session?.guest_simulator?.source ?? "--"}</div>
                 <div className="rounded border border-slate-800 bg-slate-950 p-2">LLM: {session?.guest_simulator?.llm_status ?? "--"}</div>
                 <div className="rounded border border-slate-800 bg-slate-950 p-2">Scores: {session?.guest_simulator?.llm_controls_score === false ? "deterministic" : "--"}</div>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
+              <div className="text-[10px] font-black uppercase tracking-widest text-sky-300">RAG and memory</div>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-bold text-slate-300">
+	                <div className="rounded border border-slate-800 bg-slate-950 p-2">Policy refs: {retrievedContext ? retrievedContext.counts?.policy_refs ?? 0 : "--"}</div>
+	                <div className="rounded border border-slate-800 bg-slate-950 p-2">Prior sessions: {retrievedContext ? retrievedContext.counts?.prior_sessions ?? 0 : "--"}</div>
+	                <div className="rounded border border-slate-800 bg-slate-950 p-2">Active versions: {retrievedContext ? retrievedContext.counts?.active_learning_versions ?? 0 : "--"}</div>
+	                <div className="rounded border border-slate-800 bg-slate-950 p-2">Historical tickets: {retrievedContext ? retrievedContext.counts?.historical_ticket_frequency ?? retrievedContext.counts?.guest_triage_patterns ?? 0 : "--"}</div>
+              </div>
+              <div className="mt-3 space-y-2">
+                {contextRetrieved?.trainee_profile?.coaching_priority && (
+                  <div className="rounded border border-sky-300/25 bg-sky-300/10 p-2 text-xs font-bold leading-relaxed text-sky-100">
+                    Trainee priority: {contextRetrieved.trainee_profile.coaching_priority}
+                  </div>
+                )}
+                {contextRetrieved?.scenario_recommendation?.recommended_action && (
+                  <div className="rounded border border-emerald-300/25 bg-emerald-300/10 p-2 text-xs font-bold leading-relaxed text-emerald-100">
+                    Training memory recommendation: {contextRetrieved.scenario_recommendation.recommended_action}
+                  </div>
+                )}
+                {(contextRetrieved?.policy_snippets?.length ? contextRetrieved.policy_snippets : []).slice(0, 2).map((item) => (
+                  <div key={`${item.book_id}-${item.id}`} className="rounded border border-slate-800 bg-slate-950 p-2 text-xs font-bold leading-relaxed text-slate-300">
+                    <div className="text-slate-100">{item.title ?? item.id}</div>
+                    <div className="mt-1 text-slate-500">{item.policy_refs?.slice(0, 3).join(", ") || item.book_id}</div>
+                  </div>
+                ))}
+                {(contextRetrieved?.training_gap_patterns?.length ? contextRetrieved.training_gap_patterns : []).slice(0, 3).map((item) => (
+                  <div key={`${item.gap_type}-${item.count}`} className="rounded border border-slate-800 bg-slate-950 p-2 text-xs font-bold leading-relaxed text-slate-300">
+                    {label(item.gap_type)} · {item.count ?? 0} seen · {label(item.highest_severity)}
+                  </div>
+                ))}
+                {(contextRetrieved?.guest_triage_patterns?.length ? contextRetrieved.guest_triage_patterns : []).slice(0, 3).map((item) => (
+                  <div key={`${item.issue_type}-${item.scenario_id}-${item.count}`} className="rounded border border-emerald-300/20 bg-slate-950 p-2 text-xs font-bold leading-relaxed text-slate-300">
+                    <div className="text-emerald-100">{label(item.issue_type)} · {item.count ?? 0} guest signals · {label(item.highest_severity)}</div>
+                    <div className="mt-1 text-slate-500">{item.latest_summary || label(item.scenario_id)}</div>
+                  </div>
+                ))}
+                {(contextRetrieved?.historical_ticket_frequency?.length ? contextRetrieved.historical_ticket_frequency : []).slice(0, 2).map((item) => (
+                  <div key={`freq-${item.scenario_id}`} className="rounded border border-cyan-300/20 bg-slate-950 p-2 text-xs font-bold leading-relaxed text-slate-300">
+                    <div className="text-cyan-100">{label(item.scenario_id)} · {item.frequency_label ?? `${item.ticket_count ?? 0} historical tickets`} · {label(item.highest_severity)}</div>
+                    <div className="mt-1 text-slate-500">{item.latest_summary || "Historical tickets are available for this scenario."}</div>
+                  </div>
+                ))}
+                {(contextRetrieved?.prior_sessions?.length ? contextRetrieved.prior_sessions : []).slice(0, 2).map((item) => (
+                  <div key={item.session_id} className="rounded border border-slate-800 bg-slate-950 p-2 text-xs font-bold leading-relaxed text-slate-300">
+                    Prior score {item.overall ?? "--"} · {item.critical_miss ? "critical miss" : label(item.mastery_level)}
+                  </div>
+                ))}
+                {(contextRetrieved?.manager_reviews?.length ? contextRetrieved.manager_reviews : []).slice(0, 2).map((item) => (
+                  <div key={item.review_id} className="rounded border border-slate-800 bg-slate-950 p-2 text-xs font-bold leading-relaxed text-slate-300">
+                    Manager {label(item.decision)} · {item.notes || "No notes"}
+                  </div>
+                ))}
+	                {!retrievedContext && (
+	                  <div className="rounded border border-slate-800 bg-slate-950 p-2 text-xs font-bold leading-relaxed text-slate-500">
+	                    Loading training memory for the selected scenario.
+	                  </div>
+	                )}
+	                {retrievedContext && !contextRetrieved?.training_gap_patterns?.length && !contextRetrieved?.guest_triage_patterns?.length && !contextRetrieved?.historical_ticket_frequency?.length && !contextRetrieved?.prior_sessions?.length && !contextRetrieved?.policy_snippets?.length && (
+	                  <div className="rounded border border-slate-800 bg-slate-950 p-2 text-xs font-bold leading-relaxed text-slate-500">
+	                    Context appears after prior sessions, learning versions, or manager gap tickets are available.
+	                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-[#0d171b] p-4">
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Training agent tools</div>
+              <div className="mt-3 space-y-2">
+                {(session?.agent_tool_manifest?.length ? session.agent_tool_manifest : []).slice(0, 5).map((tool) => (
+                  <div key={tool.id} className="rounded border border-slate-800 bg-slate-950 p-2 text-xs font-bold leading-relaxed text-slate-300">
+                    <div className="text-slate-100">{tool.id}</div>
+                    <div className="mt-1 text-slate-500">{label(tool.owner_agent)} · {tool.authority ?? "bounded"}</div>
+                  </div>
+                ))}
+                {!session?.agent_tool_manifest?.length && (
+                  <div className="rounded border border-slate-800 bg-slate-950 p-2 text-xs font-bold leading-relaxed text-slate-500">
+                    Start a roleplay to load the tool manifest.
+                  </div>
+                )}
+              </div>
+              <div className="mt-3 rounded border border-rose-300/20 bg-rose-300/10 p-2 text-xs font-bold leading-relaxed text-rose-100">
+                Blocked: {(retrievedContext?.blocked_tools ?? ["live dispatch", "refund approval", "reward labels"]).slice(0, 3).map(label).join(", ")}
+              </div>
+              <div className="mt-3 space-y-2">
+                {(session?.tool_trace?.length ? session.tool_trace : []).slice(0, 5).map((item) => (
+                  <div key={`${item.tool}-${item.agent}`} className="rounded border border-slate-800 bg-slate-950 p-2 text-xs font-bold leading-relaxed text-slate-300">
+                    {item.tool} · {label(item.status)} · {item.score_authority ? "score authority" : "no score authority"}
+                  </div>
+                ))}
               </div>
             </div>
 

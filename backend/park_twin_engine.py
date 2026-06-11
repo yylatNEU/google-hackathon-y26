@@ -105,7 +105,7 @@ def _scenario_key(state: dict[str, Any]) -> str:
 
 
 def _normalize_action(action_plan: dict[str, Any] | None) -> dict[str, Any]:
-    plan = action_plan or {}
+    plan = action_plan if isinstance(action_plan, dict) else {}
     selected = plan.get("selected_action") if isinstance(plan.get("selected_action"), dict) else {}
     park_action = selected.get("park_action") if isinstance(selected.get("park_action"), dict) else {}
     if not selected and isinstance(plan.get("park_action"), dict):
@@ -142,12 +142,95 @@ def _default_target_mix(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _target_mix(action_plan: dict[str, Any] | None, state: dict[str, Any]) -> list[dict[str, Any]]:
-    plan = action_plan or {}
+    plan = action_plan if isinstance(action_plan, dict) else {}
     action_mix = plan.get("action_mix", {}) if isinstance(plan.get("action_mix"), dict) else {}
     reroute = action_mix.get("guest_reroute", {}) if isinstance(action_mix.get("guest_reroute"), dict) else {}
     raw_targets = reroute.get("target_mix", []) if isinstance(reroute.get("target_mix"), list) else []
     targets = [target for target in raw_targets if isinstance(target, dict)]
     return targets or _default_target_mix(state)
+
+
+def _action_mix(action_plan: dict[str, Any] | None) -> dict[str, Any]:
+    plan = action_plan if isinstance(action_plan, dict) else {}
+    action_mix = plan.get("action_mix", {}) if isinstance(plan.get("action_mix"), dict) else {}
+    return action_mix
+
+
+def _guest_reroute_mix(action_plan: dict[str, Any] | None) -> dict[str, Any]:
+    reroute = _action_mix(action_plan).get("guest_reroute", {})
+    return reroute if isinstance(reroute, dict) else {}
+
+
+def _reroute_requested(action_plan: dict[str, Any] | None, normalized: dict[str, Any]) -> bool:
+    reroute = _guest_reroute_mix(action_plan)
+    has_targets = isinstance(reroute.get("target_mix"), list) and bool(reroute.get("target_mix"))
+    explicit = normalized["target"] in {"ride", "traffic", "queue_gate"} and normalized["action"] in {
+        "reroute",
+        "redirect_food",
+        "staged_reroute",
+        "hold_intake",
+    }
+    return explicit or bool(reroute.get("enabled") and has_targets)
+
+
+def _staff_requested(action_plan: dict[str, Any] | None, normalized: dict[str, Any]) -> bool:
+    staffing = _action_mix(action_plan).get("staffing", {})
+    moves = staffing.get("move_staff") if isinstance(staffing, dict) else None
+    return (
+        normalized["target"] == "staff"
+        and normalized["action"] in {"redeploy", "redeploy_food_certified"}
+    ) or (isinstance(moves, list) and bool(moves))
+
+
+def _food_requested(action_plan: dict[str, Any] | None, normalized: dict[str, Any]) -> bool:
+    food = _action_mix(action_plan).get("food", {})
+    suppress = food.get("suppressItems") if isinstance(food, dict) else None
+    avoid = food.get("avoidExtraDemandAt") if isinstance(food, dict) else None
+    return (
+        normalized["target"] == "food"
+        and normalized["action"] in {
+            "suppress_item",
+            "pause_mobile_order_intake",
+            "open_temp_pickup",
+            "open_satellite_cart",
+            "throttle_mobile_pickup_windows",
+        }
+    ) or (isinstance(suppress, list) and bool(suppress)) or (isinstance(avoid, list) and bool(avoid))
+
+
+def _queue_gate_requested(action_plan: dict[str, Any] | None, normalized: dict[str, Any]) -> bool:
+    controls = _action_mix(action_plan).get("controls", {})
+    gates = controls.get("queue_gates", []) if isinstance(controls, dict) and isinstance(controls.get("queue_gates"), list) else []
+    return (normalized["target"] == "queue_gate" and normalized["action"] == "hold_intake") or bool(gates)
+
+
+def _energy_requested(action_plan: dict[str, Any] | None, normalized: dict[str, Any]) -> bool:
+    facilities = _action_mix(action_plan).get("facilities", {})
+    hvac = facilities.get("hvac") if isinstance(facilities, dict) else None
+    return (normalized["target"] == "energy" and normalized["action"] == "protect_hvac") or (
+        isinstance(hvac, dict) and bool(hvac.get("protectShelterComfort"))
+    )
+
+
+def _reroute_active_minutes(action_plan: dict[str, Any] | None, normalized: dict[str, Any], horizon_minutes: int) -> int:
+    if not _reroute_requested(action_plan, normalized):
+        return 5
+    reroute = _guest_reroute_mix(action_plan)
+    controls = _action_mix(action_plan).get("controls", {})
+    gates = controls.get("queue_gates", []) if isinstance(controls, dict) and isinstance(controls.get("queue_gates"), list) else []
+    gate_hold = max((_as_int((gate.get("settings", {}) if isinstance(gate, dict) else {}).get("holdMinutes"), 0) for gate in gates), default=0)
+    duration = _as_int(reroute.get("durationMinutes") or reroute.get("expiresMinutes"), 0) or gate_hold or 15
+    return max(5, min(horizon_minutes, duration))
+
+
+def _reroute_only_action_plan(action_plan: dict[str, Any] | None, normalized: dict[str, Any]) -> dict[str, Any]:
+    reroute = deepcopy(_guest_reroute_mix(action_plan))
+    return {
+        "target": "ride",
+        "action": "reroute",
+        "label": normalized.get("label") or "Persistent guest reroute",
+        "action_mix": {"guest_reroute": reroute} if reroute else {},
+    }
 
 
 def _recompute_zone(zone: dict[str, Any], heat_index: int = 92, storm_risk: int = 0) -> None:
@@ -198,11 +281,16 @@ def _apply_reroute(state: dict[str, Any], action_plan: dict[str, Any] | None, mi
     ride = _primary_ride(state)
     origin = zone_by_id.get(str(ride.get("zone")))
     targets = _target_mix(action_plan, state)
-    plan = action_plan or {}
+    plan = action_plan if isinstance(action_plan, dict) else {}
     projected = plan.get("projected_impact", {}) if isinstance(plan.get("projected_impact"), dict) else {}
     action_mix = plan.get("action_mix", {}) if isinstance(plan.get("action_mix"), dict) else {}
     reroute = action_mix.get("guest_reroute", {}) if isinstance(action_mix.get("guest_reroute"), dict) else {}
     expected_take_rate = _as_float(reroute.get("expectedTakeRate"), 0.34)
+    normalized = _normalize_action(action_plan)
+    if normalized["action"] == "staged_reroute":
+        expected_take_rate = _as_float(reroute.get("expectedTakeRate"), 0.28)
+    if normalized["action"] == "hold_intake":
+        expected_take_rate = _as_float(reroute.get("expectedTakeRate"), 0.18)
     if not reroute and projected:
         expected_take_rate = _bounded(_as_float(projected.get("movedGuests"), 360) / max(1, _as_int(ride.get("queueGuests"), 700)), 0.18, 0.58)
     take_rate = _bounded(expected_take_rate + rng.uniform(-0.05, 0.05), 0.14, 0.62)
@@ -230,44 +318,113 @@ def _apply_reroute(state: dict[str, Any], action_plan: dict[str, Any] | None, mi
 
     for path in _paths(state):
         if path.get("from") == str(ride.get("zone")) or path.get("to") in {target.get("zoneId") for target in targets}:
-            path["currentGuests"] = _as_int(path.get("currentGuests")) + round(moved / 7)
+            path_increment = round(moved / (10 if normalized["action"] in {"staged_reroute", "hold_intake"} else 7))
+            path["currentGuests"] = _as_int(path.get("currentGuests")) + path_increment
             path["congestionLevel"] = _bounded(round((_as_int(path.get("currentGuests")) / max(1, _as_int(path.get("capacity"), 1))) * 100), 0, 125)
             path["status"] = "congested" if path["congestionLevel"] >= 88 else "busy" if path["congestionLevel"] >= 65 else "open"
 
     return {"moved_guests": moved, "overloaded_targets": overloaded, "take_rate": round(take_rate, 3)}
 
 
-def _apply_staff_action(state: dict[str, Any]) -> dict[str, Any]:
+def _apply_queue_gate(state: dict[str, Any], action_plan: dict[str, Any] | None, minutes: int) -> dict[str, Any]:
+    ride = _primary_ride(state)
+    hold_minutes = min(20, max(5, _reroute_active_minutes(action_plan, _normalize_action(action_plan), minutes)))
+    queue_before = _as_int(ride.get("queueGuests"))
+    prevented = round(hold_minutes * 9)
+    ride["queueGuests"] = max(0, queue_before - round(prevented * 0.35))
+    ride["waitMins"] = max(0, _as_int(ride.get("waitMins")) - round(prevented / 55))
+    ride["intakeHoldActive"] = True
+    ride["intakeHoldMinutes"] = hold_minutes
+    for zone in _zones(state):
+        if zone.get("id") == ride.get("zone"):
+            zone["currentGuests"] = max(0, _as_int(zone.get("currentGuests")) - round(prevented * 0.28))
+            zone["comfortScore"] = _bounded(_as_int(zone.get("comfortScore")) + 4, 20, 96)
+    return {"queue_intake_hold_minutes": hold_minutes, "queue_arrivals_prevented": prevented}
+
+
+def _apply_staff_action(state: dict[str, Any], normalized: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized = normalized or {}
     staffing = state.get("staffing", {}) if isinstance(state.get("staffing"), dict) else {}
-    staffing["checkedIn"] = min(_as_int(staffing.get("scheduled"), 214), _as_int(staffing.get("checkedIn"), 190) + 2)
+    food_certified = normalized.get("action") == "redeploy_food_certified"
+    staffing["checkedIn"] = min(_as_int(staffing.get("scheduled"), 214), _as_int(staffing.get("checkedIn"), 190) + (3 if food_certified else 2))
     impacted = 0
-    for ride in _rides(state):
-        if ride.get("status") in {"down", "constrained"} and impacted < 2:
-            ride["staffAvailable"] = min(_as_int(ride.get("staffRequired"), 1), _as_int(ride.get("staffAvailable")) + 1)
-            impacted += 1
+    if not food_certified:
+        for ride in _rides(state):
+            if ride.get("status") in {"down", "constrained"} and impacted < 2:
+                ride["staffAvailable"] = min(_as_int(ride.get("staffRequired"), 1), _as_int(ride.get("staffAvailable")) + 1)
+                impacted += 1
+    food = state.get("foodInventory", {}) if isinstance(state.get("foodInventory"), dict) else {}
+    if food_certified:
+        food["foodCertifiedRedeploy"] = True
+        for location in food.get("locations", []) if isinstance(food.get("locations"), list) else []:
+            if location.get("id") == "foodCourt1":
+                before = _as_int(location.get("mobileOrderBacklog"))
+                location["mobileOrderBacklog"] = max(0, before - 120)
+                location["pickupEtaMinutes"] = max(6, _as_int(location.get("pickupEtaMinutes")) - 22)
+                impacted += 2
     for zone in _zones(state):
         if zone.get("id") in {"coasterPlaza", "foodCourt1"}:
-            zone["waitMins"] = max(0, _as_int(zone.get("waitMins")) - 4)
-            zone["comfortScore"] = _bounded(_as_int(zone.get("comfortScore")) + 5, 20, 96)
-    return {"staff_added_to_pressure": impacted}
+            zone["waitMins"] = max(0, _as_int(zone.get("waitMins")) - (9 if food_certified and zone.get("id") == "foodCourt1" else 4))
+            zone["comfortScore"] = _bounded(_as_int(zone.get("comfortScore")) + (8 if food_certified and zone.get("id") == "foodCourt1" else 5), 20, 96)
+    return {"staff_added_to_pressure": impacted, "food_certified_redeploy": food_certified}
 
 
-def _apply_food_action(state: dict[str, Any]) -> dict[str, Any]:
+def _apply_food_action(state: dict[str, Any], normalized: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized = normalized or {}
+    action = str(normalized.get("action") or "suppress_item")
     food = state.get("foodInventory", {}) if isinstance(state.get("foodInventory"), dict) else {}
     suppressed = set(food.get("suppressedItems", []) if isinstance(food.get("suppressedItems"), list) else [])
     suppressed.update({"chicken_tenders", "bottled_drinks"})
+    if action == "pause_mobile_order_intake":
+        suppressed.add("mobile_order_intake")
+        food["mobileOrderIntakePaused"] = True
+    if action == "open_temp_pickup":
+        suppressed.add("low_throughput_pickup_lane")
+        food["tempPickupOpen"] = True
+    if action == "open_satellite_cart":
+        suppressed.add("satellite_cart_active")
+        food["satelliteCartOpen"] = True
+    if action == "throttle_mobile_pickup_windows":
+        suppressed.add("pickup_window_throttle")
+        food["pickupWindowThrottle"] = True
     food["suppressedItems"] = sorted(suppressed)
     reduced_backlog = 0
     for location in food.get("locations", []) if isinstance(food.get("locations"), list) else []:
         if location.get("id") == "foodCourt1":
             before = _as_int(location.get("mobileOrderBacklog"))
-            location["mobileOrderBacklog"] = max(0, before - 42)
-            location["pickupEtaMinutes"] = max(8, _as_int(location.get("pickupEtaMinutes")) - 8)
+            backlog_delta = 42
+            eta_delta = 8
+            if action == "pause_mobile_order_intake":
+                backlog_delta = 120
+                eta_delta = 24
+            elif action == "open_temp_pickup":
+                backlog_delta = 220
+                eta_delta = 36
+            elif action == "open_satellite_cart":
+                backlog_delta = 260
+                eta_delta = 32
+            elif action == "throttle_mobile_pickup_windows":
+                backlog_delta = 160
+                eta_delta = 24
+            location["mobileOrderBacklog"] = max(0, before - backlog_delta)
+            location["pickupEtaMinutes"] = max(5, _as_int(location.get("pickupEtaMinutes")) - eta_delta)
             reduced_backlog = before - location["mobileOrderBacklog"]
     for zone in _zones(state):
         if zone.get("id") == "foodCourt1":
-            zone["currentGuests"] = max(0, _as_int(zone.get("currentGuests")) - 110)
-    return {"food_backlog_reduced": reduced_backlog}
+            removed = (
+                260
+                if action == "open_satellite_cart"
+                else 220
+                if action == "open_temp_pickup"
+                else 190
+                if action == "throttle_mobile_pickup_windows"
+                else 170
+                if action == "pause_mobile_order_intake"
+                else 110
+            )
+            zone["currentGuests"] = max(0, _as_int(zone.get("currentGuests")) - removed)
+            zone["comfortScore"] = _bounded(_as_int(zone.get("comfortScore")) + (8 if action == "open_satellite_cart" else 5), 20, 96)
+    return {"food_backlog_reduced": reduced_backlog, "food_action": action}
 
 
 def _apply_energy_action(state: dict[str, Any]) -> dict[str, Any]:
@@ -421,6 +578,12 @@ def _apply_physical_dynamics(state: dict[str, Any], action_meta: dict[str, Any],
         arrivals = round((12 if location.get("id") == "foodCourt1" else 7) * _bounded(minutes / 5, 0.2, 2.0))
         if food.get("suppressedItems"):
             arrivals = max(0, arrivals - 10)
+        if food.get("mobileOrderIntakePaused"):
+            arrivals = max(0, arrivals - round(24 * _bounded(minutes / 5, 0.2, 2.0)))
+        if food.get("tempPickupOpen"):
+            throughput += round(36 * _bounded(minutes / 5, 0.2, 2.0))
+        if food.get("foodCertifiedRedeploy"):
+            throughput += round(22 * _bounded(minutes / 5, 0.2, 2.0))
         next_backlog = max(0, backlog + arrivals - throughput)
         location["mobileOrderBacklog"] = next_backlog
         location["pickupEtaMinutes"] = max(5, round(next_backlog / max(1, runners * 3)))
@@ -499,7 +662,17 @@ def _evolve_natural(state: dict[str, Any], minutes: int, rng: random.Random, rer
     food = state.get("foodInventory", {}) if isinstance(state.get("foodInventory"), dict) else {}
     for location in food.get("locations", []) if isinstance(food.get("locations"), list) else []:
         growth = round((14 if location.get("id") == "foodCourt1" else 5) * (minutes / 5))
-        if location.get("id") == "foodCourt1" and food.get("suppressedItems"):
+        if location.get("id") == "foodCourt1" and food.get("mobileOrderIntakePaused"):
+            growth = -round(32 * (minutes / 5))
+        elif location.get("id") == "foodCourt1" and food.get("satelliteCartOpen"):
+            growth = -round(34 * (minutes / 5))
+        elif location.get("id") == "foodCourt1" and food.get("tempPickupOpen"):
+            growth = -round(28 * (minutes / 5))
+        elif location.get("id") == "foodCourt1" and food.get("pickupWindowThrottle"):
+            growth = -round(24 * (minutes / 5))
+        elif location.get("id") == "foodCourt1" and food.get("foodCertifiedRedeploy"):
+            growth = -round(22 * (minutes / 5))
+        elif location.get("id") == "foodCourt1" and food.get("suppressedItems"):
             growth = -round(18 * (minutes / 5))
         location["mobileOrderBacklog"] = max(0, _as_int(location.get("mobileOrderBacklog")) + growth)
         location["pickupEtaMinutes"] = max(6, round(_as_int(location.get("pickupEtaMinutes")) + growth / 8))
@@ -584,17 +757,22 @@ def score_outcome(before: dict[str, Any], after: dict[str, Any], action_plan: di
         safety_violations += 1
     if after.get("incidentReadiness", {}).get("emergencyAccessBlocked"):
         safety_violations += 1
+    critical_density_excess = max((_as_int(zone.get("density")) - 100 for zone in _zones(after)), default=0)
     score = round(
         76
         + max(0, -density_delta) * 0.55
+        - max(0, density_delta) * 0.65
         + max(0, -wait_delta) * 0.42
+        - max(0, wait_delta) * 0.25
         + satisfaction_delta * 1.5
         + max(0, -food_delta) * 0.08
+        - max(0, food_delta) * 0.04
         - max(0, path_delta) * 0.45
         - max(0, callout_delta) * 0.9
         - max(0, care_delta) * 1.1
         - max(0, grid_delta) * 0.35
         - max(0, storm_delta) * 0.18
+        - max(0, critical_density_excess) * 0.8
         - safety_violations * 18
     )
     return {
@@ -610,6 +788,7 @@ def score_outcome(before: dict[str, Any], after: dict[str, Any], action_plan: di
             "grid_load_delta": grid_delta,
             "storm_risk_delta": storm_delta,
             "safety_violations": safety_violations,
+            "critical_density_excess": max(0, critical_density_excess),
         },
         "before": before_digest,
         "after": after_digest,
@@ -632,20 +811,28 @@ def transition_state(
     normalized = _normalize_action(action_plan)
     action_meta: dict[str, Any] = {}
 
-    if normalized["target"] in {"ride", "traffic"} and normalized["action"] in {"reroute", "redirect_food"}:
+    if _reroute_requested(action_plan, normalized):
         action_meta.update(_apply_reroute(next_state, action_plan, safe_minutes, rng))
         _flow(next_state)["activePolicy"] = normalized["action"]
-    elif normalized["target"] == "staff" and normalized["action"] == "redeploy":
-        action_meta.update(_apply_staff_action(next_state))
+    if _queue_gate_requested(action_plan, normalized):
+        action_meta.update(_apply_queue_gate(next_state, action_plan, safe_minutes))
         _flow(next_state)["activePolicy"] = normalized["action"]
-    elif normalized["target"] == "food" and normalized["action"] == "suppress_item":
-        action_meta.update(_apply_food_action(next_state))
+    if _staff_requested(action_plan, normalized):
+        action_meta.update(_apply_staff_action(next_state, normalized))
         _flow(next_state)["activePolicy"] = normalized["action"]
-    elif normalized["target"] == "energy" and normalized["action"] == "protect_hvac":
+    if _food_requested(action_plan, normalized):
+        action_meta.update(_apply_food_action(next_state, normalized))
+        _flow(next_state)["activePolicy"] = normalized["action"]
+    if _energy_requested(action_plan, normalized):
         action_meta.update(_apply_energy_action(next_state))
         _flow(next_state)["activePolicy"] = normalized["action"]
 
-    _evolve_natural(next_state, safe_minutes, rng, reroute_active=bool(action_meta.get("moved_guests")))
+    _evolve_natural(
+        next_state,
+        safe_minutes,
+        rng,
+        reroute_active=bool(action_meta.get("moved_guests") or action_meta.get("queue_arrivals_prevented")),
+    )
     physical_dynamics = _apply_physical_dynamics(next_state, action_meta, safe_minutes, rng)
     _refresh_summary(next_state)
     meta = next_state.setdefault("digitalTwin", {})
@@ -716,10 +903,19 @@ def simulate_action_plan(
     checkpoints: list[dict[str, Any]] = []
     current = deepcopy(state)
     first_action_effect: dict[str, Any] = {}
+    cumulative_moved_guests = 0
+    normalized = _normalize_action(action_plan)
+    reroute_active_minutes = _reroute_active_minutes(action_plan, normalized, safe_horizon)
     for elapsed in range(5, safe_horizon + 1, 5):
+        if elapsed == 5:
+            elapsed_action_plan = action_plan
+        elif elapsed <= reroute_active_minutes:
+            elapsed_action_plan = _reroute_only_action_plan(action_plan, normalized)
+        else:
+            elapsed_action_plan = {"target": "none", "action": "natural"}
         current = transition_state(
             current,
-            action_plan if elapsed == 5 else {"target": "none", "action": "natural"},
+            elapsed_action_plan,
             minutes=5,
             seed=f"{seed or 'sim'}:{elapsed}",
             stochastic=False,
@@ -730,6 +926,12 @@ def simulate_action_plan(
                 if isinstance(current.get("digitalTwin"), dict)
                 else {}
             )
+        transition_effect = (
+            current.get("digitalTwin", {}).get("lastTransition", {}).get("action_effect", {})
+            if isinstance(current.get("digitalTwin"), dict)
+            else {}
+        )
+        cumulative_moved_guests += _as_int(transition_effect.get("moved_guests"))
         checkpoints.append({"minute": elapsed, "digest": state_digest(current)})
 
     outcome = score_outcome(before, current, action_plan)
@@ -740,7 +942,7 @@ def simulate_action_plan(
     before_origin = _by_id(_zones(before)).get(origin_zone_id, {})
     after_origin = _by_id(_zones(current)).get(origin_zone_id, {})
     after_origin_ride = _by_id(_rides(current)).get(str(origin_ride.get("id")), {})
-    moved_guests = _as_int(first_action_effect.get("moved_guests"))
+    moved_guests = cumulative_moved_guests or _as_int(first_action_effect.get("moved_guests"))
     if moved_guests <= 0:
         moved_guests = max(0, _as_int(origin_ride.get("queueGuests")) - _as_int(after_origin_ride.get("queueGuests")))
     density_delta = _as_int(after_origin.get("density")) - _as_int(before_origin.get("density"))
@@ -777,7 +979,7 @@ def simulate_action_plan(
             "overall": outcome["overall"],
             "capacity_fit": round(_bounded(100 - max(0, _as_int(after_digest.get("busiest_zone", {}).get("density")) - 75) * 1.7, 0, 100)),
             "safety": 100 if outcome["metrics"]["safety_violations"] == 0 else 58,
-            "staff_burden": round(_bounded(92 - max(0, outcome["metrics"]["staff_delta"] if "staff_delta" in outcome["metrics"] else 0) * 2, 0, 100)),
+            "staff_burden": round(_bounded(92 - max(0, outcome["metrics"].get("staff_callout_delta", 0)) * 2, 0, 100)),
             "secondary_risk": round(_bounded(len(secondary_risks) * 24, 0, 100)),
         },
         "checkpoints": checkpoints,

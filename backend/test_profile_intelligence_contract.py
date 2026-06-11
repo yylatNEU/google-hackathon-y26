@@ -80,7 +80,11 @@ def test_approved_synthetic_profile_supplies_creative_venue_intelligence():
 
     assert len(real_inputs["guestSegments"]) >= 6
     assert intelligence["readiness"]["status"] == "certified"
+    assert len(intelligence["experienceRules"]["routePatterns"]) == 19
     assert intelligence["experienceRules"]["routePatterns"]["rainy_day"]["mustInclude"]
+    assert intelligence["experienceRules"]["routePatterns"]["date_night"]["recommendedArc"]
+    assert intelligence["experienceRules"]["routePatterns"]["food_festival"]["avoidClaims"]
+    assert intelligence["experienceRules"]["routePatterns"]["safety_signage"]["mustInclude"]
     assert "Dragon Arch Photo Spot" in intelligence["experienceRules"]["halloweenCandidateLocations"]
     assert intelligence["brandBible"]["thematicLexicon"]["dragon"]
     assert "priority access" in intelligence["brandBible"]["bannedClaims"]

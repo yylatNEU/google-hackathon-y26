@@ -1,7 +1,7 @@
 "use client";
 
 import type { EvalScore, RunTelemetry } from "@/types/platform";
-import type { DispatchView, LiveFeedHealth, StartupLoadTiming } from "./useCommandCenter";
+import type { AutopilotDecision, DispatchView, FeedReliabilityGate, LiveFeedHealth } from "./useCommandCenter";
 import { gateClass, humanize, toneClass } from "./style";
 
 type DecisionBriefPanelProps = {
@@ -15,7 +15,10 @@ type DecisionBriefPanelProps = {
   isRunning: boolean;
   statusMessage: string | null;
   errorMessage: string | null;
-  startupLoadTimings: StartupLoadTiming[];
+  autopilotDecision: AutopilotDecision;
+  isAutopilotEnabled: boolean;
+  isAutopilotRunning: boolean;
+  feedReliabilityGate: FeedReliabilityGate;
 };
 
 function confidenceLabel(confidence?: number, evalScore?: number) {
@@ -41,7 +44,7 @@ function nextActionLabel({
   if (selectedAction && String(policyGate ?? "").toLowerCase().includes("review")) return "Review dispatch payloads";
   if (selectedAction) return "Send through gate";
   if ((liveFeedHealth?.summary?.missing_or_weak_feed_count ?? 0) > 0) return "Refresh or review weak feeds";
-  return "Run operating loop";
+  return "Run incident review";
 }
 
 function evidenceItems(props: DecisionBriefPanelProps) {
@@ -58,12 +61,17 @@ function evidenceItems(props: DecisionBriefPanelProps) {
   return items.filter((item): item is string => Boolean(item)).slice(0, 4);
 }
 
-function timingLabel(ms: number) {
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+function autopilotTone(decision: AutopilotDecision) {
+  if (decision.mode === "executed") return "ok";
+  if (decision.mode === "blocked") return "risk";
+  if (decision.mode === "held_for_review" || decision.mode === "executing" || decision.mode === "watching") return "watch";
+  return "neutral";
 }
 
-function slowestStartupLoads(timings: StartupLoadTiming[]) {
-  return [...timings].sort((left, right) => right.elapsedMs - left.elapsedMs).slice(0, 3);
+function autopilotModeLabel(decision: AutopilotDecision, isRunning: boolean) {
+  if (isRunning || decision.mode === "executing") return "Evaluating";
+  if (decision.mode === "held_for_review") return "Held for review";
+  return humanize(decision.mode);
 }
 
 function compactValue(value: unknown) {
@@ -129,21 +137,20 @@ function reviewSteps(props: DecisionBriefPanelProps) {
 export function DecisionBriefPanel(props: DecisionBriefPanelProps) {
   const confidence = confidenceLabel(props.runTelemetry?.planner?.confidence_score, props.evalScore);
   const tone = decisionTone(props.policyGate, props.errorMessage);
-  const selectedLabel = props.selectedAction?.label ?? props.runTelemetry?.operator_response?.headline ?? "No controlled action selected yet";
+  const selectedLabel = props.selectedAction?.label ?? props.runTelemetry?.operator_response?.headline ?? "No operating action selected yet";
   const target = props.selectedAction?.target ?? props.runTelemetry?.request?.scenario_key ?? "current park state";
   const nextAction = nextActionLabel(props);
   const evidence = evidenceItems(props);
-  const slowestLoads = slowestStartupLoads(props.startupLoadTimings);
   const steps = reviewSteps(props);
 
   return (
     <section className={`rounded-lg border p-4 ${toneClass(tone)}`}>
       <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr] xl:items-start">
         <div>
-          <div className="text-[10px] font-black uppercase tracking-widest opacity-75">Decision brief</div>
+          <div className="text-[10px] font-black uppercase tracking-widest opacity-75">Decision audit receipt</div>
           <h2 className="mt-2 text-2xl font-black tracking-normal">{props.isRunning ? "Operating loop is running" : selectedLabel}</h2>
           <p className="mt-2 max-w-4xl text-sm leading-relaxed opacity-85">
-            {props.errorMessage ?? props.statusMessage ?? props.selectedAction?.action ?? "Run the loop to produce a policy-gated recommendation, evidence, dispatch draft, and eval receipt."}
+            {props.errorMessage ?? props.statusMessage ?? props.selectedAction?.action ?? "Run an incident review to produce the recommendation, evidence, dispatch draft, eval, and memory receipt."}
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <span className="rounded bg-slate-950/45 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest">Target: {humanize(String(target))}</span>
@@ -151,6 +158,9 @@ export function DecisionBriefPanel(props: DecisionBriefPanelProps) {
               Gate: {humanize(props.policyGate ?? "pending")}
             </span>
             <span className="rounded bg-slate-950/45 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest">Confidence: {confidence}</span>
+            <span className={`rounded border px-2.5 py-1 text-[10px] font-black uppercase tracking-widest ${toneClass(props.feedReliabilityGate.status === "clear" ? "ok" : props.feedReliabilityGate.status === "blocked" ? "risk" : "watch")}`}>
+              Feeds: {props.feedReliabilityGate.status} {props.feedReliabilityGate.score}/100
+            </span>
           </div>
         </div>
 
@@ -158,6 +168,18 @@ export function DecisionBriefPanel(props: DecisionBriefPanelProps) {
           <div className="rounded border border-slate-950/30 bg-slate-950/35 p-3">
             <div className="text-[10px] font-black uppercase tracking-widest opacity-65">Next action</div>
             <div className="mt-1 text-lg font-black">{nextAction}</div>
+          </div>
+          <div className={`rounded border p-3 ${toneClass(autopilotTone(props.autopilotDecision))}`}>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-widest opacity-65">Autopilot</div>
+                <div className="mt-1 text-lg font-black">{props.isAutopilotEnabled ? "Armed" : "Off"}</div>
+              </div>
+              <div className="rounded bg-slate-950/45 px-2 py-1 text-[10px] font-black uppercase opacity-85">
+                {autopilotModeLabel(props.autopilotDecision, props.isAutopilotRunning)}
+              </div>
+            </div>
+            <p className="mt-2 line-clamp-3 text-xs leading-relaxed opacity-85">{props.autopilotDecision.reason}</p>
           </div>
           <div className="rounded border border-slate-950/30 bg-slate-950/35 p-3">
             <div className="text-[10px] font-black uppercase tracking-widest opacity-65">Evidence to verify</div>
@@ -173,32 +195,14 @@ export function DecisionBriefPanel(props: DecisionBriefPanelProps) {
               )}
             </div>
           </div>
-          <div className="rounded border border-slate-950/30 bg-slate-950/35 p-3 md:col-span-2 xl:col-span-1">
-            <div className="text-[10px] font-black uppercase tracking-widest opacity-65">Startup timing</div>
-            <div className="mt-2 space-y-1.5">
-              {slowestLoads.length ? (
-                slowestLoads.map((item) => (
-                  <div key={item.id} className="flex items-center justify-between gap-3 rounded bg-slate-950/40 px-2 py-1 text-[11px] font-bold opacity-90">
-                    <span className="truncate">{item.label}</span>
-                    <span className="shrink-0">
-                      {timingLabel(item.elapsedMs)}
-                      {item.status === "deferred" ? " deferred" : ""}
-                    </span>
-                  </div>
-                ))
-              ) : (
-                <div className="text-xs font-bold opacity-80">Measuring initial panel loads.</div>
-              )}
-            </div>
-          </div>
         </div>
       </div>
 
       <div className="mt-4 rounded border border-slate-950/30 bg-slate-950/30 p-3">
         <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <div className="text-[10px] font-black uppercase tracking-widest opacity-65">Operator review path</div>
-            <div className="mt-1 text-sm font-black">Verify recommendation, evidence, gate, dispatch, and receipt before action.</div>
+            <div className="text-[10px] font-black uppercase tracking-widest opacity-65">Decision checklist</div>
+            <div className="mt-1 text-sm font-black">Verify recommendation, evidence, gate, dispatch, and receipt from the operating decision.</div>
           </div>
           <div className="w-fit rounded bg-slate-950/45 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest opacity-90">
             {props.runTelemetry ? "Receipt loaded" : "Waiting for run"}

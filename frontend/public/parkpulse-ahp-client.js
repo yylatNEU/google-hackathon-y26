@@ -1,6 +1,6 @@
 export class ParkPulseAHPClient {
   constructor({ apiBase, fetchImpl } = {}) {
-    this.apiBase = (apiBase || "http://127.0.0.1:8001").replace(/\/$/, "");
+    this.apiBase = (apiBase || "http://127.0.0.1:8000").replace(/\/$/, "");
     this.fetch = fetchImpl || globalThis.fetch;
     if (!this.fetch) throw new Error("ParkPulseAHPClient requires fetch.");
   }

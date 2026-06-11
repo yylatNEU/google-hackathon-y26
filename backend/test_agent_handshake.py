@@ -14,6 +14,7 @@ from agent_handshake import (  # noqa: E402
     _partner_registry,
     _sessions,
     _verify_certification_claims,
+    agent_handshake_memory_context,
     agent_handshake_scenario_catalog,
     agent_handshake_live_state_feed,
     agent_handshake_protocol_docs,
@@ -433,6 +434,8 @@ def test_external_client_agent_demo_runs_counterparty_loop_and_adversarial_probe
         "receipt_integrity",
     }
     assert demo["memory_context"]["memory_role"]
+    assert demo["memory_context"]["identity_boundary"]
+    assert demo["passport_memory_write"]["collection"] == "agent_learnings"
     assert demo["trust_context"]["certification_required"] is True
     assert demo["external_agent_result"]["artifact_type"] == "external_agent_useful_result"
     assert demo["external_agent_result"]["final_plan"]
@@ -451,6 +454,73 @@ def test_external_client_agent_demo_runs_counterparty_loop_and_adversarial_probe
     assert evolution["next_passport"]["passport_level"] >= 2
     assert {"purchase_order", "vendor_payment_release", "bypass_food_safety"}.issubset(set(evolution["next_passport"]["requires_approval"]))
     _sessions.pop(demo["session_id"], None)
+
+
+def test_agent_handshake_memory_context_scopes_exact_memory_and_semantic_retrieval(monkeypatch):
+    class FakeMongoMemory:
+        @staticmethod
+        def init_operational_memory():
+            return {"status": "ready", "mode": "mongodb", "connected": True}
+
+        @staticmethod
+        def get_latest_memory_documents(collection_name, limit=5):
+            if collection_name == "agent_handshake_sessions":
+                return [
+                    {
+                        "sessionId": "session_match",
+                        "clientAgentId": "john_personal_agent",
+                        "representedUserId": "guest_user_123",
+                        "state": "receipt_issued",
+                        "scenarioMode": "incident_response",
+                    },
+                    {
+                        "sessionId": "session_other",
+                        "clientAgentId": "other_agent",
+                        "representedUserId": "guest_user_123",
+                        "state": "receipt_issued",
+                    },
+                ]
+            if collection_name == "agent_handshake_policy_events":
+                return [
+                    {"sessionId": "session_match", "action": "payment", "status": "requires_user_approval", "allowed": False},
+                    {"sessionId": "session_other", "action": "refund", "status": "blocked", "allowed": False},
+                ]
+            return []
+
+        @staticmethod
+        def get_memory_collection_count(collection_name):
+            return {"agent_handshake_sessions": 2, "agent_handshake_policy_events": 2, "agent_learnings": 9, "playbooks": 4, "incidents": 3}.get(collection_name, 0)
+
+        @staticmethod
+        def retrieve_operational_context(query, state, limit=3, agent_role=None, cache_policy="normal", persist_trace=True):
+            return {
+                "summary": "matched prior low-walking recovery memory",
+                "retrieved": {
+                    "method": "vector_search",
+                    "learnings": [{"_id": "learning_1", "lesson": "Prefer lower walking route", "tags": ["agent_handshake"]}],
+                    "playbooks": [{"_id": "playbook_1", "title": "Guest recovery"}],
+                    "incidents": [{"_id": "incident_1", "summary": "Dragon Coaster recovery"}],
+                },
+            }
+
+    monkeypatch.setitem(sys.modules, "mongo_memory", FakeMongoMemory)
+    context = agent_handshake_memory_context(
+        {
+            "agent_id": "john_personal_agent",
+            "represents": "guest_user_123",
+            "scenario_mode": "incident_response",
+            "counterparty": "guest",
+            "request_text": "reduce walking after missed ride",
+        }
+    )
+    assert context["status"] == "ready"
+    assert context["connected"] is True
+    assert context["exact_identity_memory"]["method"] == "deterministic_agent_and_represented_subject_match"
+    assert [item["session_id"] for item in context["exact_identity_memory"]["sessions"]] == ["session_match"]
+    assert [item["action"] for item in context["exact_identity_memory"]["policy_events"]] == ["payment"]
+    assert context["semantic_context"]["method"] == "vector_search"
+    assert context["semantic_context"]["learnings"][0]["id"] == "learning_1"
+    assert "Vector search is not used to verify identity" in context["identity_boundary"]
 
 
 def test_passport_second_run_demo_executes_two_runs_and_preserves_gates():

@@ -204,6 +204,9 @@ public class RoleAuthService {
         if ("read_review_label_pipeline".equals(capability) || "record_review_label".equals(capability)) {
             return "ops_team".equals(role) || "ml_ops_admin".equals(role);
         }
+        if ("read_simulation_evidence".equals(capability) || "mutate_simulation_state".equals(capability) || "run_simulation_exercise".equals(capability)) {
+            return "ops_team".equals(role) || "ml_ops_admin".equals(role);
+        }
         if ("run_agent_orchestration".equals(capability) || "use_ops_chat".equals(capability)) {
             return "ops_team".equals(role) || "ml_ops_admin".equals(role);
         }

@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import sqlite3
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -69,8 +72,12 @@ HUMAN_REVIEW_PLACES = {
     "safety_rule_refusal": "ride_safety_lead",
     "unclear_guest_request": "guest_services_information_desk",
 }
+ISSUE_TICKET_SOURCES = {"guest", "employee", "historical_park_data", "dynamic_park", "place_risk", "random_incident"}
+STABLE_ISSUE_TICKET_SOURCES = {"historical_park_data", "dynamic_park", "place_risk", "random_incident"}
 TICKET_DEDUPE_WINDOW_MINUTES = 120
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+LOW_ATTENDANCE_CROWD_TICKET_FLOOR = 500
+MIN_PATH_GUESTS_FOR_CROWD_TICKET = 250
 LEARNING_VERSION_EVENT_TYPES = {
     "learning_version_promoted",
     "learning_version_rolled_back",
@@ -80,6 +87,21 @@ HUMAN_REVIEW_DECISIONS = {"approve", "reject", "hold"}
 AUTO_PROMOTION_TARGET_SURFACES = {"staff_training", "ops_checklist"}
 OUTCOME_BASELINE_OVERALL = 75.0
 OUTCOME_ROLLBACK_SCORE_FLOOR = 65.0
+TRAINING_SCENARIO_BY_GUEST_ISSUE = {
+    "angry_parent": "angry_parent",
+    "lost_child_report": "lost_child_report",
+    "ride_closure_complaint": "ride_closure_complaint",
+    "accessibility_accommodation": "accessibility_accommodation",
+    "language_barrier": "language_barrier",
+    "refund_request": "refund_request",
+    "heat_exhaustion_concern": "heat_exhaustion_concern",
+    "line_cutting_conflict": "line_cutting_conflict",
+    "safety_rule_refusal": "safety_rule_refusal",
+    "weather_evacuation_confusion": "weather_evacuation_confusion",
+    "injury_or_safety_incident": "heat_exhaustion_concern",
+    "profile_information_request": "language_barrier",
+    "unclear_guest_request": "angry_parent",
+}
 
 BACKLOG_ISSUE_MAP = {
     "food-court-a-backlog": "refund_request",
@@ -233,6 +255,11 @@ def _write_event(event: dict[str, Any]) -> None:
     _write_event_jsonl(event)
 
 
+def _scenario_for_guest_issue(issue_type: str | None) -> str:
+    normalized = _normalize_issue_type(issue_type)
+    return TRAINING_SCENARIO_BY_GUEST_ISSUE.get(normalized, normalized)
+
+
 def _write_event_jsonl(event: dict[str, Any]) -> None:
     path = _ledger_path()
     _ensure_parent(path)
@@ -355,6 +382,82 @@ def _read_events_sqlite(limit: int = 500) -> list[dict[str, Any]]:
     return rows
 
 
+def _compact_guest_triage_memory_document(event: dict[str, Any], ticket_result: dict[str, Any] | None = None) -> dict[str, Any]:
+    issue_type = _normalize_issue_type(str(event.get("issue_type") or "unclear_guest_request"))
+    scenario_id = _scenario_for_guest_issue(issue_type)
+    ticket = ticket_result.get("ticket") if isinstance(ticket_result, dict) and isinstance(ticket_result.get("ticket"), dict) else {}
+    created_at = str(event.get("created_at") or _now_iso())
+    checklist = event.get("staff_checklist") if isinstance(event.get("staff_checklist"), list) else []
+    return {
+        "_id": f"guest_triage_{event.get('id') or _stable_id('guest-triage-memory', event)}",
+        "documentType": "guest_triage_memory",
+        "source": "guest_message_triage",
+        "createdAt": created_at,
+        "updatedAt": created_at,
+        "scenarioKey": scenario_id,
+        "issueType": issue_type,
+        "severity": event.get("severity"),
+        "urgency": event.get("urgency"),
+        "urgencyScore": event.get("urgency_score"),
+        "confidence": (event.get("understanding") or {}).get("confidence") if isinstance(event.get("understanding"), dict) else None,
+        "channel": event.get("channel"),
+        "location": event.get("location"),
+        "guestNamePresent": bool(event.get("guest_name")),
+        "messageExcerpt": str(event.get("message_excerpt") or "")[:500],
+        "guestReplyDraft": str(event.get("guest_reply_draft") or "")[:600],
+        "staffChecklist": [str(item)[:240] for item in checklist[:6]],
+        "assignedTeam": event.get("assigned_team"),
+        "humanReviewPlace": event.get("human_review_place"),
+        "humanAckRequired": bool(event.get("human_ack_required")),
+        "ticketId": ticket.get("id") or event.get("ticket_id"),
+        "trainingUse": {
+            "targetSurface": "staff_training",
+            "recommendedScenarioId": scenario_id,
+            "usesRawGuestIdentity": False,
+            "requiresManagerReview": True,
+        },
+        "boundary": "Guest triage memory can suggest staff training scenarios only; it cannot dispatch live operations or train a reward model automatically.",
+    }
+
+
+def _record_guest_triage_memory(event: dict[str, Any], ticket_result: dict[str, Any] | None = None) -> dict[str, Any]:
+    document = _compact_guest_triage_memory_document(event, ticket_result)
+    try:
+        from mongo_memory import _clean_for_bson, _ensure_memory_initialized, _memory
+
+        _ensure_memory_initialized()
+        collection = _memory._collection("guest_messages")
+        if collection is not None:
+            collection.replace_one({"_id": document["_id"]}, _clean_for_bson(document), upsert=True)
+            return {
+                "status": "stored",
+                "mode": "mongodb_guest_triage_memory",
+                "collection": "guest_messages",
+                "document_id": document["_id"],
+                "scenario_id": document["scenarioKey"],
+            }
+        _memory._fallback["guest_messages"] = [
+            row for row in _memory._fallback.get("guest_messages", []) if row.get("_id") != document["_id"]
+        ]
+        _memory._fallback["guest_messages"].insert(0, document)
+        _memory._fallback["guest_messages"] = _memory._fallback["guest_messages"][:200]
+        return {
+            "status": "stored",
+            "mode": "mongo_memory_fallback_guest_triage",
+            "collection": "guest_messages",
+            "document_id": document["_id"],
+            "scenario_id": document["scenarioKey"],
+        }
+    except Exception as error:
+        return {
+            "status": "skipped",
+            "mode": "mongodb_guest_triage_memory",
+            "collection": "guest_messages",
+            "reason": str(error)[:180],
+            "scenario_id": document.get("scenarioKey"),
+        }
+
+
 def _migrate_jsonl_events_to_sqlite(conn: sqlite3.Connection) -> None:
     path = _event_db_path()
     done_paths = getattr(_migrate_jsonl_events_to_sqlite, "_done_paths", set())
@@ -409,6 +512,527 @@ def product_learning_event_store_status(limit: int = 20) -> dict[str, Any]:
         "event_type_counts": by_type,
         "boundary": "SQLite stores product-learning events with query indexes; JSONL remains an audit/compatibility append log.",
     }
+
+
+def _guest_triage_memory_rows_from_mongo(limit: int) -> list[dict[str, Any]]:
+    try:
+        from mongo_memory import get_latest_memory_documents
+
+        documents = get_latest_memory_documents("guest_messages", max(1, min(500, int(limit or 100))))
+    except Exception:
+        return []
+    rows: list[dict[str, Any]] = []
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        document_type = str(document.get("documentType") or "")
+        if document_type != "guest_triage_memory":
+            continue
+        issue_type = str(document.get("issueType") or document.get("issue_type") or "")
+        scenario_id = str(document.get("scenarioKey") or document.get("scenario_id") or _scenario_for_guest_issue(issue_type))
+        if not scenario_id:
+            continue
+        rows.append(
+            {
+                "id": str(document.get("id") or document.get("_id") or ""),
+                "source": "mongodb_guest_messages",
+                "scenario_id": scenario_id,
+                "issue_type": _normalize_issue_type(issue_type),
+                "severity": str(document.get("severity") or "medium"),
+                "urgency": str(document.get("urgency") or ""),
+                "urgency_score": document.get("urgencyScore") if document.get("urgencyScore") is not None else document.get("urgency_score"),
+                "human_review_place": document.get("humanReviewPlace") or document.get("human_review_place"),
+                "assigned_team": document.get("assignedTeam") or document.get("assigned_team"),
+                "summary": str(document.get("messageExcerpt") or document.get("message") or "")[:500],
+                "staff_checklist": document.get("staffChecklist") if isinstance(document.get("staffChecklist"), list) else [],
+                "guest_reply_draft": str(document.get("guestReplyDraft") or document.get("message") or "")[:600],
+                "created_at": str(document.get("createdAt") or document.get("created_at") or ""),
+                "memory_source": "mongodb",
+            }
+        )
+    return rows
+
+
+def _guest_triage_memory_rows_from_events(limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for event in _read_events(max(1, min(5000, int(limit or 100)))):
+        if event.get("event") not in {"guest_message_triaged", "park_issue_ticket_created", "park_issue_ticket_generated"}:
+            continue
+        if event.get("event") in {"park_issue_ticket_created", "park_issue_ticket_generated"} and str(event.get("source") or "") not in ISSUE_TICKET_SOURCES:
+            continue
+        issue_type = _normalize_issue_type(str(event.get("issue_type") or "unclear_guest_request"))
+        rows.append(
+            {
+                "id": str(event.get("id") or ""),
+                "source": f"local_{event.get('source') or 'product_learning'}_ticket",
+                "scenario_id": _scenario_for_guest_issue(issue_type),
+                "issue_type": issue_type,
+                "severity": str(event.get("severity") or "medium"),
+                "urgency": str(event.get("urgency") or ""),
+                "urgency_score": event.get("urgency_score"),
+                "human_review_place": event.get("human_review_place"),
+                "assigned_team": event.get("assigned_team"),
+                "summary": str(event.get("message_excerpt") or event.get("summary") or "")[:500],
+                "staff_checklist": event.get("staff_checklist") if isinstance(event.get("staff_checklist"), list) else [],
+                "guest_reply_draft": str(event.get("guest_reply_draft") or "")[:600],
+                "created_at": str(event.get("created_at") or ""),
+                "memory_source": "sqlite_jsonl",
+            }
+        )
+    return rows
+
+
+def _dedupe_guest_triage_memory_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = str(row.get("id") or "")
+        if not key:
+            key = _stable_id("guest-triage-memory-row", {"scenario": row.get("scenario_id"), "summary": row.get("summary"), "created": row.get("created_at")})
+        existing = deduped.get(key)
+        if existing and existing.get("memory_source") == "mongodb":
+            continue
+        deduped[key] = row
+    return sorted(deduped.values(), key=lambda item: str(item.get("created_at") or ""), reverse=True)
+
+
+def guest_triage_training_memory(scenario_id: str | None = None, *, limit: int = 80) -> dict[str, Any]:
+    safe_limit = max(1, min(500, int(limit or 80)))
+    target_scenario = str(scenario_id or "").strip()
+    rows = _dedupe_guest_triage_memory_rows(
+        [
+            *_guest_triage_memory_rows_from_mongo(safe_limit),
+            *_guest_triage_memory_rows_from_events(max(safe_limit, 500)),
+        ]
+    )
+    if target_scenario:
+        rows = [row for row in rows if str(row.get("scenario_id") or "") == target_scenario]
+    issue_groups: dict[str, list[dict[str, Any]]] = {}
+    scenario_groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        issue_groups.setdefault(str(row.get("issue_type") or "unclear_guest_request"), []).append(row)
+        scenario_groups.setdefault(str(row.get("scenario_id") or _scenario_for_guest_issue(str(row.get("issue_type") or ""))), []).append(row)
+    scenario_frequencies = []
+    for scenario_key, group in scenario_groups.items():
+        severities = [str(item.get("severity") or "medium") for item in group]
+        highest = sorted(severities, key=lambda value: SEVERITY_RANK.get(value, 0), reverse=True)[0] if severities else "medium"
+        sources: dict[str, int] = {}
+        issue_types: dict[str, int] = {}
+        for item in group:
+            source = str(item.get("source") or "unknown")
+            issue = str(item.get("issue_type") or "unknown")
+            sources[source] = sources.get(source, 0) + 1
+            issue_types[issue] = issue_types.get(issue, 0) + 1
+        scenario_frequencies.append(
+            {
+                "scenario_id": scenario_key,
+                "ticket_count": len(group),
+                "highest_severity": highest,
+                "latest_summary": str(group[0].get("summary") or "")[:240],
+                "latest_created_at": str(group[0].get("created_at") or ""),
+                "sources": sources,
+                "issue_types": issue_types,
+                "frequency_label": f"{len(group)} historical tickets/signals",
+            }
+        )
+    scenario_frequencies.sort(key=lambda item: (int(item.get("ticket_count") or 0), SEVERITY_RANK.get(str(item.get("highest_severity") or ""), 0)), reverse=True)
+    patterns = []
+    for issue_type, group in issue_groups.items():
+        highest = sorted((str(item.get("severity") or "medium") for item in group), key=lambda value: SEVERITY_RANK.get(value, 0), reverse=True)[0]
+        latest = group[0]
+        patterns.append(
+            {
+                "issue_type": issue_type,
+                "scenario_id": str(latest.get("scenario_id") or _scenario_for_guest_issue(issue_type)),
+                "count": len(group),
+                "frequency": len(group),
+                "frequency_label": f"{len(group)} historical tickets/signals",
+                "highest_severity": highest,
+                "latest_summary": str(latest.get("summary") or "")[:240],
+                "latest_created_at": str(latest.get("created_at") or ""),
+                "human_review_place": latest.get("human_review_place"),
+                "assigned_team": latest.get("assigned_team"),
+                "recommended_action": f"Prioritize {str(latest.get('scenario_id') or _scenario_for_guest_issue(issue_type)).replace('_', ' ')} roleplay from training memory and historical ticket frequency.",
+            }
+        )
+    patterns.sort(key=lambda item: (int(item.get("count") or 0), SEVERITY_RANK.get(str(item.get("highest_severity") or ""), 0)), reverse=True)
+    recent_examples = [
+        {
+            "id": row.get("id"),
+            "source": row.get("source"),
+            "scenario_id": row.get("scenario_id"),
+            "issue_type": row.get("issue_type"),
+            "severity": row.get("severity"),
+            "summary": row.get("summary"),
+            "staff_checklist": row.get("staff_checklist", [])[:4] if isinstance(row.get("staff_checklist"), list) else [],
+            "created_at": row.get("created_at"),
+        }
+        for row in rows[: min(10, safe_limit)]
+    ]
+    return {
+        "status": "ready" if rows else "empty",
+        "mode": "guest_triage_training_memory",
+        "scenario_id": target_scenario or None,
+        "memory_source": "mongodb_plus_sqlite_jsonl",
+        "memory_count": len(rows),
+        "patterns": patterns[:12],
+        "scenario_frequencies": scenario_frequencies[:12],
+        "recent_examples": recent_examples,
+        "assignment_recommendation": patterns[0] if patterns else None,
+        "boundary": "Guest triage memory recommends staff training only. It does not approve live operations, refunds, dispatch, or model promotion.",
+    }
+
+
+def recommended_training_scenarios_from_guest_triage(*, limit: int = 6) -> list[dict[str, Any]]:
+    memory = guest_triage_training_memory(limit=max(80, int(limit or 6) * 20))
+    by_scenario: dict[str, dict[str, Any]] = {}
+    for pattern in memory.get("patterns", []):
+        scenario_id = str(pattern.get("scenario_id") or "")
+        if not scenario_id:
+            continue
+        current = by_scenario.setdefault(
+            scenario_id,
+            {
+                "scenario_id": scenario_id,
+                "issue_types": [],
+                "evidence_count": 0,
+                "highest_severity": "low",
+                "latest_summary": "",
+                "latest_created_at": "",
+                "source": "guest_triage_memory",
+                "requires_manager_review": True,
+            },
+        )
+        current["issue_types"].append(pattern.get("issue_type"))
+        current["evidence_count"] = int(current.get("evidence_count") or 0) + int(pattern.get("count") or 0)
+        if SEVERITY_RANK.get(str(pattern.get("highest_severity") or ""), 0) > SEVERITY_RANK.get(str(current.get("highest_severity") or ""), 0):
+            current["highest_severity"] = pattern.get("highest_severity")
+        if str(pattern.get("latest_created_at") or "") > str(current.get("latest_created_at") or ""):
+            current["latest_created_at"] = pattern.get("latest_created_at")
+            current["latest_summary"] = pattern.get("latest_summary")
+    recommendations = list(by_scenario.values())
+    recommendations.sort(key=lambda item: (SEVERITY_RANK.get(str(item.get("highest_severity") or ""), 0), int(item.get("evidence_count") or 0)), reverse=True)
+    return recommendations[: max(1, min(20, int(limit or 6)))]
+
+
+def _guest_triage_memory_impact(issue_type: str, persistence: dict[str, Any] | None = None) -> dict[str, Any]:
+    scenario_id = _scenario_for_guest_issue(issue_type)
+    memory = guest_triage_training_memory(scenario_id, limit=80)
+    frequencies = memory.get("scenario_frequencies") if isinstance(memory.get("scenario_frequencies"), list) else []
+    frequency = frequencies[0] if frequencies and isinstance(frequencies[0], dict) else {}
+    examples = memory.get("recent_examples") if isinstance(memory.get("recent_examples"), list) else []
+    patterns = memory.get("patterns") if isinstance(memory.get("patterns"), list) else []
+    stored = bool(isinstance(persistence, dict) and persistence.get("status") == "stored")
+    return {
+        "mode": "guest_triage_to_staff_training_memory_impact",
+        "stored": stored,
+        "storage_mode": (persistence or {}).get("mode") if isinstance(persistence, dict) else None,
+        "collection": (persistence or {}).get("collection") if isinstance(persistence, dict) else None,
+        "document_id": (persistence or {}).get("document_id") if isinstance(persistence, dict) else None,
+        "training_scenario_id": scenario_id,
+        "recommended_action": f"Start or prioritize {scenario_id.replace('_', ' ')} roleplay for the relevant staff role.",
+        "memory_count": memory.get("memory_count", 0),
+        "historical_ticket_frequency": {
+            "ticket_count": frequency.get("ticket_count", 0),
+            "highest_severity": frequency.get("highest_severity"),
+            "frequency_label": frequency.get("frequency_label"),
+            "sources": frequency.get("sources") if isinstance(frequency.get("sources"), dict) else {},
+            "issue_types": frequency.get("issue_types") if isinstance(frequency.get("issue_types"), dict) else {},
+        },
+        "top_patterns": patterns[:3],
+        "recent_examples": examples[:3],
+        "visible_benefit": "This triage is now retrievable by employee training for scenario selection, roleplay context, and LLM guest simulation context.",
+        "boundary": "Memory benefit is limited to staff-training recommendations and context; it does not dispatch live actions or promote models automatically.",
+    }
+
+
+def _first_json_object(text: str) -> dict[str, Any] | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+    start = raw.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(raw)):
+        char = raw[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(raw[start : index + 1])
+                    return parsed if isinstance(parsed, dict) else None
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _sanitize_guest_triage_llm_reply(value: Any, fallback_reply: str) -> str:
+    reply = " ".join(str(value or "").replace("\n", " ").split())
+    if not reply:
+        return fallback_reply
+    lowered = reply.lower()
+    blocked = (
+        "as an ai",
+        "your score",
+        "rubric",
+        "trainer",
+        "trainee",
+        "approve refund",
+        "refund approved",
+        "i approved",
+        "dispatching security",
+        "dispatching medical",
+        "ride is safe",
+        "diagnosis",
+        "medical diagnosis",
+        "guarantee",
+        "live availability is confirmed",
+    )
+    if any(term in lowered for term in blocked):
+        return fallback_reply
+    return reply[:520]
+
+
+def _guest_message_acknowledgement(message: str, issue_type: str, profile_context: dict[str, Any]) -> str:
+    text = " ".join(str(message or "").split())
+    lowered = text.lower()
+    if issue_type == "profile_information_request":
+        category = str(profile_context.get("category") or "")
+        if category == "food_dietary":
+            if "coaster" in lowered:
+                return "You are looking for vegetarian food near the coaster."
+            return "You are looking for vegetarian food options in the park."
+        if category == "water_cooling_quiet":
+            return "You are looking for a quieter cooling or water-refill spot."
+        if category == "accessibility_map":
+            return "You are asking for accessibility information from the park profile."
+        return "You are asking for park information I can check against the park profile."
+    if issue_type == "refund_request":
+        if "closed" in lowered or "waited" in lowered:
+            return "I hear that you waited and the ride was closed, and you want the refund reviewed."
+        return "I hear that you want help with a refund review."
+    if issue_type == "lost_child_report":
+        if "carousel" in lowered:
+            return "I understand your child is missing near the carousel."
+        return "I understand you cannot find your child."
+    if issue_type == "heat_exhaustion_concern":
+        return "I understand someone with you feels dizzy or unwell in the heat."
+    if issue_type == "accessibility_accommodation":
+        return "I hear that your group needs accessibility help without sharing private medical details."
+    if issue_type == "line_cutting_conflict":
+        return "I hear that people are yelling after a line-cutting conflict."
+    if issue_type == "weather_evacuation_confusion":
+        return "I hear that you need clearer shelter or evacuation directions."
+    if issue_type == "language_barrier":
+        return "I hear that you need help understanding the next step clearly."
+    return "I hear what you are asking for."
+
+
+def _conversational_guest_reply(message: str, issue_type: str, base_reply: str, profile_context: dict[str, Any]) -> str:
+    acknowledgement = _guest_message_acknowledgement(message, issue_type, profile_context)
+    base = " ".join(str(base_reply or "").split())
+    if not base:
+        return acknowledgement
+    if base.lower().startswith(acknowledgement.lower()):
+        return base[:620]
+    return f"{acknowledgement} {base}"[:620]
+
+
+def _generate_gemini_json_sync_hard_timeout(
+    prompt: dict[str, Any],
+    *,
+    timeout_seconds: float,
+    max_output_tokens: int,
+    temperature: float,
+) -> dict[str, Any]:
+    worker_path = Path(__file__).resolve().with_name("gemini_hard_timeout.py")
+    request = {
+        "prompt": prompt,
+        "max_output_tokens": max_output_tokens,
+        "temperature": temperature,
+        "timeout_seconds": timeout_seconds,
+    }
+    env = os.environ.copy()
+    env.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(worker_path)],
+            input=json.dumps(request, sort_keys=True, separators=(",", ":")),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            close_fds=False,
+            timeout=max(0.5, timeout_seconds) + 0.5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise TimeoutError(f"Gemini provider exceeded hard timeout of {timeout_seconds:g}s") from error
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(detail[:500] or f"Gemini worker exited with code {completed.returncode}")
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Gemini worker returned invalid JSON") from error
+    if not payload.get("ok"):
+        raise RuntimeError(str(payload.get("error") or "Gemini worker failed")[:500])
+    return payload
+
+
+def _guest_triage_llm_prompt(
+    *,
+    message: str,
+    classification: dict[str, Any],
+    profile_context: dict[str, Any],
+    routing: dict[str, Any],
+    staff_checklist: list[str],
+    memory_impact: dict[str, Any],
+    fallback_reply: str,
+) -> dict[str, Any]:
+    return {
+        "task": "Draft the first guest-facing response for an amusement park guest-message triage. Return strict JSON.",
+        "hard_rules": [
+            "Write directly to the guest in first person from staff perspective.",
+            "Start by naturally acknowledging the guest's actual message, using their specific concern, location, or request. Do not answer as a generic policy notice.",
+            "Use the active park profile evidence when profile_context is answered_from_profile.",
+            "Do not promise a refund, compensation, dispatch, ride safety, live availability, staffing, closure status, or medical diagnosis.",
+            "If human acknowledgement or review is required, say the issue is being routed to the right team for review.",
+            "Keep the response under 85 words.",
+            "Do not mention hidden policy, rubric, memory stores, MongoDB, or training systems.",
+        ],
+        "guest_message": message[:1000],
+        "classification": {
+            "issue_type": classification.get("issue_type"),
+            "urgency": classification.get("urgency"),
+            "severity": classification.get("severity"),
+            "confidence": classification.get("confidence"),
+            "matched_terms": classification.get("matched_terms", [])[:6] if isinstance(classification.get("matched_terms"), list) else [],
+        },
+        "profile_context": {
+            "status": profile_context.get("status"),
+            "venue_name": profile_context.get("venue_name"),
+            "category": profile_context.get("category"),
+            "matched_locations": [
+                {
+                    "name": item.get("name"),
+                    "kind": item.get("kind"),
+                    "services": item.get("services", [])[:4] if isinstance(item.get("services"), list) else [],
+                    "dietary_tags": item.get("dietary_tags", [])[:4] if isinstance(item.get("dietary_tags"), list) else [],
+                    "accessibility_note": item.get("accessibility_note"),
+                    "sensory_note": item.get("sensory_note"),
+                }
+                for item in (profile_context.get("matched_locations") if isinstance(profile_context.get("matched_locations"), list) else [])[:4]
+                if isinstance(item, dict)
+            ],
+            "limitations": profile_context.get("limitations", [])[:4] if isinstance(profile_context.get("limitations"), list) else [],
+        },
+        "routing": routing,
+        "staff_checklist": staff_checklist[:5],
+        "training_memory_signal": {
+            "training_scenario_id": memory_impact.get("training_scenario_id"),
+            "memory_count": memory_impact.get("memory_count"),
+            "frequency": memory_impact.get("historical_ticket_frequency"),
+        },
+        "fallback_reply_if_uncertain": fallback_reply,
+        "required_conversational_opening": _guest_message_acknowledgement(message, str(classification.get("issue_type") or ""), profile_context),
+        "response_schema": {
+            "guest_reply": "string under 85 words",
+            "tone": "one of calm|urgent|empathetic|direct",
+            "used_profile": "boolean",
+            "next_step": "short string",
+            "confidence": "number from 0 to 1",
+        },
+    }
+
+
+def _generate_guest_triage_llm_response(
+    *,
+    message: str,
+    classification: dict[str, Any],
+    profile_context: dict[str, Any],
+    routing: dict[str, Any],
+    staff_checklist: list[str],
+    memory_impact: dict[str, Any],
+    fallback_reply: str,
+) -> dict[str, Any]:
+    try:
+        from gemini_provider import get_gemini_agent_properties, get_gemini_model
+
+        props = get_gemini_agent_properties()
+        if not props.ready:
+            return {
+                "status": "fallback_not_configured",
+                "source": "deterministic",
+                "reply": fallback_reply,
+                "provider": props.provider,
+                "platform": props.platform,
+                "readiness_issues": props.readiness_issues,
+                "required_env": props.required_env,
+                "llm_controls_live_ops": False,
+            }
+        timeout_seconds = float(os.getenv("PARKPULSE_GUEST_TRIAGE_LLM_TIMEOUT_SECONDS", "4"))
+        prompt = _guest_triage_llm_prompt(
+            message=message,
+            classification=classification,
+            profile_context=profile_context,
+            routing=routing,
+            staff_checklist=staff_checklist,
+            memory_impact=memory_impact,
+            fallback_reply=fallback_reply,
+        )
+        result = _generate_gemini_json_sync_hard_timeout(
+            prompt,
+            timeout_seconds=timeout_seconds,
+            max_output_tokens=int(os.getenv("PARKPULSE_GUEST_TRIAGE_LLM_MAX_OUTPUT_TOKENS", "260")),
+            temperature=float(os.getenv("PARKPULSE_GUEST_TRIAGE_LLM_TEMPERATURE", "0.45")),
+        )
+        parsed = _first_json_object(str(result.get("text") or ""))
+        reply = _sanitize_guest_triage_llm_reply((parsed or {}).get("guest_reply"), fallback_reply)
+        source = "llm_guest_triage" if reply != fallback_reply else "deterministic"
+        return {
+            "status": "generated" if source == "llm_guest_triage" else "fallback_sanitized",
+            "source": source,
+            "reply": reply,
+            "model": get_gemini_model(),
+            "provider": props.provider,
+            "platform": props.platform,
+            "transport": result.get("transport"),
+            "timeout_seconds": timeout_seconds,
+            "tone": (parsed or {}).get("tone"),
+            "used_profile": bool((parsed or {}).get("used_profile")),
+            "next_step": (parsed or {}).get("next_step"),
+            "confidence": (parsed or {}).get("confidence"),
+            "llm_controls_live_ops": False,
+        }
+    except Exception as error:
+        is_timeout = isinstance(error, TimeoutError) or "timeout" in str(error).lower() or "timed out" in str(error).lower()
+        return {
+            "status": "fallback_timeout" if is_timeout else "fallback_error",
+            "source": "deterministic",
+            "reply": fallback_reply,
+            "readiness_issues": [str(error)[:240]],
+            "llm_controls_live_ops": False,
+        }
 
 
 def _version_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -469,16 +1093,44 @@ def create_park_issue_ticket(
     reporter_role: str | None = None,
     required_action: str | None = None,
     assigned_team: str | None = None,
+    source_batch_id: str | None = None,
+    historical_window: str | None = None,
+    observed_at: str | None = None,
+    stable_key: str | None = None,
 ) -> dict[str, Any]:
     normalized_source = str(source or "employee").strip().lower()
-    if normalized_source not in {"guest", "employee"}:
-        return {"status": "invalid", "mode": "park_issue_ticket", "readiness_issues": ["source must be guest or employee."]}
+    if normalized_source not in ISSUE_TICKET_SOURCES:
+        return {"status": "invalid", "mode": "park_issue_ticket", "readiness_issues": [f"source must be one of {', '.join(sorted(ISSUE_TICKET_SOURCES))}."]}
     normalized_issue = _normalize_issue_type(issue_type)
     normalized_severity = _normalize_severity(severity, normalized_issue)
     review_place = _human_review_place(normalized_issue, normalized_severity)
+    stable_import_key = str(stable_key or "").strip()
+    stable_payload = (
+        {
+            "source": normalized_source,
+            "source_batch_id": str(source_batch_id or "")[:120],
+            "stable_key": stable_import_key[:240],
+        }
+        if stable_import_key
+        else {
+            "source": normalized_source,
+            "issue_type": normalized_issue,
+            "summary": str(summary or "")[:1000],
+            "location": str(location or "")[:120],
+            "source_batch_id": str(source_batch_id or "")[:120],
+            "historical_window": str(historical_window or "")[:120],
+            "observed_at": str(observed_at or "")[:80],
+        }
+    )
+    ticket_id = (
+        _stable_id("park-issue", stable_payload)
+        if normalized_source in STABLE_ISSUE_TICKET_SOURCES or stable_import_key
+        else _id("park-issue", {"source": normalized_source, "issue_type": normalized_issue, "summary": summary or ""})
+    )
     ticket = {
         "event": "park_issue_ticket_created",
-        "id": _id("park-issue", {"source": normalized_source, "issue_type": normalized_issue, "summary": summary or ""}),
+        "id": ticket_id,
+        "scenario_id": _scenario_for_guest_issue(normalized_issue),
         "source": normalized_source,
         "issue_type": normalized_issue,
         "severity": normalized_severity,
@@ -494,7 +1146,15 @@ def create_park_issue_ticket(
         "human_review_required": bool(review_place),
         "auto_evolve_allowed": False,
         "created_at": _now_iso(),
-        "boundary": "Real guest/employee issue ticket; high-risk actions require human acknowledgement before live dispatch.",
+        "observed_at": str(observed_at or "")[:80] or None,
+        "source_batch_id": str(source_batch_id or "")[:120] or None,
+        "historical_window": str(historical_window or "")[:120] or None,
+        "dedupe_key": ticket_id if normalized_source in STABLE_ISSUE_TICKET_SOURCES or stable_import_key else None,
+        "boundary": (
+            "Imported or generated issue ticket for product-learning and staff-training memory; high-risk actions still require human acknowledgement before live dispatch."
+            if normalized_source in STABLE_ISSUE_TICKET_SOURCES
+            else "Real guest/employee issue ticket; high-risk actions require human acknowledgement before live dispatch."
+        ),
     }
     _write_event(ticket)
     return {"status": "created", "mode": "park_issue_ticket", "ticket": ticket, "feeds_training_model": "via_product_learning_signal_only"}
@@ -527,7 +1187,8 @@ def triage_guest_message(
     severity = _severity_for_triage(classification["urgency"])
     review_place = _human_review_place(issue_type, severity)
     staff_checklist = _guest_triage_staff_checklist(issue_type)
-    reply_draft = str(profile_context.get("guest_reply_draft") or _guest_reply_draft(issue_type)) if issue_type == "profile_information_request" else _guest_reply_draft(issue_type)
+    base_reply_draft = str(profile_context.get("guest_reply_draft") or _guest_reply_draft(issue_type)) if issue_type == "profile_information_request" else _guest_reply_draft(issue_type)
+    reply_draft = _conversational_guest_reply(text, issue_type, base_reply_draft, profile_context)
     human_ack_required = bool(review_place) or severity in {"high", "critical"} or bool(profile_context.get("human_review_required")) or float(classification.get("confidence") or 0) < 0.55
     ticket_result = None
     if create_ticket:
@@ -575,33 +1236,49 @@ def triage_guest_message(
         "live_ops_authority": False,
         "boundary": "Guest message triage can create a routed issue ticket and response draft, but high-risk action requires human acknowledgement.",
     }
+    event["memory_persistence"] = _record_guest_triage_memory(event, ticket_result if isinstance(ticket_result, dict) else None)
     _write_event(event)
+    memory_impact = _guest_triage_memory_impact(issue_type, event["memory_persistence"])
+    response_classification = {
+        "issue_type": issue_type,
+        "urgency": classification["urgency"],
+        "urgency_score": classification["urgency_score"],
+        "severity": severity,
+        "matched_terms": classification["matched_terms"],
+        "confidence": classification["confidence"],
+    }
+    response_routing = {
+        "assigned_team": event["assigned_team"],
+        "human_review_place": review_place,
+        "human_ack_required": event["human_ack_required"],
+        "sla_minutes": event["sla_minutes"],
+    }
+    llm_response = _generate_guest_triage_llm_response(
+        message=text,
+        classification=response_classification,
+        profile_context=profile_context,
+        routing=response_routing,
+        staff_checklist=staff_checklist,
+        memory_impact=memory_impact,
+        fallback_reply=reply_draft,
+    )
     return {
         "status": "triaged",
         "mode": "guest_message_triage",
-        "classification": {
-            "issue_type": issue_type,
-            "urgency": classification["urgency"],
-            "urgency_score": classification["urgency_score"],
-            "severity": severity,
-            "matched_terms": classification["matched_terms"],
-            "confidence": classification["confidence"],
-        },
+        "classification": response_classification,
         "understanding": event["understanding"],
         "profile_context": profile_context,
-        "routing": {
-            "assigned_team": event["assigned_team"],
-            "human_review_place": review_place,
-            "human_ack_required": event["human_ack_required"],
-            "sla_minutes": event["sla_minutes"],
-        },
+        "routing": response_routing,
         "reaction": {
             "guest_reply_draft": reply_draft,
             "staff_checklist": staff_checklist,
             "forbidden_auto_actions": ["dispatch_security_or_medical", "approve_refund", "override_safety_policy", "change_live_operations"],
         },
+        "llm_response": llm_response,
         "ticket_result": ticket_result,
         "triage_event": event,
+        "memory_persistence": event["memory_persistence"],
+        "memory_impact": memory_impact,
         "boundary": event["boundary"],
     }
 
@@ -1002,9 +1679,15 @@ def generate_park_issue_tickets_from_operational_backlog(backlog: dict[str, Any]
 def build_place_risk_graph(state: dict[str, Any] | None) -> dict[str, Any]:
     """Build a compact place-causality graph from park state for ticket generation."""
     state = _as_dict(state)
+    represented_guests = _represented_guests(state)
+    low_attendance = 0 <= represented_guests < LOW_ATTENDANCE_CROWD_TICKET_FLOOR
     configured = _as_dict(state.get("placeRiskGraph"))
     if isinstance(configured.get("places"), list):
-        places = [_normalize_place_node(place) for place in configured.get("places", []) if isinstance(place, dict)]
+        places = [
+            _attendance_gate_place_node(_normalize_place_node(place), represented_guests, low_attendance)
+            for place in configured.get("places", [])
+            if isinstance(place, dict)
+        ]
         return {"mode": "state_supplied_place_risk_graph", "places": places}
 
     flow = _as_dict(state.get("guestFlow"))
@@ -1052,16 +1735,18 @@ def build_place_risk_graph(state: dict[str, Any] | None) -> dict[str, Any]:
         name = f"{path.get('fromName') or from_id} to {path.get('toName') or to_id}"
         congestion = int(_number(path.get("congestionLevel"), 0))
         width = _number(path.get("widthM"), 99)
-        current_guests = int(_number(path.get("currentGuests"), 0))
+        raw_current_guests = int(_number(path.get("currentGuests"), 0))
+        current_guests = min(raw_current_guests, represented_guests) if represented_guests >= 0 else raw_current_guests
+        enough_people = current_guests >= MIN_PATH_GUESTS_FOR_CROWD_TICKET and not low_attendance
         place_id = f"path:{from_id}:{to_id}"
         factors = []
-        if congestion >= 86:
+        if congestion >= 86 and enough_people:
             factors.append("crowd_bottleneck")
-        if congestion >= 86 and width <= 4.8:
+        if congestion >= 86 and width <= 4.8 and enough_people:
             factors.append("narrow_path")
-        if congestion >= 78 and current_guests >= 500:
+        if congestion >= 78 and current_guests >= 500 and not low_attendance:
             factors.append("queue_merge_conflict")
-        if storm_risk >= 65 and congestion >= 78:
+        if storm_risk >= 65 and congestion >= 78 and enough_people:
             factors.append("confusing_route")
         places[place_id] = {
             "place_id": place_id,
@@ -1073,7 +1758,13 @@ def build_place_risk_graph(state: dict[str, Any] | None) -> dict[str, Any]:
             "width_m": width,
             "current_guests": current_guests,
             "known_failure_modes": _failure_modes_for_place_factors(factors),
-            "evidence": [f"pathCongestion={congestion}", f"widthM={width}", f"currentGuests={current_guests}", f"stormRisk={storm_risk}"],
+            "evidence": [
+                f"pathCongestion={congestion}",
+                f"widthM={width}",
+                f"currentGuests={current_guests}",
+                f"representedGuests={represented_guests}",
+                f"stormRisk={storm_risk}",
+            ],
         }
 
     return {"mode": "derived_place_risk_graph", "places": list(places.values())}
@@ -1106,6 +1797,8 @@ def generate_place_risk_ticket_candidates(state: dict[str, Any] | None, *, limit
 
 def generate_random_incident_ticket_candidates(state: dict[str, Any] | None, *, seed: str | None = None, limit: int = 4) -> list[dict[str, Any]]:
     graph = build_place_risk_graph(state)
+    represented_guests = _represented_guests(state)
+    low_attendance = 0 <= represented_guests < LOW_ATTENDANCE_CROWD_TICKET_FLOOR
     base_seed = str(seed or _state_seed(state))
     candidates: list[dict[str, Any]] = []
     for place in _as_list(graph.get("places")):
@@ -1113,6 +1806,8 @@ def generate_random_incident_ticket_candidates(state: dict[str, Any] | None, *, 
             continue
         factors = {str(item) for item in _as_list(place.get("risk_factors"))}
         load = int(_number(place.get("current_load"), 0))
+        if low_attendance and factors & {"crowd_bottleneck", "narrow_path", "queue_merge_conflict", "confusing_route", "signage_gap"}:
+            continue
         if load < 75 or not factors:
             continue
         incident = _random_incident_for_place(place, factors, base_seed)
@@ -1148,6 +1843,34 @@ def _normalize_place_node(place: dict[str, Any]) -> dict[str, Any]:
         "known_failure_modes": [str(item) for item in _as_list(place.get("known_failure_modes") or place.get("knownFailureModes"))] or _failure_modes_for_place_factors(factors),
         "evidence": [str(item) for item in _as_list(place.get("evidence"))],
     }
+
+
+def _attendance_gate_place_node(place: dict[str, Any], represented_guests: int, low_attendance: bool) -> dict[str, Any]:
+    crowd_factors = {"crowd_bottleneck", "narrow_path", "queue_merge_conflict", "confusing_route", "signage_gap"}
+    current_guests = int(_number(place.get("current_guests"), 0))
+    if low_attendance or (represented_guests >= 0 and current_guests and current_guests < MIN_PATH_GUESTS_FOR_CROWD_TICKET):
+        factors = [factor for factor in _as_list(place.get("risk_factors")) if str(factor) not in crowd_factors]
+        gated = {**place, "risk_factors": factors, "known_failure_modes": _failure_modes_for_place_factors(factors)}
+        evidence = [str(item) for item in _as_list(gated.get("evidence"))]
+        gated["evidence"] = [*evidence, f"representedGuests={represented_guests}", "crowdRiskSuppressedByAttendance=true"]
+        return gated
+    evidence = [str(item) for item in _as_list(place.get("evidence"))]
+    return {**place, "evidence": [*evidence, f"representedGuests={represented_guests}"]}
+
+
+def _represented_guests(state: dict[str, Any] | None) -> int:
+    state = _as_dict(state)
+    flow = _as_dict(state.get("guestFlow"))
+    explicit = flow.get("representedGuests")
+    if explicit is not None:
+        return int(_number(explicit, -1))
+    zones = [zone for zone in _as_list(flow.get("zones")) if isinstance(zone, dict)]
+    if zones:
+        return sum(max(0, int(_number(zone.get("currentGuests"), 0))) for zone in zones)
+    groups = _as_list(_as_dict(state.get("physicalMap")).get("guestGroups"))
+    if groups:
+        return sum(max(0, int(_number(group.get("count") or group.get("guestCount"), 0))) for group in groups if isinstance(group, dict))
+    return -1
 
 
 def _failure_modes_for_place_factors(factors: list[str] | set[str]) -> list[str]:

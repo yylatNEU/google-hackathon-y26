@@ -151,10 +151,22 @@ def test_conversation_plan_creates_generator_ready_brief_without_learning_loop(m
     assert rows[0]["learningEligible"] is False
     assert rows[0]["learningSource"] == "conversation_plan_receipt_only"
 
-    generated = asyncio.run(experience_studio.build_experience_studio_payload(plan["recommendedPlan"]["payload"], None))
+    plan_payload = {
+        **plan["recommendedPlan"]["payload"],
+        "plannerContext": {
+            "source": "conversation_plan",
+            "designerRequest": "Create a rainy-day family journey with verified indoor stops.",
+            "recommendedPlanLabel": plan["recommendedPlan"]["label"],
+            "recommendedPayload": plan["recommendedPlan"]["payload"],
+            "planStatus": plan["status"],
+        },
+    }
+    generated = asyncio.run(experience_studio.build_experience_studio_payload(plan_payload, None))
     assert generated["draft"]["creativeBrief"]["seasonalTheme"].startswith("Build a rainy-day family journey")
     assert generated["draft"]["sourceIntegrity"]["usesSeedData"] is False
     package = generated["draft"]["creativePackage"]
+    assert generated["draft"]["plannerContext"]["source"] == "conversation_plan"
+    assert generated["draft"]["plannerContext"]["recommendedPlanLabel"] == plan["recommendedPlan"]["label"]
     assert package["executiveConcept"]["oneLine"]
     assert package["executiveConcept"]["guestPromise"]
     assert len(package["journeyMap"]) == len(generated["draft"]["route"])
@@ -182,6 +194,13 @@ def test_conversation_plan_creates_generator_ready_brief_without_learning_loop(m
     assert package["sectionDossiers"]
     assert package["routeBlueprint"]
     assert package["channelMatrix"]
+    event_team = package["eventTeamMarketingPackage"]
+    assert event_team["mode"] == "event_team_marketing_package_v1"
+    assert event_team["publishAuthority"] is False
+    assert event_team["eventBrief"]["eventName"]
+    assert len(event_team["workstreams"]) >= 5
+    assert {item["id"] for item in event_team["deliverables"]} >= {"web_hero", "pre_arrival_email", "onsite_signage", "visual_key_art"}
+    assert event_team["executionBoundary"]
     assert package["productionDetail"]["contentCompletenessChecklist"]
     assert package["memoryInfluence"]["authority"] == "retrieval_context_only"
     assert package["sectionCreativeDetails"]["conceptBoard"]["workingTitle"]
@@ -233,6 +252,484 @@ def test_conversation_plan_creates_generator_ready_brief_without_learning_loop(m
     route_copy = [stop["guestCopy"] for stop in generated["draft"]["route"]]
     assert any("Start dry" in copy for copy in route_copy)
     assert any("short reset" in copy or "quiet middle beat" in copy for copy in route_copy)
+
+
+def test_conversation_plan_text_overrides_stale_template_for_chinese_new_year(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+
+    plan = experience_studio.build_experience_studio_conversation_plan(
+        {
+            "message": "Create a chinese new year festival plan that run for a month",
+            "templateId": "rainy-day",
+            "audience": "mixed family groups",
+            "tone": "calm, helpful, upbeat",
+            "useVenueExperienceData": True,
+        }
+    )
+
+    assert plan["parsedBrief"]["templateId"] == "festival-plan"
+    assert plan["recommendedPlan"]["payload"]["templateId"] == "festival-plan"
+    assert plan["recommendedPlan"]["label"] == "Lantern Wishes festival concept"
+    assert "Chinese New Year" in plan["recommendedPlan"]["payload"]["seasonalTheme"] or "festival" in plan["recommendedPlan"]["payload"]["seasonalTheme"].lower()
+
+    generated = asyncio.run(experience_studio.build_experience_studio_payload(plan["recommendedPlan"]["payload"], None))
+    package = generated["draft"]["creativePackage"]
+    visible_output = {
+        "title": generated["draft"]["title"],
+        "creativeBrief": generated["draft"]["creativeBrief"],
+        "route": generated["draft"]["route"],
+        "messages": generated["draft"]["messages"],
+        "concept": package["executiveConcept"],
+        "signage": package["signageSet"],
+        "email": package["preArrivalEmail"],
+        "staffScript": package["staffScript"],
+        "experienceBeats": package["experienceBeats"],
+        "routeBlueprint": package["routeBlueprint"],
+    }
+    assert generated["draft"]["title"] == "Festival Experience Plan"
+    assert "rainy" not in json.dumps(visible_output, default=str).lower()
+    assert package["executiveConcept"]["name"] == "Lantern Wishes Festival Month"
+    assert "month" in package["preArrivalEmail"]["body"].lower()
+    assert package["contentCreationModel"]["mode"] == "evidence_backed_package_content_v1"
+    assert package["eventTeamNarrative"]["creativeTerritory"].startswith("Warm lantern festival")
+    assert len(package["programCalendar"]) == 3
+    assert len(package["eventTeamMarketingPackage"]["executionPlan"]) == 3
+    assert len(package["eventTeamMarketingPackage"]["approvalMatrix"]) >= 5
+    assert package["eventTeamMarketingPackage"]["executiveNarrative"]["marketingAngle"].startswith("A month of optional lantern")
+    assert "Create a chinese new year" not in package["executiveConcept"]["guestPromise"]
+    assert "Create a chinese new year" not in generated["draft"]["route"][0]["guestCopy"]
+    assert "launch, discovery, and finale" in package["executiveConcept"]["oneLine"]
+    assert package["eventTeamMarketingPackage"]["eventBrief"]["format"] == "Month-long seasonal festival"
+    assert package["eventTeamMarketingPackage"]["eventBrief"]["runShape"] == "Kickoff, discovery, finale"
+    assert any(item["team"] == "Creative and brand" for item in package["eventTeamMarketingPackage"]["workstreams"])
+    assert len(package["signageSet"]) >= 3
+    assert any("festival cue" in sign["body"].lower() or "wish" in sign["body"].lower() for sign in package["signageSet"])
+    assert any("Launch" == beat["beat"] for beat in package["experienceBeats"])
+    assert "optional festival-month path" in package["staffScript"]["openingLine"]
+
+
+def test_conversation_plan_autohydrates_active_venue_profile_by_default(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+    from venue_experience_data import activate_synthetic_venue_export
+
+    activated = activate_synthetic_venue_export("pytest")
+    assert activated["status"] == "imported"
+
+    plan = experience_studio.build_experience_studio_conversation_plan(
+        {
+            "message": "Create a chinese new year festival plan that run for a month",
+            "templateId": "rainy-day",
+            "audience": "mixed family groups",
+            "tone": "festive, respectful, clear",
+        }
+    )
+
+    assert plan["parsedBrief"]["templateId"] == "festival-plan"
+    assert plan["sourceIntegrity"]["realInputCount"] > 10
+    assert plan["retrievalEvidence"]["status"] == "ready"
+    assert len(plan["retrievalEvidence"]["retrievedEvidence"]) >= 8
+    assert {tool["id"] for tool in plan["planningTools"]} >= {"retrieval_evidence", "agent_workflow"}
+    assert plan["recommendedPlan"]["payload"]["realInputs"]["locations"]
+
+
+def test_expanded_template_coverage_routes_free_text_to_new_categories(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+    from venue_experience_data import approved_synthetic_venue_export, build_venue_experience_data_from_export
+
+    venue_data = build_venue_experience_data_from_export(approved_synthetic_venue_export(), loaded_from="approved_profile.json")
+    expected = {
+        "Create a holiday seasonal overlay with photo moments": "seasonal-overlay",
+        "Design a food festival tasting trail": "food-festival",
+        "Build an instagram photo moment route": "photo-moment-route",
+        "Create an accessible family day plan": "accessibility-family-day",
+        "Plan a teen night out route": "teen-night-out",
+        "Create a first-time visitor orientation journey": "first-time-visitor",
+        "Design a date night route": "date-night",
+        "Create an education field trip plan": "education-field-trip",
+        "Write post-incident recovery copy after a disruption": "post-incident-recovery-copy",
+        "Create a retail merch quest": "retail-merch-quest",
+    }
+
+    assert len(experience_studio.TEMPLATES) == 19
+    for message, template_id in expected.items():
+        plan = experience_studio.build_experience_studio_conversation_plan(
+            {
+                "message": message,
+                "templateId": "rainy-day",
+                "audience": "mixed guest groups",
+                "tone": "clear, warm, reviewable",
+                "useVenueExperienceData": False,
+                "realInputs": venue_data["realInputs"],
+            }
+        )
+        assert plan["parsedBrief"]["templateId"] == template_id
+        assert plan["recommendedPlan"]["payload"]["templateId"] == template_id
+        assert plan["retrievalEvidence"]["retrievedEvidence"]
+        assert {tool["id"] for tool in plan["planningTools"]} >= {"retrieval_evidence", "agent_workflow"}
+
+
+def test_new_template_generates_named_content_package(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+    from venue_experience_data import approved_synthetic_venue_export, build_venue_experience_data_from_export
+
+    venue_data = build_venue_experience_data_from_export(approved_synthetic_venue_export(), loaded_from="approved_profile.json")
+    plan = experience_studio.build_experience_studio_conversation_plan(
+        {
+            "message": "Create a date night route with scenic photo moments and a relaxed close",
+            "templateId": "rainy-day",
+            "audience": "adult couples",
+            "tone": "warm, relaxed, tasteful",
+            "useVenueExperienceData": False,
+            "realInputs": venue_data["realInputs"],
+        }
+    )
+    generated = asyncio.run(
+        experience_studio.build_experience_studio_payload(
+            {
+                **plan["recommendedPlan"]["payload"],
+                "useLlm": False,
+                "useCreativeReasoning": False,
+            },
+            None,
+        )
+    )
+    package = generated["draft"]["creativePackage"]
+
+    assert plan["parsedBrief"]["templateId"] == "date-night"
+    assert generated["draft"]["title"] == "Date Night Route"
+    assert package["executiveConcept"]["name"] == "Evening Ease Route"
+    assert "relaxed evening route" in package["executiveConcept"]["oneLine"]
+    assert "private access" in package["executiveConcept"]["guestPromise"]
+    assert package["venuePattern"]["id"] == "date_night"
+    assert package["venuePattern"]["recommendedArc"]
+    assert package["contentCreationModel"]["mode"] == "evidence_backed_package_content_v1"
+    assert package["contentCreationModel"]["email"]["subject"] == "A relaxed date-night route"
+    assert [item["headline"] for item in package["signageSet"][:3]] == ["Evening route", "Food or view", "Photo close"]
+    assert "Open softly" in generated["draft"]["route"][0]["purpose"]
+    assert "start the evening route" in generated["draft"]["route"][0]["guestCopy"]
+    assert len(generated["draft"]["route"]) >= 4
+    assert package["channelMatrix"]
+
+
+def test_visual_asset_studio_adds_vertex_poster_prompts(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+    from venue_experience_data import approved_synthetic_venue_export, build_venue_experience_data_from_export
+
+    monkeypatch.delenv("GOOGLE_GENAI_USE_VERTEXAI", raising=False)
+    venue_data = build_venue_experience_data_from_export(approved_synthetic_venue_export(), loaded_from="approved_profile.json")
+    generated = asyncio.run(
+        experience_studio.build_experience_studio_payload(
+            {
+                "templateId": "festival-plan",
+                "audience": "families and friend groups",
+                "tone": "festive, respectful, warm",
+                "constraints": "Use verified venue facts only.",
+                "useVenueExperienceData": False,
+                "realInputs": venue_data["realInputs"],
+                "useLlm": False,
+            },
+            None,
+        )
+    )
+    package = generated["draft"]["creativePackage"]
+    visual = package["visualAssetStudio"]
+
+    assert visual["mode"] == "vertex_imagen_visual_asset_studio_v1"
+    assert visual["model"] == "imagen-4.0-generate-001"
+    assert visual["status"] in {"prompt_ready_provider_not_configured", "configured_ready"}
+    assert {prompt["id"] for prompt in visual["prompts"]} >= {"poster_hero", "app_tile", "signage_mockup", "social_story"}
+    assert "Marketing poster key art" in visual["prompts"][0]["prompt"]
+    assert visual["posterCreation"]["publishAuthority"] is False
+
+    assets = experience_studio.generate_experience_studio_visual_assets({"draft": generated["draft"], "generateImages": False, "promptIds": ["poster_hero"]})
+    assert assets["status"] == "prompt_ready"
+    assert assets["selectedPrompts"][0]["id"] == "poster_hero"
+    assert assets["providerReadiness"]["ready"] in {False, True}
+
+
+def test_visual_asset_persistence_writes_images_and_receipt(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+    output_dir = tmp_path / "visuals"
+    monkeypatch.setenv("PARKPULSE_EXPERIENCE_STUDIO_VISUAL_OUTPUT_DIR", str(output_dir))
+
+    persistence = experience_studio._persist_visual_asset_images(
+        [
+            {
+                "status": "generated",
+                "model": "imagen-4.0-generate-001",
+                "promptId": "poster_hero",
+                "images": [{"id": "poster_hero_1", "mimeType": "image/png", "dataUrl": "data:image/png;base64,aGVsbG8="}],
+            }
+        ],
+        {"executiveConcept": {"name": "Festival Passport Path"}},
+        [{"id": "poster_hero", "label": "Campaign poster hero", "format": "poster"}],
+    )
+
+    assert persistence["status"] == "saved"
+    assert persistence["assetCount"] == 1
+    assert output_dir.joinpath("festival-passport-path-poster-hero-1.png").exists()
+    assert output_dir.joinpath("festival-passport-path-visual-assets.json").exists()
+    assert persistence["assets"][0]["reviewStatus"] == "review_draft"
+
+
+def test_event_team_pdf_builds_from_current_package(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+    output_dir = tmp_path / "pdfs"
+    monkeypatch.setenv("PARKPULSE_EXPERIENCE_STUDIO_VISUAL_OUTPUT_DIR", str(output_dir))
+    generated = asyncio.run(
+        experience_studio.build_experience_studio_payload(
+            {
+                "templateId": "festival-plan",
+                "audience": "families, friend groups, and multigenerational guests",
+                "tone": "festive, respectful, warm, culturally careful",
+                "seasonalTheme": "Chinese New Year festival month",
+                "useVenueExperienceData": True,
+            },
+            None,
+        )
+    )
+
+    result = experience_studio.generate_experience_studio_event_team_pdf({"draft": generated["draft"], "creativePackage": generated["draft"]["creativePackage"]})
+
+    assert result["status"] == "generated"
+    assert result["mode"] == "experience_studio_event_team_pdf"
+    assert result["pdfPath"].endswith(".pdf")
+    assert result["pdfDataUrl"].startswith("data:application/pdf;base64,")
+    assert output_dir.joinpath(result["fileName"]).exists()
+    assert result["sizeBytes"] > 1000
+    assert "review draft" in result["boundary"].lower()
+
+
+def test_approved_finished_package_becomes_memory_without_seed_examples(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+    from venue_experience_data import approved_synthetic_venue_export, build_venue_experience_data_from_export
+
+    venue_data = build_venue_experience_data_from_export(approved_synthetic_venue_export(), loaded_from="approved_profile.json")
+    plan = experience_studio.build_experience_studio_conversation_plan(
+        {
+            "message": "Create a chinese new year festival plan that run for a month",
+            "templateId": "rainy-day",
+            "audience": "mixed family groups",
+            "tone": "festive, respectful, clear",
+            "useVenueExperienceData": False,
+            "realInputs": venue_data["realInputs"],
+        }
+    )
+    generated = asyncio.run(
+        experience_studio.build_experience_studio_payload(
+            {
+                **plan["recommendedPlan"]["payload"],
+                "useLlm": False,
+                "useCreativeReasoning": False,
+            },
+            None,
+        )
+    )
+    saved = experience_studio.save_experience_studio_draft(
+        {
+            "templateId": "rainy-day",
+            "draft": generated["draft"],
+            "actor": "experience_designer",
+        }
+    )
+    draft_id = saved["draftRecord"]["id"]
+
+    assert saved["draftRecord"]["templateId"] == "festival-plan"
+
+    approved = experience_studio.update_experience_studio_draft_status(
+        draft_id,
+        {
+            "status": "approved",
+            "actor": "creative_lead",
+            "note": "Approved for bounded Experience Studio memory retrieval in demo.",
+        },
+    )
+
+    assert approved["status"] == "updated"
+    assert approved["memoryPersistence"]["finishedWork"]["collection"] == "experience_studio_approved_work"
+
+    followup = experience_studio.build_experience_studio_conversation_plan(
+        {
+            "message": "Create another chinese new year festival plan for families",
+            "templateId": "festival-plan",
+            "audience": "mixed family groups",
+            "tone": "festive, respectful, clear",
+            "useVenueExperienceData": False,
+            "realInputs": venue_data["realInputs"],
+        }
+    )
+
+    memory_gate = followup["retrievalEvidence"]["memoryGate"]
+    assert memory_gate["status"] == "accepted"
+    assert memory_gate["accepted"][0]["id"] == draft_id
+    assert followup["retrievalEvidence"]["evidenceSummary"]["memoryCount"] == 1
+    memory_tool = next(tool for tool in followup["planningTools"] if tool["id"] == "retrieval_evidence")
+    assert memory_tool["data"]["memoryGate"]["accepted"][0]["id"] == draft_id
+
+
+def test_semantic_studio_memory_retrieves_synthetic_context_without_exposing_vectors(monkeypatch, tmp_path):
+    experience_studio, mongo_memory = _fresh_modules(monkeypatch, tmp_path)
+
+    injected = experience_studio.inject_experience_studio_synthetic_memory({"actor": "pytest", "templateId": "festival-plan"})
+    assert injected["status"] == "injected"
+    assert injected["writeCount"] == 32
+
+    retrieved = mongo_memory.retrieve_experience_studio_memory(
+        "Create a Chinese New Year festival plan that runs for a month with food, craft, signage, email, and staff cues.",
+        [
+            "experience_studio_approved_work",
+            "experience_studio_learning_rules",
+            "experience_studio_eval_examples",
+        ],
+        template_id="festival-plan",
+        limit=8,
+    )
+
+    assert retrieved["status"] == "ready"
+    assert retrieved["retrieval"]["returnedCount"] >= 3
+    assert retrieved["retrieval"]["rerank"]["status"] in {"not_configured", "fallback", "ready"}
+    assert any(row.get("templateId") == "festival-plan" for row in retrieved["rows"])
+    assert any((row.get("_retrieval") or {}).get("collection") == "experience_studio_approved_work" for row in retrieved["rows"])
+    assert any((row.get("_retrieval") or {}).get("collection") == "experience_studio_learning_rules" for row in retrieved["rows"])
+    assert all("embedding" not in row and "modelEmbedding" not in row and "embeddingText" not in row for row in retrieved["rows"])
+
+    plan = experience_studio.build_experience_studio_conversation_plan(
+        {
+            "message": "Create a Chinese New Year festival plan that runs for a month.",
+            "templateId": "rainy-day",
+            "audience": "families",
+            "tone": "festive and respectful",
+            "useVenueExperienceData": False,
+            "realInputs": {"source": "test", "locations": ["Front Gate", "Dragon Arch Photo Spot", "Lagoon Lanterns", "Harbor Treats", "Theater B"]},
+        }
+    )
+
+    assert plan["parsedBrief"]["templateId"] == "festival-plan"
+    assert plan["retrievalEvidence"]["memoryGate"]["status"] == "accepted"
+    assert plan["retrievalEvidence"]["evidenceSummary"]["learningRuleCount"] >= 1
+    assert plan["recommendedPlan"]["label"] == "Lantern Wishes festival concept"
+    assert plan["retrievalEvidence"]["memoryGate"]["accepted"][0]["selectedConceptName"]
+
+
+def test_llm_planner_uses_tool_list_and_carries_reasoning_to_package(monkeypatch, tmp_path):
+    experience_studio, _ = _fresh_modules(monkeypatch, tmp_path)
+    from venue_experience_data import approved_synthetic_venue_export, build_venue_experience_data_from_export
+
+    venue_data = build_venue_experience_data_from_export(approved_synthetic_venue_export(), loaded_from="approved_profile.json")
+    seen_prompt = {}
+
+    def fake_planner(prompt, *, timeout_seconds, max_output_tokens, temperature):
+        seen_prompt.update(prompt)
+        tool_ids = [tool["id"] for tool in prompt["planning_tools"]]
+        assert "template_catalog" in tool_ids
+        assert "venue_profile" in tool_ids
+        assert "route_pattern" in tool_ids
+        assert "retrieval_evidence" in tool_ids
+        assert "agent_workflow" in tool_ids
+        retrieval_tool = next(tool for tool in prompt["planning_tools"] if tool["id"] == "retrieval_evidence")
+        assert retrieval_tool["data"]["retrievedEvidence"]
+        assert retrieval_tool["data"]["memoryGate"]["authority"] == "approved_or_ready_finished_work_only"
+        assert prompt["designer_request"].startswith("Create a chinese new year")
+        return {
+            "transport": "fake_llm",
+            "finish_reason": "STOP",
+            "usage_metadata": {"totalTokenCount": 123},
+            "generated": {
+                "planName": "Lantern Wishes Month",
+                "selectedTemplateId": "festival-plan",
+                "selectedToolIds": ["template_catalog", "venue_profile", "route_pattern", "channels_and_voice"],
+                "strategy": {
+                    "objective": "Create a month-long Chinese New Year festival with repeatable weekly discovery and a reviewable finale.",
+                    "audienceReasoning": "Families need clear optional paths, short participation beats, and culture-safe copy review.",
+                    "routeStrategy": "Start at the verified entry, build through food/craft/show beats, and close with a lantern/photo moment.",
+                    "channelStrategy": "Guest app carries the month map; signage marks optional stops; email frames weekly returns; staff cue keeps claims reviewable.",
+                    "riskTradeoffs": ["Do not promise a prize, cultural performance, or access unless the owner approves it."],
+                },
+                "programPhases": [
+                    {"name": "Opening weekend", "duration": "Days 1-3", "guestJob": "pick a first wish/passport path", "heroMoment": "entry lantern/photo cue", "channels": ["guest_app", "signage"], "reviewGate": "brand and cultural review"},
+                    {"name": "Discovery weeks", "duration": "Weeks 1-3", "guestJob": "return for rotating food, craft, and show prompts", "heroMoment": "weekly verified stop prompt", "channels": ["email", "guest_app"], "reviewGate": "program calendar review"},
+                    {"name": "Finale week", "duration": "Final week", "guestJob": "close the month without a prize promise", "heroMoment": "lantern finale placeholder", "channels": ["staff_cue"], "reviewGate": "operations and accessibility review"},
+                ],
+                "signatureMoments": [
+                    {"name": "Wish Wall Start", "venueEvidence": "Front Gate", "guestAction": "choose an optional wish prompt", "reviewNeed": "signage placement approval"}
+                ],
+                "evidenceUse": [
+                    {"evidenceId": "location:Front Gate", "usedFor": "entry orientation and first optional photo cue"}
+                ],
+                "agentStageNotes": [
+                    {"stageId": "retrieval_agent", "decision": "use verified route evidence and keep cultural programming owner-reviewed"}
+                ],
+                "contentPillars": ["return visits", "optional participation", "culture-safe review"],
+                "recommendedPayloadPatch": {
+                    "creativeDirection": "month-long lantern festival programming",
+                    "storyArc": "Opening wish -> weekly discovery -> food and craft beats -> show spotlight -> lantern finale",
+                    "sensoryLevel": "balanced",
+                    "walkingPace": "flexible",
+                    "outputPackage": "complete month festival package",
+                    "seasonalTheme": "Chinese New Year festival month",
+                    "constraints": "Use reviewable cultural references and verified venue stops only.",
+                },
+                "ownerQuestions": ["Which cultural references and participation mechanics are approved?"],
+                "reviewBoundaries": ["No prize, live performance, or availability promises."],
+            },
+        }
+
+    monkeypatch.setattr(experience_studio, "_run_experience_studio_llm_json_sync", fake_planner)
+
+    plan = experience_studio.build_experience_studio_conversation_plan(
+        {
+            "message": "Create a chinese new year festival plan that run for a month",
+            "templateId": "rainy-day",
+            "audience": "mixed family groups",
+            "tone": "festive, respectful, clear",
+            "useVenueExperienceData": False,
+            "realInputs": venue_data["realInputs"],
+            "useLlmPlanner": True,
+        }
+    )
+
+    assert plan["parsedBrief"]["templateId"] == "festival-plan"
+    assert plan["llmReasoning"]["status"] == "ready"
+    assert plan["llmReasoning"]["transport"] == "fake_llm"
+    assert plan["llmReasoning"]["acceptedPayloadFields"]
+    assert plan["reasonedPlan"]["status"] == "llm_reasoned"
+    assert plan["reasonedPlan"]["programPhases"][0]["name"] == "Opening weekend"
+    assert plan["retrievalEvidence"]["status"] == "ready"
+    assert plan["retrievalEvidence"]["retrievedEvidence"]
+    assert plan["retrievalEvidence"]["memoryGate"]["authority"] == "approved_or_ready_finished_work_only"
+    assert len(plan["agentWorkflow"]["stages"]) >= 5
+    assert plan["productReadiness"]["score"] >= 70
+    assert plan["reasonedPlan"]["evidenceUse"][0]["evidenceId"] == "location:Front Gate"
+    assert plan["reasonedPlan"]["agentStageNotes"][0]["stageId"] == "retrieval_agent"
+    assert plan["recommendedPlan"]["label"] == "Lantern Wishes Month"
+    assert plan["recommendedPlan"]["payload"]["creativeDirection"] == "month-long lantern festival programming"
+    assert plan["recommendedPlan"]["payload"]["plannerContext"]["llmReasoning"]["status"] == "ready"
+    assert plan["recommendedPlan"]["payload"]["plannerContext"]["retrievalEvidence"]["retrievedEvidence"]
+    assert plan["recommendedPlan"]["payload"]["plannerContext"]["agentWorkflow"]["stages"]
+    assert plan["recommendedPlan"]["payload"]["plannerContext"]["productReadiness"]["score"] >= 70
+    assert {tool["id"] for tool in plan["planningTools"]} >= {"template_catalog", "venue_profile", "route_pattern", "channels_and_voice", "retrieval_evidence", "agent_workflow"}
+
+    generated = asyncio.run(
+        experience_studio.build_experience_studio_payload(
+            {
+                **plan["recommendedPlan"]["payload"],
+                "useLlm": False,
+                "useCreativeReasoning": False,
+            },
+            None,
+        )
+    )
+    reasoned_package = generated["draft"]["creativePackage"]["plannerReasonedPlan"]
+    assert reasoned_package["status"] == "llm_reasoned"
+    assert reasoned_package["programPhases"][1]["name"] == "Discovery weeks"
+    assert reasoned_package["strategy"]["objective"].startswith("Create a month-long Chinese New Year")
+    assert reasoned_package["retrievalEvidence"]["retrievedEvidence"]
+    assert reasoned_package["agentWorkflow"]["stages"][0]["id"] == "brief_interpreter"
+    assert reasoned_package["productReadiness"]["score"] >= 70
+    assert generated["draft"]["creativePackage"]["productionDetail"]["plannerEvidence"]["llmReasoningStatus"] == "ready"
+    assert generated["draft"]["creativePackage"]["productionDetail"]["plannerEvidence"]["retrievalSummary"]["locationCount"] >= 1
+    assert generated["draft"]["creativePackage"]["productReadiness"]["score"] >= 70
+    assert "rainy" not in json.dumps(generated["draft"]["creativePackage"], default=str).lower()
 
 
 def test_profile_backed_generation_uses_venue_pattern_and_copy_voice(monkeypatch, tmp_path):

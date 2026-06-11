@@ -216,6 +216,14 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(jsonPath("$.summary.required_feed_count", equalTo(6)))
 			.andExpect(jsonPath("$.feeds[0].source", equalTo("weather")));
 
+		mockMvc.perform(get("/api/park/live-feed-health/summary").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.mode", equalTo("live_feed_health_summary_spring")))
+			.andExpect(jsonPath("$.summary.required_feed_count", equalTo(6)))
+			.andExpect(jsonPath("$.summary.stale_feed_count", equalTo(0)))
+			.andExpect(jsonPath("$.cache.source", equalTo("spring_live_feed_summary")));
+
 		mockMvc.perform(get("/api/park/live-feeds/weather").header("authorization", "Bearer " + signedRoleToken("ops_team")))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
@@ -413,6 +421,20 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
 			.andExpect(jsonPath("$.scenarios[0].id", equalTo("angry_parent")));
 
+		mockMvc.perform(get("/api/park/staff-training/policy-pack").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.tool_manifest[0].id", equalTo("staff_training.retrieve_context")))
+			.andExpect(jsonPath("$.rag_contract.llm_controls_score", equalTo(false)))
+			.andExpect(jsonPath("$.blocked_tools[0]", equalTo("live_dispatch.execute")));
+
+		mockMvc.perform(get("/api/park/staff-training/agent-context?scenario_id=angry_parent").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.tool_manifest_ids[0]", equalTo("staff_training.retrieve_context")))
+			.andExpect(jsonPath("$.retrieved.policy_snippets[0].policy_refs[0]", equalTo("PARK-SAFE-001")))
+			.andExpect(jsonPath("$.blocked_tools[4]", equalTo("reward_model.write_label")));
+
 		mockMvc.perform(get("/api/park/staff-training/assignments").header("authorization", "Bearer " + signedRoleToken("onsite_worker")))
 			.andExpect(status().isForbidden());
 
@@ -437,9 +459,24 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.status", equalTo("active")))
 			.andExpect(jsonPath("$.scenario.id", equalTo("angry_parent")))
+			.andExpect(jsonPath("$.retrieved_training_context.mode", equalTo("staff_training_rag_context_spring")))
+			.andExpect(jsonPath("$.retrieved_training_context.retrieved.policy_snippets[0].title", equalTo("Safety escalation")))
+			.andExpect(jsonPath("$.agent_tool_manifest[0].id", equalTo("staff_training.retrieve_context")))
+			.andExpect(jsonPath("$.tool_trace[0].tool", equalTo("staff_training.retrieve_context")))
 			.andReturn();
 
 		String sessionId = objectMapper.readTree(sessionResult.getResponse().getContentAsByteArray()).get("id").asText();
+		mockMvc.perform(
+				post("/api/park/staff-training/turn")
+					.header("authorization", "Bearer " + signedRoleToken("onsite_worker"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"sessionId\":\"" + sessionId + "\",\"employeeMessage\":\"No.\"}")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.session.transcript[2].message", containsString("actually going to do next")))
+			.andExpect(jsonPath("$.tool_trace[1].tool", equalTo("staff_training.score_turn")))
+			.andExpect(jsonPath("$.session.transcript[2].message").value(org.hamcrest.Matchers.not(containsString("clearer answer"))));
+
 		mockMvc.perform(
 				post("/api/park/staff-training/turn")
 					.header("authorization", "Bearer " + signedRoleToken("onsite_worker"))
@@ -649,6 +686,8 @@ class ParkPulseSpringBackendApplicationTests {
 	void venueProfileRoutesRunNativelyInSpringWithImportPreviewAndActivation() throws Exception {
 		Path runtime = Path.of("target/test-parkpulse-runtime");
 		Files.deleteIfExists(runtime.resolve("customer_venue_export.json"));
+		Files.deleteIfExists(runtime.resolve("accessibility_journey_receipts.jsonl"));
+		Files.deleteIfExists(runtime.resolve("accessibility_journey_feedback.jsonl"));
 
 		mockMvc.perform(get("/api/park/venue-profile"))
 			.andExpect(status().isUnauthorized());
@@ -760,9 +799,33 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(jsonPath("$.mode", equalTo("accessibility_scope_spring")))
 			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
 			.andExpect(jsonPath("$.venueProfile.status", equalTo("studio_ready")))
-			.andExpect(jsonPath("$.venueProfile.venueIdentity.name", equalTo("ParkPulse Adventure Park")));
+			.andExpect(jsonPath("$.venueProfile.venueIdentity.name", equalTo("ParkPulse Adventure Park")))
+			.andExpect(jsonPath("$.startLocationOptions.length()", org.hamcrest.Matchers.greaterThanOrEqualTo(1)))
+			.andExpect(jsonPath("$.startLocationOptions[0].name", notNullValue()));
+
+		mockMvc.perform(get("/api/park/accessibility/tools").header("authorization", "Bearer " + signedRoleToken("customer")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("accessibility_journey_llm_tools_spring")))
+			.andExpect(jsonPath("$.llmControlAuthority", equalTo(false)))
+			.andExpect(jsonPath("$.tools[?(@.name == 'accessibility.build_journey')]", org.hamcrest.Matchers.notNullValue()));
 
 		mockMvc.perform(
+				post("/api/park/accessibility/tool")
+					.header("authorization", "Bearer " + signedRoleToken("customer"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+						{
+						  "toolName":"accessibility.normalize_intake",
+						  "arguments":{"request":"Need wheelchair friendly indoor breaks from Arcade Zone.","needs":["mobility"],"durationMinutes":90,"currentLocation":"Arcade Zone"}
+						}
+						""")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("ok")))
+			.andExpect(jsonPath("$.llmControlsRoute", equalTo(false)))
+			.andExpect(jsonPath("$.result.currentLocation", equalTo("Arcade Zone")));
+
+		MvcResult journeyResult = mockMvc.perform(
 				post("/api/park/accessibility/journey")
 					.header("authorization", "Bearer " + signedRoleToken("customer"))
 					.contentType(MediaType.APPLICATION_JSON)
@@ -786,13 +849,86 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(jsonPath("$.mode", equalTo("accessible_journey_builder_spring")))
 			.andExpect(jsonPath("$.springRuntime", equalTo("java_spring")))
 			.andExpect(jsonPath("$.runtime.backend", equalTo("java_spring")))
+			.andExpect(jsonPath("$.runtime.liveParkState", equalTo(true)))
 			.andExpect(jsonPath("$.summary.requiresHumanReview", equalTo(true)))
 			.andExpect(jsonPath("$.profile.guestSegmentId", equalTo("allergy_or_dietary_guests")))
 			.andExpect(jsonPath("$.staffHandoff.owner", equalTo("Dining manager or allergy-trained staff")))
 			.andExpect(jsonPath("$.planSteps.length()", org.hamcrest.Matchers.greaterThanOrEqualTo(3)))
+			.andExpect(jsonPath("$.planSteps[0].type", equalTo("start_location")))
+			.andExpect(jsonPath("$.planSteps[0].location", equalTo("Entrance Plaza")))
+			.andExpect(jsonPath("$.clientPackage.status", equalTo("client_ready")))
+			.andExpect(jsonPath("$.clientPackage.itinerary[0].location", equalTo("Entrance Plaza")))
+			.andExpect(jsonPath("$.clientPackage.confirmationChecklist.length()", org.hamcrest.Matchers.greaterThanOrEqualTo(2)))
+			.andExpect(jsonPath("$.clientPackage.technicalProof.llmControlsRoute", equalTo(false)))
+			.andExpect(jsonPath("$.learningReceipt.observation.startLocation", equalTo("Entrance Plaza")))
 			.andExpect(jsonPath("$.guardrails[?(@ == 'Allergy result is a dining shortlist, not an allergen-free guarantee.')]", org.hamcrest.Matchers.notNullValue()))
+			.andExpect(jsonPath("$.liveState.zoneCount", org.hamcrest.Matchers.greaterThanOrEqualTo(3)))
+			.andExpect(jsonPath("$.liveState.foodLocationCount", org.hamcrest.Matchers.greaterThanOrEqualTo(1)))
+			.andExpect(jsonPath("$.llmContract.llmControlsRoute", equalTo(false)))
+			.andExpect(jsonPath("$.llmContract.availableTools[?(@ == 'accessibility.build_journey')]", org.hamcrest.Matchers.notNullValue()))
+			.andExpect(jsonPath("$.guestCopy.llmControlsRoute", equalTo(false)))
+			.andExpect(jsonPath("$.guestCopy.message", notNullValue()))
+			.andExpect(jsonPath("$.memoryPersistence.status", equalTo("stored")))
+			.andExpect(jsonPath("$.memoryPersistence.targetCollection", equalTo("accessibility_journey_receipts")))
+			.andExpect(jsonPath("$.memoryPersistence.mongoWritePerformedBySpring", equalTo(false)))
+			.andExpect(jsonPath("$.memoryPersistence.durablePath", endsWith("accessibility_journey_receipts.jsonl")))
+			.andExpect(jsonPath("$.profileIntelligence.modulePolicy.mustReview", org.hamcrest.Matchers.hasItem("route blockage")))
 			.andExpect(jsonPath("$.venueProfile.status", equalTo("studio_ready")))
-			.andExpect(jsonPath("$.learningReceipt.scenarioTaxonomy", equalTo("accessibility_journey")));
+			.andExpect(jsonPath("$.learningReceipt.scenarioTaxonomy", equalTo("accessibility_journey")))
+			.andReturn();
+
+		String memoryId = objectMapper.readTree(journeyResult.getResponse().getContentAsByteArray())
+			.get("memoryPersistence")
+			.get("memoryId")
+			.asText();
+		mockMvc.perform(
+				post("/api/park/accessibility/feedback")
+					.header("authorization", "Bearer " + signedRoleToken("customer"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content(objectMapper.writeValueAsString(Map.of(
+						"memoryId", memoryId,
+						"feedbackLabel", "guest_completed_route",
+						"humanReviewed", true,
+						"reviewer", "spring-test"
+					)))
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status", equalTo("recorded")))
+			.andExpect(jsonPath("$.feedback.memory_id", equalTo(memoryId)))
+			.andExpect(jsonPath("$.memoryPersistence.targetCollection", equalTo("accessibility_journey_feedback")))
+			.andExpect(jsonPath("$.memoryPersistence.mongoWritePerformedBySpring", equalTo(false)));
+
+		mockMvc.perform(get("/api/park/accessibility/memory?limit=5").header("authorization", "Bearer " + signedRoleToken("customer")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("accessibility_journey_memory_spring")))
+			.andExpect(jsonPath("$.memoryLayer", equalTo("spring_jsonl_authority_mongo_contract")))
+			.andExpect(jsonPath("$.collections.accessibility_journey_receipts.length()", org.hamcrest.Matchers.greaterThanOrEqualTo(1)))
+			.andExpect(jsonPath("$.collections.accessibility_journey_feedback[0].memory_id", equalTo(memoryId)));
+
+		mockMvc.perform(
+				post("/api/park/accessibility/journey")
+					.header("authorization", "Bearer " + signedRoleToken("customer"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("""
+						{
+						  "request":"Create a mobility route while paths are degraded.",
+						  "needs":["mobility"],
+						  "durationMinutes":90,
+						  "parkState":{
+						    "weather":{"condition":"rain","stormRisk":72,"heatIndexF":88},
+						    "incidentReadiness":{"accessibilityRoutesOpen":false,"firstAidReady":true},
+						    "guestFlow":{"zones":[],"rides":[]},
+						    "foodInventory":{"locations":[]},
+						    "source_of_truth":"test_override"
+						  }
+						}
+						""")
+			)
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.summary.requiresHumanReview", equalTo(true)))
+			.andExpect(jsonPath("$.summary.reviewReason", equalTo("Accessibility route status needs staff confirmation.")))
+			.andExpect(jsonPath("$.guardrails[?(@ == 'Live accessibility route status is degraded; confirm route with staff before moving.')]", org.hamcrest.Matchers.notNullValue()))
+			.andExpect(jsonPath("$.liveState.readiness.accessibilityRoutesOpen", equalTo(false)));
 	}
 
 	@Test
@@ -882,6 +1018,22 @@ class ParkPulseSpringBackendApplicationTests {
 			.andExpect(jsonPath("$.recorded_count", org.hamcrest.Matchers.greaterThanOrEqualTo(1)))
 			.andExpect(jsonPath("$.labels_or_reward_changed", equalTo(false)))
 			.andExpect(jsonPath("$.llm_used_for_reward_or_label", equalTo(false)));
+	}
+
+	@Test
+	void simulationFacadeLedgerRunsNativelyInSpringWithRoleGate() throws Exception {
+		mockMvc.perform(get("/api/park/simulation-facade/ledger"))
+			.andExpect(status().isUnauthorized());
+
+		mockMvc.perform(get("/api/park/simulation-facade/ledger").header("authorization", "Bearer " + signedRoleToken("customer")))
+			.andExpect(status().isForbidden());
+
+		mockMvc.perform(get("/api/park/simulation-facade/ledger").header("authorization", "Bearer " + signedRoleToken("ops_team")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.mode", equalTo("simulation_facade_ledger_spring")))
+			.andExpect(jsonPath("$.runtime", equalTo("java_spring")))
+			.andExpect(jsonPath("$.source_of_truth", equalTo("local_sqlite_wal")))
+			.andExpect(jsonPath("$.boundary", containsString("Python remains the compute adapter")));
 	}
 
 	@Test
@@ -1722,6 +1874,15 @@ class ParkPulseSpringBackendApplicationTests {
 
 		mockMvc.perform(
 				post("/api/park/agent-onboarding/spring_guest_agent/certify")
+					.header("authorization", "Bearer " + signedRoleToken("ops_team"))
+					.contentType(MediaType.APPLICATION_JSON)
+					.content(objectMapper.writeValueAsString(Map.of("requested_scopes", List.of("location", "route_plan", "payment"))))
+			)
+			.andExpect(status().isForbidden());
+
+		mockMvc.perform(
+				post("/api/park/agent-onboarding/spring_guest_agent/certify")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
 					.contentType(MediaType.APPLICATION_JSON)
 					.content(objectMapper.writeValueAsString(Map.of("requested_scopes", List.of("location", "route_plan", "payment"))))
 			)
@@ -1754,6 +1915,7 @@ class ParkPulseSpringBackendApplicationTests {
 
 		MvcResult issuedCertification = mockMvc.perform(
 				post("/api/park/agent-onboarding/spring_certified_agent/certify")
+					.header("authorization", "Bearer " + signedRoleToken("ml_ops_admin"))
 					.contentType(MediaType.APPLICATION_JSON)
 					.content(objectMapper.writeValueAsString(Map.of(
 						"requested_scopes", List.of("location", "policy_check", "preferences", "route_plan", "wait_time_alert"),

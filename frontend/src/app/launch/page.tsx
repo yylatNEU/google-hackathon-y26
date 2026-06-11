@@ -2,312 +2,383 @@
 
 import { useState } from "react";
 
-const launchStats = [
-  { value: "540", label: "guests still near a down ride" },
-  { value: "44m", label: "current downtime estimate" },
-  { value: "55m", label: "nearby indoor ride wait" },
-  { value: "3", label: "actions gated before dispatch" },
-];
+type Tone = {
+  badge: string;
+  text: string;
+  border: string;
+  wash: string;
+};
+
+const tones: Record<string, Tone> = {
+  cyan: { badge: "bg-cyan-300 text-neutral-950", text: "text-cyan-300", border: "border-cyan-300/25", wash: "bg-cyan-300/10" },
+  emerald: { badge: "bg-emerald-300 text-neutral-950", text: "text-emerald-300", border: "border-emerald-300/25", wash: "bg-emerald-300/10" },
+  violet: { badge: "bg-violet-300 text-neutral-950", text: "text-violet-300", border: "border-violet-300/25", wash: "bg-violet-300/10" },
+  teal: { badge: "bg-teal-300 text-neutral-950", text: "text-teal-300", border: "border-teal-300/25", wash: "bg-teal-300/10" },
+  amber: { badge: "bg-amber-300 text-neutral-950", text: "text-amber-300", border: "border-amber-300/25", wash: "bg-amber-300/10" },
+  rose: { badge: "bg-rose-300 text-neutral-950", text: "text-rose-300", border: "border-rose-300/25", wash: "bg-rose-300/10" },
+  blue: { badge: "bg-blue-300 text-neutral-950", text: "text-blue-300", border: "border-blue-300/25", wash: "bg-blue-300/10" },
+};
 
 const chapterLinks = [
-  { href: "#system", label: "System" },
-  { href: "#advantage", label: "Advantage" },
   { href: "#foundation", label: "Foundation" },
-  { href: "#signals", label: "Signals" },
-  { href: "#architecture", label: "Architecture" },
-  { href: "#decision", label: "Decision" },
+  { href: "#ops", label: "Ops" },
+  { href: "#event-agent", label: "Event" },
+  { href: "#guest-care", label: "Guest Care" },
+  { href: "#training", label: "Training" },
+  { href: "#trust", label: "Trust" },
   { href: "#proof", label: "Proof" },
+  { href: "#architecture", label: "Architecture" },
+  { href: "#depth", label: "Depth" },
   { href: "#demo", label: "Demo" },
 ];
 
-const incidentPressure = [
-  { label: "Ride intake", value: "paused", tone: "bg-rose-500 text-neutral-950" },
-  { label: "Food Court 2", value: "understaffed", tone: "bg-amber-300 text-neutral-950" },
-  { label: "Coaster Plaza", value: "88% density", tone: "bg-cyan-300 text-neutral-950" },
-  { label: "Indoor Ride B", value: "55m wait", tone: "bg-white text-neutral-950" },
+const launchStats = [
+  { value: "4", label: "agent surfaces" },
+  { value: "10", label: "demo stops" },
+  { value: "6", label: "GCP roles" },
+  { value: "1", label: "memory loop" },
 ];
 
-const lifecycleStages = [
+const capabilityMap = [
   {
     id: "foundation",
-    label: "Foundation",
-    title: "Start with a venue model the agents are allowed to trust.",
-    body: "ParkPulse first defines the park: locations, zones, paths, accessibility notes, sensory context, brand rules, safety instructions, and approved guest-facing claims.",
-    modules: [
-      {
-        name: "Venue Profile",
-        route: "/venue-profile",
-        proof: "Validates the park identity, location graph, channel owners, dining constraints, accessibility notes, and module policy rules.",
-      },
-      {
-        name: "Experience Studio",
-        route: "/experience-studio",
-        proof: "Drafts seasonal routes, attraction copy, signage, VIP tours, and guest experiences from approved venue data only.",
-      },
-      {
-        name: "Accessibility Journey",
-        route: "/accessibility-journey",
-        proof: "Builds low-walking, sensory-aware, allergy-aware, and cooling plans while keeping sensitive details and human-review reasons explicit.",
-      },
-    ],
+    label: "Venue Memory",
+    route: "/venue-profile",
+    tone: "emerald",
+    headline: "The park model every agent shares.",
+    body: "Venue facts, paths, policies, and accessibility rules.",
+    proof: ["Venue Profile", "MongoDB park_state", "Module bindings"],
   },
   {
-    id: "signals",
-    label: "Sense",
-    title: "Turn live noise into operational pressure.",
-    body: "A park incident is never a single alert. Ride status, queues, food load, guest messages, weather, staff coverage, and operator notes all shape the safe answer.",
-    modules: [
-      {
-        name: "Command Center",
-        route: "/",
-        proof: "Shows the live park state, current incident pressure, selected action, policy gate, dispatch state, and eval receipt.",
-      },
-      {
-        name: "Guest Triage",
-        route: "/guest-triage",
-        proof: "Classifies guest text, scores urgency, drafts a safe first reply, and creates a routed human-acknowledged issue ticket.",
-      },
-    ],
+    id: "event",
+    label: "Event Agent",
+    route: "/experience-studio",
+    tone: "violet",
+    headline: "Event plans grounded in venue memory.",
+    body: "Routes, signage, scripts, claims, and review history.",
+    proof: ["Experience Studio", "Creative memory", "Review gates"],
   },
   {
-    id: "decision",
-    label: "Decide",
-    title: "Make a bounded recommendation, not a generic answer.",
-    body: "The operating loop structures signals, simulates alternatives, optimizes tradeoffs, and keeps the LLM in the role of interpreter and explainer.",
-    modules: [
-      {
-        name: "Ops Agent",
-        route: "/ops-agent",
-        proof: "Routes between scan, react, proact, customer, and QA modes while preserving conversation memory, tool traces, and policy-aware apply mode.",
-      },
-      {
-        name: "Policy Gate",
-        route: "/",
-        proof: "Blocks ride reopening, break-policy violations, unsafe queue dumping, sensitive guest-data exposure, and unsupported dispatch.",
-      },
-    ],
+    id: "guest",
+    label: "Guest Care",
+    route: "/guest-triage",
+    tone: "cyan",
+    headline: "Guest needs become reviewable action.",
+    body: "Urgency, reply, route, ticket, and review boundary.",
+    proof: ["Guest Triage", "Accessibility Journey", "Human review"],
   },
   {
-    id: "action",
-    label: "Act",
-    title: "Move the right payload to the right human or system.",
-    body: "Approved recommendations become guest messages, worker notifications, signage updates, operator approval workflows, and external-agent handoffs.",
-    modules: [
-      {
-        name: "Agent Handshake",
-        route: "/agent-handshake",
-        proof: "Verifies identity, capability, delegation scope, policy challenges, external-agent negotiation, and signed protocol receipts.",
-      },
-      {
-        name: "GCP Delivery",
-        route: "#architecture",
-        proof: "Uses Workflows for approval, FCM or pseudo-FCM for guest and worker delivery, and Pub/Sub/Eventarc for operations fanout.",
-      },
-    ],
+    id: "ops",
+    label: "Ops Control",
+    route: "/ops",
+    tone: "amber",
+    headline: "Live pressure becomes an approved plan.",
+    body: "Signals, simulation, policy gates, dispatch, and evals.",
+    proof: ["Command Center", "Ops Agent", "Policy Gate"],
   },
   {
-    id: "proof",
-    label: "Prove",
-    title: "Record why the decision was safe, grounded, and useful.",
-    body: "The result is inspectable: policy refs, source signals, rejected alternatives, dispatch payloads, eval dimensions, memory writes, and review queues.",
-    modules: [
-      {
-        name: "Monitor",
-        route: "/monitor",
-        proof: "Exposes policy integrity, trace/eval readiness, supervised actions, runtime governance, review ledgers, and evidence packets.",
-      },
-      {
-        name: "Staff Training",
-        route: "/staff-training",
-        proof: "Turns hard guest-care scenarios into roleplay, rubric evaluation, mastery gaps, review queues, and training-gap tickets.",
-      },
-    ],
+    id: "training",
+    label: "Employee Training",
+    route: "/staff-training",
+    tone: "teal",
+    headline: "Incidents become staff readiness.",
+    body: "Roleplay, scoring, readiness holds, and gap tickets.",
+    proof: ["Staff Training", "Readiness packets", "Learning boundary"],
+  },
+  {
+    id: "trust",
+    label: "Agent Trust",
+    route: "/agent-handshake",
+    tone: "blue",
+    headline: "Agent handoffs carry scoped authority.",
+    body: "Identity, delegation, challenge, handoff, receipt.",
+    proof: ["Agent Handshake", "Delegation scope", "Signed receipt"],
   },
 ];
 
-const signalRows = [
-  { label: "Ride ops", source: "downtime estimate, intake pause, queue hold", status: "critical" },
-  { label: "Guest flow", source: "zone density, app routing, walking load", status: "rising" },
-  { label: "Staffing", source: "training tags, break windows, fatigue", status: "constrained" },
-  { label: "Food ops", source: "mobile backlog, inventory, kitchen load", status: "watch" },
-  { label: "Weather", source: "heat index, lightning window, shelter load", status: "watch" },
+const foundationRows = [
+  ["Venue graph", "Zones, paths, owners, dining, accessibility"],
+  ["Policy memory", "Safety, labor, privacy, dispatch boundaries"],
+  ["Experience rules", "Brand, season, route, sensory context"],
+  ["Retrieval layer", "MongoDB plus Atlas Vector Search"],
 ];
 
-const advantageOutcomes = [
-  {
-    metric: "From alert to plan",
-    before: "Static dashboards show ride downtime, queue length, staffing, and food backlog as separate panels.",
-    after: "ParkPulse fuses them into one bounded action: pause intake, reroute guests, protect breaks, adjust food capacity, and draft approved messages.",
-  },
-  {
-    metric: "From memoryless to adaptive",
-    before: "The next incident starts cold, with operators searching old notes and repeating the same failure patterns.",
-    after: "MongoDB retrieves prior incidents, playbooks, eval results, guest-message outcomes, and agent decisions before the next recommendation is made.",
-  },
-  {
-    metric: "From generic advice to proof",
-    before: "A chatbot can suggest a plausible plan without proving whether it is safe, grounded, or executable.",
-    after: "The system returns policy gates, rejected alternatives, dispatch payloads, eval dimensions, and memory receipts alongside the recommendation.",
-  },
+const eventFlow = [
+  ["Brief", "Audience, route, sensory profile, channels."],
+  ["Ground", "Retrieve approved venue memory."],
+  ["Generate", "Draft copy, signage, cues, scripts."],
+  ["Review", "Hold risky claims for approval."],
+  ["Publish", "Ship the approved event package."],
 ];
 
-const comparisonModes = [
+const eventReceiptRows = [
+  ["Selected", "Family route with indoor rest stops."],
+  ["Rejected", "Blackout overlay; sensory and staffing risk."],
+  ["Review", "Wait-time and accessibility claims held."],
+  ["Memory", "Drafts, feedback, revisions, rules updated."],
+];
+
+const guestCareCards = [
   {
-    id: "dashboard",
-    label: "Dashboard",
-    title: "Separate alerts, no operating judgment.",
-    summary: "Ride downtime, queue pressure, staff coverage, and food backlog appear as separate facts. The operator still has to infer the safest combined move.",
-    cards: [
-      ["Ride ops", "Dragon Coaster down for 44 minutes"],
-      ["Guest flow", "540 guests still clustered nearby"],
-      ["Food ops", "Food Court 2 understaffed"],
-      ["Staffing", "Break window at risk"],
-    ],
-    verdict: "Useful visibility, but no bounded cross-domain action.",
+    title: "Guest Triage",
+    route: "/guest-triage",
+    body: "Classify urgency, draft reply, route ticket.",
+    checks: ["Urgency", "Safe reply", "Ticket route", "Escalation"],
   },
   {
-    id: "chatbot",
-    label: "Generic chatbot",
-    title: "Plausible advice, weak proof.",
-    summary: "A generic assistant can suggest rerouting guests and notifying staff, but it does not know the venue graph, previous incidents, policy books, or dispatch authority.",
-    cards: [
-      ["Suggestion", "Move guests to another ride"],
-      ["Missing", "Indoor Ride B is already 55 minutes"],
-      ["Missing", "Protected staff breaks are constrained"],
-      ["Missing", "No signed dispatch or eval receipt"],
-    ],
-    verdict: "Sounds reasonable, but cannot prove it is safe or executable.",
+    title: "Accessibility Journey",
+    route: "/accessibility-journey",
+    body: "Build low-walking, sensory, allergy, cooling plans.",
+    checks: ["Mobility", "Sensory", "Allergy", "Cooling"],
   },
   {
-    id: "parkpulse",
-    label: "ParkPulse + Mongo",
-    title: "Memory-backed action with proof.",
-    summary: "ParkPulse retrieves venue facts, prior incidents, playbooks, eval rows, and useful decisions before selecting a bounded action and writing the result back to memory.",
-    cards: [
-      ["Retrieve", "Similar ride-down cases and response playbooks"],
-      ["Decide", "Pause intake, protect breaks, route away from Coaster Plaza"],
-      ["Gate", "Human review required; ride reopening blocked"],
-      ["Write back", "Decision, payloads, eval score, review label"],
-    ],
-    verdict: "One grounded action plan, with policy proof and reusable memory.",
+    title: "Guest Memory",
+    route: "#architecture",
+    body: "Keep reviewed patterns without leaking sensitive details.",
+    checks: ["PII scoped", "Review label", "Outcome", "Retrieval"],
   },
 ];
 
-const memoryCycle = [
-  { label: "Retrieve", detail: "Find similar incidents, playbooks, prior decisions, and agent learnings with Atlas Vector Search." },
-  { label: "Ground", detail: "Attach venue facts, safety rules, staff constraints, and guest-care boundaries before the model reasons." },
-  { label: "Decide", detail: "Score alternatives against guest impact, capacity, labor stress, safety, and actionability." },
-  { label: "Write back", detail: "Store the selected action, dispatch result, eval score, review label, and useful learning signal." },
+const guestCareReceiptRows = [
+  ["Message", "Overwhelmed child; quiet route; peanut-safe food."],
+  ["Triage", "Urgency 82; accessibility and allergy flags."],
+  ["Route", "Low-walking path, cooling break, restroom stop."],
+  ["Review", "Medical and guarantee language held."],
+];
+
+const opsArchitectureNodes = [
+  { id: "live", label: "Live Signals", tag: "Pub/Sub", x: 90, y: 105, tone: "intake" },
+  { id: "operator", label: "Operator Intent", tag: "Human", x: 90, y: 235, tone: "intake" },
+  { id: "venue", label: "Venue Memory", tag: "MongoDB", x: 90, y: 365, tone: "memory" },
+  { id: "packet", label: "Incident Packet", tag: "Normalize", x: 270, y: 235, tone: "intake" },
+  { id: "features", label: "Feature Builder", tag: "Dataflow", x: 450, y: 145, tone: "structure" },
+  { id: "candidates", label: "Candidate Actions", tag: "Planner", x: 450, y: 325, tone: "structure" },
+  { id: "safety", label: "Safety Gate", tag: "Reject", x: 630, y: 80, tone: "reject" },
+  { id: "privacy", label: "Privacy Gate", tag: "Reject", x: 630, y: 190, tone: "reject" },
+  { id: "labor", label: "Labor Gate", tag: "Reject", x: 630, y: 300, tone: "reject" },
+  { id: "sim", label: "Capacity Twin", tag: "Vertex", x: 630, y: 410, tone: "reject" },
+  { id: "ride", label: "Ride Agent", tag: "Negotiate", x: 810, y: 80, tone: "negotiate" },
+  { id: "guest", label: "Guest Flow Agent", tag: "Negotiate", x: 810, y: 190, tone: "negotiate" },
+  { id: "food", label: "Food + Staff Agent", tag: "Negotiate", x: 810, y: 300, tone: "negotiate" },
+  { id: "compliance", label: "Compliance Agent", tag: "Policy", x: 810, y: 410, tone: "policy" },
+  { id: "arbiter", label: "Tradeoff Arbiter", tag: "Resolve", x: 990, y: 245, tone: "negotiate" },
+  { id: "policy", label: "Policy Alignment", tag: "IAM + Rules", x: 990, y: 430, tone: "policy" },
+  { id: "approval", label: "Human Approval", tag: "Review", x: 1160, y: 155, tone: "decide" },
+  { id: "dispatch", label: "Dispatch Plan", tag: "Workflows", x: 1160, y: 315, tone: "decide" },
+  { id: "memory", label: "Eval + Memory", tag: "Mongo + BQ", x: 1160, y: 505, tone: "memory" },
+];
+
+const opsArchitectureEdges = [
+  ["live", "packet"], ["operator", "packet"], ["venue", "packet"],
+  ["live", "features"], ["operator", "features"], ["venue", "features"],
+  ["packet", "features"], ["packet", "candidates"],
+  ["features", "candidates"], ["features", "safety"], ["features", "privacy"], ["features", "labor"], ["features", "sim"],
+  ["candidates", "safety"], ["candidates", "privacy"], ["candidates", "labor"], ["candidates", "sim"],
+  ["venue", "safety"], ["venue", "privacy"], ["venue", "labor"], ["venue", "compliance"], ["venue", "policy"],
+  ["safety", "ride"], ["privacy", "guest"], ["labor", "food"], ["sim", "ride"], ["sim", "guest"], ["sim", "food"],
+  ["safety", "compliance"], ["privacy", "compliance"], ["labor", "compliance"], ["sim", "compliance"],
+  ["candidates", "ride"], ["candidates", "guest"], ["candidates", "food"], ["candidates", "compliance"],
+  ["ride", "arbiter"], ["guest", "arbiter"], ["food", "arbiter"], ["compliance", "arbiter"],
+  ["ride", "guest"], ["guest", "ride"], ["ride", "food"], ["food", "ride"], ["guest", "food"], ["food", "guest"],
+  ["compliance", "ride"], ["compliance", "guest"], ["compliance", "food"],
+  ["arbiter", "policy"], ["policy", "arbiter"],
+  ["safety", "policy"], ["privacy", "policy"], ["labor", "policy"], ["sim", "policy"], ["compliance", "policy"],
+  ["policy", "approval"], ["approval", "dispatch"], ["dispatch", "memory"], ["memory", "features"],
+];
+
+const opsNodeTones = {
+  intake: { fill: "#082f49", stroke: "#67e8f9", text: "#ecfeff", tag: "#a5f3fc" },
+  structure: { fill: "#1c1917", stroke: "#facc15", text: "#fff7ed", tag: "#fde68a" },
+  reject: { fill: "#4c0519", stroke: "#fda4af", text: "#fff1f2", tag: "#fecdd3" },
+  negotiate: { fill: "#312e81", stroke: "#c4b5fd", text: "#f5f3ff", tag: "#ddd6fe" },
+  policy: { fill: "#052e16", stroke: "#86efac", text: "#f0fdf4", tag: "#bbf7d0" },
+  decide: { fill: "#022c22", stroke: "#5eead4", text: "#f0fdfa", tag: "#99f6e4" },
+  memory: { fill: "#2e1065", stroke: "#d8b4fe", text: "#faf5ff", tag: "#e9d5ff" },
+};
+
+const opsArchitectureNodeById = Object.fromEntries(opsArchitectureNodes.map((node) => [node.id, node]));
+
+const opsArchitectureDetailRows = [
+  {
+    label: "Intake layer",
+    headline: "Turn noisy inputs into one case.",
+    body: "Events, operator intent, and venue memory become one packet.",
+    proof: ["Live Signals", "Operator Intent", "Venue Memory", "Incident Packet"],
+  },
+  {
+    label: "Reject layer",
+    headline: "Remove unsafe options early.",
+    body: "Safety, privacy, labor, and capacity gates block bad moves.",
+    proof: ["Safety Gate", "Privacy Gate", "Labor Gate", "Capacity Twin"],
+  },
+  {
+    label: "Negotiation layer",
+    headline: "Departments negotiate the tradeoff.",
+    body: "Ride, flow, food, staff, and compliance trade constraints.",
+    proof: ["Ride Agent", "Guest Flow Agent", "Food + Staff Agent", "Tradeoff Arbiter"],
+  },
+  {
+    label: "Policy alignment",
+    headline: "Policy decides what can move.",
+    body: "IAM, venue policy, and review rules decide authority.",
+    proof: ["Compliance Agent", "Policy Alignment", "Human Approval"],
+  },
+  {
+    label: "Decision writeback",
+    headline: "The outcome becomes memory.",
+    body: "Workflows executes; MongoDB and BigQuery remember.",
+    proof: ["Dispatch Plan", "Eval + Memory", "Mongo + BQ"],
+  },
+];
+
+const opsArchitectureArtifacts = [
+  ["Candidates", "All plausible actions before gates."],
+  ["Rejected", "Blocked options with reasons."],
+  ["Negotiation", "Department counterproposals."],
+  ["Policy", "Approval, IAM, dispatch boundary."],
+  ["Memory", "Decision, eval, reviewer label."],
+];
+
+const opsLiveProofRows = [
+  ["Run", "Trigger an incident review."],
+  ["Inspect", "See rejects, policy, dispatch, eval."],
+  ["Ask why", "Question the selected plan."],
+  ["Verify", "Audit evidence and review ledgers."],
+];
+
+const opsMemoryReplayRows = [
+  ["Run 01", "Unsafe candidates are rejected."],
+  ["Mongo write", "agent_decisions stores the receipt."],
+  ["Run 02", "Prior outcome changes the next plan."],
+];
+
+const opsArtifactRows = [
+  ["Selected action", "Pause intake, route guests away from Coaster Plaza, protect breaks, add Food Court 2 capacity, and hold ride reopening."],
+  ["Rejected alternative", "Dump all coaster guests into Indoor Ride B; rejected because the nearby queue is already 55 minutes and accessibility walking load rises."],
+  ["Policy result", "Human review required for dispatch; safety clearance required for reopening; sensitive guest details removed from worker payloads."],
+  ["Memory write", "agent_decisions stores evidence, selected action, rejected options, policy gate, dispatch payloads, eval score, and outcome label."],
+];
+
+const trainingLoop = [
+  ["Scenario", "A real issue becomes safe roleplay."],
+  ["Roleplay", "The employee practices the response."],
+  ["Evaluate", "Policy, empathy, clarity, escalation scored."],
+  ["Readiness", "Holds and assignments show readiness."],
+  ["Learn", "Gaps become reviewed training signals."],
+];
+
+const trainingReceiptRows = [
+  ["Scenario", "Safety delay plus walking and food confusion."],
+  ["Rubric", "Empathy 88, clarity 82, policy 91."],
+  ["Critical miss", "Priority-access promise capped the score."],
+  ["Gap", "Ticket for compensation and handoff language."],
+];
+
+const handshakeRounds = [
+  {
+    label: "Verify",
+    actor: "Personal agent",
+    message: "A guest agent asks ParkPulse to recover a family visit after a safety delay.",
+    platform: "ParkPulse verifies identity, party context, delegation scope, and the exact authority the agent does not have.",
+    policy: "No purchase, compensation, priority access, or safety override authority.",
+    artifact: "verified delegation",
+  },
+  {
+    label: "Offer",
+    actor: "Park agent",
+    message: "ParkPulse proposes a shaded route, alternate attraction, and food pickup window.",
+    platform: "The proposal is grounded in live queue state, venue profile, accessibility constraints, and prior similar outcomes.",
+    policy: "Allowed as recommendation; worker and guest delivery remain gated.",
+    artifact: "proposal receipt",
+  },
+  {
+    label: "Challenge",
+    actor: "External agent",
+    message: "The external agent counters with priority access and automatic compensation.",
+    platform: "ParkPulse separates negotiable service recovery from requests that exceed delegated authority.",
+    policy: "Priority access blocked; compensation routed to manager approval.",
+    artifact: "policy challenge",
+  },
+  {
+    label: "Handoff",
+    actor: "Policy engine",
+    message: "Approved parts become scoped payloads for queue, food, and guest-experience teams.",
+    platform: "Internal agents receive only the minimum data needed to execute their part of the plan.",
+    policy: "Safety, privacy, commerce, and labor checks pass.",
+    artifact: "handoff envelope",
+  },
+  {
+    label: "Sign",
+    actor: "ParkPulse",
+    message: "ParkPulse signs the final plan, notifies the guest agent, and records the outcome.",
+    platform: "Workflows records approval, delivery is tracked, BigQuery receives the row, and MongoDB stores the trust session.",
+    policy: "Signed receipt is ready for audit, replay, and revocation review.",
+    artifact: "signed receipt",
+  },
+];
+
+const proofRows = [
+  ["Policy gate", "Unsafe authority stops here."],
+  ["Eval receipt", "Groundedness, capacity, staff stress, policy."],
+  ["Monitor packet", "Evidence, review ledger, runtime state."],
+  ["Learning write", "Outcome, label, reusable rule."],
+];
+
+const learningLoopRows = [
+  ["Outcome", "Did pressure fall?"],
+  ["Evaluate", "Score the decision."],
+  ["Review", "Accept, edit, block, or label."],
+  ["Remember", "Store evidence and outcome."],
+  ["Improve", "Retrieve better context next time."],
+];
+
+const architectureMatrixRows = [
+  ["Event Agent", "Vertex AI Gemini, Cloud Run, Pub/Sub", "experience_studio_*", "Draft, review gate, channel package, learning rule"],
+  ["Guest Care", "Cloud Run, Workflows, FCM", "guest_messages, venue_profile", "Urgency score, safe reply, accessibility route, ticket"],
+  ["Live Ops", "Pub/Sub, Eventarc, Workflows, BigQuery", "park_state, agent_decisions, eval_results", "Selected action, rejected alternatives, dispatch receipt"],
+  ["Employee Training", "Cloud Run, BigQuery-ready analytics", "training_*", "Rubric receipt, readiness hold, training-gap ticket"],
+  ["Agent Trust", "Cloud Run, Workflows, FCM", "trust_sessions, agent_decisions", "Delegation scope, policy challenge, signed receipt"],
+];
+
+const depthRows = [
+  ["Real consequences", "Crowds, labor, privacy, safety, and communication move together."],
+  ["Operational authority", "The system prepares actions, not advice."],
+  ["Persistent memory", "Every reviewed result shapes the next run."],
+  ["Bigger than parks", "The same loop fits campuses, stadiums, resorts, airports, and malls."],
 ];
 
 const gcpTools = [
-  { name: "Cloud Run", role: "Private runtime", detail: "Runs the backend behind authenticated access for production-like pressure without public API exposure." },
-  { name: "Vertex AI Gemini", role: "Interpreter", detail: "Explains tradeoffs, drafts payloads, and supports role-specific reasoning without owning final authority." },
-  { name: "Pub/Sub + Eventarc", role: "Signal intake", detail: "Moves live park events into the operating loop and fans delivery events into downstream systems." },
-  { name: "Cloud Workflows", role: "Approval", detail: "Creates explicit operator-review executions before human-gated dispatch." },
-  { name: "Firebase Cloud Messaging", role: "Delivery", detail: "Targets guest-app and worker-device topics, with pseudo-FCM for demo-safe validation." },
-  { name: "Dataflow + BigQuery", role: "Analytics", detail: "Normalizes event envelopes into rows for outcome analytics, evaluator backtests, and training signals." },
+  ["Cloud Run", "Runtime", "Private backend execution."],
+  ["Vertex AI Gemini", "Reasoning", "Tradeoff explanation and payload drafting."],
+  ["Pub/Sub + Eventarc", "Intake", "Live event movement."],
+  ["Cloud Workflows", "Approval", "Human-gated execution."],
+  ["Firebase Cloud Messaging", "Delivery", "Worker and guest delivery topics."],
+  ["Dataflow + BigQuery", "Analytics", "Outcome rows and eval backtests."],
 ];
 
 const mongoMemory = [
-  { collection: "park_state", purpose: "Current ride, guest-flow, weather, staff, food, and energy state." },
-  { collection: "playbooks + incidents", purpose: "SOPs, historical disruptions, lessons, and response procedures." },
-  { collection: "agent_decisions", purpose: "Decision history with evidence, selected action, policy result, and usefulness gate." },
-  { collection: "guest_messages", purpose: "Reviewed outbound drafts tied back to the decision that produced them." },
-  { collection: "eval_results", purpose: "Groundedness, safety, capacity, staff-stress, and actionability scorecards." },
-  { collection: "Atlas Vector Search", purpose: "Semantic retrieval over playbooks, incidents, and agent learnings using model embeddings." },
-];
-
-const operatingLoop = [
-  {
-    label: "Observe",
-    owner: "Scan agent",
-    body: "Collect live state, operator notes, guest messages, and weak signals.",
-    input: "Ride telemetry, queues, weather, food backlog, staff coverage, guest text",
-    output: "One incident packet with source confidence and missing context",
-  },
-  {
-    label: "Structure",
-    owner: "Feature pipeline",
-    body: "Turn noisy text and telemetry into comparable operational features.",
-    input: "Raw signals plus MongoDB venue profile, playbooks, incidents, and prior decisions",
-    output: "Capacity pressure, guest impact, labor stress, safety risk, and action constraints",
-  },
-  {
-    label: "Simulate",
-    owner: "Digital twin",
-    body: "Test reroutes, food capacity, staffing moves, and downstream pressure.",
-    input: "Candidate actions from the planner and operational memory",
-    output: "Rejected options, projected wait shift, staffing effect, and crowd-spillover risk",
-  },
-  {
-    label: "Optimize",
-    owner: "Decision bridge",
-    body: "Select the bounded action with the best safety, guest, staff, and capacity tradeoff.",
-    input: "Simulation scores, policy constraints, venue facts, and operator intent",
-    output: "Selected action, rationale, receiver payloads, and alternatives considered",
-  },
-  {
-    label: "Gate",
-    owner: "Policy engine",
-    body: "Block unsafe authority, labor, privacy, accessibility, procurement, or dispatch violations.",
-    input: "Selected action, receiver payloads, role authority, and policy books",
-    output: "Allowed, blocked, or human-review-required gate with policy references",
-  },
-  {
-    label: "Learn",
-    owner: "Eval and memory",
-    body: "Write the receipt, outcome score, review label, and training signal.",
-    input: "Dispatch result, acknowledgements, eval scorecard, and reviewer decisions",
-    output: "MongoDB decision memory, BigQuery analytics row, and staff-training gap when needed",
-  },
-];
-
-const decisionArtifacts = [
-  {
-    label: "Selected action",
-    value: "Pause intake, route guests away from Coaster Plaza, protect breaks, add food capacity",
-  },
-  {
-    label: "Rejected option",
-    value: "Dump all coaster guests into Indoor Ride B; blocked because nearby queue is already 55 minutes",
-  },
-  {
-    label: "Human gate",
-    value: "Dispatch allowed only after operator approval; ride reopening remains blocked without safety clearance",
-  },
-  {
-    label: "Memory write",
-    value: "Store evidence, selected action, receiver payloads, eval score, review label, and outcome metrics",
-  },
-];
-
-const policyGates = [
-  { rule: "No ride reopening", result: "blocked without safety clearance" },
-  { rule: "No staff break violation", result: "requires protected coverage" },
-  { rule: "No queue dumping", result: "reroute capped by capacity" },
-  { rule: "No sensitive guest data", result: "PII removed from payloads" },
-];
-
-const receiptRows = [
-  { label: "Groundedness", score: "97/100" },
-  { label: "Capacity awareness", score: "93/100" },
-  { label: "Staff stress", score: "91/100" },
-  { label: "Actionability", score: "96/100" },
-  { label: "Policy compliance", score: "pass" },
+  ["park_state", "Live operating state."],
+  ["venue_profile", "Paths, rules, brand, constraints."],
+  ["experience_studio_*", "Drafts, revisions, learning rules."],
+  ["agent_decisions", "Evidence, action, policy, outcome."],
+  ["guest_messages", "Reviewed replies and tickets."],
+  ["training_*", "Roleplay, readiness, gap tickets."],
+  ["trust_sessions", "Delegation, challenges, signatures."],
+  ["eval_results", "Safety and actionability scorecards."],
 ];
 
 const demoSteps = [
-  { label: "Validate Venue Profile", route: "/venue-profile", detail: "Show the trusted venue model: zones, locations, accessibility notes, dining constraints, paths, channel owners, and policy rules." },
-  { label: "Open Experience Studio", route: "/experience-studio", detail: "Show that guest experiences and seasonal routes are generated only from approved venue data and risky claims go to review." },
-  { label: "Plan Accessibility Journey", route: "/accessibility-journey", detail: "Show low-walking, low-sensory, allergy-aware, and cooling plans with explicit human-review boundaries." },
-  { label: "Run Ride Down", route: "/", detail: "Start the command center incident and watch live pressure become a bounded operating-loop action." },
-  { label: "Open Guest Triage", route: "/guest-triage", detail: "Show guest care routed through urgency scoring, venue context, safe reply drafting, and ticket creation." },
-  { label: "Ask Ops Agent Why", route: "/ops-agent", detail: "Ask why the plan was selected, what options were rejected, and how policy-aware apply mode preserves the receipt." },
-  { label: "Inspect Monitor", route: "/monitor", detail: "Prove policy integrity, eval readiness, evidence packets, review ledgers, and runtime governance after the action." },
-  { label: "Run Staff Training", route: "/staff-training", detail: "Show the learning layer: guest-care roleplay, rubric evaluation, mastery gaps, and training-gap tickets." },
-  { label: "Verify Agent Trust", route: "/agent-handshake", detail: "Show external-agent negotiation, delegation scope, policy challenges, and signed protocol receipts." },
-  { label: "Return To Architecture", route: "#architecture", detail: "Tie the proof back to GCP execution, delivery, analytics, and MongoDB operational memory." },
+  ["Ground venue memory", "/venue-profile", "Approved graph, rules, accessibility, owners."],
+  ["Create an event", "/experience-studio", "Same memory, guest-facing plan, review gate."],
+  ["Add guest constraints", "/accessibility-journey", "Mobility, sensory, allergy, cooling."],
+  ["Triage live issue", "/guest-triage", "Urgency, reply, ticket, escalation."],
+  ["Run ops loop", "/ops", "Reject, approve, dispatch, write receipt."],
+  ["Ask why", "/ops-agent", "Selected plan versus blocked options."],
+  ["Validate scorer", "/model-validation", "Decision quality under live state."],
+  ["Train staff", "/staff-training", "Roleplay, rubric, readiness hold."],
+  ["Negotiate safely", "/agent-handshake", "Delegation, challenge, signed receipt."],
+  ["Audit runtime", "/monitor", "Evidence, evals, review ledger."],
+  ["Map architecture", "#architecture", "GCP control plane plus Mongo memory."],
 ];
 
 function SectionLabel({ children, tone = "text-cyan-300" }: { children: React.ReactNode; tone?: string }) {
@@ -328,19 +399,15 @@ function MetricStrip() {
 }
 
 export default function LaunchPage() {
-  const [comparisonMode, setComparisonMode] = useState(comparisonModes[2].id);
-  const [activeDecisionIndex, setActiveDecisionIndex] = useState(0);
-  const activeComparison = comparisonModes.find((mode) => mode.id === comparisonMode) ?? comparisonModes[2];
-  const activeDecision = operatingLoop[activeDecisionIndex] ?? operatingLoop[0];
+  const [activeHandshakeIndex, setActiveHandshakeIndex] = useState(0);
+  const activeHandshake = handshakeRounds[activeHandshakeIndex] ?? handshakeRounds[0];
 
   return (
     <main className="min-h-screen bg-neutral-950 text-white">
-      <nav className="sticky top-0 z-30 border-b border-white/10 bg-neutral-950/88 px-5 py-4 backdrop-blur-xl">
+      <nav className="sticky top-0 z-30 border-b border-white/10 bg-neutral-950/90 px-5 py-4 backdrop-blur-xl">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4">
-          <a href="/launch" className="text-sm font-black tracking-normal text-white">
-            ParkPulse
-          </a>
-          <div className="hidden items-center gap-1 lg:flex">
+          <a href="/" className="text-sm font-black text-white">ParkPulse</a>
+          <div className="hidden items-center gap-1 xl:flex">
             {chapterLinks.map((link) => (
               <a key={link.href} href={link.href} className="rounded-full px-3 py-2 text-xs font-bold text-neutral-400 transition hover:bg-white/10 hover:text-white">
                 {link.label}
@@ -348,33 +415,25 @@ export default function LaunchPage() {
             ))}
           </div>
           <div className="flex items-center gap-2">
-            <a href="/" className="rounded-full border border-white/15 px-4 py-2 text-xs font-bold text-neutral-200 transition hover:border-white/40 hover:text-white">
-              Command Center
-            </a>
-            <a href="/agent-handshake" className="hidden rounded-full border border-white/15 px-4 py-2 text-xs font-bold text-neutral-200 transition hover:border-white/40 hover:text-white sm:inline-flex">
-              Agent Trust
-            </a>
+            <a href="/ops" className="rounded-full border border-white/15 px-4 py-2 text-xs font-bold text-neutral-200 transition hover:border-white/40 hover:text-white">Command Center</a>
+            <a href="#demo" className="hidden rounded-full bg-white px-4 py-2 text-xs font-black text-neutral-950 transition hover:bg-cyan-100 sm:inline-flex">Demo Path</a>
           </div>
         </div>
       </nav>
 
-      <section className="relative overflow-hidden px-5 pt-20 pb-10 lg:pt-28">
+      <section className="relative overflow-hidden px-5 pt-20 pb-12 lg:pt-28">
         <div className="mx-auto grid max-w-7xl gap-12 lg:grid-cols-[0.82fr_1.18fr] lg:items-center">
           <div>
-            <SectionLabel>ParkPulse AI</SectionLabel>
+            <SectionLabel>ParkPulse Launch</SectionLabel>
             <h1 className="mt-6 max-w-5xl text-5xl font-black leading-[0.96] tracking-normal text-white sm:text-7xl lg:text-7xl">
-              The operating layer for critical park decisions.
+              The operating memory for a live park.
             </h1>
             <p className="mt-7 max-w-2xl text-lg leading-8 text-neutral-300 sm:text-xl">
-              ParkPulse is not one agent screen. It is a venue operating lifecycle: model the park, sense live pressure, decide through policy, dispatch with approval, prove the result, and train the next response.
+              One shared system for events, guests, operations, training, agent trust, and audit.
             </p>
             <div className="mt-9 flex flex-wrap gap-3">
-              <a href="/" className="rounded-full bg-white px-5 py-3 text-sm font-black text-neutral-950 transition hover:bg-cyan-100">
-                Open live demo
-              </a>
-              <a href="#system" className="rounded-full border border-white/20 px-5 py-3 text-sm font-black text-white transition hover:border-cyan-200 hover:text-cyan-100">
-                See system map
-              </a>
+              <a href="#foundation" className="rounded-full bg-white px-5 py-3 text-sm font-black text-neutral-950 transition hover:bg-cyan-100">Start the story</a>
+              <a href="#demo" className="rounded-full border border-white/20 px-5 py-3 text-sm font-black text-white transition hover:border-cyan-200 hover:text-cyan-100">Judge demo path</a>
             </div>
           </div>
 
@@ -382,7 +441,7 @@ export default function LaunchPage() {
             <div className="h-[520px] overflow-hidden rounded-[28px] border border-white/15 bg-neutral-900 shadow-2xl shadow-cyan-950/40 sm:h-[660px] lg:h-[760px]">
               <img
                 src="/parkpulse-command-center.png"
-                alt="ParkPulse command center showing park map, scenario panel, action plan, policy gate, and eval scorecard"
+                alt="ParkPulse command center showing park map, action plan, policy gate, and eval receipt"
                 className="h-full w-full object-cover object-top"
               />
             </div>
@@ -393,96 +452,424 @@ export default function LaunchPage() {
         </div>
       </section>
 
-      <section id="system" className="px-5 pt-24 pb-20">
+      <section id="foundation" className="bg-neutral-100 px-5 py-20 text-neutral-950">
         <div className="mx-auto max-w-7xl">
-          <div className="grid gap-10 lg:grid-cols-[0.95fr_1.05fr] lg:items-end">
+          <div className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-end">
             <div>
-              <SectionLabel tone="text-emerald-300">System Map</SectionLabel>
-              <h2 className="mt-4 text-4xl font-black leading-tight text-white sm:text-6xl">
-                Every built module fits one operating lifecycle.
-              </h2>
+              <SectionLabel tone="text-emerald-700">1 / Foundation Memory</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">Start with the park, not the prompt.</h2>
             </div>
-            <p className="text-lg leading-8 text-neutral-300">
-              The front page is organized by what the platform must do end to end. Each card below is a built surface, but the value is how the surfaces connect.
+            <p className="text-lg leading-8 text-neutral-600">
+              Every agent starts from the same approved park facts, rules, and review boundaries.
             </p>
           </div>
 
-          <div className="mt-12 grid gap-4">
-            {lifecycleStages.map((stage, index) => (
-              <article key={stage.id} id={`stage-${stage.id}`} className="rounded-[28px] border border-white/10 bg-neutral-900 p-6 sm:p-8">
-                <div className="grid gap-8 lg:grid-cols-[0.65fr_1.35fr]">
-                  <div>
-                    <div className="text-5xl font-black text-white">{String(index + 1).padStart(2, "0")}</div>
-                    <div className="mt-5 text-xs font-black uppercase tracking-[0.24em] text-cyan-300">{stage.label}</div>
-                    <h3 className="mt-4 text-3xl font-black leading-tight text-white">{stage.title}</h3>
-                    <p className="mt-4 text-sm leading-6 text-neutral-300">{stage.body}</p>
-                  </div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    {stage.modules.map((module) => (
-                      <a key={module.name} href={module.route} className="rounded-2xl border border-white/10 bg-neutral-950 p-5 transition hover:border-cyan-300/60">
-                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                          <div className="text-xl font-black text-white">{module.name}</div>
-                          <div className="w-fit rounded-full bg-cyan-300 px-3 py-1.5 text-xs font-black text-neutral-950">{module.route}</div>
-                        </div>
-                        <p className="mt-4 text-sm font-bold leading-6 text-neutral-300">{module.proof}</p>
-                      </a>
-                    ))}
-                  </div>
-                </div>
-              </article>
+          <div className="mt-12 grid gap-4 lg:grid-cols-2">
+            {foundationRows.map(([label, value]) => (
+              <div key={label} className="rounded-2xl border border-neutral-200 bg-white p-5">
+                <div className="text-xs font-black uppercase tracking-[0.2em] text-emerald-700">{label}</div>
+                <p className="mt-3 text-sm font-bold leading-6 text-neutral-600">{value}</p>
+              </div>
             ))}
           </div>
         </div>
       </section>
 
-      <section id="advantage" className="bg-white px-5 py-20 text-neutral-950">
+      <section id="capabilities" className="px-5 py-20">
         <div className="mx-auto max-w-7xl">
-          <div className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-end">
+          <div className="grid gap-10 lg:grid-cols-[0.85fr_1.15fr] lg:items-end">
             <div>
-              <SectionLabel tone="text-cyan-700">AI + Memory Advantage</SectionLabel>
-              <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">
-                The difference is not more dashboards. It is an operating memory that changes the next decision.
-              </h2>
+              <SectionLabel tone="text-cyan-300">2 / Built System</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight text-white sm:text-6xl">Six surfaces, one memory layer.</h2>
             </div>
-            <p className="text-lg leading-8 text-neutral-600">
-              ParkPulse uses AI to interpret messy cross-domain pressure and MongoDB to remember what happened, what worked, what failed, and what the system is allowed to reuse.
+            <p className="text-lg leading-8 text-neutral-300">
+              The built features are not separate demos. They share one GCP workflow and MongoDB memory backbone.
             </p>
           </div>
 
-          <div className="mt-12 grid gap-4 lg:grid-cols-3">
-            {advantageOutcomes.map((item) => (
-              <article key={item.metric} className="rounded-[28px] border border-neutral-200 bg-neutral-50 p-6">
-                <div className="text-xs font-black uppercase tracking-[0.24em] text-cyan-700">{item.metric}</div>
-                <div className="mt-6 rounded-2xl border border-neutral-200 bg-white p-4">
-                  <div className="text-xs font-black uppercase tracking-[0.18em] text-neutral-500">Before</div>
-                  <p className="mt-3 text-sm font-bold leading-6 text-neutral-600">{item.before}</p>
+          <div className="mt-10 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {capabilityMap.map((capability, index) => {
+              const tone = tones[capability.tone];
+              return (
+                <a key={capability.id} href={capability.route} className={`rounded-2xl border ${tone.border} bg-neutral-900 p-4 transition hover:border-white/40`}>
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="text-3xl font-black text-white">{String(index + 1).padStart(2, "0")}</div>
+                    <div className={`w-fit rounded-full px-2.5 py-1 text-[10px] font-black ${tone.badge}`}>{capability.route}</div>
+                  </div>
+                  <div className={`mt-5 text-xs font-black uppercase tracking-[0.22em] ${tone.text}`}>{capability.label}</div>
+                  <h3 className="mt-3 text-2xl font-black leading-tight text-white">{capability.headline}</h3>
+                  <p className="mt-3 text-xs font-bold leading-5 text-neutral-300">{capability.body}</p>
+                  <div className="mt-4 flex flex-wrap gap-1.5">
+                    {capability.proof.map((proof) => (
+                      <span key={proof} className="rounded-full border border-white/15 px-2.5 py-1 text-[10px] font-black text-neutral-300">{proof}</span>
+                    ))}
+                  </div>
+                </a>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
+      <section id="ops" className="bg-neutral-100 px-5 py-20 text-neutral-950">
+        <div className="mx-auto max-w-7xl">
+          <div className="grid gap-10 lg:grid-cols-[0.78fr_1.22fr] lg:items-end">
+            <div>
+              <SectionLabel tone="text-amber-700">3 / Operations Core</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">From park pressure to approved action.</h2>
+            </div>
+            <p className="text-lg leading-8 text-neutral-600">
+              The moat is the control loop: intake, reject, negotiate, approve, dispatch, evaluate, remember.
+            </p>
+          </div>
+
+          <div className="mt-12 rounded-[32px] border border-neutral-800 bg-neutral-950 p-5 text-white shadow-2xl shadow-neutral-950/30 sm:p-6">
+            <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr] lg:items-end">
+              <div>
+                <div className="text-xs font-black uppercase tracking-[0.24em] text-amber-300">Decision architecture</div>
+                <h3 className="mt-3 text-3xl font-black leading-tight text-white">A control graph for real operations.</h3>
+                <p className="mt-4 text-sm font-bold leading-6 text-neutral-400">
+                  A 19-node graph turns pressure into approved action, not advice.
+                </p>
+              </div>
+              <div>
+                <div className="mt-6 grid grid-cols-2 gap-3">
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+                    <div className="text-3xl font-black text-amber-300">{opsArchitectureNodes.length}</div>
+                    <div className="mt-1 text-[10px] font-black uppercase tracking-[0.18em] text-neutral-500">Nodes</div>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+                    <div className="text-3xl font-black text-amber-300">{opsArchitectureEdges.length}</div>
+                    <div className="mt-1 text-[10px] font-black uppercase tracking-[0.18em] text-neutral-500">Edges</div>
+                  </div>
                 </div>
-                <div className="mt-3 rounded-2xl bg-neutral-950 p-4 text-white">
-                  <div className="text-xs font-black uppercase tracking-[0.18em] text-cyan-300">With ParkPulse</div>
-                  <p className="mt-3 text-sm font-bold leading-6 text-neutral-200">{item.after}</p>
+                <div className="mt-5 space-y-2 text-xs font-black uppercase tracking-[0.16em] text-neutral-500">
+                  <div>Intake {'->'} Reject</div>
+                  <div>Reject {'->'} Negotiate</div>
+                  <div>Negotiate {'->'} Align</div>
+                  <div>Approve {'->'} Dispatch</div>
+                  <div>Dispatch {'->'} Memory</div>
                 </div>
+              </div>
+            </div>
+
+            <div className="mt-6 overflow-hidden rounded-[28px] border border-white/10 bg-black">
+              <div className="flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4">
+                <div className="text-xs font-black uppercase tracking-[0.24em] text-neutral-500">19 node / 60 edge decision graph</div>
+                <div className="rounded-full border border-emerald-300/30 px-3 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-emerald-200">General architecture</div>
+              </div>
+              <div className="overflow-x-auto">
+                <svg viewBox="0 0 1240 620" className="w-full min-w-[980px]">
+                  <defs>
+                    <pattern id="ops-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+                      <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#ffffff" strokeOpacity="0.055" strokeWidth="1" />
+                    </pattern>
+                    <marker id="ops-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+                      <path d="M0,0 L7,3.5 L0,7 Z" fill="#facc15" fillOpacity="0.72" />
+                    </marker>
+                  </defs>
+                  <rect width="1240" height="620" fill="#050505" />
+                  <rect width="1240" height="620" fill="url(#ops-grid)" />
+                  {[
+                    ["INTAKE", 90, 35],
+                    ["STRUCTURE", 450, 35],
+                    ["REJECT + SIM", 630, 35],
+                    ["NEGOTIATE", 810, 35],
+                    ["ALIGN", 990, 35],
+                    ["DECIDE + LEARN", 1160, 35],
+                  ].map(([label, x, y]) => (
+                    <text key={label} x={x} y={y} textAnchor="middle" fill="#a3a3a3" fontSize="11" fontWeight="900" letterSpacing="3">
+                      {label}
+                    </text>
+                  ))}
+                  {opsArchitectureEdges.map(([from, to], index) => {
+                    const source = opsArchitectureNodeById[from];
+                    const target = opsArchitectureNodeById[to];
+                    if (!source || !target) return null;
+                    const isFeedback = from === "memory" || to === "arbiter" || from === "policy";
+                    const isGate = ["safety", "privacy", "labor", "sim", "compliance"].includes(from) && to === "policy";
+                    return (
+                      <line
+                        key={`${from}-${to}-${index}`}
+                        x1={source.x}
+                        y1={source.y}
+                        x2={target.x}
+                        y2={target.y}
+                        stroke={isGate ? "#fb7185" : isFeedback ? "#c4b5fd" : "#facc15"}
+                        strokeWidth={isGate ? 1.6 : 1.2}
+                        strokeOpacity={isGate ? 0.52 : 0.32}
+                        markerEnd="url(#ops-arrow)"
+                      />
+                    );
+                  })}
+                  {opsArchitectureNodes.map((node) => {
+                    const tone = opsNodeTones[node.tone as keyof typeof opsNodeTones];
+                    return (
+                      <g key={node.id}>
+                        <rect x={node.x - 70} y={node.y - 29} width="140" height="58" rx="12" fill={tone.fill} stroke={tone.stroke} strokeWidth="1.5" />
+                        <text x={node.x} y={node.y - 6} textAnchor="middle" fill={tone.text} fontSize="13" fontWeight="900">
+                          {node.label}
+                        </text>
+                        <text x={node.x} y={node.y + 17} textAnchor="middle" fill={tone.tag} fontSize="9" fontWeight="900" letterSpacing="2">
+                          {node.tag}
+                        </text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+            </div>
+
+            <div className="mt-6 grid gap-3 md:grid-cols-5">
+              {opsArchitectureDetailRows.map((row, index) => (
+                <article key={row.label} className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-300 text-xs font-black text-neutral-950">{index + 1}</div>
+                    <div className="text-[10px] font-black uppercase tracking-[0.16em] text-amber-300">{row.label}</div>
+                  </div>
+                  <h4 className="mt-3 text-sm font-black leading-tight text-white">{row.headline}</h4>
+                  <p className="mt-2 text-xs font-bold leading-5 text-neutral-400">{row.body}</p>
+                </article>
+              ))}
+            </div>
+
+            <div className="mt-6 grid gap-5 lg:grid-cols-[0.45fr_1.55fr]">
+              <div className="rounded-2xl border border-amber-300/25 bg-amber-300/10 p-5">
+                <div className="text-xs font-black uppercase tracking-[0.24em] text-amber-300">What the graph proves</div>
+                <h4 className="mt-3 text-2xl font-black leading-tight text-white">Every action has a path and a reason.</h4>
+                <p className="mt-4 text-sm font-bold leading-6 text-neutral-300">
+                  A judge can trace intake, rejection, negotiation, policy, dispatch, and memory.
+                </p>
+              </div>
+              <div className="grid gap-3 md:grid-cols-5">
+                {opsArchitectureArtifacts.map(([label, value]) => (
+                  <div key={label} className="rounded-2xl border border-white/10 bg-black p-4">
+                    <div className="text-xs font-black uppercase tracking-[0.18em] text-emerald-300">{label}</div>
+                    <p className="mt-3 text-xs font-bold leading-5 text-neutral-400">{value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-6 grid gap-5 lg:grid-cols-2">
+              <div className="rounded-2xl border border-cyan-300/25 bg-cyan-300/10 p-5">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <div className="text-xs font-black uppercase tracking-[0.24em] text-cyan-300">Live execution bridge</div>
+                    <h4 className="mt-3 text-2xl font-black leading-tight text-white">Run the graph in the command center.</h4>
+                  </div>
+                  <a href="/ops" className="w-fit rounded-full bg-cyan-300 px-4 py-2 text-xs font-black text-neutral-950">Open Command Center</a>
+                </div>
+                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  {opsLiveProofRows.map(([label, value]) => (
+                    <div key={label} className="rounded-2xl border border-white/10 bg-black p-4">
+                      <div className="text-xs font-black uppercase tracking-[0.18em] text-cyan-300">{label}</div>
+                      <p className="mt-2 text-xs font-bold leading-5 text-neutral-400">{value}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-violet-300/25 bg-violet-300/10 p-5">
+                <div className="text-xs font-black uppercase tracking-[0.24em] text-violet-300">Mongo memory replay</div>
+                <h4 className="mt-3 text-2xl font-black leading-tight text-white">Memory changes the next recommendation.</h4>
+                <div className="mt-5 grid gap-3">
+                  {opsMemoryReplayRows.map(([label, value]) => (
+                    <div key={label} className="grid gap-3 rounded-2xl border border-white/10 bg-black p-4 sm:grid-cols-[90px_1fr] sm:items-start">
+                      <div className="text-xs font-black uppercase tracking-[0.18em] text-violet-300">{label}</div>
+                      <p className="text-xs font-bold leading-5 text-neutral-400">{value}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-8 rounded-[32px] bg-neutral-950 p-6 text-white sm:p-8">
+            <div className="grid gap-8 lg:grid-cols-[0.65fr_1.35fr] lg:items-start">
+              <div>
+                <div className="text-xs font-black uppercase tracking-[0.24em] text-amber-300">Decision receipt</div>
+                <h3 className="mt-3 text-3xl font-black leading-tight text-white">The receipt shows the system working.</h3>
+                <a href="/ops" className="mt-6 inline-flex rounded-full bg-amber-300 px-4 py-2 text-xs font-black text-neutral-950">Open Command Center</a>
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                {opsArtifactRows.map(([label, value]) => (
+                  <div key={label} className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
+                    <div className="text-sm font-black text-amber-300">{label}</div>
+                    <p className="mt-3 text-sm font-bold leading-6 text-neutral-300">{value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="event-agent" className="bg-white px-5 py-20 text-neutral-950">
+        <div className="mx-auto max-w-7xl">
+          <div className="grid gap-10 lg:grid-cols-[0.85fr_1.15fr] lg:items-end">
+            <div>
+              <SectionLabel tone="text-violet-700">4 / Event Agent</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">Plan guest experiences from trusted park memory.</h2>
+            </div>
+            <p className="text-lg leading-8 text-neutral-600">
+              The same memory creates guest-facing plans before the park is under pressure.
+            </p>
+          </div>
+
+          <div className="mt-12 grid gap-3 lg:grid-cols-5">
+            {eventFlow.map(([label, detail], index) => (
+              <article key={label} className="rounded-2xl border border-neutral-200 bg-neutral-50 p-5">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-violet-300 text-sm font-black text-neutral-950">{index + 1}</div>
+                <h3 className="mt-5 text-xl font-black text-neutral-950">{label}</h3>
+                <p className="mt-3 text-sm font-bold leading-6 text-neutral-600">{detail}</p>
               </article>
             ))}
           </div>
 
-          <div className="mt-8 rounded-[32px] border border-neutral-200 bg-neutral-50 p-6 sm:p-8">
+          <div className="mt-8 rounded-[32px] bg-neutral-950 p-6 text-white sm:p-8">
+            <div className="grid gap-8 lg:grid-cols-[0.65fr_1.35fr] lg:items-start">
+              <div>
+                <div className="text-xs font-black uppercase tracking-[0.24em] text-violet-300">Event receipt</div>
+                <h3 className="mt-3 text-3xl font-black leading-tight text-white">Every event plan leaves a review trail.</h3>
+                <a href="/experience-studio" className="mt-6 inline-flex rounded-full bg-violet-300 px-4 py-2 text-xs font-black text-neutral-950">Open Event Agent</a>
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                {eventReceiptRows.map(([label, value]) => (
+                  <div key={label} className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
+                    <div className="text-sm font-black text-violet-300">{label}</div>
+                    <p className="mt-3 text-sm font-bold leading-6 text-neutral-300">{value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="guest-care" className="px-5 py-20">
+        <div className="mx-auto max-w-7xl">
+          <div className="grid gap-10 lg:grid-cols-[0.85fr_1.15fr] lg:items-end">
+            <div>
+              <SectionLabel tone="text-cyan-300">5 / Guest Care</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight text-white sm:text-6xl">Guest care is part of the operating loop.</h2>
+            </div>
+            <p className="text-lg leading-8 text-neutral-300">
+              ParkPulse optimizes the venue without losing the individual guest.
+            </p>
+          </div>
+
+          <div className="mt-12 grid gap-4 lg:grid-cols-3">
+            {guestCareCards.map((card) => (
+              <a key={card.title} href={card.route} className="rounded-[28px] border border-white/10 bg-neutral-900 p-6 transition hover:border-cyan-300/60">
+                <div className="flex items-center justify-between gap-4">
+                  <h3 className="text-2xl font-black text-white">{card.title}</h3>
+                  <div className="rounded-full bg-cyan-300 px-3 py-1.5 text-xs font-black text-neutral-950">{card.route}</div>
+                </div>
+                <p className="mt-5 text-sm font-bold leading-6 text-neutral-300">{card.body}</p>
+                <div className="mt-6 grid grid-cols-2 gap-2">
+                  {card.checks.map((check) => (
+                    <div key={check} className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-black text-neutral-300">{check}</div>
+                  ))}
+                </div>
+              </a>
+            ))}
+          </div>
+
+          <div className="mt-8 rounded-[32px] border border-cyan-300/20 bg-cyan-300/10 p-6 sm:p-8">
+            <div className="grid gap-8 lg:grid-cols-[0.65fr_1.35fr] lg:items-start">
+              <div>
+                <div className="text-xs font-black uppercase tracking-[0.24em] text-cyan-300">Guest-care artifact</div>
+                <h3 className="mt-3 text-3xl font-black leading-tight text-white">A guest need becomes a bounded response.</h3>
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                {guestCareReceiptRows.map(([label, value]) => (
+                  <div key={label} className="rounded-2xl border border-white/10 bg-neutral-950 p-5">
+                    <div className="text-sm font-black text-cyan-300">{label}</div>
+                    <p className="mt-3 text-sm font-bold leading-6 text-neutral-300">{value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="training" className="px-5 py-20">
+        <div className="mx-auto max-w-7xl">
+          <div className="grid gap-10 lg:grid-cols-[0.85fr_1.15fr] lg:items-end">
+            <div>
+              <SectionLabel tone="text-teal-300">6 / Employee Training</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight text-white sm:text-6xl">Operations become training data.</h2>
+            </div>
+            <p className="text-lg leading-8 text-neutral-300">
+              Incidents become practice, scores, readiness holds, and training signals.
+            </p>
+          </div>
+
+          <div className="mt-12 grid gap-3 lg:grid-cols-5">
+            {trainingLoop.map(([label, detail], index) => (
+              <article key={label} className="rounded-2xl border border-white/10 bg-neutral-900 p-5">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-teal-300 text-sm font-black text-neutral-950">{index + 1}</div>
+                <h3 className="mt-5 text-xl font-black text-white">{label}</h3>
+                <p className="mt-3 text-sm font-bold leading-6 text-neutral-300">{detail}</p>
+              </article>
+            ))}
+          </div>
+
+          <div className="mt-8 rounded-[32px] border border-teal-300/20 bg-teal-300/10 p-6 sm:p-8">
+            <div className="grid gap-8 lg:grid-cols-[0.65fr_1.35fr] lg:items-start">
+              <div>
+                <div className="text-xs font-black uppercase tracking-[0.24em] text-teal-300">Training receipt</div>
+                <h3 className="mt-3 text-3xl font-black leading-tight text-white">Readiness has a receipt.</h3>
+                <a href="/staff-training" className="mt-6 inline-flex rounded-full bg-teal-300 px-4 py-2 text-xs font-black text-neutral-950">Open Training</a>
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                {trainingReceiptRows.map(([label, value]) => (
+                  <div key={label} className="rounded-2xl border border-white/10 bg-neutral-950 p-5">
+                    <div className="text-sm font-black text-teal-300">{label}</div>
+                    <p className="mt-3 text-sm font-bold leading-6 text-neutral-300">{value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="trust" className="bg-white px-5 py-20 text-neutral-950">
+        <div className="mx-auto max-w-7xl">
+          <div className="grid gap-10 lg:grid-cols-[0.85fr_1.15fr] lg:items-end">
+            <div>
+              <SectionLabel tone="text-blue-700">7 / Agent Trust</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">Let outside agents help without giving them the park.</h2>
+            </div>
+            <p className="text-lg leading-8 text-neutral-600">
+              ParkPulse verifies delegated authority, handles counteroffers, challenges unsafe requests, and signs the final handoff.
+            </p>
+          </div>
+
+          <div className="mt-12 rounded-[32px] border border-neutral-200 bg-neutral-50 p-6 sm:p-8">
             <div className="grid gap-8 lg:grid-cols-[0.55fr_1.45fr] lg:items-start">
               <div>
-                <div className="text-xs font-black uppercase tracking-[0.24em] text-neutral-500">Interactive replay</div>
-                <h3 className="mt-3 text-3xl font-black leading-tight text-neutral-950">Same incident. Three levels of intelligence.</h3>
+                <div className="text-xs font-black uppercase tracking-[0.24em] text-neutral-500">Negotiation replay</div>
+                <h3 className="mt-3 text-3xl font-black leading-tight text-neutral-950">Verify, offer, challenge, handoff, sign.</h3>
                 <div className="mt-6 grid gap-2">
-                  {comparisonModes.map((mode) => {
-                    const isActive = mode.id === activeComparison.id;
+                  {handshakeRounds.map((round, index) => {
+                    const isActive = index === activeHandshakeIndex;
                     return (
                       <button
-                        key={mode.id}
+                        key={round.label}
                         type="button"
-                        onClick={() => setComparisonMode(mode.id)}
-                        className={`rounded-full px-4 py-3 text-left text-sm font-black transition ${
+                        onClick={() => setActiveHandshakeIndex(index)}
+                        className={`rounded-2xl px-4 py-3 text-left transition ${
                           isActive ? "bg-neutral-950 text-white" : "border border-neutral-300 bg-white text-neutral-700 hover:border-neutral-950"
                         }`}
                       >
-                        {mode.label}
+                        <div className="flex items-center justify-between gap-4">
+                          <span className="text-sm font-black">{String(index + 1).padStart(2, "0")} {round.label}</span>
+                          <span className="text-[10px] font-black uppercase tracking-[0.14em]">{round.artifact}</span>
+                        </div>
                       </button>
                     );
                   })}
@@ -492,280 +879,22 @@ export default function LaunchPage() {
               <div className="rounded-[28px] bg-neutral-950 p-6 text-white">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                   <div>
-                    <div className="text-xs font-black uppercase tracking-[0.24em] text-cyan-300">{activeComparison.label}</div>
-                    <h4 className="mt-3 text-3xl font-black leading-tight text-white">{activeComparison.title}</h4>
-                    <p className="mt-4 max-w-3xl text-sm font-bold leading-6 text-neutral-300">{activeComparison.summary}</p>
+                    <div className="text-xs font-black uppercase tracking-[0.24em] text-blue-300">{activeHandshake.actor}</div>
+                    <h4 className="mt-3 text-4xl font-black leading-tight text-white">{activeHandshake.label}</h4>
+                    <p className="mt-4 max-w-3xl text-sm font-bold leading-6 text-neutral-300">{activeHandshake.message}</p>
                   </div>
-                  <div className="w-fit rounded-full bg-cyan-300 px-3 py-1.5 text-xs font-black text-neutral-950">ride down</div>
+                  <div className="w-fit rounded-full bg-blue-300 px-3 py-1.5 text-xs font-black text-neutral-950">{activeHandshake.artifact}</div>
                 </div>
-                <div className="mt-6 grid gap-3 md:grid-cols-2">
-                  {activeComparison.cards.map(([label, value]) => (
-                    <div key={`${activeComparison.id}-${label}`} className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                      <div className="text-xs font-black uppercase tracking-[0.18em] text-neutral-500">{label}</div>
-                      <p className="mt-3 text-sm font-bold leading-6 text-neutral-200">{value}</p>
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-5 rounded-2xl border border-emerald-300/30 bg-emerald-300/10 p-4 text-sm font-black leading-6 text-emerald-100">
-                  {activeComparison.verdict}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-8 rounded-[32px] bg-neutral-950 p-6 text-white sm:p-8">
-            <div className="grid gap-8 lg:grid-cols-[0.7fr_1.3fr] lg:items-start">
-              <div>
-                <div className="text-xs font-black uppercase tracking-[0.24em] text-emerald-300">MongoDB memory loop</div>
-                <h3 className="mt-4 text-3xl font-black leading-tight sm:text-5xl">Every run becomes better context for the next one.</h3>
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                {memoryCycle.map((step, index) => (
-                  <div key={step.label} className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
-                    <div className="flex items-center gap-3">
-                      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-300 text-sm font-black text-neutral-950">{index + 1}</div>
-                      <div className="text-xl font-black text-white">{step.label}</div>
-                    </div>
-                    <p className="mt-4 text-sm font-bold leading-6 text-neutral-300">{step.detail}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section id="foundation" className="bg-neutral-100 px-5 py-20 text-neutral-950">
-        <div className="mx-auto max-w-7xl">
-          <div className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-end">
-            <div>
-              <SectionLabel tone="text-cyan-700">Foundation / Live Venue</SectionLabel>
-              <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">
-                One ride goes down. The whole park feels it.
-              </h2>
-            </div>
-            <p className="text-lg leading-8 text-neutral-600">
-              Dragon Coaster closes during peak demand. Nearby queues are saturated, a food court is understaffed, and weather risk is rising. A naive reroute creates a second incident. ParkPulse starts with the full venue state, not a single alert.
-            </p>
-          </div>
-
-          <div className="mt-12 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-            {incidentPressure.map((item) => (
-              <div key={item.label} className="border-t border-neutral-300 pt-5">
-                <div className="text-xs font-black uppercase tracking-[0.2em] text-neutral-500">{item.label}</div>
-                <div className={`mt-4 inline-flex rounded-full px-3 py-2 text-sm font-black ${item.tone}`}>{item.value}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <section id="signals" className="bg-white px-5 py-20 text-neutral-950">
-        <div className="mx-auto grid max-w-7xl gap-12 lg:grid-cols-[0.85fr_1.15fr] lg:items-start">
-          <div>
-            <SectionLabel tone="text-cyan-700">Signals / Intake</SectionLabel>
-            <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">
-              Messy context becomes operational features.
-            </h2>
-            <p className="mt-5 text-lg leading-8 text-neutral-600">
-              The operator sees a simple incident. The system sees correlated pressure across ride ops, guest movement, staffing, food throughput, weather, and policy.
-            </p>
-          </div>
-
-          <div className="overflow-hidden rounded-[28px] border border-neutral-200 bg-neutral-50">
-            {signalRows.map((row) => (
-              <div key={row.label} className="grid gap-3 border-b border-neutral-200 p-5 last:border-b-0 sm:grid-cols-[150px_1fr_110px] sm:items-center">
-                <div className="text-sm font-black text-neutral-950">{row.label}</div>
-                <div className="text-sm leading-6 text-neutral-600">{row.source}</div>
-                <div className="w-fit rounded-full bg-neutral-950 px-3 py-1.5 text-xs font-black uppercase tracking-[0.14em] text-white sm:justify-self-end">{row.status}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <section id="architecture" className="px-5 py-20">
-        <div className="mx-auto max-w-7xl">
-          <div className="grid gap-10 lg:grid-cols-[0.95fr_1.05fr] lg:items-end">
-            <div>
-              <SectionLabel tone="text-blue-300">Architecture</SectionLabel>
-              <h2 className="mt-4 text-4xl font-black leading-tight text-white sm:text-6xl">
-                GCP runs the control plane. MongoDB remembers the park.
-              </h2>
-            </div>
-            <p className="text-lg leading-8 text-neutral-300">
-              Google Cloud moves, executes, evaluates, and analyzes the operating loop. MongoDB stores the live operational memory the agents retrieve from and write back to.
-            </p>
-          </div>
-
-          <div className="mt-12 grid gap-6 xl:grid-cols-[1fr_1fr]">
-            <div className="rounded-[32px] border border-white/10 bg-neutral-900 p-6 sm:p-8">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-xs font-black uppercase tracking-[0.24em] text-blue-300">Google Cloud Platform</div>
-                  <h3 className="mt-3 text-3xl font-black text-white">Execution, delivery, and analytics</h3>
-                </div>
-                <div className="rounded-full bg-white px-3 py-1.5 text-xs font-black text-neutral-950">GCP</div>
-              </div>
-              <div className="mt-7 grid gap-3">
-                {gcpTools.map((tool) => (
-                  <article key={tool.name} className="rounded-2xl border border-white/10 bg-neutral-950 p-4">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <h4 className="text-lg font-black text-white">{tool.name}</h4>
-                      <div className="w-fit rounded-full bg-blue-300 px-3 py-1.5 text-xs font-black text-neutral-950">{tool.role}</div>
-                    </div>
-                    <p className="mt-3 text-sm leading-6 text-neutral-300">{tool.detail}</p>
-                  </article>
-                ))}
-              </div>
-            </div>
-
-            <div className="rounded-[32px] border border-white/10 bg-neutral-900 p-6 sm:p-8">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-xs font-black uppercase tracking-[0.24em] text-emerald-300">MongoDB Atlas</div>
-                  <h3 className="mt-3 text-3xl font-black text-white">Operational memory and retrieval</h3>
-                </div>
-                <div className="rounded-full bg-emerald-300 px-3 py-1.5 text-xs font-black text-neutral-950">Memory</div>
-              </div>
-              <div className="mt-7 overflow-hidden rounded-2xl border border-white/10">
-                {mongoMemory.map((memory) => (
-                  <div key={memory.collection} className="grid gap-2 border-b border-white/10 bg-neutral-950 p-4 last:border-b-0 sm:grid-cols-[170px_1fr]">
-                    <div className="text-sm font-black text-white">{memory.collection}</div>
-                    <div className="text-sm leading-6 text-neutral-300">{memory.purpose}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section id="decision" className="px-5 py-20">
-        <div className="mx-auto max-w-7xl">
-          <div className="grid gap-10 lg:grid-cols-[0.85fr_1.15fr] lg:items-end">
-            <div>
-              <SectionLabel tone="text-amber-300">Decision Loop</SectionLabel>
-              <h2 className="mt-4 text-4xl font-black leading-tight text-white sm:text-6xl">
-                Not a chatbot. A controlled decision loop.
-              </h2>
-            </div>
-            <p className="text-lg leading-8 text-neutral-300">
-              Prediction, simulation, optimization, policy, and approval own the action. Gemini interprets and explains; MongoDB grounds and remembers; the policy engine decides what can actually move.
-            </p>
-          </div>
-
-          <div className="mt-12 rounded-[32px] border border-white/10 bg-neutral-900 p-6 sm:p-8">
-            <div className="grid gap-8 lg:grid-cols-[0.55fr_1.45fr] lg:items-start">
-              <div>
-                <div className="text-xs font-black uppercase tracking-[0.24em] text-neutral-500">Step through the loop</div>
-                <div className="mt-5 grid gap-2">
-                  {operatingLoop.map((step, index) => {
-                    const isActive = index === activeDecisionIndex;
-                    return (
-                      <button
-                        key={step.label}
-                        type="button"
-                        onClick={() => setActiveDecisionIndex(index)}
-                        className={`rounded-2xl px-4 py-3 text-left transition ${
-                          isActive ? "bg-cyan-300 text-neutral-950" : "border border-white/10 bg-neutral-950 text-neutral-300 hover:border-cyan-300/60 hover:text-white"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-4">
-                          <span className="text-sm font-black">{String(index + 1).padStart(2, "0")} {step.label}</span>
-                          <span className="text-[10px] font-black uppercase tracking-[0.14em]">{step.owner}</span>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="rounded-[28px] border border-white/10 bg-neutral-950 p-6">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <div className="text-xs font-black uppercase tracking-[0.24em] text-amber-300">{activeDecision.owner}</div>
-                    <h3 className="mt-3 text-4xl font-black leading-tight text-white">{activeDecision.label}</h3>
-                    <p className="mt-4 max-w-3xl text-sm font-bold leading-6 text-neutral-300">{activeDecision.body}</p>
-                  </div>
-                  <div className="w-fit rounded-full bg-white px-3 py-1.5 text-xs font-black text-neutral-950">active step</div>
-                </div>
-
                 <div className="mt-7 grid gap-3 md:grid-cols-2">
                   <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
-                    <div className="text-xs font-black uppercase tracking-[0.18em] text-cyan-300">Input</div>
-                    <p className="mt-3 text-sm font-bold leading-6 text-neutral-300">{activeDecision.input}</p>
+                    <div className="text-xs font-black uppercase tracking-[0.18em] text-cyan-300">Reasoning</div>
+                    <p className="mt-3 text-sm font-bold leading-6 text-neutral-300">{activeHandshake.platform}</p>
                   </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
-                    <div className="text-xs font-black uppercase tracking-[0.18em] text-emerald-300">Output</div>
-                    <p className="mt-3 text-sm font-bold leading-6 text-neutral-300">{activeDecision.output}</p>
-                  </div>
-                </div>
-
-                <div className="mt-3 grid gap-3 md:grid-cols-2">
-                  <div className="rounded-2xl border border-blue-300/20 bg-blue-300/10 p-5">
-                    <div className="text-xs font-black uppercase tracking-[0.18em] text-blue-200">GCP role</div>
-                    <p className="mt-3 text-sm font-bold leading-6 text-blue-50">
-                      {activeDecision.label === "Learn"
-                        ? "Dataflow and BigQuery preserve outcome rows for analytics and evaluator backtests."
-                        : activeDecision.label === "Gate"
-                          ? "Cloud Workflows creates the approval handoff when policy requires human review."
-                          : activeDecision.label === "Observe"
-                            ? "Pub/Sub and Eventarc carry live operations signals into the private Cloud Run runtime."
-                            : "Vertex AI Gemini helps interpret, explain, and draft while Cloud Run keeps the control path private."}
-                    </p>
-                  </div>
-                  <div className="rounded-2xl border border-emerald-300/20 bg-emerald-300/10 p-5">
-                    <div className="text-xs font-black uppercase tracking-[0.18em] text-emerald-200">MongoDB role</div>
-                    <p className="mt-3 text-sm font-bold leading-6 text-emerald-50">
-                      {activeDecision.label === "Learn"
-                        ? "Writes the useful decision, eval result, review label, and future retrieval signal."
-                        : activeDecision.label === "Observe"
-                          ? "Stores the current park state so later steps share the same operational truth."
-                          : "Retrieves venue facts, playbooks, incidents, and prior decisions to ground the step."}
-                    </p>
+                  <div className="rounded-2xl border border-emerald-300/25 bg-emerald-300/10 p-5">
+                    <div className="text-xs font-black uppercase tracking-[0.18em] text-emerald-200">Policy alignment</div>
+                    <p className="mt-3 text-sm font-bold leading-6 text-emerald-50">{activeHandshake.policy}</p>
                   </div>
                 </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-8 grid gap-px overflow-hidden rounded-[28px] border border-white/10 bg-white/10 lg:grid-cols-2">
-            {operatingLoop.map((step, index) => (
-              <article key={step.label} className="bg-neutral-950 p-6">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="text-4xl font-black text-white">{String(index + 1).padStart(2, "0")}</div>
-                  <div className="rounded-full border border-white/15 px-3 py-1.5 text-xs font-black uppercase tracking-[0.14em] text-neutral-300">{step.owner}</div>
-                </div>
-                <h3 className="mt-8 text-2xl font-black text-white">{step.label}</h3>
-                <p className="mt-3 text-sm leading-6 text-neutral-300">{step.body}</p>
-                <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-cyan-300">Input</div>
-                    <p className="mt-2 text-xs font-bold leading-5 text-neutral-300">{step.input}</p>
-                  </div>
-                  <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                    <div className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-300">Output</div>
-                    <p className="mt-2 text-xs font-bold leading-5 text-neutral-300">{step.output}</p>
-                  </div>
-                </div>
-              </article>
-            ))}
-          </div>
-
-          <div className="mt-8 rounded-[32px] border border-white/10 bg-neutral-900 p-6 sm:p-8">
-            <div className="grid gap-8 lg:grid-cols-[0.65fr_1.35fr] lg:items-start">
-              <div>
-                <div className="text-xs font-black uppercase tracking-[0.24em] text-neutral-500">Decision artifact</div>
-                <h3 className="mt-3 text-3xl font-black leading-tight text-white">What the loop returns to the operator.</h3>
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                {decisionArtifacts.map((artifact) => (
-                  <div key={artifact.label} className="rounded-2xl border border-white/10 bg-neutral-950 p-5">
-                    <div className="text-sm font-black text-cyan-300">{artifact.label}</div>
-                    <p className="mt-3 text-sm font-bold leading-6 text-neutral-300">{artifact.value}</p>
-                  </div>
-                ))}
               </div>
             </div>
           </div>
@@ -774,76 +903,162 @@ export default function LaunchPage() {
 
       <section id="proof" className="bg-neutral-100 px-5 py-20 text-neutral-950">
         <div className="mx-auto max-w-7xl">
-          <div className="grid gap-12 lg:grid-cols-[0.95fr_1.05fr] lg:items-start">
+          <div className="grid gap-10 lg:grid-cols-[0.85fr_1.15fr] lg:items-end">
             <div>
-              <SectionLabel tone="text-rose-700">Governance / Proof / Learning</SectionLabel>
-              <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">
-                The safest action is sometimes no automatic action.
-              </h2>
-              <p className="mt-5 text-lg leading-8 text-neutral-600">
-                Every recommendation carries a policy gate, dispatch boundary, eval receipt, memory write, and review path.
-              </p>
+              <SectionLabel tone="text-rose-700">8 / Safety Proof</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">The system earns the right to act.</h2>
             </div>
+            <p className="text-lg leading-8 text-neutral-600">
+              The system is valuable because it knows when not to act.
+            </p>
+          </div>
 
-            <div className="grid gap-4">
-              <div className="rounded-[28px] bg-neutral-950 p-5 text-white">
-                <div className="rounded-2xl border border-amber-300/40 bg-amber-300 px-5 py-4 text-sm font-black uppercase tracking-[0.18em] text-neutral-950">
-                  Human review required
-                </div>
-                <div className="mt-4 space-y-3">
-                  {policyGates.map((gate) => (
-                    <div key={gate.rule} className="grid gap-2 rounded-2xl border border-white/10 bg-white/[0.04] p-4 sm:grid-cols-[170px_1fr]">
-                      <div className="text-sm font-black text-white">{gate.rule}</div>
-                      <div className="text-sm leading-6 text-neutral-300">{gate.result}</div>
-                    </div>
-                  ))}
-                </div>
+          <div className="mt-12 grid gap-4 lg:grid-cols-4">
+            {proofRows.map(([label, value]) => (
+              <article key={label} className="rounded-2xl border border-neutral-200 bg-white p-5">
+                <div className="text-xs font-black uppercase tracking-[0.2em] text-rose-700">{label}</div>
+                <p className="mt-3 text-sm font-bold leading-6 text-neutral-600">{value}</p>
+              </article>
+            ))}
+          </div>
+
+          <div className="mt-8 rounded-[32px] bg-neutral-950 p-6 text-white sm:p-8">
+            <div className="grid gap-8 lg:grid-cols-[0.65fr_1.35fr] lg:items-start">
+              <div>
+                <div className="text-xs font-black uppercase tracking-[0.24em] text-emerald-300">Closed learning loop</div>
+                <h3 className="mt-3 text-3xl font-black leading-tight text-white">Memory becomes operating improvement.</h3>
+                <p className="mt-4 text-sm font-bold leading-6 text-neutral-300">
+                  Every reviewed outcome improves the next event, guest reply, ops action, training run, or handshake.
+                </p>
               </div>
-
-              <div className="rounded-[28px] border border-neutral-200 bg-white p-6">
-                <div className="text-xs font-black uppercase tracking-[0.24em] text-neutral-500">Eval receipt</div>
-                <div className="mt-5 space-y-4">
-                  {receiptRows.map((row) => (
-                    <div key={row.label}>
-                      <div className="flex items-center justify-between gap-4 text-sm font-black">
-                        <span className="text-neutral-600">{row.label}</span>
-                        <span className="text-neutral-950">{row.score}</span>
-                      </div>
-                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-neutral-100">
-                        <div className="h-full w-[88%] rounded-full bg-emerald-500" />
-                      </div>
-                    </div>
-                  ))}
-                </div>
+              <div className="grid gap-3 md:grid-cols-5">
+                {learningLoopRows.map(([label, value], index) => (
+                  <div key={label} className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-300 text-xs font-black text-neutral-950">{index + 1}</div>
+                    <div className="mt-4 text-sm font-black text-emerald-300">{label}</div>
+                    <p className="mt-3 text-xs font-bold leading-5 text-neutral-300">{value}</p>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
         </div>
       </section>
 
-      <section id="demo" className="px-5 py-20">
+      <section id="architecture" className="px-5 py-20">
+        <div className="mx-auto max-w-7xl">
+          <div className="grid gap-10 lg:grid-cols-[0.95fr_1.05fr] lg:items-end">
+            <div>
+              <SectionLabel tone="text-blue-300">9 / Architecture</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight text-white sm:text-6xl">GCP runs the control plane. MongoDB stores the memory.</h2>
+            </div>
+            <p className="text-lg leading-8 text-neutral-300">
+              GCP moves and governs the work. MongoDB keeps the operating memory.
+            </p>
+          </div>
+
+          <div className="mt-10 grid gap-5 xl:grid-cols-[1fr_1fr]">
+            <div className="rounded-[32px] border border-white/10 bg-neutral-900 p-6 sm:p-8">
+              <div className="text-xs font-black uppercase tracking-[0.24em] text-blue-300">Google Cloud Platform</div>
+              <h3 className="mt-3 text-3xl font-black text-white">Move, approve, deliver, measure.</h3>
+              <div className="mt-6 grid gap-2 sm:grid-cols-2">
+                {gcpTools.map(([name, role]) => (
+                  <div key={name} className="rounded-2xl border border-white/10 bg-neutral-950 p-3">
+                    <div className="text-sm font-black text-white">{name}</div>
+                    <div className="mt-2 w-fit rounded-full bg-blue-300 px-2.5 py-1 text-[10px] font-black text-neutral-950">{role}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-[32px] border border-white/10 bg-neutral-900 p-6 sm:p-8">
+              <div className="text-xs font-black uppercase tracking-[0.24em] text-emerald-300">MongoDB Atlas</div>
+              <h3 className="mt-3 text-3xl font-black text-white">The memory every agent reads and writes.</h3>
+              <div className="mt-6 overflow-hidden rounded-2xl border border-white/10">
+                {mongoMemory.map(([collection, purpose]) => (
+                  <div key={collection} className="grid gap-2 border-b border-white/10 bg-neutral-950 px-4 py-3 last:border-b-0 sm:grid-cols-[150px_1fr]">
+                    <div className="text-sm font-black text-white">{collection}</div>
+                    <div className="text-xs font-bold leading-5 text-neutral-300">{purpose}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-6 rounded-[28px] border border-white/10 bg-neutral-900 p-5 sm:p-6">
+            <div className="grid gap-6 lg:grid-cols-[0.45fr_1.55fr] lg:items-start">
+              <div>
+                <div className="text-xs font-black uppercase tracking-[0.24em] text-blue-300">Tool-to-feature matrix</div>
+                <h3 className="mt-3 text-2xl font-black leading-tight text-white">Execution, memory, proof.</h3>
+              </div>
+              <div className="overflow-hidden rounded-2xl border border-white/10">
+                {architectureMatrixRows.map(([feature, gcp, mongo, artifact]) => (
+                  <div key={feature} className="grid gap-3 border-b border-white/10 bg-neutral-950 p-3 last:border-b-0 xl:grid-cols-[120px_1fr_1fr_1fr]">
+                    <div className="text-sm font-black text-white">{feature}</div>
+                    <div>
+                      <div className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-300">GCP</div>
+                      <p className="mt-1 text-xs font-bold leading-5 text-neutral-300">{gcp}</p>
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-300">MongoDB</div>
+                      <p className="mt-1 text-xs font-bold leading-5 text-neutral-300">{mongo}</p>
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-black uppercase tracking-[0.18em] text-cyan-300">Proof</div>
+                      <p className="mt-1 text-xs font-bold leading-5 text-neutral-300">{artifact}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="depth" className="bg-neutral-100 px-5 py-20 text-neutral-950">
+        <div className="mx-auto max-w-7xl">
+          <div className="grid gap-10 lg:grid-cols-[0.85fr_1.15fr] lg:items-end">
+            <div>
+              <SectionLabel tone="text-neutral-700">10 / Why It Matters</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">A park is a small city with real operating authority.</h2>
+            </div>
+            <p className="text-lg leading-8 text-neutral-600">
+              A park is a small city: crowds, labor, safety, privacy, food, events, and communication in one live venue.
+            </p>
+          </div>
+
+          <div className="mt-12 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {depthRows.map(([label, value]) => (
+              <article key={label} className="rounded-2xl border border-neutral-200 bg-white p-5">
+                <div className="text-xs font-black uppercase tracking-[0.2em] text-neutral-500">{label}</div>
+                <p className="mt-3 text-sm font-bold leading-6 text-neutral-600">{value}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section id="demo" className="bg-white px-5 py-20 text-neutral-950">
         <div className="mx-auto max-w-7xl">
           <div className="grid gap-10 lg:grid-cols-[0.85fr_1.15fr] lg:items-start">
             <div>
-              <SectionLabel tone="text-cyan-300">Demo Path</SectionLabel>
-              <h2 className="mt-4 text-4xl font-black leading-tight text-white sm:text-6xl">
-                Walk every feature through one coherent story.
-              </h2>
-              <p className="mt-5 text-lg leading-8 text-neutral-300">
-                This is the route I would show judges: foundation data, guest experience generation, accessibility, live operations, guest triage, ops copilot, monitoring, staff learning, external-agent trust, and cloud/memory proof.
+              <SectionLabel tone="text-cyan-700">11 / Demo Path</SectionLabel>
+              <h2 className="mt-4 text-4xl font-black leading-tight sm:text-6xl">Run the story from memory to audit.</h2>
+              <p className="mt-5 text-lg leading-8 text-neutral-600">
+                One route through the product: memory, plan, guest, ops, policy, learning, architecture.
               </p>
             </div>
 
-            <div className="grid gap-3">
-              {demoSteps.map((step, index) => (
-                <a key={step.label} href={step.route} className="rounded-2xl border border-white/10 bg-neutral-900 p-5 transition hover:border-cyan-300/60">
-                  <div className="grid gap-4 sm:grid-cols-[58px_1fr_auto] sm:items-center">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white text-sm font-black text-neutral-950">{index + 1}</div>
+            <div className="grid gap-2 md:grid-cols-2">
+              {demoSteps.map(([label, route, detail], index) => (
+                <a key={label} href={route} className="rounded-2xl border border-neutral-200 bg-neutral-50 p-3 transition hover:border-neutral-950">
+                  <div className="grid gap-3 sm:grid-cols-[40px_1fr] sm:items-start">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-full bg-neutral-950 text-xs font-black text-white">{index + 1}</div>
                     <div>
-                      <div className="text-xl font-black text-white">{step.label}</div>
-                      <p className="mt-2 text-sm leading-6 text-neutral-300">{step.detail}</p>
+                      <div className="text-base font-black text-neutral-950">{label}</div>
+                      <p className="mt-1 text-xs font-bold leading-5 text-neutral-600">{detail}</p>
+                      <div className="mt-2 text-[10px] font-black uppercase tracking-[0.12em] text-cyan-700">{route}</div>
                     </div>
-                    <div className="w-fit rounded-full bg-cyan-300 px-3 py-1.5 text-xs font-black text-neutral-950">{step.route}</div>
                   </div>
                 </a>
               ))}

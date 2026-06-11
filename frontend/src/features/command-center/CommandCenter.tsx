@@ -2,17 +2,12 @@
 
 import { lazy, Suspense } from "react";
 import { DecisionBriefPanel } from "./DecisionBriefPanel";
+import { OperationsStoryPanel } from "./OperationsStoryPanel";
 import { ParkStateStrip } from "./ParkStateStrip";
 import { useCommandCenter } from "./useCommandCenter";
 
 const LiveFeedReviewPanel = lazy(() => import("./LiveFeedReviewPanel").then((module) => ({ default: module.LiveFeedReviewPanel })));
-const ReviewLabelPipelinePanel = lazy(() => import("./ReviewLabelPipelinePanel").then((module) => ({ default: module.ReviewLabelPipelinePanel })));
-const RoleAccessPanel = lazy(() => import("./RoleAccessPanel").then((module) => ({ default: module.RoleAccessPanel })));
-const StaffTrainingAnalyticsPanel = lazy(() => import("./StaffTrainingAnalyticsPanel").then((module) => ({ default: module.StaffTrainingAnalyticsPanel })));
-const ProductLoopPanel = lazy(() => import("./ProductLoopPanel").then((module) => ({ default: module.ProductLoopPanel })));
-const ActualTrainingPanel = lazy(() => import("./ActualTrainingPanel").then((module) => ({ default: module.ActualTrainingPanel })));
 const DispatchApprovalPanel = lazy(() => import("./DispatchApprovalPanel").then((module) => ({ default: module.DispatchApprovalPanel })));
-const EvalReceiptPanel = lazy(() => import("./EvalReceiptPanel").then((module) => ({ default: module.EvalReceiptPanel })));
 
 function PanelFallback({ label }: { label: string }) {
   return (
@@ -41,35 +36,20 @@ export function CommandCenter() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <a href="/launch" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-white transition hover:border-white hover:text-cyan-100">
-                Launch
-              </a>
-              <a href="/human" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
-                Human view
-              </a>
               <a href="/ops-agent" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-cyan-100 transition hover:border-cyan-300">
                 Ops Agent
-              </a>
-              <a href="/staff-training" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-teal-100 transition hover:border-teal-300">
-                Staff trainer
               </a>
               <a href="/monitor" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
                 Monitor
               </a>
+              <a href="/operation-proof" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-cyan-100 transition hover:border-cyan-300">
+                Runtime proof
+              </a>
               <a href="/executive" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
                 Executive
               </a>
-              <a href="/venue-profile" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-300">
-                Venue Profile
-              </a>
-              <a href="/experience-studio" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-300">
-                Experience Studio
-              </a>
-              <a href="/accessibility-journey" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-300">
-                Accessibility Journey
-              </a>
-              <a href="/labs" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-400 transition hover:border-amber-400 hover:text-amber-100">
-                Labs
+              <a href="/" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-300 transition hover:border-white hover:text-cyan-100">
+                All modules
               </a>
             </div>
           </div>
@@ -80,10 +60,57 @@ export function CommandCenter() {
           isConnected={command.isConnected}
           isRefreshing={command.isRefreshing}
           lastUpdatedAt={command.lastUpdatedAt}
+          liveTick={command.liveTick}
           livePollMs={command.livePollMs}
           connectionError={command.connectionError}
+          isLiveLoopRunning={command.isLiveLoopRunning}
           onRefresh={() => void command.refreshParkState()}
+          onStartLiveLoop={command.startLiveLoop}
+          onStopLiveLoop={command.stopLiveLoop}
         />
+
+        <OperationsStoryPanel
+          parkState={command.parkState}
+          runTelemetry={command.runTelemetry}
+          selectedAction={command.selectedAction}
+          policyGate={command.policyGate}
+          evalScore={command.evalScore}
+          dispatches={command.dispatches}
+          actualTraining={command.actualTraining}
+          liveFeedHealth={command.liveFeedHealth}
+          feedReliabilityGate={command.feedReliabilityGate}
+          autopilotDecision={command.autopilotDecision}
+          isAutopilotEnabled={command.isAutopilotEnabled}
+          isAutopilotRunning={command.isAutopilotRunning}
+          isRunning={command.isRunning}
+          onSetAutopilotEnabled={command.setAutopilotEnabled}
+          onRunAutopilot={() => void command.runAutopilotCycle()}
+          onRunIncidentReview={() => void command.runAgent({ injectUnexpectedEvent: true })}
+          onRunLiveFeedCase={() => void command.runLiveFeedAgent()}
+          onRunNegotiationCase={() => void command.runDepartmentNegotiationDemo()}
+        />
+
+        <Suspense fallback={<PanelFallback label="Loading live feed review" />}>
+          <LiveFeedReviewPanel
+            health={command.liveFeedHealth}
+            ledger={command.reviewTrainingLedger}
+            isLoading={command.isLiveFeedHealthLoading}
+            isAutoRecovering={command.isAutoRecoveringLiveFeeds}
+            weatherLoad={command.liveWeatherLoad}
+            rideOpsLoad={command.liveRideOpsLoad}
+            guestFlowLoad={command.liveGuestFlowLoad}
+            staffingLoad={command.liveStaffingLoad}
+            foodOpsLoad={command.liveFoodOpsLoad}
+            operatorSignalLoad={command.liveOperatorSignalLoad}
+            refreshSupervisor={command.liveFeedRefreshSupervisor}
+            reliabilityGate={command.feedReliabilityGate}
+            onRefresh={() => void command.refreshLiveFeedHealth()}
+            onRefreshStale={() => void command.refreshStaleLiveFeeds()}
+            onReviewDecision={(caseId, decision) => void command.recordReviewDecision(caseId, decision)}
+            canManageFeeds={command.canManageFeeds}
+            canReviewCases={command.canReviewCases}
+          />
+        </Suspense>
 
         <DecisionBriefPanel
           runTelemetry={command.runTelemetry}
@@ -96,59 +123,11 @@ export function CommandCenter() {
           isRunning={command.isRunning}
           statusMessage={command.statusMessage}
           errorMessage={command.errorMessage ?? command.connectionError}
-          startupLoadTimings={command.startupLoadTimings}
+          autopilotDecision={command.autopilotDecision}
+          isAutopilotEnabled={command.isAutopilotEnabled}
+          isAutopilotRunning={command.isAutopilotRunning}
+          feedReliabilityGate={command.feedReliabilityGate}
         />
-
-        <Suspense fallback={<PanelFallback label="Loading live feed review" />}>
-          <LiveFeedReviewPanel
-            health={command.liveFeedHealth}
-            ledger={command.reviewTrainingLedger}
-            isLoading={command.isLiveFeedHealthLoading}
-            isLoadingWeather={command.isLoadingLiveWeather}
-            isLoadingRideOps={command.isLoadingLiveRideOps}
-            isLoadingGuestFlow={command.isLoadingLiveGuestFlow}
-            isLoadingStaffing={command.isLoadingLiveStaffing}
-            isLoadingFoodOps={command.isLoadingLiveFoodOps}
-            isLoadingOperatorSignal={command.isLoadingLiveOperatorSignal}
-            weatherLoad={command.liveWeatherLoad}
-            rideOpsLoad={command.liveRideOpsLoad}
-            guestFlowLoad={command.liveGuestFlowLoad}
-            staffingLoad={command.liveStaffingLoad}
-            foodOpsLoad={command.liveFoodOpsLoad}
-            operatorSignalLoad={command.liveOperatorSignalLoad}
-            refreshSupervisor={command.liveFeedRefreshSupervisor}
-            onRefresh={() => void command.refreshLiveFeedHealth()}
-            onRefreshStale={() => void command.refreshStaleLiveFeeds()}
-            onLoadWeather={() => void command.loadLiveWeatherFeed()}
-            onLoadRideOps={() => void command.loadLiveRideOpsFeed()}
-            onLoadGuestFlow={() => void command.loadLiveGuestFlowFeed()}
-            onLoadStaffing={() => void command.loadLiveStaffingFeed()}
-            onLoadFoodOps={() => void command.loadLiveFoodOpsFeed()}
-            onLoadOperatorSignal={() => void command.loadLiveOperatorSignalFeed()}
-            onReviewDecision={(caseId, decision) => void command.recordReviewDecision(caseId, decision)}
-            canManageFeeds={command.canManageFeeds}
-            canReviewCases={command.canReviewCases}
-          />
-        </Suspense>
-
-        <Suspense fallback={<PanelFallback label="Loading review and role panels" />}>
-          <ReviewLabelPipelinePanel
-            pipeline={command.reviewLabelPipeline}
-            isLoading={command.isReviewLabelPipelineLoading}
-            onRefresh={() => void command.refreshReviewLabelPipeline()}
-            onAutoLabel={() => void command.autoLabelHighConfidenceReviewLabels()}
-            onDecision={(candidate, decision, finalLabel) => void command.recordReviewLabelDecision(candidate, decision, finalLabel)}
-            canReviewLabels={command.canReviewLabels}
-          />
-
-          <RoleAccessPanel
-            contracts={command.roleAccess}
-            isLoading={command.isRoleAccessLoading}
-            onRefresh={() => void command.refreshRoleAccess()}
-          />
-
-          <StaffTrainingAnalyticsPanel />
-        </Suspense>
 
         {(command.statusMessage || command.errorMessage || command.connectionError) && (
           <section className="rounded-lg border border-slate-800 bg-slate-950 p-3">
@@ -158,60 +137,7 @@ export function CommandCenter() {
         )}
 
         <div className="space-y-5">
-          <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Operating loop</div>
-                <h2 className="mt-1 text-xl font-black text-slate-100">Signals, features, predictors, optimizer, gate, execute or review, learn</h2>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => void command.runLiveFeedAgent()}
-                  disabled={command.isRunning}
-                  className="w-fit rounded border border-emerald-300 bg-emerald-300 px-4 py-3 text-sm font-black text-slate-950 transition hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Live feed case
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void command.runDepartmentNegotiationDemo()}
-                  disabled={command.isRunning}
-                  className="w-fit rounded border border-amber-300 bg-amber-300 px-4 py-3 text-sm font-black text-slate-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Department demo
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void command.runAgent()}
-                  disabled={command.isRunning}
-                  className="w-fit rounded border border-cyan-300 bg-cyan-300 px-5 py-3 text-sm font-black text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {command.isRunning ? "Running loop" : "Run operating loop"}
-                </button>
-              </div>
-            </div>
-          </section>
-
-          <Suspense fallback={<PanelFallback label="Loading operating loop panels" />}>
-            <ProductLoopPanel
-              parkState={command.parkState}
-              runTelemetry={command.runTelemetry}
-              dispatches={command.dispatches}
-              evals={command.activeEvalScores}
-              selectedAction={command.selectedAction}
-              policyGate={command.policyGate}
-              memoryMode={command.memoryMode}
-              liveAgentsSmoke={command.liveAgentsSmoke}
-            />
-            <ActualTrainingPanel
-              training={command.actualTraining}
-              isLoading={command.isTrainingLoading}
-              isStartingGcpTraining={command.isStartingGcpTraining}
-              onRefresh={() => void command.refreshActualTraining()}
-              onStartGcpTraining={() => void command.refreshActualTraining({ runGcpTraining: true })}
-              canStartTraining={command.canStartTraining}
-            />
+          <Suspense fallback={<PanelFallback label="Loading dispatch controls" />}>
             <DispatchApprovalPanel
               dispatches={command.dispatches}
               humanApproval={command.policyGate?.toLowerCase().includes("review") ?? false}
@@ -221,15 +147,6 @@ export function CommandCenter() {
               onAcknowledge={(dispatch, choice) => void command.acknowledgeDispatch(dispatch, choice)}
               canExecute={command.canExecute}
               canAcknowledge={command.canAcknowledge}
-            />
-            <EvalReceiptPanel
-              evals={command.activeEvalScores}
-              telemetry={command.runTelemetry}
-              integrationStatus={command.integrationStatus}
-              gcpLiveReadiness={command.gcpLiveReadiness}
-              operatingLoopResilience={command.operatingLoopResilience}
-              evalScore={command.evalScore}
-              memoryMode={command.memoryMode}
             />
           </Suspense>
         </div>

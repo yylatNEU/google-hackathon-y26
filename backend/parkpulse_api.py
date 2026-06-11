@@ -251,7 +251,7 @@ from park_review import build_review_snapshot
 from park_replay_store import backup_replay_store, replay_collaboration_context, replay_store_status
 from park_scenarios import get_park_scenarios
 from park_signal_intake import classify_unstructured_signal, fuse_signal_batch, latest_signals, realistic_signal_batch
-from live_feedback_loop import apply_live_food_ops_to_state, apply_live_guest_flow_to_state, apply_live_operator_signal_to_state, apply_live_ride_ops_to_state, apply_live_staffing_to_state, apply_live_weather_to_state, ingest_live_feed_event, ingest_live_feed_events, live_feed_health, record_review_decision, review_training_ledger
+from live_feedback_loop import apply_live_food_ops_to_state, apply_live_guest_flow_to_state, apply_live_operator_signal_to_state, apply_live_ride_ops_to_state, apply_live_staffing_to_state, apply_live_weather_to_state, ingest_live_feed_event, ingest_live_feed_events, live_feed_health, live_feed_health_summary, record_review_decision, review_training_ledger
 from guest_flow_live_feed import ingest_live_guest_flow_feed, guest_flow_feed_config
 from ops_remaining_live_feeds import food_ops_feed_config, ingest_live_food_ops_feed, ingest_live_operator_signal_feed, ingest_live_staffing_feed, operator_signal_feed_config, staffing_feed_config
 from ride_ops_live_feed import ingest_live_ride_ops_feed, ride_ops_feed_config
@@ -546,8 +546,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-setup_arize_tracing()
-setup_gcp_cloud_trace_exporter()
 tracer = _get_tracer("parkpulse.api")
 
 
@@ -738,7 +736,8 @@ async def park_agent_onboarding_revoke_credential(request: Request, body: dict[s
 
 
 @app.get("/api/park/agent-trust/status")
-async def park_agent_trust_status():
+async def park_agent_trust_status(request: Request):
+    _require_role_action(request, "manage_agent_trust", "agent_trust_status", default_role="ml_ops_admin")
     return {**agent_trust_registry_status(), "auth_boundary": _identity_readiness_payload()}
 
 
@@ -787,7 +786,8 @@ async def park_agent_onboarding_get(agent_id: str):
 
 
 @app.post("/api/park/agent-onboarding/{agent_id}/certify")
-async def park_agent_onboarding_certify(agent_id: str, body: dict[str, Any] | None = None):
+async def park_agent_onboarding_certify(agent_id: str, request: Request, body: dict[str, Any] | None = None):
+    _require_role_action(request, "manage_agent_trust", "agent_onboarding_certification", body or {}, default_role="ml_ops_admin")
     try:
         return certify_agent_onboarding(agent_id, body or {}, park_state=await park_simulation.get_state_lite())
     except KeyError as error:
@@ -2013,6 +2013,579 @@ def _role_proposal_route_for_agent_run(scenario_key: str, operator_route: dict[s
     return {"route": "scenario_run", "scenario_key": scenario_key}
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _compact_policy_state(state: dict[str, Any], scenario_key: str, selected_action: dict[str, Any] | None = None) -> dict[str, Any]:
+    flow = _as_dict(state.get("guestFlow"))
+    active = _as_dict(flow.get("activeScenario"))
+    zones = _as_list(flow.get("zones"))
+    rides = _as_list(flow.get("rides"))
+    food_zones = [zone for zone in zones if isinstance(zone, dict) and str(zone.get("processType", "")).lower() == "food"]
+    top_zone = max([zone for zone in zones if isinstance(zone, dict)], key=lambda zone: float(zone.get("density", 0) or 0), default={})
+    top_food = max(food_zones, key=lambda zone: float(zone.get("waitMins", 0) or zone.get("density", 0) or 0), default={})
+    slowest_ride = max([ride for ride in rides if isinstance(ride, dict)], key=lambda ride: float(ride.get("waitMins", 0) or 0), default={})
+    staffing = _as_dict(state.get("staffing"))
+    weather = _as_dict(state.get("weather"))
+    selected_action = selected_action or {}
+    return {
+        "scenario": scenario_key or active.get("key"),
+        "active_scenario": active,
+        "selected_action": {
+            "target": selected_action.get("target"),
+            "action": selected_action.get("action"),
+            "label": selected_action.get("label") or selected_action.get("title"),
+            "owner": selected_action.get("owner"),
+        },
+        "top_zone": {
+            "id": top_zone.get("id"),
+            "name": top_zone.get("name"),
+            "density": top_zone.get("density"),
+            "waitMins": top_zone.get("waitMins"),
+        },
+        "slowest_ride": {
+            "id": slowest_ride.get("id"),
+            "name": slowest_ride.get("name"),
+            "status": slowest_ride.get("status"),
+            "waitMins": slowest_ride.get("waitMins"),
+        },
+        "food_pressure": {
+            "zone": top_food.get("id") or top_food.get("name"),
+            "waitMins": top_food.get("waitMins"),
+            "density": top_food.get("density"),
+            "mobileOrderBacklog": top_food.get("mobileOrderBacklog") or top_food.get("backlog"),
+            "pickupEtaMinutes": top_food.get("pickupEtaMinutes") or top_food.get("etaMinutes"),
+        },
+        "staffing": {
+            "openCallouts": staffing.get("openCallouts"),
+            "availableFloaters": staffing.get("availableFloaters"),
+            "fatigueRisk": staffing.get("fatigueRisk"),
+        },
+        "weather": {
+            "stormRisk": weather.get("stormRisk") or weather.get("storm_risk"),
+            "heatIndex": weather.get("heatIndex"),
+        },
+    }
+
+
+def _policy_refs_from_contract(policy_contract: dict[str, Any], interpreted_policy: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for source in (
+        policy_contract.get("policy_refs"),
+        policy_contract.get("resolved_refs"),
+        interpreted_policy.get("policy_refs"),
+    ):
+        for ref in _as_list(source):
+            if ref and str(ref) not in refs:
+                refs.append(str(ref))
+    if not refs:
+        refs = ["PARK-OPS-BOUNDED-ACTION", "PARK-SAFE-HUMAN-AUTHORITY", "PARK-EXP-GUEST-COMMS"]
+    return refs[:14]
+
+
+def _build_policy_regulation_judgment(
+    *,
+    state: dict[str, Any],
+    scenario_key: str,
+    selected_action: dict[str, Any],
+    governance: dict[str, Any],
+    role_agent_proposals: dict[str, Any] | None = None,
+    operator_constraints: dict[str, Any] | None = None,
+    source: str = "reactive_agent_run",
+) -> dict[str, Any]:
+    role_agent_proposals = _as_dict(role_agent_proposals)
+    operator_constraints = _as_dict(operator_constraints)
+    selected_action = _as_dict(selected_action)
+    compact_state = _compact_policy_state(state, scenario_key, selected_action)
+    action_text = " ".join(
+        str(item)
+        for item in (
+            scenario_key,
+            selected_action.get("target"),
+            selected_action.get("action"),
+            selected_action.get("label") or selected_action.get("title"),
+            selected_action.get("expected_effect"),
+            operator_constraints.get("intent_summary"),
+            role_agent_proposals.get("generated_issue", {}).get("kind") if isinstance(role_agent_proposals.get("generated_issue"), dict) else None,
+        )
+        if item
+    )
+    doctrine = retrieve_operational_doctrine(action_text or scenario_key, compact_state)
+    interpreted = interpret_policy_for_action(action_text or scenario_key, compact_state, doctrine)
+    policy_contract = _as_dict(governance.get("policy_contract"))
+    gate_status = str(governance.get("gate_status") or "unknown")
+    findings = [str(item) for item in _as_list(governance.get("findings")) if item]
+    blocked_actions = [str(item) for item in _as_list(interpreted.get("blocked_actions")) if item]
+    required_evidence = [str(item) for item in _as_list(interpreted.get("required_evidence")) if item]
+    policy_refs = _policy_refs_from_contract(policy_contract, interpreted)
+    held_departments = []
+    executive_tradeoff = _as_dict(role_agent_proposals.get("executive_tradeoff"))
+    for department in _as_list(executive_tradeoff.get("held_departments")):
+        if department and str(department) not in held_departments:
+            held_departments.append(str(department))
+    for row in _as_list(role_agent_proposals.get("tradeoff_matrix")):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("verdict") or "").lower() != "approved_for_controlled_execution" and row.get("department"):
+            department = str(row.get("department"))
+            if department not in held_departments:
+                held_departments.append(department)
+
+    human_review_reasons: list[str] = []
+    if gate_status in {"review", "blocked"}:
+        human_review_reasons.extend(findings[:4] or [f"governance gate status is {gate_status}"])
+    selected_target = str(selected_action.get("target") or "").lower()
+    selected_verb = str(selected_action.get("action") or "").lower()
+    selected_label = str(selected_action.get("label") or selected_action.get("title") or "").lower()
+    selected_text = " ".join([selected_target, selected_verb, selected_label, str(selected_action.get("expected_effect") or "").lower()])
+    direct_human_authority_target = selected_target in {
+        "medical",
+        "security",
+        "emergency",
+        "maintenance_clearance",
+        "refund",
+        "payment",
+    }
+    direct_human_authority_verb = selected_verb in {
+        "dispatch_medical",
+        "evacuate",
+        "reopen",
+        "restart",
+        "clear",
+        "approve_clearance",
+        "refund",
+        "compensate",
+        "detain",
+    }
+    explicit_human_authority_phrases = (
+        "dispatch medical",
+        "dispatch security",
+        "evacuate",
+        "reopen ride",
+        "restart ride",
+        "clear for operation",
+        "grant clearance",
+        "approve clearance",
+        "issue refund",
+        "promise compensation",
+        "detain",
+    )
+    bounded_routing_actions = {
+        ("ride", "reroute"),
+        ("ride", "hold_and_reroute"),
+        ("traffic", "reroute"),
+        ("traffic", "redirect_food"),
+        ("guest_flow", "reroute"),
+        ("guest", "reroute"),
+        ("food", "rebalance"),
+    }
+    selected_needs_human_authority = (
+        direct_human_authority_target
+        or direct_human_authority_verb
+        or (
+            (selected_target, selected_verb) not in bounded_routing_actions
+            and any(phrase in selected_text for phrase in explicit_human_authority_phrases)
+        )
+    )
+    if interpreted.get("approval_required") and selected_needs_human_authority:
+        human_review_reasons.append("policy interpreter requires human approval for this selected action authority")
+    if held_departments:
+        findings.append(f"executive negotiation held departments for context: {', '.join(held_departments[:6])}")
+    if policy_contract.get("status") == "invalid":
+        human_review_reasons.append("policy contract validation returned invalid")
+    if operator_constraints.get("requires_human_review"):
+        human_review_reasons.append("operator route marked the request as human-review required")
+
+    if gate_status == "blocked" or policy_contract.get("status") == "invalid":
+        status = "blocked"
+    elif human_review_reasons:
+        status = "review_required"
+    else:
+        status = "allowed"
+
+    blocked_authorities = list(
+        dict.fromkeys(
+            [
+                "ride_reopening_or_maintenance_clearance",
+                "medical_diagnosis_or_emergency_command",
+                "security_detention_or_enforcement",
+                "refund_compensation_or_public_promise",
+                "uncertified_staff_reassignment_or_break_violation",
+                *blocked_actions[:8],
+            ]
+        )
+    )
+    return {
+        "status": status,
+        "source": source,
+        "hard_gate_status": gate_status,
+        "allowed_by_legacy_gate": bool(governance.get("allowed")),
+        "human_review_required": status == "review_required",
+        "approval_owner": "park_operations_executive" if status == "review_required" else None,
+        "policy_refs": policy_refs,
+        "findings": list(dict.fromkeys([*findings, *[str(item) for item in _as_list(interpreted.get("allowed_actions"))[:2]]]))[:10],
+        "human_review_reasons": list(dict.fromkeys(human_review_reasons))[:10],
+        "required_evidence": required_evidence[:12],
+        "blocked_authorities": blocked_authorities,
+        "interpreted_policy": {
+            "status": interpreted.get("status"),
+            "primary_case_id": interpreted.get("primary_case_id"),
+            "primary_case_title": interpreted.get("primary_case_title"),
+            "approval_required": interpreted.get("approval_required"),
+            "conflict_analysis": interpreted.get("conflict_analysis", {}),
+        },
+        "alignment_rule": "Execution is online when the legacy policy gate allows the action and the policy book does not require human authority for the selected bounded action.",
+    }
+
+
+def _build_backend_negotiation_trace(
+    *,
+    scenario_key: str,
+    selected_action: dict[str, Any],
+    role_agent_proposals: dict[str, Any] | None,
+    policy_regulation_judgment: dict[str, Any],
+    optimization: dict[str, Any] | None = None,
+    source: str = "reactive_agent_run",
+) -> dict[str, Any]:
+    role_agent_proposals = _as_dict(role_agent_proposals)
+    optimization = _as_dict(optimization)
+    rounds = _as_list(role_agent_proposals.get("negotiation_rounds"))
+    turns = _as_list(role_agent_proposals.get("negotiation_turns"))
+    conflicts = _as_list(role_agent_proposals.get("conflicts"))
+    proposals = _as_list(role_agent_proposals.get("proposals"))
+    tradeoff = _as_dict(role_agent_proposals.get("executive_tradeoff"))
+    selected_action = _as_dict(selected_action)
+
+    if not rounds and proposals:
+        rounds = [
+            {
+                "round": 1,
+                "name": "local_department_positions",
+                "claims": [
+                    {
+                        "agent": proposal.get("agent_id"),
+                        "department": proposal.get("department"),
+                        "wants": proposal.get("recommendation"),
+                        "policy_status": _as_dict(proposal.get("policy_judge")).get("status"),
+                    }
+                    for proposal in proposals
+                    if isinstance(proposal, dict)
+                ],
+            },
+            {"round": 2, "name": "cross_department_challenges", "challenges": conflicts},
+            {"round": 3, "name": "policy_regulation_judgment", "judgment": policy_regulation_judgment},
+        ]
+    elif not rounds:
+        rounds = [
+            {
+                "round": 1,
+                "name": "single_agent_policy_alignment",
+                "selected_action": selected_action,
+                "judgment": policy_regulation_judgment,
+            }
+        ]
+
+    final_status = (
+        "blocked"
+        if policy_regulation_judgment.get("status") == "blocked"
+        else "human_review_required"
+        if policy_regulation_judgment.get("status") == "review_required"
+        else "approved_for_bounded_execution"
+    )
+    selected_plan = _as_dict(optimization.get("selected_plan"))
+    accepted_role = _as_dict(optimization.get("decision_bridge_resolution")).get("accepted_role_proposal")
+    executive_adjudication = _as_dict(optimization.get("executive_adjudication"))
+    if executive_adjudication and not any(item.get("name") == "executive_mediation" for item in rounds if isinstance(item, dict)):
+        rounds = [
+            *rounds,
+            {
+                "round": len(rounds) + 1,
+                "name": "executive_mediation",
+                "adjudication": executive_adjudication,
+            },
+        ]
+    return {
+        "mode": "backend_multi_agent_negotiation_policy_alignment_v1",
+        "source": source,
+        "scenario_key": scenario_key,
+        "proposal_count": role_agent_proposals.get("proposal_count") or len(proposals),
+        "active_roles": role_agent_proposals.get("active_roles", []),
+        "rounds": rounds,
+        "turns": turns,
+        "conflicts": conflicts,
+        "tradeoff_matrix": role_agent_proposals.get("tradeoff_matrix", []),
+        "executive_tradeoff": tradeoff,
+        "selected_action": selected_action,
+        "accepted_role_proposal": accepted_role,
+        "selected_plan_id": selected_plan.get("id") or optimization.get("selected_plan_id"),
+        "executive_adjudication": executive_adjudication,
+        "policy_regulation_judgment": policy_regulation_judgment,
+        "final_executive_decision": {
+            "status": final_status,
+            "approval_owner": policy_regulation_judgment.get("approval_owner"),
+            "reason": (
+                "Policy/regulation judgment blocked the action."
+                if final_status == "blocked"
+                else "Human review is required before receiver dispatch or simulation mutation."
+                if final_status == "human_review_required"
+                else executive_adjudication.get("reason") or "Negotiation and policy alignment allow bounded execution."
+            ),
+            "initial_candidate_id": executive_adjudication.get("initial_candidate_id"),
+            "final_candidate_id": executive_adjudication.get("final_candidate_id"),
+            "rejected_candidates": executive_adjudication.get("rejected_candidates", []),
+        },
+    }
+
+
+def _backend_candidate_score(candidate: dict[str, Any]) -> int:
+    scorecard = candidate.get("scorecard", {}) if isinstance(candidate.get("scorecard"), dict) else {}
+    try:
+        return int(scorecard.get("overall") or candidate.get("estimated_score") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _backend_action_key(action: dict[str, Any]) -> str:
+    return f"{action.get('target')}/{action.get('action')}"
+
+
+def _backend_candidate_metrics(candidate: dict[str, Any]) -> dict[str, Any]:
+    scorecard = candidate.get("scorecard", {}) if isinstance(candidate.get("scorecard"), dict) else {}
+    metrics = scorecard.get("metrics", {}) if isinstance(scorecard.get("metrics"), dict) else {}
+    if metrics:
+        return metrics
+    projection = (
+        candidate.get("digital_twin_projection", {})
+        if isinstance(candidate.get("digital_twin_projection"), dict)
+        else {}
+    )
+    projection_scorecard = (
+        projection.get("scorecard", {})
+        if isinstance(projection.get("scorecard"), dict)
+        else {}
+    )
+    return projection_scorecard.get("metrics", {}) if isinstance(projection_scorecard.get("metrics"), dict) else {}
+
+
+def _backend_candidate_mediated_score(candidate: dict[str, Any]) -> dict[str, Any]:
+    base = _backend_candidate_score(candidate)
+    action = _backend_candidate_action(candidate)
+    action_key = _backend_action_key(action)
+    metrics = _backend_candidate_metrics(candidate)
+    food_delta = int(metrics.get("food_backlog_delta") or 0)
+    wait_delta = int(metrics.get("slowest_ride_wait_delta") or 0)
+    path_delta = int(metrics.get("path_congestion_delta") or 0)
+    density_delta = int(metrics.get("busiest_zone_density_delta") or 0)
+    satisfaction_delta = int(metrics.get("avg_satisfaction_delta") or 0)
+    adjustment = 0
+    reasons: list[str] = []
+    food_recovery_credit = min(24, max(0, -food_delta) // 8)
+    if food_recovery_credit:
+        adjustment += food_recovery_credit
+        reasons.append(f"food recovery credit +{food_recovery_credit}")
+    flow_credit = min(12, max(0, -wait_delta) // 5 + max(0, -path_delta) // 6 + max(0, -density_delta) // 4)
+    if flow_credit:
+        adjustment += flow_credit
+        reasons.append(f"flow relief credit +{flow_credit}")
+    if satisfaction_delta:
+        sat_adjustment = max(-10, min(10, satisfaction_delta * 2))
+        adjustment += sat_adjustment
+        reasons.append(f"satisfaction adjustment {sat_adjustment:+d}")
+    if action_key in {"traffic/redirect_food", "ride/reroute"} and food_delta >= 0:
+        penalty = 10 + min(12, max(0, wait_delta) // 4 + max(0, path_delta) // 4)
+        adjustment -= penalty
+        reasons.append(f"food-pressure persistence penalty -{penalty}")
+    constraint_violations: list[dict[str, Any]] = []
+    if satisfaction_delta < 0:
+        constraint_violations.append(
+            {
+                "metric": "avg_satisfaction_delta",
+                "delta": satisfaction_delta,
+                "reason": "Protected guest satisfaction cannot regress for an automatic action.",
+            }
+        )
+    if food_delta > 25:
+        constraint_violations.append(
+            {
+                "metric": "food_backlog_delta",
+                "delta": food_delta,
+                "reason": "Food backlog cannot materially regress for an automatic action.",
+            }
+        )
+    if wait_delta > 5:
+        constraint_violations.append(
+            {
+                "metric": "slowest_ride_wait_delta",
+                "delta": wait_delta,
+                "reason": "Ride wait cannot materially regress for an automatic action.",
+            }
+        )
+    if path_delta > 8:
+        constraint_violations.append(
+            {
+                "metric": "path_congestion_delta",
+                "delta": path_delta,
+                "reason": "Path congestion cannot materially regress for an automatic action.",
+            }
+        )
+    if density_delta > 5:
+        constraint_violations.append(
+            {
+                "metric": "busiest_zone_density_delta",
+                "delta": density_delta,
+                "reason": "Zone density cannot materially regress for an automatic action.",
+            }
+        )
+    mediated = max(0, min(150, base + adjustment))
+    return {
+        "base_score": base,
+        "mediated_score": mediated,
+        "adjustment": adjustment,
+        "action_key": action_key,
+        "constraint_status": "passed" if not constraint_violations else "blocked",
+        "constraint_violation_count": len(constraint_violations),
+        "constraint_violations": constraint_violations,
+        "metrics": metrics,
+        "reasons": reasons,
+    }
+
+
+def _backend_candidate_action(candidate: dict[str, Any]) -> dict[str, Any]:
+    action = candidate.get("selected_action") if isinstance(candidate.get("selected_action"), dict) else {}
+    if action:
+        return dict(action)
+    return {
+        "target": candidate.get("target"),
+        "action": candidate.get("action"),
+        "label": candidate.get("label") or candidate.get("name") or "candidate action",
+        "owner": candidate.get("owner") or "Decision Bridge",
+        "expected_effect": candidate.get("expected_effect") or candidate.get("summary"),
+    }
+
+
+def _apply_backend_executive_mediation(
+    optimization: dict[str, Any],
+    role_agent_proposals: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(optimization, dict):
+        return {"optimization": optimization, "adjudication": {"status": "not_available"}}
+    candidates = optimization.get("candidates", []) if isinstance(optimization.get("candidates"), list) else []
+    selected_plan = optimization.get("selected_plan", {}) if isinstance(optimization.get("selected_plan"), dict) else {}
+    if not candidates or not selected_plan:
+        adjudication = {
+            "status": "no_candidate_frame",
+            "reason": "Optimizer did not provide a selected plan and comparable candidates.",
+            "final_candidate_id": selected_plan.get("id"),
+        }
+        optimization["executive_adjudication"] = adjudication
+        return {"optimization": optimization, "adjudication": adjudication}
+
+    selected_id = str(selected_plan.get("id") or optimization.get("selected_plan_id") or "")
+    role_candidates = [item for item in candidates if item.get("source") == "role_agent_proposal"]
+    top_role = max(role_candidates, key=_backend_candidate_score, default=None)
+    top_overall = max(candidates, key=_backend_candidate_score, default=selected_plan)
+    conflicts = role_agent_proposals.get("conflicts", []) if isinstance(role_agent_proposals.get("conflicts"), list) else []
+    selected_score = _backend_candidate_score(selected_plan)
+    top_role_score = _backend_candidate_score(top_role) if isinstance(top_role, dict) else 0
+    top_overall_score = _backend_candidate_score(top_overall) if isinstance(top_overall, dict) else selected_score
+    final_plan = selected_plan
+    status = "kept_optimizer_selection"
+    reason = "Optimizer-selected plan retained after executive mediation."
+    challenger_ledgers = []
+    for candidate in [selected_plan, top_overall, top_role]:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = str(candidate.get("id") or "")
+        if candidate_id and any(item.get("candidate_id") == candidate_id for item in challenger_ledgers):
+            continue
+        role = candidate.get("role_proposal", {}) if isinstance(candidate.get("role_proposal"), dict) else {}
+        challenger_ledgers.append(
+            {
+                "candidate_id": candidate_id,
+                "source": candidate.get("source"),
+                "score": _backend_candidate_score(candidate),
+                "agent_id": role.get("agent_id"),
+                "role": role.get("role"),
+                "recommendation": role.get("recommendation"),
+            }
+        )
+
+    if (
+        conflicts
+        and isinstance(top_role, dict)
+        and str(top_role.get("id") or "") != selected_id
+        and top_role_score >= selected_score - 5
+    ):
+        final_plan = top_role
+        status = "negotiated_role_challenger_override"
+        reason = "Cross-role conflict existed and the best role-agent challenger was within five points of the optimizer selection."
+    elif (
+        isinstance(top_overall, dict)
+        and str(top_overall.get("id") or "") != selected_id
+        and top_overall_score >= selected_score + 8
+    ):
+        final_plan = top_overall
+        status = "negotiated_score_challenger_override"
+        reason = "A challenger exceeded the selected plan by at least eight score points."
+
+    if final_plan is not selected_plan:
+        final_action = _backend_candidate_action(final_plan)
+        final_plan = {**final_plan, "selected_action": final_action}
+        optimization["selected_plan"] = final_plan
+        optimization["selected_plan_id"] = final_plan.get("id")
+        optimization["decision_summary"] = f"{reason} Final action: {final_action.get('label') or final_action.get('action')}."
+        resolution = optimization.get("decision_bridge_resolution", {}) if isinstance(optimization.get("decision_bridge_resolution"), dict) else {}
+        role = final_plan.get("role_proposal", {}) if isinstance(final_plan.get("role_proposal"), dict) else {}
+        rejected = [
+            {
+                "candidate_id": selected_id,
+                "agent_id": None,
+                "role": None,
+                "recommendation": selected_plan.get("name") or selected_plan.get("label"),
+                "score": selected_score,
+                "reason": "Rejected by backend executive mediation in favor of a stronger conflict-resolution candidate.",
+            }
+        ]
+        optimization["decision_bridge_resolution"] = {
+            **resolution,
+            "selected_candidate_id": final_plan.get("id"),
+            "selected_source": final_plan.get("source"),
+            "accepted_role_proposal": role or resolution.get("accepted_role_proposal"),
+            "rejected_role_proposals": [*rejected, *(_as_list(resolution.get("rejected_role_proposals")) or [])][:6],
+            "summary": reason,
+        }
+
+    final_id = str(final_plan.get("id") or selected_id)
+    adjudication = {
+        "model_version": "v2_compromise_mediator",
+        "decision_policy": "score_and_conflict_compromise",
+        "status": status,
+        "reason": reason,
+        "initial_candidate_id": selected_id,
+        "final_candidate_id": final_id,
+        "score_gap_vs_initial": _backend_candidate_score(final_plan) - selected_score,
+        "conflict_count": len(conflicts),
+        "challenger_ledgers": challenger_ledgers,
+        "rejected_candidates": [
+            {
+                "candidate_id": item.get("candidate_id"),
+                "score": item.get("score"),
+                "reason": "lower V2 compromise utility than final candidate" if item.get("candidate_id") != final_id else "selected",
+            }
+            for item in challenger_ledgers
+            if item.get("candidate_id") != final_id
+        ],
+    }
+    optimization["ops_model_version"] = "v2_compromise_mediator"
+    optimization["executive_adjudication"] = adjudication
+    return {"optimization": optimization, "adjudication": adjudication}
+
+
 def _attach_unified_operating_receipt(payload: dict[str, Any], route: dict[str, Any], *, role: str = "react") -> dict[str, Any]:
     telemetry = payload.setdefault("run_telemetry", {})
     scenario_key = str(route.get("scenario_key") or telemetry.get("scenario_key") or "custom")
@@ -2055,6 +2628,8 @@ def _attach_unified_operating_receipt(payload: dict[str, Any], route: dict[str, 
         "tools": role_route.get("required_tools", []),
         "selected_action": selected_action or {"label": payload.get("operator_response", {}).get("headline"), "target": domain},
         "policy_result": telemetry.get("governance", {}) if isinstance(telemetry.get("governance"), dict) else {},
+        "policy_regulation_judgment": telemetry.get("policy_regulation_judgment", {}) if isinstance(telemetry.get("policy_regulation_judgment"), dict) else {},
+        "negotiation_trace": telemetry.get("negotiation_trace", {}) if isinstance(telemetry.get("negotiation_trace"), dict) else {},
         "dispatches": {
             "count": len(dispatches),
             "channels": sorted({str(item.get("channel")) for item in dispatches if isinstance(item, dict)}),
@@ -2150,10 +2725,14 @@ def _infer_operator_command_route(message: str, requested_mode: str = "auto") ->
         "ride_down": (
             "ride down",
             "coaster is down",
+            "goes down",
+            "went down",
+            "is down",
             "down for",
             "breakdown",
             "closed ride",
             "dragon coaster",
+            "thunder loop",
             "queue intake",
         ),
         "staff_shortage": (
@@ -2233,8 +2812,11 @@ def _infer_operator_command_route(message: str, requested_mode: str = "auto") ->
         key: sum(2 if " " in term and term in lowered else 1 for term in terms if term in lowered)
         for key, terms in scenario_terms.items()
     }
-    if any(term in lowered for term in ("ride", "coaster", "attraction")) and any(term in lowered for term in ("down", "broken", "closed", "stopped")):
-        scores["ride_down"] += 3
+    explicit_ride_outage = any(term in lowered for term in ("ride", "coaster", "attraction", "thunder loop", "dragon coaster")) and any(
+        term in lowered for term in ("down", "goes down", "went down", "broken", "closed", "stopped", "outage")
+    )
+    if explicit_ride_outage:
+        scores["ride_down"] += 5
     if any(term in lowered for term in ("staff", "worker", "break")) and any(term in lowered for term in ("protect", "avoid", "do not overload", "don't overload")):
         scores["staff_shortage"] = max(0, scores["staff_shortage"] - 1)
     scenario_key = max(scores, key=scores.get) if any(scores.values()) else "ride_down"
@@ -6018,6 +6600,8 @@ def build_run_trace_contract(
     memory: dict[str, Any],
     digital_twin_trace: dict[str, Any] | None = None,
     learning_proof: dict[str, Any] | None = None,
+    negotiation_trace: dict[str, Any] | None = None,
+    policy_regulation_judgment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     candidates = candidates or []
     selected_label = str(
@@ -6148,6 +6732,25 @@ def build_run_trace_contract(
             "allowed": policy_gate.get("allowed"),
         },
         {
+            "step": "policy_regulation_alignment",
+            "phase": "govern",
+            "evidence": "; ".join((policy_regulation_judgment or {}).get("human_review_reasons", [])[:3])
+            or "; ".join((policy_regulation_judgment or {}).get("findings", [])[:3])
+            or "Policy/regulation alignment judgment was not supplied.",
+            "artifact_id": ",".join((policy_regulation_judgment or {}).get("policy_refs", [])[:6]),
+            "status": (policy_regulation_judgment or {}).get("status", "not_supplied"),
+            "approval_owner": (policy_regulation_judgment or {}).get("approval_owner"),
+        },
+        {
+            "step": "agent_negotiation",
+            "phase": "decide",
+            "evidence": (negotiation_trace or {}).get("final_executive_decision", {}).get("reason")
+            or "Negotiation trace was not supplied.",
+            "artifact_id": (negotiation_trace or {}).get("mode", "not_supplied"),
+            "status": (negotiation_trace or {}).get("final_executive_decision", {}).get("status"),
+            "conflict_count": len((negotiation_trace or {}).get("conflicts", []) or []),
+        },
+        {
             "step": "payload_emit",
             "phase": "emit",
             "evidence": " / ".join(str(item.get("payload_summary")) for item in dispatch_trace[:3]),
@@ -6231,6 +6834,8 @@ def build_run_trace_contract(
         "candidate_actions": normalized_candidates,
         "selected_action": selected_action,
         "policy_gate": policy_gate,
+        "policy_regulation_judgment": policy_regulation_judgment or {},
+        "negotiation_trace": negotiation_trace or {},
         "policy_rules": policy_rules,
         "trace_table": trace_table,
         "dispatches": dispatch_trace,
@@ -6267,6 +6872,8 @@ async def _run_startup_check(name: str, func, timeout_seconds: float = 3.0) -> N
 
 async def _deferred_startup_initialization() -> None:
     _startup_status["deferred_initialization"] = "running"
+    await _run_startup_check("arize_tracing", setup_arize_tracing)
+    await _run_startup_check("gcp_cloud_trace", setup_gcp_cloud_trace_exporter)
     await _run_startup_check("platform_store", safe_migrate_platform_store)
     await _run_startup_check("memory", init_operational_memory)
     await _run_startup_check("audit_store", init_audit_store)
@@ -7004,12 +7611,15 @@ async def park_agent_run(request: ParkAgentRunRequest):
         optimization = optimize_park_response(state, scenario_key, context, plan)
         if operator_constraints:
             optimization = apply_operator_constraints_to_optimization(optimization, operator_constraints, state, scenario_key)
+        mediation_result = _apply_backend_executive_mediation(optimization, role_agent_proposals)
+        optimization = mediation_result["optimization"]
         workflow_timer.mark(
             "decide.optimizer",
             "local_tournament",
             candidate_source=optimization.get("candidate_source"),
             candidate_count=len(optimization.get("candidates", [])),
             selected_plan_id=optimization.get("selected_plan_id"),
+            mediation_status=mediation_result.get("adjudication", {}).get("status"),
         )
         digital_twin_trace = build_digital_twin_tool_trace(state, scenario_key, context, plan, optimization)
         workflow_timer.mark(
@@ -7052,23 +7662,62 @@ async def park_agent_run(request: ParkAgentRunRequest):
             allowed=selected_gate.get("allowed"),
             finding_count=len(selected_gate.get("findings", [])),
         )
+        preliminary_governance = {
+            "allowed": selected_gate["allowed"],
+            "gate_status": selected_gate["gate_status"],
+            "policy_contract": selected_gate["policy_contract"],
+            "findings": selected_gate["findings"],
+            "remediation_task": selected_gate["remediation_task"],
+            "customer_care_case": selected_gate["customer_care_case"],
+            "ledger_entry": selected_gate["ledger_entry"],
+        }
+        policy_regulation_judgment = _build_policy_regulation_judgment(
+            state=state,
+            scenario_key=scenario_key,
+            selected_action=selected,
+            governance=preliminary_governance,
+            role_agent_proposals=role_agent_proposals,
+            operator_constraints=operator_constraints,
+            source="reactive_agent_run",
+        )
+        negotiation_trace = _build_backend_negotiation_trace(
+            scenario_key=scenario_key,
+            selected_action=selected,
+            role_agent_proposals=role_agent_proposals,
+            policy_regulation_judgment=policy_regulation_judgment,
+            optimization=optimization,
+            source="reactive_agent_run",
+        )
+        policy_alignment_allows_execution = (
+            selected_gate["allowed"] and policy_regulation_judgment.get("status") == "allowed"
+        )
+        workflow_timer.mark(
+            "validate.policy_regulation_alignment",
+            "policy_doctrine+agent_negotiation",
+            status=policy_regulation_judgment.get("status"),
+            approval_owner=policy_regulation_judgment.get("approval_owner"),
+            conflict_count=len(negotiation_trace.get("conflicts", [])),
+        )
         if selected.get("target") and selected.get("action"):
-            if selected_gate["allowed"] and request.execute:
+            if policy_alignment_allows_execution and request.execute:
                 action_result = await park_simulation.execute_action(selected["target"], selected["action"])
                 clear_hot_endpoint_cache()
-            elif selected_gate["allowed"]:
+            elif policy_alignment_allows_execution:
                 action_result = {
                     "status": "preview",
                     "message": "Operator command generated an executable plan; execution was disabled for this request.",
                 }
             else:
                 action_result = {
-                    "status": "blocked" if selected_gate["gate_status"] == "blocked" else "pending_operator_approval",
+                    "status": "blocked"
+                    if selected_gate["gate_status"] == "blocked" or policy_regulation_judgment.get("status") == "blocked"
+                    else "pending_operator_approval",
                     "message": (
-                        "Policy gate blocked the selected agent action before execution."
-                        if selected_gate["gate_status"] == "blocked"
-                        else "Policy gate requires operator approval before execution."
+                        "Policy or regulation alignment blocked the selected agent action before execution."
+                        if selected_gate["gate_status"] == "blocked" or policy_regulation_judgment.get("status") == "blocked"
+                        else "Policy/regulation alignment requires operator approval before execution."
                     ),
+                    "policy_regulation_judgment": policy_regulation_judgment,
                 }
         else:
             action_result = {"status": "noop", "message": "No executable selected action."}
@@ -7108,6 +7757,8 @@ async def park_agent_run(request: ParkAgentRunRequest):
                 "timeout_seconds": plan.get("timeout_seconds"),
                 "errors": plan.get("errors", []),
                 "role_agent_proposals": role_agent_proposals,
+                "negotiation_trace": negotiation_trace,
+                "policy_regulation_judgment": policy_regulation_judgment,
             },
             memory_eval,
             updated_state,
@@ -7128,7 +7779,7 @@ async def park_agent_run(request: ParkAgentRunRequest):
                 decision_id,
                 action_mix=optimization.get("selected_plan", {}).get("action_mix"),
             )
-            if selected_gate["allowed"]
+            if policy_alignment_allows_execution
             else []
         )
         response_metrics = response_summary(delivery_dispatches)
@@ -7140,7 +7791,7 @@ async def park_agent_run(request: ParkAgentRunRequest):
             follow_through=response_metrics.get("reactiveFollowThroughRate"),
         )
         revision = revise_plan_after_response(optimization, response_metrics)
-        if revision:
+        if revision and policy_alignment_allows_execution:
             revision_dispatches = build_delivery_plan(
                 scenario_key,
                 revision.get("selected_action", selected),
@@ -7153,6 +7804,13 @@ async def park_agent_run(request: ParkAgentRunRequest):
             delivery_dispatches.extend(revision_dispatches)
             response_metrics = response_summary(delivery_dispatches)
             workflow_timer.mark("decide.revision", "local", revision_dispatch_count=len(revision_dispatches))
+        elif revision:
+            workflow_timer.mark(
+                "decide.revision",
+                "held_by_policy_alignment",
+                revision_dispatch_count=0,
+                policy_regulation_status=policy_regulation_judgment.get("status"),
+            )
         gate_summary = {
             "allowed": selected_gate["allowed"],
             "gate_status": selected_gate["gate_status"],
@@ -7252,6 +7910,8 @@ async def park_agent_run(request: ParkAgentRunRequest):
             "remediation_task": selected_gate["remediation_task"],
             "customer_care_case": selected_gate["customer_care_case"],
             "ledger_entry": selected_gate["ledger_entry"],
+            "policy_alignment_allowed": policy_alignment_allows_execution,
+            "policy_regulation_status": policy_regulation_judgment.get("status"),
         }
         trace_contract = build_run_trace_contract(
             run_id=decision_id,
@@ -7267,6 +7927,8 @@ async def park_agent_run(request: ParkAgentRunRequest):
             eval_result=eval_result,
             memory=memory_summary,
             digital_twin_trace=digital_twin_trace,
+            negotiation_trace=negotiation_trace,
+            policy_regulation_judgment=policy_regulation_judgment,
         )
         agent_workflow = workflow_timer.summary(
             route=operator_route or {"route": "scenario_run", "scenario_key": scenario_key},
@@ -7282,6 +7944,8 @@ async def park_agent_run(request: ParkAgentRunRequest):
             "operation_event": operation_event,
             "planner": plan,
             "role_agent_proposals": role_agent_proposals,
+            "negotiation_trace": negotiation_trace,
+            "policy_regulation_judgment": policy_regulation_judgment,
             "role_outcome_attribution": role_outcome_attribution,
             "role_proposal_memory": role_proposal_memory,
             "agent_findings": agent_findings,
@@ -7681,12 +8345,86 @@ async def _build_proactive_run_payload(emit_trace=None):
                 "Worker tasks are advisory dispatches with operator-visible ownership.",
             ],
         }
+        proactive_role_agent_proposals = {
+            "mode": "proactive_policy_alignment",
+            "active_roles": ["scan_agent", "proact_agent", "memory_agent", "policy_regulation_judge", "executive_bridge"],
+            "proposal_count": len(proactive_candidates),
+            "proposals": [
+                {
+                    "agent_id": item.get("agent") or "proact_agent",
+                    "department": "eventops",
+                    "recommendation": item.get("trigger"),
+                    "policy_judge": {"status": "passed", "reason": item.get("proactive_not_reactive")},
+                }
+                for item in proactive.get("insights", [])
+                if isinstance(item, dict)
+            ],
+            "negotiation_rounds": [
+                {
+                    "round": 1,
+                    "name": "early_signal_positions",
+                    "claims": [
+                        {
+                            "agent": item.get("agent") or "proact_agent",
+                            "wants": item.get("recommendation"),
+                            "evidence": item.get("evidence", []),
+                        }
+                        for item in proactive.get("insights", [])
+                        if isinstance(item, dict)
+                    ],
+                },
+                {
+                    "round": 2,
+                    "name": "policy_and_prevention_gate",
+                    "decisions": proactive_policy_gate.get("findings", []),
+                },
+            ],
+            "conflicts": [],
+            "executive_tradeoff": {
+                "decision": "approve_bounded_preventive_actions",
+                "reason": "Only reversible preventive actions and advisory receiver payloads are eligible.",
+            },
+        }
+        proactive_policy_regulation_judgment = _build_policy_regulation_judgment(
+            state=state,
+            scenario_key="proactive_eventops",
+            selected_action={
+                "target": "event",
+                "action": "proactive_commit",
+                "label": "Commit proactive pre-stage actions",
+                "owner": "EventOps Proactive Agent",
+                "expected_effect": brief.get("why_now", ""),
+            },
+            governance=proactive_policy_gate,
+            role_agent_proposals=proactive_role_agent_proposals,
+            operator_constraints={},
+            source="eventops_proactive_agent",
+        )
+        proactive_negotiation_trace = _build_backend_negotiation_trace(
+            scenario_key="proactive_eventops",
+            selected_action={
+                "target": "event",
+                "action": "proactive_commit",
+                "label": "Commit proactive pre-stage actions",
+                "owner": "EventOps Proactive Agent",
+                "expected_effect": brief.get("why_now", ""),
+            },
+            role_agent_proposals=proactive_role_agent_proposals,
+            policy_regulation_judgment=proactive_policy_regulation_judgment,
+            optimization={"selected_plan_id": "proactive_commit"},
+            source="eventops_proactive_agent",
+        )
+        proactive_alignment_allows_execution = proactive_policy_regulation_judgment.get("status") == "allowed"
         await publish_phase(
             "govern",
             "Govern",
             2,
             "3/6 Govern: safety, customer-care, staff authority, and equipment envelopes have passed policy gates.",
-            proactive_policy_gate,
+            {
+                **proactive_policy_gate,
+                "policy_regulation_judgment": proactive_policy_regulation_judgment,
+                "negotiation_trace": proactive_negotiation_trace,
+            },
         )
         decision_id = record_mongo_agent_decision(
             {
@@ -7719,13 +8457,16 @@ async def _build_proactive_run_payload(emit_trace=None):
                 "root_cause_classification": "proactive_event_monitoring",
                 "guest_message": "EventOps is pre-staging low-risk actions before event congestion appears.",
                 "digital_twin_tools": digital_twin_trace,
+                "role_agent_proposals": proactive_role_agent_proposals,
+                "negotiation_trace": proactive_negotiation_trace,
+                "policy_regulation_judgment": proactive_policy_regulation_judgment,
             },
             _proactive_eval_for_memory(proactive_eval),
             state,
             context,
             source="eventops_proactive_agent",
         )
-        dispatches = _build_proactive_dispatches(proactive, brief, decision_id, bigquery_priors)
+        dispatches = _build_proactive_dispatches(proactive, brief, decision_id, bigquery_priors) if proactive_alignment_allows_execution else []
         await publish_phase(
             "emit",
             "Emit",
@@ -7733,6 +8474,8 @@ async def _build_proactive_run_payload(emit_trace=None):
             "4/6 Emit: bounded payloads were created for guest app, worker device, and equipment control receivers.",
             {
                 "decision_id": decision_id,
+                "policy_alignment_allowed": proactive_alignment_allows_execution,
+                "policy_regulation_status": proactive_policy_regulation_judgment.get("status"),
                 "dispatch_count": len(dispatches),
                 "dispatches": [
                     {
@@ -7970,12 +8713,17 @@ async def _build_proactive_run_payload(emit_trace=None):
             memory=memory_summary,
             digital_twin_trace=digital_twin_trace,
             learning_proof=learning_proof,
+            negotiation_trace=proactive_negotiation_trace,
+            policy_regulation_judgment=proactive_policy_regulation_judgment,
         )
         return {
             "status": "complete",
             "decision_id": decision_id,
             "outcome_id": outcome_id,
             "trace_contract": trace_contract,
+            "role_agent_proposals": proactive_role_agent_proposals,
+            "negotiation_trace": proactive_negotiation_trace,
+            "policy_regulation_judgment": proactive_policy_regulation_judgment,
             "lifecycle": lifecycle,
             "intelligence_comparison": intelligence_comparison,
             "learning_proof": learning_proof,
@@ -8004,6 +8752,11 @@ async def _build_proactive_run_payload(emit_trace=None):
 @app.post("/api/park/proactive-run")
 async def park_proactive_run():
     payload = await _build_proactive_run_payload()
+    payload = _attach_unified_operating_receipt(
+        {"run_telemetry": payload, **payload},
+        {"route": "proactive_run", "scenario_key": "proactive_eventops", "selected_role": "proact", "skill": "parkpulse-proact-agent"},
+        role="proact",
+    )
     try:
         ledger_context = await asyncio.to_thread(retrieve_agent_ops_context, "proactive park operation", 3)
         payload.setdefault("memory", {})["agent_ops_ledger_retrieval"] = ledger_context
@@ -8857,6 +9610,52 @@ def _live_feed_health_cache_ttl_seconds() -> float:
     return max(0.0, _float_env("PARKPULSE_LIVE_FEED_HEALTH_CACHE_TTL_SECONDS", 3.0))
 
 
+def _live_feed_health_summary_cache_ttl_seconds() -> float:
+    return max(0.0, _float_env("PARKPULSE_LIVE_FEED_HEALTH_SUMMARY_CACHE_TTL_SECONDS", 30.0))
+
+
+async def _live_feed_health_summary_payload(limit: int = 120) -> dict[str, Any]:
+    bounded_limit = max(20, min(500, int(limit or 120)))
+    cache_key = f"summary:{bounded_limit}"
+    ttl = _live_feed_health_summary_cache_ttl_seconds()
+    now = time.time()
+    cached = _live_feed_health_cache.get(cache_key)
+    if cached and ttl > 0 and now - cached[0] <= ttl:
+        payload = dict(cached[1])
+        payload["cache"] = {"status": "hit", "ttl_seconds": ttl, "source": "live_feed_health_summary"}
+        return payload
+    get_state_lite = getattr(park_simulation, "get_state_lite", None)
+    state = await get_state_lite() if callable(get_state_lite) else None
+    timeout = max(0.5, _float_env("PARKPULSE_LIVE_FEED_HEALTH_SUMMARY_TIMEOUT_SECONDS", 3.0))
+    try:
+        payload = await asyncio.wait_for(asyncio.to_thread(live_feed_health_summary, state, bounded_limit), timeout=timeout)
+    except Exception as error:
+        text = str(error).strip() or f"Live feed health summary timed out after {timeout:g}s."
+        payload = {
+            "status": "refreshing",
+            "mode": "live_feed_health_summary_refreshing",
+            "created_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "summary": {
+                "required_feed_count": 0,
+                "ready_feed_count": 0,
+                "missing_or_weak_feed_count": 0,
+                "stale_feed_count": 0,
+                "low_confidence_feed_count": 0,
+                "open_review_count": 0,
+                "persisted_event_count": 0,
+            },
+            "feeds": [],
+            "open_reviews": [],
+            "readiness_issues": [text[:240]],
+            "boundary": "Summary timeout keeps Autopilot waiting for evidence without dispatching or promoting model changes.",
+            "uses_seed_data": False,
+            "llm_control_authority": False,
+        }
+    if ttl > 0 and payload.get("status") != "refreshing":
+        _live_feed_health_cache[cache_key] = (now, payload)
+    return {**payload, "cache": {"status": "miss", "ttl_seconds": ttl, "source": "live_feed_health_summary"}}
+
+
 async def _live_feed_health_payload(limit: int = 120) -> dict[str, Any]:
     bounded_limit = max(20, min(500, int(limit or 120)))
     cache_key = str(bounded_limit)
@@ -8953,6 +9752,11 @@ def _queue_live_weather_refresh(reason: str = "manual_refresh_supervisor") -> di
 @app.get("/api/park/live-feed-health")
 async def park_live_feed_health(limit: int = 120):
     return await _live_feed_health_payload(limit=limit)
+
+
+@app.get("/api/park/live-feed-health/summary")
+async def park_live_feed_health_summary(limit: int = 120):
+    return await _live_feed_health_summary_payload(limit=limit)
 
 
 @app.post("/api/park/live-feed-events")

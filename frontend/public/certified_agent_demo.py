@@ -17,7 +17,7 @@ def assert_passed(payload: dict, case_id: str) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run an external personal-agent ParkPulse handshake demo.")
-    parser.add_argument("--api", default="http://127.0.0.1:8001", help="ParkPulse API base URL.")
+    parser.add_argument("--api", default="http://127.0.0.1:8000", help="ParkPulse API base URL.")
     parser.add_argument("--agent-id", default=f"external_family_agent_{int(time.time())}", help="External agent id.")
     parser.add_argument("--guest-id", default="guest_user_123", help="Guest subject represented by the external agent.")
     args = parser.parse_args()

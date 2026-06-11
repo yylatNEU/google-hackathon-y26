@@ -17,6 +17,8 @@ def request_json(
     path: str,
     *,
     token: str,
+    role: str,
+    role_token: str,
     context: ssl.SSLContext | None,
     method: str = "GET",
     payload: dict[str, Any] | None = None,
@@ -28,6 +30,10 @@ def request_json(
         headers["Content-Type"] = "application/json"
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if role:
+        headers["x-parkpulse-role"] = role
+    if role_token:
+        headers["x-parkpulse-role-token"] = role_token
     request = urllib.request.Request(f"{base_url.rstrip('/')}{path}", data=body, headers=headers, method=method)
     with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -38,12 +44,18 @@ def read_first_sse_event(
     path: str,
     *,
     token: str,
+    role: str,
+    role_token: str,
     context: ssl.SSLContext | None,
     timeout: float = 8,
 ) -> dict[str, Any]:
     headers = {"Accept": "text/event-stream"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if role:
+        headers["x-parkpulse-role"] = role
+    if role_token:
+        headers["x-parkpulse-role-token"] = role_token
     request = urllib.request.Request(f"{base_url.rstrip('/')}{path}", headers=headers)
     started = time.perf_counter()
     with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
@@ -64,20 +76,22 @@ def read_first_sse_event(
     raise RuntimeError(f"No SSE event received from {path}")
 
 
-def verify_operator(base_url: str, token: str, context: ssl.SSLContext | None) -> dict[str, Any]:
+def verify_operator(base_url: str, token: str, role: str, role_token: str, context: ssl.SSLContext | None) -> dict[str, Any]:
     message = "Food court is down, redirect mobile orders and protect staff breaks."
     query = urllib.parse.urlencode({"message": message, "mode": "auto", "execute": "true"})
-    first = read_first_sse_event(base_url, f"/api/park/operator-command/stream?{query}", token=token, context=context)
+    first = read_first_sse_event(base_url, f"/api/park/operator-command/stream?{query}", token=token, role=role, role_token=role_token, context=context)
     recovered = request_json(
         base_url,
         "/api/park/operator-command",
         token=token,
+        role=role,
+        role_token=role_token,
         context=context,
         method="POST",
         payload={"message": message, "mode": "auto", "execute": True},
     )
     receipt_id = recovered.get("run_receipt", {}).get("id")
-    receipt = request_json(base_url, f"/api/park/run-receipt/{receipt_id}", token=token, context=context)
+    receipt = request_json(base_url, f"/api/park/run-receipt/{receipt_id}", token=token, role=role, role_token=role_token, context=context)
     return {
         "stream": "operator-command",
         "first_event": first.get("event"),
@@ -89,20 +103,22 @@ def verify_operator(base_url: str, token: str, context: ssl.SSLContext | None) -
     }
 
 
-def verify_proactive(base_url: str, token: str, context: ssl.SSLContext | None) -> dict[str, Any]:
+def verify_proactive(base_url: str, token: str, role: str, role_token: str, context: ssl.SSLContext | None) -> dict[str, Any]:
     query = urllib.parse.urlencode({"client_run_id": f"sse_recovery_{int(time.time())}"})
-    first = read_first_sse_event(base_url, f"/api/park/proactive-run/stream?{query}", token=token, context=context)
+    first = read_first_sse_event(base_url, f"/api/park/proactive-run/stream?{query}", token=token, role=role, role_token=role_token, context=context)
     recovered = request_json(
         base_url,
         "/api/park/proactive-run",
         token=token,
+        role=role,
+        role_token=role_token,
         context=context,
         method="POST",
         payload={},
         timeout=30,
     )
     receipt_id = recovered.get("run_receipt", {}).get("id")
-    receipt = request_json(base_url, f"/api/park/run-receipt/{receipt_id}", token=token, context=context)
+    receipt = request_json(base_url, f"/api/park/run-receipt/{receipt_id}", token=token, role=role, role_token=role_token, context=context)
     return {
         "stream": "proactive-run",
         "first_event": first.get("event"),
@@ -118,12 +134,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Verify ParkPulse SSE interruption recovery through non-streaming receipts.")
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--bearer-token", default=os.getenv("PARKPULSE_LOAD_BEARER_TOKEN", ""))
+    parser.add_argument("--role", default=os.getenv("PARKPULSE_ROLE", "ops_team"))
+    parser.add_argument("--role-token", default=os.getenv("PARKPULSE_ROLE_TOKEN", ""))
     parser.add_argument("--insecure-skip-tls-verify", action="store_true")
     parser.add_argument("--output-json", default="")
     args = parser.parse_args()
 
     context = ssl._create_unverified_context() if args.insecure_skip_tls_verify else None
-    results = [verify_operator(args.base_url, args.bearer_token, context), verify_proactive(args.base_url, args.bearer_token, context)]
+    results = [
+        verify_operator(args.base_url, args.bearer_token, args.role, args.role_token, context),
+        verify_proactive(args.base_url, args.bearer_token, args.role, args.role_token, context),
+    ]
     summary = {"base_url": args.base_url, "passed": all(item["passed"] for item in results), "results": results}
     print(json.dumps(summary, indent=2, sort_keys=True))
     if args.output_json:

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -11,15 +12,36 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 from env_bootstrap import load_backend_env
 
 
+os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
 load_backend_env()
 
-import main as parkpulse_lazy_main
-from main import app
 from park_role_access import authorize_role_action, identity_provider_readiness, normalize_role, verify_external_role_identity, verify_role_session
 
 
 _ASGI_LOOP: asyncio.AbstractEventLoop | None = None
 _ASGI_LOOP_THREAD: threading.Thread | None = None
+_PARKPULSE_MAIN: Any | None = None
+
+
+def _get_parkpulse_main() -> Any:
+    global _PARKPULSE_MAIN
+    if _PARKPULSE_MAIN is None:
+        import main as loaded_main
+
+        _PARKPULSE_MAIN = loaded_main
+    return _PARKPULSE_MAIN
+
+
+class _ParkPulseLazyMainProxy:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_get_parkpulse_main(), name)
+
+
+parkpulse_lazy_main = _ParkPulseLazyMainProxy()
+
+
+async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    await _get_parkpulse_main().app(scope, receive, send)
 
 
 def _asgi_loop() -> asyncio.AbstractEventLoop:
@@ -65,6 +87,8 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
         try:
             body = self.rfile.read(int(self.headers.get("content-length", "0") or 0))
         except TimeoutError:
+            return
+        if self._run_core_fast_path(parsed):
             return
         if self._run_health_fast_path(parsed.path):
             return
@@ -207,6 +231,187 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return False
 
+    def _fallback_park_state_lite(self) -> dict[str, Any]:
+        now = time.localtime()
+        return {
+            "product": {
+                "name": "ParkPulse AI",
+                "domain": "amusement_park_operations",
+                "one_liner": "Local operations copilot runtime fallback.",
+                "primary_collections": ["park_state", "incidents", "agent_decisions", "eval_results"],
+            },
+            "simTime": {"hour": now.tm_hour, "minute": now.tm_min, "day": 1, "seasonIndex": 0},
+            "weather": {"condition": "clear", "temperatureF": 74, "heatIndexF": 74, "humidity": 48, "windMph": 6, "stormRisk": 10},
+            "energy": {"gridLoadPercent": 54, "disruptionLoadMw": 0, "demandChargeRisk": "normal", "utilityPricePerMwh": 72, "carbonIntensity": 310},
+            "staffing": {"scheduled": 112, "checkedIn": 101, "openCallouts": 11, "medicalTeams": 3, "securityTeams": 6},
+            "parkOps": {
+                "mode": "local_fast_path",
+                "outdoorCapacityCutPct": 0,
+                "rideConflictCount": 0,
+                "atRiskRides": 1,
+                "guestRecoveryPressure": 22,
+                "staffReadyPct": 90,
+            },
+            "guestFlow": {
+                "activePolicy": "normal",
+                "activeScenario": {
+                    "key": "local_runtime_recovery",
+                    "name": "Local runtime recovery",
+                    "description": "Fast-path state is serving while the full runtime warms separately.",
+                    "condition": "degraded",
+                },
+                "interventions": ["hold review gates", "keep operator UI online"],
+                "representedGuests": 8854,
+                "avgSatisfaction": 70,
+                "activeGroups": 1107,
+                "zones": [
+                    {"id": "entrancePlaza", "name": "Entrance Plaza", "density": 42, "status": "clear"},
+                    {"id": "coasterPlaza", "name": "Coaster Plaza", "density": 63, "status": "watch"},
+                    {"id": "foodCourt1", "name": "Food Court", "density": 48, "status": "clear"},
+                ],
+                "paths": [
+                    {"id": "entrancePlaza->coasterPlaza", "from": "entrancePlaza", "to": "coasterPlaza", "congestionLevel": 38, "status": "clear"},
+                    {"id": "coasterPlaza->foodCourt1", "from": "coasterPlaza", "to": "foodCourt1", "congestionLevel": 44, "status": "clear"},
+                ],
+                "rides": [
+                    {"id": "dragonCoaster", "name": "Dragon Coaster", "waitMins": 54, "status": "open", "uptimePct": 97},
+                    {"id": "indoorLaunch", "name": "Indoor Launch", "waitMins": 31, "status": "open", "uptimePct": 98},
+                ],
+            },
+            "alerts": [],
+            "chaosEngine": {"activeUnexpectedEvents": [], "ruleCount": 8},
+            "runtime": {"status": "degraded_fast_path", "full_app_loaded": _PARKPULSE_MAIN is not None},
+        }
+
+    def _run_core_fast_path(self, parsed) -> bool:
+        path = parsed.path
+        if path in {
+            "/api/park/state-lite",
+            "/api/park/integration-status",
+            "/api/park/actual-training",
+            "/api/park/command-center",
+            "/api/gcp/live-readiness",
+            "/api/gcp/operating-loop-resilience",
+            "/api/park/live-agents-smoke/latest",
+            "/api/park/review-label-pipeline",
+            "/api/park/role-access-contracts",
+        } and self.command == "OPTIONS":
+            self._send_direct_options()
+            return True
+        if self.command != "GET":
+            return False
+        if path == "/api/park/state-lite":
+            self._send_direct_json(200, self._fallback_park_state_lite())
+            return True
+        if path == "/api/park/integration-status":
+            self._send_direct_json(
+                200,
+                {
+                    "status": "degraded",
+                    "mode": "lazy_dev_fast_path",
+                    "mongo": {"ready": False, "mode": "not_checked_during_startup"},
+                    "arize": {"ready": False, "mode": "not_checked_during_startup"},
+                    "gcp": {"ready": False, "mode": "not_checked_during_startup"},
+                    "readiness_issues": ["Full runtime import is deferred so the local app can stay online."],
+                },
+            )
+            return True
+        if path == "/api/park/actual-training":
+            self._send_direct_json(
+                200,
+                {
+                    "status": "degraded",
+                    "mode": "actual_outcome_training",
+                    "uses_generated_data": False,
+                    "source": "local_fast_path",
+                    "sample_count": 0,
+                    "min_sample_count": 50,
+                    "debug": {"readiness_issues": ["Full runtime training ledger is deferred during local startup recovery."]},
+                },
+            )
+            return True
+        if path == "/api/park/command-center":
+            state = self._fallback_park_state_lite()
+            self._send_direct_json(
+                200,
+                {
+                    "status": "degraded",
+                    "mode": "command_center_fast_path",
+                    "parkState": state,
+                    "runTelemetry": {
+                        "status": "deferred",
+                        "planner": {"runtime": "local_fast_path", "confidence_score": 0},
+                        "memory": {"mode": "deferred"},
+                    },
+                    "dispatches": [],
+                    "evals": [],
+                    "readiness_issues": ["Full command-center runtime is deferred so the shell remains usable."],
+                },
+            )
+            return True
+        if path == "/api/gcp/live-readiness":
+            self._send_direct_json(
+                200,
+                {
+                    "status": "degraded",
+                    "mode": "gcp_live_readiness_fast_path",
+                    "ready": False,
+                    "readiness_issues": ["Full GCP readiness check is deferred during local startup recovery."],
+                },
+            )
+            return True
+        if path == "/api/gcp/operating-loop-resilience":
+            self._send_direct_json(
+                200,
+                {
+                    "status": "degraded",
+                    "mode": "operating_loop_resilience_fast_path",
+                    "summary": {"status": "degraded", "checked_count": 0, "passing_count": 0},
+                    "readiness_issues": ["Full operating-loop resilience check is deferred during local startup recovery."],
+                },
+            )
+            return True
+        if path == "/api/park/live-agents-smoke/latest":
+            self._send_direct_json(
+                200,
+                {
+                    "status": "degraded",
+                    "mode": "live_all_agents_smoke",
+                    "summary": {"status": "degraded", "activated_role_count": 0, "activated_department_count": 0},
+                    "readiness_issues": ["Live agents smoke report is deferred during local startup recovery."],
+                },
+            )
+            return True
+        if path == "/api/park/review-label-pipeline":
+            self._send_direct_json(
+                200,
+                {
+                    "status": "degraded",
+                    "mode": "review_label_pipeline",
+                    "summary": {"candidate_count": 0, "open_count": 0, "decided_count": 0, "approved_label_count": 0, "training_candidate_count": 0},
+                    "candidates": [],
+                    "decided": [],
+                    "label_options": ["approve_label", "edit_label", "reject_label", "needs_more_evidence"],
+                    "labels_or_reward_changed": False,
+                    "llm_used_for_reward_or_label": False,
+                    "readiness_issues": ["Review label pipeline is deferred during local startup recovery."],
+                },
+            )
+            return True
+        if path == "/api/park/role-access-contracts":
+            self._send_direct_json(
+                200,
+                {
+                    "status": "degraded",
+                    "mode": "role_access_contracts_fast_path",
+                    "contracts": [],
+                    "surfaces": [],
+                    "readiness_issues": ["Role access contract detail is deferred during local startup recovery."],
+                },
+            )
+            return True
+        return False
+
     def _resolve_direct_payload(self, value: Any, timeout_seconds: float = 10.0) -> Any:
         if asyncio.iscoroutine(value):
             return asyncio.run(asyncio.wait_for(value, timeout=timeout_seconds))
@@ -318,9 +523,11 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
             "runtime": "python-fallback",
         }
         if path == "/readyz":
-            monitor_storage = parkpulse_lazy_main.monitor_evidence_storage_status()
-            payload["dependency_status"] = {"monitor_evidence_snapshot": monitor_storage}
-            payload["degraded_dependencies"] = [] if monitor_storage.get("ready") else ["monitor_evidence_snapshot is degraded or unavailable"]
+            payload["dependency_status"] = {
+                "lazy_dev_server": {"ready": True},
+                "full_runtime": {"ready": _PARKPULSE_MAIN is not None, "mode": "deferred_import"},
+            }
+            payload["degraded_dependencies"] = [] if _PARKPULSE_MAIN is not None else ["full_runtime import deferred"]
         self._send_direct_json(
             200,
             payload,
@@ -333,6 +540,7 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                 "/api/park/venue-profile",
                 "/api/park/experience-studio/conversation-plan",
                 "/api/park/experience-studio/draft",
+                "/api/park/experience-studio/event-team-pdf",
                 "/api/park/experience-studio/section-revision",
                 "/api/park/experience-studio/drafts",
                 "/api/park/experience-studio/memory",
@@ -405,6 +613,12 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                     payload["useRealParkContext"] = False
                     payload["realParkContextDeferred"] = True
                 self._send_direct_json(200, asyncio.run(build_experience_studio_payload(payload, None)))
+                return True
+            if self.command == "POST" and path == "/api/park/experience-studio/event-team-pdf":
+                from experience_studio import generate_experience_studio_event_team_pdf
+
+                result = generate_experience_studio_event_team_pdf(self._json_body(body))
+                self._send_direct_json(200, result)
                 return True
             if self.command == "POST" and path == "/api/park/experience-studio/section-revision":
                 from experience_studio import revise_experience_studio_section
@@ -612,6 +826,8 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                 self._send_direct_json(200, revoke_agent_certification_credential(payload))
                 return True
             if self.command == "GET" and path == "/api/park/agent-trust/status":
+                if not self._authorize_trust_admin("agent_trust_status", payload):
+                    return True
                 self._send_direct_json(200, {**agent_trust_registry_status(), "auth_boundary": self._identity_readiness_payload()})
                 return True
             if self.command == "GET" and path == "/api/park/agent-trust/partners":
@@ -652,6 +868,8 @@ class LazyAsgiHandler(BaseHTTPRequestHandler):
                     self._send_direct_json(200, get_agent_onboarding(agent_id))
                     return True
                 if self.command == "POST" and agent_id and action == "certify":
+                    if not self._authorize_trust_admin("agent_onboarding_certification", payload):
+                        return True
                     self._send_direct_json(200, certify_agent_onboarding(agent_id, payload))
                     return True
             if self.command == "POST" and path == "/api/park/handshake":

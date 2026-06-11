@@ -8,10 +8,6 @@ import urllib.error
 os.environ["MONGODB_DISABLE_DRIVER_IMPORT"] = "1"
 os.environ["PARKPULSE_MONGO_MODEL_EMBEDDINGS"] = "false"
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
-
 class FakeSimulation:
     async def get_state(self):
         return {"guestFlow": {"activeScenario": {"key": "ride_down"}}}
@@ -21,6 +17,9 @@ class FakeSimulation:
 
 
 def client_for(register, deps=None):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
     app = FastAPI()
     base_deps = {
         "park_simulation": FakeSimulation(),

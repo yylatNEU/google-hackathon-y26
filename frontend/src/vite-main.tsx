@@ -20,9 +20,15 @@ const VenueProfilePage = lazy(() => import("./app/venue-profile/page"));
 const AccessibilityJourneyPage = lazy(() => import("./app/accessibility-journey/page"));
 const AgentHandshakePage = lazy(() => import("./app/agent-handshake/page"));
 const OpsAgentPage = lazy(() => import("./app/ops-agent/page"));
+const OperationProofPage = lazy(() => import("./app/operation-proof/page"));
+const ModelValidationPage = lazy(() => import("./app/model-validation/page"));
 const LabsPage = lazy(() => import("./features/labs/LabsPage"));
 
 const routes: Array<{ prefix: string; page: ComponentType }> = [
+  { prefix: "/ops-agent", page: OpsAgentPage },
+  { prefix: "/operation-proof", page: OperationProofPage },
+  { prefix: "/model-validation", page: ModelValidationPage },
+  { prefix: "/ops", page: Home },
   { prefix: "/monitor", page: MonitorPage },
   { prefix: "/human", page: HumanEnhancementPage },
   { prefix: "/staff-training", page: StaffTrainingPage },
@@ -32,12 +38,11 @@ const routes: Array<{ prefix: string; page: ComponentType }> = [
   { prefix: "/venue-profile", page: VenueProfilePage },
   { prefix: "/accessibility-journey", page: AccessibilityJourneyPage },
   { prefix: "/agent-handshake", page: AgentHandshakePage },
-  { prefix: "/ops-agent", page: OpsAgentPage },
   { prefix: "/executive", page: ExecutivePage },
   { prefix: "/labs", page: LabsPage },
 ];
 
-const Page = routes.find((route) => window.location.pathname.startsWith(route.prefix))?.page ?? Home;
+const Page = routes.find((route) => window.location.pathname.startsWith(route.prefix))?.page ?? LaunchPage;
 
 createRoot(root).render(
   <StrictMode>

@@ -4,7 +4,7 @@ PERF_CONCURRENCY ?= 50
 PERF_TARGET_P95_MS ?= 250
 TEST_PYTHON ?= /tmp/parkpulse_backend_venv/bin/python
 
-.PHONY: qa qa-fast qa-release qa-live qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate loop-resilience loop-resilience-monitor live-agents-smoke live-feed-agent-smoke live-feed-training-closure live-feed-agent-report live-feed-learning-loop-validation experience-studio-dev experience-studio-demo-verify test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-judge-smoke gcp-judge-smoke-strict gcp-build-ops-agent-release gcp-deploy-private gcp-deploy-private-diagnostics gcp-deploy-frontend gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private gcp-verify-agent-roles gcp-preflight-mongo-model gcp-schedule-loop-resilience
+.PHONY: qa qa-fast qa-release qa-live qa-quick qa-backend qa-frontend qa-spring agent-role-eval-gate loop-resilience loop-resilience-monitor live-agents-smoke live-feed-agent-smoke live-feed-training-closure live-feed-agent-report live-feed-learning-loop-validation weekly-budget-prune one-day-timelapse-cost-probe one-day-timelapse-candidate-ranking-probe timelapse-policy-scorecard timelapse-frozen-benchmark timelapse-model-improvement timelapse-model-eval timelapse-memory-influence ranked-reasoning-action-report llm-policy-interpreter experience-studio-dev experience-studio-demo-verify test-unit test-integration-collect coverage coverage-backend coverage-frontend perf-smoke gcp-bootstrap gcp-local gcp-judge-smoke gcp-judge-smoke-strict gcp-build-ops-agent-release gcp-deploy-private gcp-deploy-private-diagnostics gcp-deploy-frontend gcp-dev-private gcp-proxy-private gcp-smoke-private gcp-validate-private gcp-verify-agent-roles gcp-preflight-mongo-model gcp-schedule-loop-resilience
 
 qa:
 	python3 scripts/qa_agent.py
@@ -53,6 +53,36 @@ live-feed-agent-report:
 
 live-feed-learning-loop-validation:
 	PYTHONPATH=backend:. python3 scripts/live_feed_learning_loop_validation.py
+
+weekly-budget-prune:
+	python3 scripts/prune_parkpulse_weekly_data.py
+
+one-day-timelapse-cost-probe:
+	PYTHONPATH=backend python3 scripts/run_one_day_timelapse_cost_probe.py
+
+one-day-timelapse-candidate-ranking-probe:
+	PYTHONPATH=backend python3 scripts/run_one_day_timelapse_cost_probe.py --call-gemini --gemini-candidate-ranking --execute-gemini-actions
+
+timelapse-policy-scorecard:
+	python3 scripts/evaluate_timelapse_policy_scorecard.py --run-dir "$(RUN_DIR)" $(if $(BASELINE_RUN_DIR),--baseline-run-dir "$(BASELINE_RUN_DIR)")
+
+timelapse-frozen-benchmark:
+	PYTHONPATH=backend:scripts python3 scripts/run_timelapse_frozen_benchmark.py $(if $(CALL_GEMINI),--call-gemini) $(if $(SCENARIOS),--scenarios "$(SCENARIOS)") $(if $(SEEDS),--seeds "$(SEEDS)") $(if $(SIM_MINUTES),--sim-minutes "$(SIM_MINUTES)") $(if $(GEMINI_RETRIES),--gemini-retries "$(GEMINI_RETRIES)") $(if $(COUNTERFACTUAL_HORIZON_MINUTES),--counterfactual-horizon-minutes "$(COUNTERFACTUAL_HORIZON_MINUTES)") $(if $(SCORE_GAP_OVERRIDE),--score-gap-override "$(SCORE_GAP_OVERRIDE)") $(if $(SCORE_CALIBRATION_REPORT),--score-calibration-report "$(SCORE_CALIBRATION_REPORT)") $(if $(USE_MONGODB_MEMORY),--use-mongodb-memory) $(if $(MEMORY_LIMIT),--memory-limit "$(MEMORY_LIMIT)")
+
+timelapse-model-improvement:
+	PYTHONPATH=backend python3 scripts/materialize_timelapse_model_improvement.py --benchmark-report "$(BENCHMARK_REPORT)" $(if $(PERSIST_MONGODB),--persist-mongodb)
+
+timelapse-model-eval:
+	PYTHONPATH=backend python3 scripts/evaluate_timelapse_model_improvement.py --eval-jsonl "$(EVAL_JSONL)" $(if $(CALL_GEMINI),--call-gemini) $(if $(USE_MONGODB_MEMORY),--use-mongodb-memory) $(if $(MEMORY_LIMIT),--memory-limit "$(MEMORY_LIMIT)")
+
+timelapse-memory-influence:
+	PYTHONPATH=backend:scripts python3 scripts/analyze_memory_influence.py --memory-report "$(MEMORY_REPORT)" $(if $(CONTROL_REPORT),--control-report "$(CONTROL_REPORT)")
+
+ranked-reasoning-action-report:
+	python3 scripts/render_ranked_reasoning_action_report.py $(if $(BASELINE_REPORT),--baseline-report "$(BASELINE_REPORT)") $(if $(EXPANDED_REPORT),--expanded-report "$(EXPANDED_REPORT)") $(if $(OUTPUT_ROOT),--output-root "$(OUTPUT_ROOT)")
+
+llm-policy-interpreter:
+	PYTHONPATH=backend python3 scripts/evaluate_llm_policy_interpreter.py $(if $(CALL_GEMINI),--call-gemini)
 
 experience-studio-dev:
 	scripts/dev_experience_studio.sh

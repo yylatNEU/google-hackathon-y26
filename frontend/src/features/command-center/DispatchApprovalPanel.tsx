@@ -3,6 +3,14 @@
 import type { DispatchView } from "./useCommandCenter";
 import { humanize } from "./style";
 
+function dispatchDecision(status?: string) {
+  const normalized = String(status ?? "").toLowerCase();
+  if (normalized.includes("approved")) return "approved";
+  if (normalized.includes("held")) return "held";
+  if (normalized.includes("acknowledged")) return "acknowledged";
+  return "";
+}
+
 export function DispatchApprovalPanel({
   dispatches,
   humanApproval,
@@ -22,20 +30,53 @@ export function DispatchApprovalPanel({
   canExecute: boolean;
   canAcknowledge: boolean;
 }) {
+  const approvedCount = dispatches.filter((dispatch) => dispatchDecision(dispatch.status) === "approved").length;
+  const heldCount = dispatches.filter((dispatch) => dispatchDecision(dispatch.status) === "held").length;
+  const decidedCount = dispatches.filter((dispatch) => dispatchDecision(dispatch.status)).length;
+  const pendingCount = Math.max(0, dispatches.length - decidedCount);
+  const hasDispatches = dispatches.length > 0;
+  const allApproved = hasDispatches && approvedCount === dispatches.length;
+  const hasHeld = heldCount > 0;
+  const canSendThroughGate = canExecute && hasDispatches && allApproved && !hasHeld;
+  const sendLabel = isDispatching
+    ? "Sending"
+    : !hasDispatches
+      ? "No payloads"
+      : hasHeld
+        ? "Held for review"
+        : pendingCount > 0
+          ? "Approve payloads first"
+          : "Send through gate";
+  const completionMessage = !hasDispatches
+    ? "Run an operating case to draft receiver payloads."
+    : hasHeld
+      ? "At least one receiver payload is held. Resolve or rerun before execution."
+      : allApproved
+        ? "All receiver payloads are approved and ready for gated execution."
+        : "Approve or hold each receiver payload before sending through the gate.";
+
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">LLM-drafted receiver payloads</div>
           <h2 className="mt-1 text-xl font-black text-slate-100">{humanApproval ? "Human approval required" : "Bounded dispatch ready"}</h2>
+          {dispatches.length ? (
+            <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest">
+              <span className="rounded bg-slate-900 px-2 py-1 text-slate-300">{pendingCount} pending</span>
+              <span className="rounded bg-emerald-950/40 px-2 py-1 text-emerald-100">{approvedCount} approved</span>
+              <span className="rounded bg-amber-950/40 px-2 py-1 text-amber-100">{heldCount} held</span>
+            </div>
+          ) : null}
+          <p className="mt-2 text-xs font-bold leading-relaxed text-slate-400">{completionMessage}</p>
         </div>
         <button
           type="button"
           onClick={onExecute}
-          disabled={isDispatching || !canExecute}
+          disabled={isDispatching || !canSendThroughGate}
           className="w-fit rounded border border-cyan-300 bg-cyan-300 px-4 py-2 text-xs font-black text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {isDispatching ? "Sending" : "Send through gate"}
+          {sendLabel}
         </button>
       </div>
       {!canExecute && (
@@ -45,7 +86,9 @@ export function DispatchApprovalPanel({
       )}
 
       <div className="mt-4 grid gap-3">
-        {dispatches.map((dispatch) => (
+        {dispatches.map((dispatch) => {
+          const decision = dispatchDecision(dispatch.status);
+          return (
           <div key={dispatch.id} className="rounded-lg border border-slate-800 bg-slate-900 p-3">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
@@ -62,23 +105,24 @@ export function DispatchApprovalPanel({
                 <button
                   type="button"
                   onClick={() => onAcknowledge(dispatch, "approved")}
-                  disabled={isApproving || !canAcknowledge}
+                  disabled={Boolean(decision) || isApproving || !canAcknowledge}
                   className="rounded border border-emerald-400 bg-emerald-400 px-3 py-2 text-xs font-black text-slate-950 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Approve
+                  {decision === "approved" ? "Approved" : "Approve"}
                 </button>
                 <button
                   type="button"
                   onClick={() => onAcknowledge(dispatch, "held_for_review")}
-                  disabled={isApproving || !canAcknowledge}
+                  disabled={Boolean(decision) || isApproving || !canAcknowledge}
                   className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-amber-300 hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Hold
+                  {decision === "held" ? "Held" : "Hold"}
                 </button>
               </div>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );

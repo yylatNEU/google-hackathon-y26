@@ -3,6 +3,7 @@
 import type {
   LiveFeedHealth,
   LiveFeedRefreshSupervisorResult,
+  FeedReliabilityGate,
   LiveFoodOpsLoadResult,
   LiveGuestFlowLoadResult,
   LiveOperatorSignalLoadResult,
@@ -38,12 +39,7 @@ export function LiveFeedReviewPanel({
   health,
   ledger,
   isLoading,
-  isLoadingWeather,
-  isLoadingRideOps,
-  isLoadingGuestFlow,
-  isLoadingStaffing,
-  isLoadingFoodOps,
-  isLoadingOperatorSignal,
+  isAutoRecovering,
   weatherLoad,
   rideOpsLoad,
   guestFlowLoad,
@@ -51,14 +47,9 @@ export function LiveFeedReviewPanel({
   foodOpsLoad,
   operatorSignalLoad,
   refreshSupervisor,
+  reliabilityGate,
   onRefresh,
   onRefreshStale,
-  onLoadWeather,
-  onLoadRideOps,
-  onLoadGuestFlow,
-  onLoadStaffing,
-  onLoadFoodOps,
-  onLoadOperatorSignal,
   onReviewDecision,
   canManageFeeds,
   canReviewCases,
@@ -66,12 +57,7 @@ export function LiveFeedReviewPanel({
   health: LiveFeedHealth | null;
   ledger: ReviewTrainingLedger | null;
   isLoading: boolean;
-  isLoadingWeather: boolean;
-  isLoadingRideOps: boolean;
-  isLoadingGuestFlow: boolean;
-  isLoadingStaffing: boolean;
-  isLoadingFoodOps: boolean;
-  isLoadingOperatorSignal: boolean;
+  isAutoRecovering: boolean;
   weatherLoad: LiveWeatherLoadResult | null;
   rideOpsLoad: LiveRideOpsLoadResult | null;
   guestFlowLoad: LiveGuestFlowLoadResult | null;
@@ -79,14 +65,9 @@ export function LiveFeedReviewPanel({
   foodOpsLoad: LiveFoodOpsLoadResult | null;
   operatorSignalLoad: LiveOperatorSignalLoadResult | null;
   refreshSupervisor: LiveFeedRefreshSupervisorResult | null;
+  reliabilityGate: FeedReliabilityGate;
   onRefresh: () => void;
   onRefreshStale: () => void;
-  onLoadWeather: () => void;
-  onLoadRideOps: () => void;
-  onLoadGuestFlow: () => void;
-  onLoadStaffing: () => void;
-  onLoadFoodOps: () => void;
-  onLoadOperatorSignal: () => void;
   onReviewDecision: (caseId: string, decision: "approve_for_state" | "request_corroboration" | "hold_for_review" | "escalate") => void;
   canManageFeeds: boolean;
   canReviewCases: boolean;
@@ -114,43 +95,10 @@ export function LiveFeedReviewPanel({
           <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Live feeds and review</div>
           <h2 className="mt-1 text-xl font-black text-slate-100">Operational data contract</h2>
           <div className="mt-2 max-w-4xl text-sm leading-relaxed text-slate-400">
-            Each feed is normalized before it reaches the decision loop. Stale, sensitive, or low-confidence facts create review cases before they can become trusted training evidence.
+            Command Center summarizes source-feed reliability and can refresh stale evidence before it becomes trusted training data. Stale, sensitive, or low-confidence facts create review cases.
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={onLoadWeather}
-            disabled={isLoadingWeather || !canManageFeeds}
-            className="w-fit rounded border border-cyan-300 bg-cyan-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-cyan-200 disabled:opacity-50"
-          >
-            {isLoadingWeather ? "Loading weather" : "Load weather"}
-          </button>
-          <button
-            type="button"
-            onClick={onLoadRideOps}
-            disabled={isLoadingRideOps || !canManageFeeds}
-            className="w-fit rounded border border-emerald-300 bg-emerald-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-emerald-200 disabled:opacity-50"
-          >
-            {isLoadingRideOps ? "Loading rides" : "Load rides"}
-          </button>
-          <button
-            type="button"
-            onClick={onLoadGuestFlow}
-            disabled={isLoadingGuestFlow || !canManageFeeds}
-            className="w-fit rounded border border-sky-300 bg-sky-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-sky-200 disabled:opacity-50"
-          >
-            {isLoadingGuestFlow ? "Loading flow" : "Load flow"}
-          </button>
-          <button type="button" onClick={onLoadStaffing} disabled={isLoadingStaffing || !canManageFeeds} className="w-fit rounded border border-violet-300 bg-violet-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-violet-200 disabled:opacity-50">
-            {isLoadingStaffing ? "Loading staffing" : "Load staffing"}
-          </button>
-          <button type="button" onClick={onLoadFoodOps} disabled={isLoadingFoodOps || !canManageFeeds} className="w-fit rounded border border-orange-300 bg-orange-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-orange-200 disabled:opacity-50">
-            {isLoadingFoodOps ? "Loading food" : "Load food"}
-          </button>
-          <button type="button" onClick={onLoadOperatorSignal} disabled={isLoadingOperatorSignal || !canManageFeeds} className="w-fit rounded border border-rose-300 bg-rose-300 px-3 py-2 text-xs font-black text-slate-950 transition hover:bg-rose-200 disabled:opacity-50">
-            {isLoadingOperatorSignal ? "Loading reports" : "Load reports"}
-          </button>
           <button
             type="button"
             onClick={onRefresh}
@@ -171,7 +119,46 @@ export function LiveFeedReviewPanel({
       </div>
       {!canManageFeeds && (
         <div className="mt-3 rounded border border-slate-700 bg-slate-900 p-3 text-xs font-bold text-slate-300">
-          Signed Ops Team or ML / Ops Admin role is required to load or refresh live feeds.
+          Signed Ops Team or ML / Ops Admin role is required to refresh live feeds.
+        </div>
+      )}
+
+      <div className={`mt-4 rounded-lg border p-3 ${toneClass(reliabilityGate.status === "clear" ? "ok" : reliabilityGate.status === "blocked" ? "risk" : "watch")}`}>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="text-[10px] font-black uppercase tracking-widest opacity-70">Decision evidence gate</div>
+            <div className="mt-1 text-lg font-black">
+              {humanize(reliabilityGate.status)} / {reliabilityGate.score}/100 / {humanize(reliabilityGate.action)}
+            </div>
+            <p className="mt-2 text-xs leading-relaxed opacity-85">{reliabilityGate.reasons[0]}</p>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
+            {[
+              ["Ready", `${reliabilityGate.readyCount}/${reliabilityGate.requiredCount}`],
+              ["Weak", reliabilityGate.weakCount],
+              ["Stale", reliabilityGate.staleCount],
+              ["Low conf", reliabilityGate.lowConfidenceCount],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded border border-slate-950/30 bg-slate-950/35 px-3 py-2">
+                <div className="text-[10px] font-black uppercase opacity-65">{label}</div>
+                <div className="mt-1 text-sm font-black">{fmt(value)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      {reliabilityGate.reasons.length > 1 && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {reliabilityGate.reasons.slice(1, 4).map((reason) => (
+              <span key={reason} className="rounded bg-slate-950/35 px-2 py-1 text-[10px] font-bold opacity-85">
+                {reason}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      {isAutoRecovering && (
+        <div className="mt-3 rounded border border-cyan-400/30 bg-cyan-950/20 p-3 text-xs font-black uppercase tracking-widest text-cyan-100">
+          Auto-refreshing operation data feeds
         </div>
       )}
 

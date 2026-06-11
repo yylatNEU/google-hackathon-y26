@@ -1,4 +1,6 @@
-const localApiUrls = ["http://127.0.0.1:8000", "http://127.0.0.1:8010", "http://127.0.0.1:8017"];
+const primaryLocalApiUrl = "http://127.0.0.1:8000";
+const localApiUrls = [primaryLocalApiUrl];
+const optionalLocalApiFallbackUrls = ["http://127.0.0.1:8011", "http://127.0.0.1:8010", "http://127.0.0.1:8017"];
 const defaultRequestTimeoutMs = 12000;
 const transientTransportAttempts = 2;
 const roleSessionTokenStorageKey = "parkpulse.roleSessionToken";
@@ -72,10 +74,9 @@ export function setParkPulseRoleSessionToken(token: string) {
 }
 
 export function getApiUrls(): string[] {
-  const urlOverride =
-    typeof globalThis.location !== "undefined"
-      ? new URLSearchParams(globalThis.location.search).get("api") || undefined
-      : undefined;
+  const params = typeof globalThis.location !== "undefined" ? new URLSearchParams(globalThis.location.search) : undefined;
+  const urlOverride = params?.get("api") || undefined;
+  const includeLocalFallbacks = params?.get("apiFallbacks") === "1";
   if (urlOverride) return [urlOverride];
   const viteEnv = import.meta.env as Record<string, string | undefined> | undefined;
   const configured = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.NEXT_PUBLIC_API_URL;
@@ -94,14 +95,15 @@ export function getApiUrls(): string[] {
     try {
       const url = new URL(sameOrigin);
       if (!localApiHostnames.has(url.hostname)) return false;
-      return !["8010", "8000", "8017"].includes(url.port);
+      return !["8010", "8000", "8011", "8017"].includes(url.port);
     } catch {
       return false;
     }
   })();
-  if (localDevSameOrigin && sameOrigin) return Array.from(new Set([...localApiUrls, sameOrigin]));
+  const localUrls = includeLocalFallbacks ? [...localApiUrls, ...optionalLocalApiFallbackUrls] : localApiUrls;
+  if (localDevSameOrigin && sameOrigin) return Array.from(new Set(localUrls));
   if (sameOrigin && !sameOriginLocal) return Array.from(new Set([...configuredUrls, sameOrigin]));
-  const fallbacks = [...localApiUrls, sameOrigin];
+  const fallbacks = [...localUrls, sameOrigin];
   return Array.from(new Set([...configuredUrls, ...fallbacks].filter(Boolean) as string[]));
 }
 
@@ -114,6 +116,15 @@ function availableApiUrls() {
       return true;
     }
     return false;
+  });
+}
+
+function prioritizeApiUrlsForPath(path: string, urls: string[]) {
+  if (!path.startsWith("/api/park/experience-studio")) return urls;
+  return [...urls].sort((left, right) => {
+    const leftScore = left.includes("127.0.0.1:8000") || left.includes("localhost:8000") ? 0 : 1;
+    const rightScore = right.includes("127.0.0.1:8000") || right.includes("localhost:8000") ? 0 : 1;
+    return leftScore - rightScore;
   });
 }
 
@@ -141,6 +152,26 @@ function headersToEntries(headers?: HeadersInit): Array<[string, string]> {
 function headerValue(entries: Array<[string, string]>, name: string) {
   const lowered = name.toLowerCase();
   return entries.find(([key]) => key.toLowerCase() === lowered)?.[1];
+}
+
+function roleTokenPayload(token: string) {
+  try {
+    const encodedPayload = token.split(".")[1];
+    if (!encodedPayload || typeof globalThis.atob !== "function") return null;
+    const normalized = encodedPayload.replaceAll("-", "+").replaceAll("_", "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    return JSON.parse(globalThis.atob(padded)) as { exp?: number; role?: string };
+  } catch {
+    return null;
+  }
+}
+
+function usableStoredRoleToken(token: string, requestedRole: string) {
+  const payload = roleTokenPayload(token);
+  if (!payload?.exp) return false;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (payload.exp - 30 <= nowSeconds) return false;
+  return !requestedRole || payload.role === requestedRole;
 }
 
 async function getSignedRoleToken(apiUrl: string, role: string, timeoutMs: number) {
@@ -227,6 +258,12 @@ function request(url: string, init?: RequestInit, timeoutMs = defaultRequestTime
     url.includes("/api/park/accessibility") ||
     url.includes("/api/park/experience-studio") ||
     url.includes("/api/park/review-label-pipeline") ||
+    url.includes("/api/park/tick") ||
+    url.includes("/api/park/time") ||
+    url.includes("/api/park/causal-impact-demo") ||
+    url.includes("/api/park/episode-fitness") ||
+    url.includes("/api/park/digital-twin-war-room") ||
+    url.includes("/api/park/simulation-facade") ||
     url.includes("/api/park/guest-message-triage") ||
     url.includes("/api/park/product-learning") ||
     url.includes("/api/park/auth/dev-session")
@@ -254,7 +291,19 @@ function defaultRoleForPath(path: string, method: string) {
   if (path.startsWith("/api/park/accessibility")) return "customer";
   if (path === "/api/park/venue-profile" && method === "GET") return "ops_team";
   if (path.startsWith("/api/park/experience-studio") && method === "GET") return "ops_team";
+  if (path.startsWith("/api/park/live-feeds")) return "ops_team";
   if (path.startsWith("/api/park/review-label-pipeline")) return "ml_ops_admin";
+  if (path.startsWith("/api/park/role-access-contracts")) return "ml_ops_admin";
+  if (path.startsWith("/api/park/agent-trust")) return "ml_ops_admin";
+  if (path.includes("/api/park/agent-onboarding/") && path.endsWith("/certify")) return "ml_ops_admin";
+  if (
+    path.startsWith("/api/park/tick") ||
+    path.startsWith("/api/park/time") ||
+    path.startsWith("/api/park/causal-impact-demo") ||
+    path.startsWith("/api/park/episode-fitness") ||
+    path.startsWith("/api/park/digital-twin-war-room") ||
+    path.startsWith("/api/park/simulation-facade")
+  ) return "ops_team";
   return "";
 }
 
@@ -275,6 +324,25 @@ function responseContentType(response: Response) {
   } catch {
     return "";
   }
+}
+
+async function retryWithFreshRoleToken(
+  apiUrl: string,
+  path: string,
+  requestInit: RequestInit,
+  headerEntries: Array<[string, string]>,
+  requestedRole: string,
+  timeoutMs: number,
+) {
+  setParkPulseRoleSessionToken("");
+  roleTokenCache.delete(`${apiUrl}:${requestedRole}`);
+  const freshToken = await getOptionalSignedRoleToken(apiUrl, requestedRole, timeoutMs);
+  if (!freshToken) return null;
+  return request(
+    `${apiUrl}${path}`,
+    { ...requestInit, headers: { ...Object.fromEntries(headerEntries), "x-parkpulse-role-token": freshToken } },
+    timeoutMs,
+  );
 }
 
 function normalizeParkPulseApiError(error: unknown, path: string) {
@@ -304,14 +372,16 @@ export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestIni
   const method = String(requestInit.method ?? "GET").toUpperCase();
   const maxAttempts = method === "GET" || method === "HEAD" ? transientTransportAttempts : 1;
 
-  for (const apiUrl of availableApiUrls()) {
+  for (const apiUrl of prioritizeApiUrlsForPath(path, availableApiUrls())) {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         const headerEntries = headersToEntries(requestInit.headers);
         const requestedRole = headerValue(headerEntries, "x-parkpulse-role") || defaultRoleForPath(path, method);
         const hasAuthorization = Boolean(headerValue(headerEntries, "authorization"));
         const hasRoleToken = Boolean(headerValue(headerEntries, "x-parkpulse-role-token"));
-        const storedRoleToken = !hasAuthorization && !hasRoleToken && path !== "/api/park/auth/dev-session" ? getParkPulseRoleSessionToken() : "";
+        const storedTokenCandidate = !hasAuthorization && !hasRoleToken && path !== "/api/park/auth/dev-session" ? getParkPulseRoleSessionToken() : "";
+        const storedRoleToken = storedTokenCandidate && usableStoredRoleToken(storedTokenCandidate, requestedRole) ? storedTokenCandidate : "";
+        if (storedTokenCandidate && !storedRoleToken) setParkPulseRoleSessionToken("");
         const token =
           requestedRole && !hasAuthorization && !hasRoleToken && !storedRoleToken && path !== "/api/park/auth/dev-session"
             ? await getOptionalSignedRoleToken(apiUrl, requestedRole, timeoutMs)
@@ -326,6 +396,19 @@ export async function fetchParkPulseApi(path: string, init?: ParkPulseRequestIni
             break;
           }
           return response;
+        }
+        if (
+          [401, 403].includes(response.status) &&
+          storedRoleToken &&
+          requestedRole &&
+          !hasAuthorization &&
+          !hasRoleToken &&
+          path !== "/api/park/auth/dev-session"
+        ) {
+          const retryResponse = await retryWithFreshRoleToken(apiUrl, path, requestInit, headerEntries, requestedRole, timeoutMs);
+          if (retryResponse?.ok) return retryResponse;
+          if (retryResponse) lastError = new Error(`${apiUrl}${path} returned ${retryResponse.status} after refreshing role token`);
+          break;
         }
         if (isBrowserPrivateCloudRunAuthFailure(apiUrl, response)) {
           markApiUrlBackoff(apiUrl);

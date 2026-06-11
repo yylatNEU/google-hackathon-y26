@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import types
 
 import main
 import product_learning_loop as loop
@@ -13,6 +14,12 @@ def reset_loop(monkeypatch, tmp_path):
     monkeypatch.setenv("PARKPULSE_PRODUCT_LEARNING_DB_PATH", str(tmp_path / "product_learning_loop.sqlite"))
     monkeypatch.setenv("PARKPULSE_STAFF_TRAINING_LOG_PATH", str(tmp_path / "staff_training_sessions.jsonl"))
     roleplay._SESSIONS.clear()
+    try:
+        import mongo_memory
+
+        mongo_memory._memory._fallback["guest_messages"] = []
+    except Exception:
+        pass
 
 
 async def _call_app(method: str, path: str, body: dict | None = None, token: str | None = None, role: str | None = None):
@@ -74,6 +81,197 @@ def test_live_issue_and_training_gap_feed_learning_signals_with_boundaries(monke
     assert any(signal["source"] == "park_issue_ticket" for signal in status["product_learning_signals"])
     assert any(signal["source"] == "training_gap_ticket" for signal in status["product_learning_signals"])
     assert any(signal["source"] == "manager_review" for signal in status["product_learning_signals"])
+
+
+def test_guest_triage_persists_guest_message_memory_for_training_recommendations(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    try:
+        import mongo_memory
+
+        mongo_memory._memory._fallback["guest_messages"] = []
+    except Exception:
+        pass
+
+    triage = loop.triage_guest_message(
+        message="My child is missing near the carousel. I need help right now.",
+        location="Carousel",
+        channel="guest_app",
+        create_ticket=True,
+    )
+    memory = loop.guest_triage_training_memory("lost_child_report")
+    recommendations = loop.recommended_training_scenarios_from_guest_triage()
+
+    assert triage["memory_persistence"]["collection"] == "guest_messages"
+    assert triage["memory_persistence"]["scenario_id"] == "lost_child_report"
+    assert triage["memory_impact"]["stored"] is True
+    assert triage["memory_impact"]["training_scenario_id"] == "lost_child_report"
+    assert triage["memory_impact"]["historical_ticket_frequency"]["ticket_count"] >= 1
+    assert triage["llm_response"]["reply"]
+    assert triage["llm_response"]["llm_controls_live_ops"] is False
+    assert memory["status"] == "ready"
+    assert memory["patterns"][0]["scenario_id"] == "lost_child_report"
+    assert memory["patterns"][0]["count"] >= 1
+    assert recommendations[0]["scenario_id"] == "lost_child_report"
+    assert recommendations[0]["requires_manager_review"] is True
+
+
+def test_guest_triage_parsing_acknowledgement_and_learning_version_branches(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+
+    assert loop._first_json_object("") is None
+    assert loop._first_json_object("[1, 2]") is None
+    assert loop._first_json_object("prefix {\"reply\":\"ok\", \"nested\":{\"a\":\"}\"}} suffix") == {"reply": "ok", "nested": {"a": "}"}}
+    assert loop._first_json_object("prefix {bad json}") is None
+    assert loop._first_json_object("no object here") is None
+
+    assert loop._guest_message_acknowledgement("Where is vegetarian food?", "profile_information_request", {"category": "food_dietary"}) == "You are looking for vegetarian food options in the park."
+    assert loop._guest_message_acknowledgement("Need water", "profile_information_request", {"category": "water_cooling_quiet"}).startswith("You are looking")
+    assert loop._guest_message_acknowledgement("Need map", "profile_information_request", {"category": "accessibility_map"}).startswith("You are asking")
+    assert loop._guest_message_acknowledgement("Need info", "profile_information_request", {"category": "unknown"}).startswith("You are asking")
+    assert loop._guest_message_acknowledgement("refund please", "refund_request", {}) == "I hear that you want help with a refund review."
+    assert loop._guest_message_acknowledgement("missing child", "lost_child_report", {}) == "I understand you cannot find your child."
+    assert loop._guest_message_acknowledgement("dizzy", "heat_exhaustion_concern", {}).startswith("I understand")
+    assert loop._guest_message_acknowledgement("line cut", "line_cutting_conflict", {}).startswith("I hear")
+    assert loop._guest_message_acknowledgement("storm", "weather_evacuation_confusion", {}).startswith("I hear")
+    assert loop._guest_message_acknowledgement("translate", "language_barrier", {}).startswith("I hear")
+    assert loop._guest_message_acknowledgement("custom", "unclear_guest_request", {}) == "I hear what you are asking for."
+
+    version_events = [
+        {"event": "learning_version_promoted", "version_id": "v1", "scenario_id": "refund_request", "target_surface": "staff_training"},
+        {"event": "learning_version_promoted", "version_id": "v2", "scenario_id": "refund_request", "target_surface": "staff_training"},
+    ]
+    assert loop._active_version_for_scope(version_events, "refund_request", "staff_training") == "v2"
+    assert loop._active_version_for_scope(version_events, "refund_request", "staff_training", exclude_version_id="v2") is None
+    rolled_back_events = [
+        *version_events,
+        {"event": "learning_version_rolled_back", "version_id": "v2", "scenario_id": "refund_request", "target_surface": "staff_training"},
+        {"event": "learning_version_promoted", "version_id": "", "scenario_id": "refund_request", "target_surface": "staff_training"},
+        {"event": "learning_version_promoted", "version_id": "other", "scenario_id": "lost_child_report", "target_surface": "staff_training"},
+    ]
+    assert loop._active_version_for_scope(rolled_back_events, "refund_request", "staff_training") is None
+    assert loop._learning_version_outcome_metrics("v-empty", [])["measurement_status"] == "pending"
+    improving = loop._learning_version_outcome_metrics(
+        "v-good",
+        [
+            {"event": "learning_version_outcome_recorded", "version_id": "v-good", "overall": 86, "critical_miss": False, "training_gap_created": False, "session_id": "s1"},
+            {"event": "learning_version_outcome_recorded", "version_id": "v-good", "overall": 80, "critical_miss": False, "training_gap_created": False, "session_id": "s2"},
+        ],
+    )
+    assert improving["measurement_status"] == "improving"
+    regressed = loop._learning_version_outcome_metrics(
+        "v-bad",
+        [
+            {"event": "learning_version_outcome_recorded", "version_id": "v-bad", "overall": 50, "critical_miss": True, "training_gap_created": True, "session_id": "s3"},
+        ],
+    )
+    assert regressed["measurement_status"] == "regressed_auto_rollback"
+
+
+def test_product_learning_gemini_worker_timeout_and_error_branches(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    calls = []
+
+    def run_success(args, **kwargs):
+        calls.append((args, kwargs))
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True, "reply": "ready"}), stderr="")
+
+    monkeypatch.setattr(loop.subprocess, "run", run_success)
+    payload = loop._generate_gemini_json_sync_hard_timeout(
+        {"task": "triage"},
+        timeout_seconds=0.1,
+        max_output_tokens=32,
+        temperature=0.0,
+    )
+    assert payload["reply"] == "ready"
+    assert calls[0][1]["check"] is False
+    assert json.loads(calls[0][1]["input"])["timeout_seconds"] == 0.1
+
+    monkeypatch.setattr(
+        loop.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(returncode=2, stdout="", stderr="worker failed"),
+    )
+    try:
+        loop._generate_gemini_json_sync_hard_timeout({}, timeout_seconds=0.1, max_output_tokens=8, temperature=0.0)
+        assert False, "expected nonzero worker exit to raise"
+    except RuntimeError as error:
+        assert "worker failed" in str(error)
+
+    monkeypatch.setattr(
+        loop.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout="{bad", stderr=""),
+    )
+    try:
+        loop._generate_gemini_json_sync_hard_timeout({}, timeout_seconds=0.1, max_output_tokens=8, temperature=0.0)
+        assert False, "expected invalid worker JSON to raise"
+    except RuntimeError as error:
+        assert "invalid JSON" in str(error)
+
+    monkeypatch.setattr(
+        loop.subprocess,
+        "run",
+        lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout=json.dumps({"ok": False, "error": "provider down"}), stderr=""),
+    )
+    try:
+        loop._generate_gemini_json_sync_hard_timeout({}, timeout_seconds=0.1, max_output_tokens=8, temperature=0.0)
+        assert False, "expected provider failure payload to raise"
+    except RuntimeError as error:
+        assert "provider down" in str(error)
+
+    def run_timeout(*args, **kwargs):
+        raise loop.subprocess.TimeoutExpired(cmd=["gemini-worker"], timeout=0.6)
+
+    monkeypatch.setattr(loop.subprocess, "run", run_timeout)
+    try:
+        loop._generate_gemini_json_sync_hard_timeout({}, timeout_seconds=0.1, max_output_tokens=8, temperature=0.0)
+        assert False, "expected timeout to raise"
+    except TimeoutError as error:
+        assert "hard timeout" in str(error)
+
+
+def test_historical_park_ticket_source_dedupes_and_feeds_training_frequency(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    try:
+        import mongo_memory
+
+        monkeypatch.setattr(mongo_memory, "get_latest_memory_documents", lambda *args, **kwargs: [])
+    except Exception:
+        pass
+
+    first = loop.create_park_issue_ticket(
+        source="historical_park_data",
+        issue_type="refund_request",
+        summary="Historical pattern: refund desk backed up after ride closure.",
+        severity="high",
+        location="Guest Services",
+        source_batch_id="audit-load-2026-06",
+        historical_window="last_30_operating_days",
+        observed_at="2026-06-01T18:00:00Z",
+        stable_key="historical-refund-closure-wave",
+    )
+    second = loop.create_park_issue_ticket(
+        source="historical_park_data",
+        issue_type="refund_request",
+        summary="Edited wording should not duplicate the same historical pattern.",
+        severity="high",
+        location="Guest Services",
+        source_batch_id="audit-load-2026-06",
+        historical_window="last_30_operating_days",
+        observed_at="2026-06-01T18:00:00Z",
+        stable_key="historical-refund-closure-wave",
+    )
+    status = loop.product_learning_loop_status()
+    memory = loop.guest_triage_training_memory("refund_request")
+
+    assert first["status"] == "created"
+    assert first["ticket"]["id"] == second["ticket"]["id"]
+    assert first["ticket"]["source"] == "historical_park_data"
+    assert first["ticket"]["dedupe_key"] == first["ticket"]["id"]
+    assert status["park_issue_ticket_count"] == 1
+    assert memory["scenario_frequencies"][0]["scenario_id"] == "refund_request"
+    assert memory["scenario_frequencies"][0]["ticket_count"] == 1
+    assert memory["scenario_frequencies"][0]["sources"]["local_historical_park_data_ticket"] == 1
 
 
 def test_failed_roleplay_finish_creates_training_gap_not_live_issue(monkeypatch, tmp_path):
@@ -254,6 +452,77 @@ def test_seeded_random_incident_generation_is_repeatable(monkeypatch, tmp_path):
     assert first[0]["source"] == "random_incident"
     assert first[0]["issue_type"] == "injury_or_safety_incident"
     assert first[0]["matched_rule"] == "seeded_slip_trip_or_collision"
+
+
+def test_low_attendance_suppresses_crowd_congestion_tickets(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    state = {
+        "guestFlow": {
+            "representedGuests": 181,
+            "zones": [
+                {"id": "entrancePlaza", "name": "Entrance Plaza", "currentGuests": 90, "density": 5},
+                {"id": "coveredPlaza", "name": "Covered Plaza", "currentGuests": 91, "density": 5},
+            ],
+            "paths": [
+                {
+                    "from": "entrancePlaza",
+                    "to": "coveredPlaza",
+                    "fromName": "Entrance Plaza",
+                    "toName": "Parade Route",
+                    "widthM": 4.2,
+                    "currentGuests": 181,
+                    "congestionLevel": 91,
+                }
+            ],
+        },
+        "weather": {"stormRisk": 8, "heatIndexF": 78},
+        "operatingClock": {
+            "eventSchedule": {
+                "activeWave": "parade_release",
+                "eventTrafficRiskPct": 92,
+                "nextEvent": {"name": "Afternoon parade"},
+            }
+        },
+        "planningAgent": {"readinessPct": 90},
+    }
+
+    candidates = loop.generate_park_issue_tickets_from_park_state(state, seed="low-attendance-parade")
+    assert candidates == []
+
+    import agent_ops_ledger
+
+    backlog = agent_ops_ledger.build_operational_backlog(state)
+    issue_ids = {issue["id"] for issue in backlog["issues"]}
+    assert "showtime-traffic-wave" not in issue_ids
+    assert "safety-access-readiness" not in issue_ids
+    assert "planning-horizon-risk" not in issue_ids
+
+
+def test_supplied_place_risk_graph_cannot_bypass_low_attendance_gate(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    state = {
+        "guestFlow": {"representedGuests": 181},
+        "placeRiskGraph": {
+            "places": [
+                {
+                    "id": "parade_pinch",
+                    "name": "Parade Pinch",
+                    "type": "path",
+                    "currentLoad": 94,
+                    "current_guests": 181,
+                    "riskFactors": ["narrow_path", "crowd_bottleneck", "queue_merge_conflict"],
+                    "evidence": ["pathCongestion=94", "currentGuests=181"],
+                }
+            ]
+        },
+    }
+
+    graph = loop.build_place_risk_graph(state)
+    tickets = loop.generate_park_issue_tickets_from_park_state(state, seed="configured-low-attendance")
+
+    assert graph["places"][0]["risk_factors"] == []
+    assert "crowdRiskSuppressedByAttendance=true" in graph["places"][0]["evidence"]
+    assert tickets == []
 
 
 def test_auto_learning_governance_auto_drafts_low_risk_shadow_candidate(monkeypatch, tmp_path):
@@ -630,7 +899,8 @@ def test_guest_message_triage_scores_urgency_and_creates_gated_ticket(monkeypatc
     assert result["routing"]["assigned_team"] == "security"
     assert result["routing"]["human_ack_required"] is True
     assert result["ticket_result"]["ticket"]["live_ops_authority"] is True
-    assert result["reaction"]["guest_reply_draft"].startswith("Stay with me")
+    assert result["reaction"]["guest_reply_draft"].startswith("I understand your child is missing near the carousel.")
+    assert "Stay with me" in result["reaction"]["guest_reply_draft"]
     assert any(ticket["issue_type"] == "lost_child_report" for ticket in status["park_issue_tickets"])
     assert any(event.get("event") == "guest_message_triaged" for event in loop._read_events(20))
 
@@ -646,7 +916,8 @@ def test_guest_message_triage_keeps_accessibility_context_out_of_injury(monkeypa
     assert result["classification"]["issue_type"] == "accessibility_accommodation"
     assert result["classification"]["urgency"] == "high"
     assert result["routing"]["assigned_team"] == "accessibility"
-    assert result["reaction"]["guest_reply_draft"].startswith("You do not need to share private medical details")
+    assert result["reaction"]["guest_reply_draft"].startswith("I hear that your group needs accessibility help without sharing private medical details.")
+    assert "You do not need to share private medical details" in result["reaction"]["guest_reply_draft"]
 
 
 def test_guest_message_triage_answers_park_profile_questions(monkeypatch, tmp_path):
@@ -674,8 +945,77 @@ def test_guest_message_triage_answers_park_profile_questions(monkeypatch, tmp_pa
     assert result["profile_context"]["status"] == "answered_from_profile"
     assert result["profile_context"]["category"] == "food_dietary"
     assert result["profile_context"]["matched_locations"][0]["name"] == "Food Court A"
+    assert result["reaction"]["guest_reply_draft"].startswith("You are looking for vegetarian food near the coaster.")
     assert "Food Court A" in result["reaction"]["guest_reply_draft"]
     assert result["routing"]["human_ack_required"] is False
+    assert result["llm_response"]["reply"]
+    assert result["llm_response"]["llm_controls_live_ops"] is False
+
+
+def test_guest_message_triage_returns_mocked_llm_response(monkeypatch, tmp_path):
+    reset_loop(monkeypatch, tmp_path)
+    fake_props = types.SimpleNamespace(
+        ready=True,
+        provider="Vertex AI Gemini",
+        platform="vertex_ai",
+        readiness_issues=[],
+        required_env=[],
+    )
+
+    monkeypatch.setattr(
+        loop,
+        "_load_guest_triage_venue_profile",
+        lambda: {
+            "venueIdentity": {"name": "Demo Park", "profileType": "test_profile"},
+            "readiness": {"status": "studio_ready"},
+            "realInputs": {
+                "locationDetails": {
+                    "Food Court A": {"name": "Food Court A", "kind": "food", "dietaryTags": ["vegetarian options"]},
+                },
+            },
+        },
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "gemini_provider",
+        types.SimpleNamespace(
+            get_gemini_agent_properties=lambda: fake_props,
+            get_gemini_model=lambda: "gemini-test",
+        ),
+    )
+    captured = {}
+
+    def fake_generate(prompt, *args, **kwargs):
+        captured["prompt"] = prompt
+        return {
+            "text": json.dumps(
+                {
+                    "guest_reply": "You are looking for vegetarian food near the coaster. Food Court A has vegetarian options listed in the park profile. Please confirm live availability with a nearby team member.",
+                    "tone": "calm",
+                    "used_profile": True,
+                    "next_step": "direct guest to Food Court A",
+                    "confidence": 0.86,
+                }
+            ),
+            "transport": "mocked_gemini",
+        }
+
+    monkeypatch.setattr(
+        loop,
+        "_generate_gemini_json_sync_hard_timeout",
+        fake_generate,
+    )
+
+    result = loop.triage_guest_message(message="Where is the closest vegetarian food near the coaster?", create_ticket=False)
+
+    assert result["llm_response"]["status"] == "generated"
+    assert result["llm_response"]["source"] == "llm_guest_triage"
+    assert result["llm_response"]["reply"].startswith("You are looking for vegetarian food near the coaster.")
+    assert result["llm_response"]["used_profile"] is True
+    assert result["llm_response"]["transport"] == "mocked_gemini"
+    assert captured["prompt"]["guest_message"] == "Where is the closest vegetarian food near the coaster?"
+    assert "guest's actual message" in " ".join(captured["prompt"]["hard_rules"])
+    assert captured["prompt"]["required_conversational_opening"] == "You are looking for vegetarian food near the coaster."
 
 
 def test_guest_message_triage_routes_unclear_niche_questions_to_human(monkeypatch, tmp_path):
@@ -699,7 +1039,8 @@ def test_guest_message_triage_routes_unclear_niche_questions_to_human(monkeypatc
     assert result["routing"]["human_review_place"] == "guest_services_information_desk"
     assert result["routing"]["human_ack_required"] is True
     assert result["ticket_result"]["ticket"]["requires_human_ack"] is True
-    assert result["reaction"]["guest_reply_draft"].startswith("I am not fully certain")
+    assert result["reaction"]["guest_reply_draft"].startswith("I hear what you are asking for.")
+    assert "I am not fully certain" in result["reaction"]["guest_reply_draft"]
 
 
 def test_review_place_resolution_updates_human_review_queue(monkeypatch, tmp_path):
@@ -946,6 +1287,25 @@ def test_product_learning_api_routes_and_role_gates(monkeypatch, tmp_path):
     assert issue_status == 200
     assert issue["ticket"]["live_ops_authority"] is True
 
+    historical_status, historical = asyncio.run(
+        _call_app(
+            "POST",
+            "/api/park/product-learning/issue-ticket",
+            {
+                "source": "historical_park_data",
+                "issueType": "refund_request",
+                "summary": "Historical import: refund request spike after ride downtime.",
+                "sourceBatchId": "api-history-load",
+                "historicalWindow": "last_30_operating_days",
+                "stableKey": "api-history-refund-spike",
+            },
+            token=worker_token,
+        )
+    )
+    assert historical_status == 200
+    assert historical["ticket"]["source"] == "historical_park_data"
+    assert historical["ticket"]["dedupe_key"] == historical["ticket"]["id"]
+
     blocked_status, blocked = asyncio.run(
         _call_app(
             "POST",
@@ -970,9 +1330,13 @@ def test_product_learning_api_routes_and_role_gates(monkeypatch, tmp_path):
 
     loop_status, payload = asyncio.run(_call_app("GET", "/api/park/product-learning/loop", token=ops_token))
     assert loop_status == 200
-    assert payload["park_issue_ticket_count"] >= 1
+    assert payload["park_issue_ticket_count"] >= 2
     assert any(
         ticket.get("issue_type") == "heat_exhaustion_concern"
+        for ticket in payload["park_issue_tickets"]
+    )
+    assert any(
+        ticket.get("source") == "historical_park_data" and ticket.get("issue_type") == "refund_request"
         for ticket in payload["park_issue_tickets"]
     )
     assert payload["training_gap_ticket_count"] == 1

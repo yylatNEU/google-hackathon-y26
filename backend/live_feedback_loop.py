@@ -679,6 +679,73 @@ def live_feed_health(park_state: dict[str, Any] | None = None, limit: int = 500)
     }
 
 
+def live_feed_health_summary(park_state: dict[str, Any] | None = None, limit: int = 120) -> dict[str, Any]:
+    bounded_limit = max(20, min(500, int(limit or 120)))
+    persisted = _read_jsonl(_feed_log_path(), limit=bounded_limit)
+    records = [*persisted, *_state_derived_events(park_state)]
+    latest_by_source: dict[str, dict[str, Any]] = {}
+    for event in records:
+        source = str(event.get("source") or "")
+        if source and source not in latest_by_source:
+            latest_by_source[source] = event
+
+    rows = []
+    now = _now()
+    ready_count = 0
+    stale_count = 0
+    low_confidence_count = 0
+    for feed in REQUIRED_FEEDS:
+        event = latest_by_source.get(feed["source"])
+        observed_at = _parse_time((event or {}).get("observed_at"))
+        age = int((now - observed_at).total_seconds()) if observed_at else None
+        stale = age is None or age > int(feed["max_stale_seconds"])
+        confidence = float((event or {}).get("confidence") or 0)
+        status = "ready" if event and not stale and confidence >= 0.7 else "stale" if event and stale else "weak" if event else "missing"
+        if status == "ready":
+            ready_count += 1
+        if event and stale:
+            stale_count += 1
+        if event and confidence < 0.7:
+            low_confidence_count += 1
+        rows.append(
+            {
+                **feed,
+                "status": status,
+                "latest_event_id": (event or {}).get("id"),
+                "latest_signal_type": (event or {}).get("signal_type"),
+                "latest_observed_at": (event or {}).get("observed_at"),
+                "age_seconds": age,
+                "confidence": round(confidence, 2),
+                "readiness_issues": [] if status == "ready" else _feed_issues(feed, event, stale, confidence),
+            }
+        )
+
+    review_rows = _read_jsonl(_review_log_path(), limit=min(200, bounded_limit))
+    review_state = _fold_review_state(review_rows, latest_by_source=latest_by_source)
+    open_review_count = len(review_state["open_reviews"])
+    status = "ready" if ready_count == len(REQUIRED_FEEDS) and not open_review_count else "review" if ready_count >= 4 else "not_ready"
+    return {
+        "status": status,
+        "mode": "live_feed_health_summary",
+        "created_at": _now_iso(),
+        "summary": {
+            "required_feed_count": len(REQUIRED_FEEDS),
+            "ready_feed_count": ready_count,
+            "missing_or_weak_feed_count": len(REQUIRED_FEEDS) - ready_count,
+            "stale_feed_count": stale_count,
+            "low_confidence_feed_count": low_confidence_count,
+            "open_review_count": open_review_count,
+            "persisted_event_count": len(persisted),
+        },
+        "feeds": rows,
+        "open_reviews": [],
+        "boundary": "Fast summary is allowed to gate planning readiness. Deep feed rows and review evidence refresh off the hot path.",
+        "uses_seed_data": False,
+        "llm_control_authority": False,
+        "readiness_issues": [],
+    }
+
+
 def _feed_issues(feed: dict[str, Any], event: dict[str, Any] | None, stale: bool, confidence: float) -> list[str]:
     issues = []
     if not event:

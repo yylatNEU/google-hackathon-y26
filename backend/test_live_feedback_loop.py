@@ -23,6 +23,7 @@ from live_feedback_loop import (
     ingest_live_feed_event,
     ingest_live_feed_events,
     live_feed_health,
+    live_feed_health_summary,
     live_feed_storage_status,
     normalize_live_feed_event,
     record_review_decision,
@@ -479,6 +480,53 @@ def test_full_runtime_live_feed_health_uses_short_ttl_cache(tmp_path, monkeypatc
     assert first["cache"]["status"] == "miss"
     assert second["cache"]["status"] == "hit"
     assert calls["count"] == 1
+
+
+def test_full_runtime_live_feed_health_summary_uses_fast_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_EVENT_LOG_PATH", str(tmp_path / "feeds.jsonl"))
+    monkeypatch.setenv("PARKPULSE_REVIEW_LEDGER_LOG_PATH", str(tmp_path / "reviews.jsonl"))
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_HEALTH_SUMMARY_CACHE_TTL_SECONDS", "30")
+
+    import parkpulse_api
+
+    calls = {"count": 0}
+
+    class FakeParkSimulation:
+        async def get_state_lite(self):
+            calls["count"] += 1
+            return {"weather": {"heatIndexF": 91, "stormRisk": 0.15}}
+
+    parkpulse_api._live_feed_health_cache.clear()
+    monkeypatch.setattr(parkpulse_api, "park_simulation", FakeParkSimulation())
+
+    first = asyncio.run(parkpulse_api.park_live_feed_health_summary(limit=120))
+    second = asyncio.run(parkpulse_api.park_live_feed_health_summary(limit=120))
+
+    assert first["mode"] == "live_feed_health_summary"
+    assert first["cache"]["status"] == "miss"
+    assert second["cache"]["status"] == "hit"
+    assert second["cache"]["source"] == "live_feed_health_summary"
+    assert calls["count"] == 1
+
+
+def test_live_feed_health_summary_is_compact_but_gateable(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_EVENT_LOG_PATH", str(tmp_path / "feeds.jsonl"))
+    monkeypatch.setenv("PARKPULSE_REVIEW_LEDGER_LOG_PATH", str(tmp_path / "reviews.jsonl"))
+
+    summary = live_feed_health_summary(
+        {
+            "weather": {"heatIndexF": 91, "stormRisk": 0.15},
+            "guestFlow": {"zones": []},
+            "staffing": {},
+            "foodInventory": {},
+        }
+    )
+
+    assert summary["mode"] == "live_feed_health_summary"
+    assert summary["summary"]["required_feed_count"] == 6
+    assert "schema" not in summary
+    assert "storage" not in summary
+    assert len(summary["feeds"]) == 6
 
 
 def test_live_feed_orchestration_enriches_department_tool_proposals():

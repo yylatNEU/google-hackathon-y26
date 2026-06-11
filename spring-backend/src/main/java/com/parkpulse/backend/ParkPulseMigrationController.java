@@ -9,6 +9,8 @@ import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -28,6 +30,8 @@ public class ParkPulseMigrationController {
     private final VenueProfileService venueProfileService;
     private final AccessibilityJourneyService accessibilityJourneyService;
     private final ReviewLabelPipelineService reviewLabelPipelineService;
+    private final SimulationFacadeService simulationFacadeService;
+    private final ParkStateProjectionService parkStateProjectionService;
     private final Instant startedAt = Instant.now();
 
     public ParkPulseMigrationController(
@@ -43,7 +47,9 @@ public class ParkPulseMigrationController {
         ExperienceStudioService experienceStudioService,
         VenueProfileService venueProfileService,
         AccessibilityJourneyService accessibilityJourneyService,
-        ReviewLabelPipelineService reviewLabelPipelineService
+        ReviewLabelPipelineService reviewLabelPipelineService,
+        SimulationFacadeService simulationFacadeService,
+        ParkStateProjectionService parkStateProjectionService
     ) {
         this.platformStoreService = platformStoreService;
         this.roleAuthService = roleAuthService;
@@ -58,6 +64,8 @@ public class ParkPulseMigrationController {
         this.venueProfileService = venueProfileService;
         this.accessibilityJourneyService = accessibilityJourneyService;
         this.reviewLabelPipelineService = reviewLabelPipelineService;
+        this.simulationFacadeService = simulationFacadeService;
+        this.parkStateProjectionService = parkStateProjectionService;
     }
 
     @GetMapping(value = {"/", "/health", "/healthz"}, produces = MediaType.APPLICATION_JSON_VALUE)
@@ -512,6 +520,31 @@ public class ParkPulseMigrationController {
         return payload;
     }
 
+    @GetMapping(value = "/api/park/live-feed-health/summary", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> liveFeedHealthSummary(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_ops_evidence");
+        List<Map<String, Object>> feeds = springLiveFeedRows();
+        long openReviews = springReviewRows().stream()
+            .filter(item -> "open".equals(String.valueOf(item.get("status"))))
+            .count();
+
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", openReviews == 0 ? "ready" : "review");
+        payload.put("mode", "live_feed_health_summary_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("summary", liveFeedSummary(feeds, (int) openReviews));
+        payload.put("feeds", feeds.stream().limit(limit == null ? feeds.size() : Math.max(1, Math.min(limit, feeds.size()))).toList());
+        payload.put("open_reviews", List.of());
+        payload.put("cache", Map.of(
+            "status", "fresh",
+            "source", "spring_live_feed_summary",
+            "generated_at", Instant.now().toString()
+        ));
+        payload.put("boundary", "Fast summary gates planning readiness while deep feed rows and review evidence refresh separately.");
+        payload.put("readiness_issues", List.of());
+        return payload;
+    }
+
     @GetMapping(value = "/api/park/live-feeds/refresh-worker", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> liveFeedRefreshWorker(HttpServletRequest request) {
         roleAuthService.requireCapability(request, "read_ops_evidence");
@@ -687,6 +720,24 @@ public class ParkPulseMigrationController {
         return staffTrainingService.policyPack();
     }
 
+    @GetMapping(value = "/api/park/staff-training/agent-context", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> staffTrainingAgentContext(
+        HttpServletRequest request,
+        @RequestParam(name = "scenario_id", required = false) String scenarioId,
+        @RequestParam(name = "scenarioId", required = false) String scenarioIdCamel,
+        @RequestParam(name = "trainee_name", required = false) String traineeName,
+        @RequestParam(name = "traineeName", required = false) String traineeNameCamel,
+        @RequestParam(name = "assignment_id", required = false) String assignmentId,
+        @RequestParam(name = "assignmentId", required = false) String assignmentIdCamel
+    ) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.agentContext(
+            firstNonBlank(scenarioId, scenarioIdCamel),
+            firstNonBlank(traineeName, traineeNameCamel),
+            firstNonBlank(assignmentId, assignmentIdCamel)
+        );
+    }
+
     @GetMapping(value = "/api/park/staff-training/assignments", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> staffTrainingAssignments(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
         roleAuthService.requireCapability(request, "read_staff_training_analytics");
@@ -819,6 +870,30 @@ public class ParkPulseMigrationController {
         return accessibilityJourneyService.journey(body);
     }
 
+    @GetMapping(value = "/api/park/accessibility/memory", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> accessibilityMemory(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "use_accessibility_journey");
+        return accessibilityJourneyService.memory(limit == null ? 20 : limit);
+    }
+
+    @PostMapping(value = "/api/park/accessibility/feedback", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> accessibilityFeedback(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_accessibility_journey");
+        return accessibilityJourneyService.recordFeedback(body);
+    }
+
+    @GetMapping(value = "/api/park/accessibility/tools", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> accessibilityTools(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "use_accessibility_journey");
+        return accessibilityJourneyService.tools();
+    }
+
+    @PostMapping(value = "/api/park/accessibility/tool", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> accessibilityTool(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_accessibility_journey");
+        return accessibilityJourneyService.tool(body);
+    }
+
     @GetMapping(value = "/api/park/review-label-pipeline", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> reviewLabelPipeline(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
         roleAuthService.requireCapability(request, "read_review_label_pipeline");
@@ -841,6 +916,60 @@ public class ParkPulseMigrationController {
     public Map<String, Object> reviewLabelDecisionLedger(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
         roleAuthService.requireCapability(request, "read_review_label_pipeline");
         return reviewLabelPipelineService.decisionLedger(limit == null ? 120 : limit);
+    }
+
+    @PostMapping(value = "/api/park/tick", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationTick(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "mutate_simulation_state");
+        return simulationFacadeService.tick(request, body, identity);
+    }
+
+    @PostMapping(value = "/api/park/time", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationTime(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "mutate_simulation_state");
+        return simulationFacadeService.setTime(request, body, identity);
+    }
+
+    @PostMapping(value = "/api/park/causal-impact-demo", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationCausalImpactDemo(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "run_simulation_exercise");
+        return simulationFacadeService.causalImpactDemo(request, body, identity);
+    }
+
+    @GetMapping(value = "/api/park/episode-fitness", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationEpisodeFitness(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "read_simulation_evidence");
+        return simulationFacadeService.episodeFitness(request, limit, identity);
+    }
+
+    @RequestMapping(value = "/api/park/digital-twin-war-room", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> digitalTwinWarRoom(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "run_simulation_exercise");
+        return simulationFacadeService.warRoom(request, "/api/park/digital-twin-war-room", body, identity);
+    }
+
+    @PostMapping(value = "/api/park/digital-twin-war-room/run", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> runDigitalTwinWarRoom(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "run_simulation_exercise");
+        return simulationFacadeService.warRoom(request, "/api/park/digital-twin-war-room/run", body, identity);
+    }
+
+    @PostMapping(value = "/api/park/digital-twin-war-room/remediate", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> remediateDigitalTwinWarRoom(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "run_simulation_exercise");
+        return simulationFacadeService.warRoom(request, "/api/park/digital-twin-war-room/remediate", body, identity);
+    }
+
+    @GetMapping(value = "/api/park/simulation-facade/ledger", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationFacadeLedger(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_simulation_evidence");
+        return simulationFacadeService.ledger(limit == null ? 50 : limit);
+    }
+
+    @GetMapping(value = "/api/park/simulation-facade/health", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationFacadeHealth(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_simulation_evidence");
+        return simulationFacadeService.health();
     }
 
     @PostMapping(value = "/api/park/experience-studio/conversation-plan", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -950,10 +1079,16 @@ public class ParkPulseMigrationController {
 
     private Map<String, Object> liveFeedSummary(List<Map<String, Object>> feeds, int openReviewCount) {
         long readyCount = feeds.stream().filter(item -> "ready".equals(String.valueOf(item.get("status")))).count();
+        long staleCount = feeds.stream().filter(item -> "stale".equals(String.valueOf(item.get("status")))).count();
+        long lowConfidenceCount = feeds.stream()
+            .filter(item -> item.get("confidence") instanceof Number number && number.doubleValue() < 0.7)
+            .count();
         Map<String, Object> payload = orderedMap();
         payload.put("required_feed_count", feeds.size());
         payload.put("ready_feed_count", readyCount);
         payload.put("missing_or_weak_feed_count", feeds.size() - readyCount);
+        payload.put("stale_feed_count", staleCount);
+        payload.put("low_confidence_feed_count", lowConfidenceCount);
         payload.put("open_review_count", openReviewCount);
         return payload;
     }
@@ -1277,57 +1412,7 @@ public class ParkPulseMigrationController {
     }
 
     private Map<String, Object> springState(String auditMode) {
-        Map<String, Object> guestFlow = orderedMap();
-        guestFlow.put("activePolicy", "spring-hot-path");
-        guestFlow.put("activeScenario", Map.of(
-            "key", "spring_gateway_state_lite",
-            "name", "Spring Gateway Operating State",
-            "description", "Compact operating state served by Java Spring while heavier simulation routes continue migrating.",
-            "condition", "normal"
-        ));
-        guestFlow.put("interventions", List.of());
-        guestFlow.put("representedGuests", 12480);
-        guestFlow.put("avgSatisfaction", 86);
-        guestFlow.put("activeGroups", 3120);
-        guestFlow.put("zones", List.of(
-            Map.of("id", "covered-plaza", "name", "Covered Plaza", "density", 72, "waitMins", 12, "status", "watch"),
-            Map.of("id", "east-midway", "name", "East Midway", "density", 58, "waitMins", 8, "status", "normal")
-        ));
-        guestFlow.put("paths", List.of(
-            Map.of("id", "main-loop", "from", "front-gate", "to", "covered-plaza", "congestion", 44, "status", "normal"),
-            Map.of("id", "east-cutover", "from", "east-midway", "to", "family-zone", "congestion", 39, "status", "normal")
-        ));
-        guestFlow.put("rides", List.of(
-            Map.of("id", "dragon-coaster", "name", "Dragon Coaster", "status", "operating", "waitMins", 42, "queueGuests", 680, "throughputGap", 12),
-            Map.of("id", "river-run", "name", "River Run", "status", "operating", "waitMins", 18, "queueGuests", 220, "throughputGap", 4)
-        ));
-
-        Map<String, Object> payload = orderedMap();
-        payload.put("product", Map.of(
-            "name", "ParkPulse",
-            "domain", "amusement_park_operations",
-            "one_liner", "Real-time park operating state and supervised action routing.",
-            "primary_collections", List.of("guestFlow", "weather", "staffing", "parkOps")
-        ));
-        payload.put("simTime", Map.of("hour", 14, "minute", 15, "day", 1, "seasonIndex", 2));
-        payload.put("weather", Map.of("condition", "partly_cloudy", "temperatureF", 82, "heatIndexF", 86, "humidity", 61, "windMph", 8, "stormRisk", 18));
-        payload.put("energy", Map.of("gridLoadPercent", 63, "disruptionLoadMw", 0, "demandChargeRisk", "normal", "utilityPricePerMwh", 92, "carbonIntensity", 310));
-        payload.put("staffing", Map.of("scheduled", 140, "checkedIn", 128, "openCallouts", 4, "medicalTeams", 4, "securityTeams", 5));
-        payload.put("parkOps", Map.of("mode", "spring_hot_path", "outdoorCapacityCutPct", 0, "rideConflictCount", 1, "atRiskRides", 1, "guestRecoveryPressure", 28, "staffReadyPct", 91));
-        payload.put("guestFlow", guestFlow);
-        payload.put("alerts", List.of(Map.of("id", "spring-state-lite", "severity", "info", "message", "Spring is serving the hot state-lite route without Python fallback.")));
-        payload.put("operationsAudit", Map.of(
-            "ready", true,
-            "mode", auditMode,
-            "findings", List.of(),
-            "policy_refs", List.of("PARK-SAFE-001", "PARK-OPS-001", "PARK-CARE-001")
-        ));
-        payload.put("heartbeatController", Map.of("status", "ready", "runtime", "java_spring"));
-        payload.put("heartbeatExplanation", Map.of("status", "ready", "summary", "Compact Spring state is available for UI polling."));
-        payload.put("runtime", "java_spring");
-        payload.put("source_of_truth", "spring_hot_path_sqlite_authority");
-        payload.put("updated_at", Instant.now().toString());
-        return payload;
+        return parkStateProjectionService.state(auditMode);
     }
 
     private static Map<String, Object> highestWaitRow(List<Object> rows) {

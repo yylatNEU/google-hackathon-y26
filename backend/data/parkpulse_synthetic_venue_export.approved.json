@@ -536,6 +536,90 @@
           "preferredStops": ["Dragon Arch Photo Spot", "Theater B", "Storybook Boats", "Lagoon Lanterns", "Food Court B"],
           "mustInclude": ["family-safe scare level", "well-lit exit option", "no jump-scare wording"],
           "avoidClaims": ["fear pressure", "dark route guarantee", "age-inappropriate threat language"]
+        },
+        "festival_plan": {
+          "recommendedArc": ["festival month invite", "landmark photo ritual", "lantern discovery", "food or craft pause", "show or finale close"],
+          "preferredStops": ["Front Gate", "Dragon Arch Photo Spot", "Lagoon Lanterns", "Harbor Treats", "Theater B"],
+          "mustInclude": ["cultural review gate", "optional participation mechanic", "current schedule caveat", "no guaranteed reward"],
+          "avoidClaims": ["cultural claims without review", "guaranteed red envelope or prize", "always-on show or menu availability"]
+        },
+        "seasonal_overlay": {
+          "recommendedArc": ["seasonal arrival signal", "overlay discovery", "photo or decor pause", "flexible activity choice", "seasonal close"],
+          "preferredStops": ["Front Gate", "Dragon Arch Photo Spot", "Lagoon Lanterns", "Theater B", "Covered Plaza"],
+          "mustInclude": ["temporary-install review", "decor placement approval", "weather alternate", "current dates caveat"],
+          "avoidClaims": ["permanent decor", "all-day activation guarantee", "unapproved character or IP references"]
+        },
+        "food_festival": {
+          "recommendedArc": ["taste invitation", "first sample choice", "seated reset", "craft or retail pairing", "flavor finale"],
+          "preferredStops": ["Front Gate", "Food Court A", "Harbor Treats", "Food Court B", "Covered Plaza"],
+          "mustInclude": ["menu-owner review", "allergy handoff language", "seating caveat", "non-purchase participation option"],
+          "avoidClaims": ["allergen-free assurance", "guaranteed sample availability", "dietary or medical advice"]
+        },
+        "photo_moment_route": {
+          "recommendedArc": ["photo invite", "landmark shot", "scenic transition", "group photo pause", "shareable close"],
+          "preferredStops": ["Front Gate", "Dragon Arch Photo Spot", "Lagoon Lanterns", "Theater B", "Covered Plaza"],
+          "mustInclude": ["alternate no-photo participation", "accessible viewing check", "crowd-safe pause point", "privacy-respectful language"],
+          "avoidClaims": ["professional photo guarantee", "exclusive photo access", "blocking path for photos"]
+        },
+        "accessibility_family_day": {
+          "recommendedArc": ["plain arrival", "step-free choice", "rest point", "flexible activity", "supported close"],
+          "preferredStops": ["Guest Services", "Covered Plaza", "Theater B", "Food Court B", "Care Lagoon Family Room"],
+          "mustInclude": ["step-free verification", "restroom or family-room cue", "permission to pause", "staff handoff caveat"],
+          "avoidClaims": ["ADA compliance claim", "equipment availability guarantee", "medical or diagnosis-specific advice"]
+        },
+        "teen_night_out": {
+          "recommendedArc": ["meet-up signal", "photo beat", "food or hangout choice", "thrill or show option", "regroup close"],
+          "preferredStops": ["Front Gate", "Dragon Arch Photo Spot", "Arcade Zone", "Food Court B", "Lagoon Lanterns"],
+          "mustInclude": ["caregiver-friendly regroup point", "well-lit close", "current-options caveat", "not childish tone"],
+          "avoidClaims": ["unsupervised safety guarantee", "exclusive teen access", "pressure to ride or purchase"]
+        },
+        "first_time_visitor": {
+          "recommendedArc": ["arrival confidence", "orientation landmark", "first signature choice", "comfort reset", "next-step close"],
+          "preferredStops": ["Front Gate", "Guest Services", "Dragon Arch Photo Spot", "Food Court B", "Lagoon Lanterns"],
+          "mustInclude": ["map/app orientation cue", "skip-or-switch language", "restroom or support cue", "next best option"],
+          "avoidClaims": ["must-do route", "complete park guarantee", "live wait-time promise"]
+        },
+        "date_night": {
+          "recommendedArc": ["warm evening welcome", "scenic pause", "food or show beat", "quiet choice", "photo close"],
+          "preferredStops": ["Front Gate", "Dragon Arch Photo Spot", "Lagoon Lanterns", "Theater B", "Covered Plaza"],
+          "mustInclude": ["relaxed pacing", "quiet bypass option", "tasteful photo cue", "current food/show caveat"],
+          "avoidClaims": ["romantic guarantee", "priority seating", "private or exclusive access"]
+        },
+        "education_field_trip": {
+          "recommendedArc": ["group arrival", "observation prompt", "learning stop", "lunch or reset", "reflection close"],
+          "preferredStops": ["Front Gate", "Storybook Boats", "Lagoon Lanterns", "Food Court B", "Theater B"],
+          "mustInclude": ["chaperone cue", "headcount pause", "learning prompt", "school-owner review"],
+          "avoidClaims": ["curriculum certification", "student supervision guarantee", "unsafe crowd-control instruction"]
+        },
+        "post_incident_recovery_copy": {
+          "recommendedArc": ["acknowledge concern", "orient to support", "offer current alternate", "staff phrase", "follow-up close"],
+          "preferredStops": ["Guest Services", "Covered Plaza", "Food Court B", "Theater B", "Front Gate"],
+          "mustInclude": ["empathetic acknowledgement", "current source handoff", "no fault speculation", "owner-approved escalation path"],
+          "avoidClaims": ["incident cause speculation", "compensation promise", "resolved without live confirmation"]
+        },
+        "retail_merch_quest": {
+          "recommendedArc": ["quest invite", "display clue", "shop or story beat", "non-purchase option", "collectible close"],
+          "preferredStops": ["Front Gate", "Dragon Arch Photo Spot", "Food Court B", "Covered Plaza", "Lagoon Lanterns"],
+          "mustInclude": ["non-purchase path", "fulfillment review", "display placement approval", "caregiver opt-out"],
+          "avoidClaims": ["purchase requirement", "guaranteed item availability", "limited-edition claim without retail approval"]
+        },
+        "scavenger_hunt": {
+          "recommendedArc": ["map pickup", "visual clue", "landmark solve", "validation pause", "final reveal"],
+          "preferredStops": ["Dragon Arch Photo Spot", "Storybook Boats", "Lagoon Lanterns", "Shade Garden", "Food Court B"],
+          "mustInclude": ["visible clue object", "skip option", "non-purchase validation", "path-safe pause"],
+          "avoidClaims": ["guaranteed prize", "blocking paths", "requiring staff to validate every clue"]
+        },
+        "attraction_copy": {
+          "recommendedArc": ["expectation set", "signature detail", "access and comfort cue", "nearby pairing", "current-options handoff"],
+          "preferredStops": ["Dragon Coaster", "Indoor Launch", "Storybook Boats", "Theater B", "Lagoon Lanterns"],
+          "mustInclude": ["height or eligibility review", "accessibility review", "nearby lower-pressure alternate", "current operating caveat"],
+          "avoidClaims": ["no wait", "always open", "safe for every guest", "medical suitability"]
+        },
+        "safety_signage": {
+          "recommendedArc": ["plain instruction", "reason cue", "location context", "staff-support phrase", "app or follow-up reminder"],
+          "preferredStops": ["Front Gate", "Guest Services", "Covered Plaza", "Food Court B", "Theater B"],
+          "mustInclude": ["one action per sign", "plain language", "readability check", "safety-owner approval"],
+          "avoidClaims": ["new rule without source", "ambiguous direction", "operational instruction beyond approved safety copy"]
         }
       },
       "noGoPairings": [

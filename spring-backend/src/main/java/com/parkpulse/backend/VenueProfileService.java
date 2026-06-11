@@ -658,7 +658,11 @@ public class VenueProfileService {
         intelligence.put("brandBible", mapValue(supplied.get("brand_bible")));
         intelligence.put("reviewOwners", mapValue(supplied.get("review_owners")));
         intelligence.put("fieldSourceLedger", Map.of("rows", fieldSourceRows(export)));
-        intelligence.put("modulePolicy", Map.of("experience_studio", "draft_only_human_review_required", "command_center", "review_and_dispatch_authority"));
+        Map<String, Object> modulePolicy = orderedMap();
+        modulePolicy.putAll(mapValue(supplied.get("module_policy")));
+        modulePolicy.putIfAbsent("experience_studio", "draft_only_human_review_required");
+        modulePolicy.putIfAbsent("command_center", "review_and_dispatch_authority");
+        intelligence.put("modulePolicy", modulePolicy);
         intelligence.put("liveFeedBindings", Map.of("locations", locations.keySet(), "zones", zones.keySet(), "paths", listValue(spatialModel.get("paths")).size()));
         return intelligence;
     }
