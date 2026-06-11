@@ -84,7 +84,11 @@ function getRunGate(telemetry?: AnyRecord | null): string | undefined {
 function getSelectedAction(telemetry?: AnyRecord | null): string | undefined {
   if (!telemetry) return undefined;
   const selected = telemetry.planner?.selected_action;
+  const finalDecision = telemetry.negotiation_trace?.final_executive_decision;
+  const adjudication = telemetry.negotiation_trace?.executive_adjudication;
   return (
+    finalDecision?.reason ??
+    adjudication?.reason ??
     telemetry.learning_proof?.after?.strategy ??
     telemetry.learned_run?.status ??
     telemetry.brief?.operator_brief ??
@@ -126,6 +130,8 @@ export function buildOperatingLoopViewModel({
   const dispatches = getRunDispatches(displayTelemetry);
   const evalScore = getRunEvalScore(displayTelemetry);
   const resolvedGate =
+    displayTelemetry?.policy_regulation_judgment?.status ??
+    displayTelemetry?.trace_contract?.policy_regulation_judgment?.status ??
     latestCopilotReceipt?.recommended_action?.gate ??
     getRunGate(displayTelemetry) ??
     operatorCommandResult?.run_telemetry?.governance?.gate_status ??
@@ -145,9 +151,18 @@ export function buildOperatingLoopViewModel({
     displayTelemetry?.outcome_id ??
     causalImpactReceipt?.memory?.outcome_id ??
     null;
-  const reasoningRows = latestCopilotReceipt?.reasoning_summary?.length
-    ? latestCopilotReceipt.reasoning_summary
-    : runTraceEvents.map((event) => event.message ?? event.label).filter(Boolean);
+  const negotiationTrace = displayTelemetry?.negotiation_trace;
+  const executiveAdjudication = negotiationTrace?.executive_adjudication;
+  const finalExecutiveDecision = negotiationTrace?.final_executive_decision;
+  const policyJudgment = displayTelemetry?.policy_regulation_judgment ?? displayTelemetry?.trace_contract?.policy_regulation_judgment;
+  const reasoningRows = [
+    finalExecutiveDecision?.reason,
+    executiveAdjudication?.reason,
+    policyJudgment?.findings?.[0],
+    policyJudgment?.human_review_reasons?.[0],
+    ...(latestCopilotReceipt?.reasoning_summary?.length ? latestCopilotReceipt.reasoning_summary : []),
+    ...runTraceEvents.map((event) => event.message ?? event.label).filter(Boolean),
+  ].filter(Boolean);
   const hasReasoning = Boolean(latestCopilotReceipt || operatorCommandResult || reasoningRows.length || displayTelemetry);
   const hasSimulation = Boolean(causalImpactReceipt || displayTelemetry?.digital_twin_tools || latestCopilotReceipt?.impact_replay || toolTimeline.length);
   const hasDecision = Boolean(latestCopilotReceipt || operatorCommandResult || displayTelemetry || causalImpactReceipt?.selected_action);
@@ -196,8 +211,13 @@ export function buildOperatingLoopViewModel({
       label: "Reason",
       owner: "Orchestrator",
       status: stageStatus(hasReasoning, isActive("reason")),
-      metric: latestCopilotReceipt?.chat_brain?.intent ?? latestCopilotReceipt?.mode ?? operatorCommandResult?.mode ?? "freeform",
-      title: hasReasoning ? "Intent routed" : "Waiting for request",
+      metric:
+        executiveAdjudication?.model_version ??
+        latestCopilotReceipt?.chat_brain?.intent ??
+        latestCopilotReceipt?.mode ??
+        operatorCommandResult?.mode ??
+        "freeform",
+      title: finalExecutiveDecision?.status ? humanize(finalExecutiveDecision.status) : hasReasoning ? "Intent routed" : "Waiting for request",
       body: latestCopilotReceipt?.chat_brain?.planner_message ?? reasoningRows[0] ?? runProgress ?? "The agent has not reasoned over a fresh operator request yet.",
       evidenceTab: "trace",
       evidenceCount: reasoningRows.length,
@@ -224,9 +244,13 @@ export function buildOperatingLoopViewModel({
       status: stageStatus(hasDecision, isActive("decide")),
       metric: humanize(resolvedGate),
       title: selectedAction,
-      body: selectedAction,
+      body:
+        finalExecutiveDecision?.reason ??
+        executiveAdjudication?.reason ??
+        policyJudgment?.alignment_rule ??
+        selectedAction,
       evidenceTab: "governance",
-      evidenceCount: resolvedGate ? 1 : 0,
+      evidenceCount: [resolvedGate, finalExecutiveDecision, executiveAdjudication, policyJudgment].filter(Boolean).length,
     },
     {
       id: "execute",

@@ -22,6 +22,7 @@ RUBRIC_DIMENSIONS = [
 ]
 
 _SESSIONS: dict[str, dict[str, Any]] = {}
+_STAFF_TRAINING_SESSION_COLLECTION = "staff_training_sessions"
 
 STAFF_ROLE_ASSIGNMENT_SCENARIOS = {
     "guest_services": ["angry_parent", "refund_request", "accessibility_accommodation", "language_barrier"],
@@ -30,8 +31,100 @@ STAFF_ROLE_ASSIGNMENT_SCENARIOS = {
     "security": ["lost_child_report", "line_cutting_conflict", "weather_evacuation_confusion"],
     "food": ["heat_exhaustion_concern", "refund_request", "line_cutting_conflict"],
 }
+TRAINING_SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 
 STAFF_TRAINING_REVIEW_DECISIONS = {"approve_shadowing", "require_retry", "hold"}
+
+STAFF_TRAINING_AGENT_ROLES = [
+    {
+        "id": "context_retriever",
+        "purpose": "Retrieve scenario policy, active learning versions, prior trainee outcomes, and training-gap memory before a roleplay starts.",
+        "score_authority": False,
+        "live_ops_authority": False,
+    },
+    {
+        "id": "guest_simulator",
+        "purpose": "Generate or select the next guest-only roleplay turn while staying inside scenario facts.",
+        "score_authority": False,
+        "live_ops_authority": False,
+    },
+    {
+        "id": "deterministic_scorer",
+        "purpose": "Score employee turns with the policy and safety rubric.",
+        "score_authority": True,
+        "live_ops_authority": False,
+    },
+    {
+        "id": "mastery_tracker",
+        "purpose": "Track open and repaired coaching gaps across turns and sessions.",
+        "score_authority": False,
+        "live_ops_authority": False,
+    },
+    {
+        "id": "shadow_evaluator",
+        "purpose": "Optionally comment on rubric alignment without changing the official score.",
+        "score_authority": False,
+        "live_ops_authority": False,
+    },
+]
+
+STAFF_TRAINING_TOOL_MANIFEST = [
+    {
+        "id": "staff_training.retrieve_context",
+        "owner_agent": "context_retriever",
+        "allowed": True,
+        "inputs": ["scenario_id", "trainee_name", "assignment_id"],
+        "outputs": ["policy_refs", "active_learning_versions", "prior_sessions", "training_gap_patterns"],
+    },
+    {
+        "id": "staff_training.generate_guest_turn",
+        "owner_agent": "guest_simulator",
+        "allowed": True,
+        "inputs": ["scenario", "transcript", "retrieved_training_context", "deterministic_score_summary"],
+        "outputs": ["guest_reply"],
+        "constraints": ["guest voice only", "no scoring", "no live-action approval"],
+    },
+    {
+        "id": "staff_training.score_turn",
+        "owner_agent": "deterministic_scorer",
+        "allowed": True,
+        "inputs": ["scenario", "employee_message", "turn_count"],
+        "outputs": ["turn_score", "coaching_notes"],
+        "authority": "official_training_score",
+    },
+    {
+        "id": "staff_training.update_mastery_memory",
+        "owner_agent": "mastery_tracker",
+        "allowed": True,
+        "inputs": ["previous_mastery_tracker", "turn_score"],
+        "outputs": ["open_gaps", "repaired_gaps", "mastery_level"],
+    },
+    {
+        "id": "product_learning.create_training_gap_ticket",
+        "owner_agent": "mastery_tracker",
+        "allowed": True,
+        "inputs": ["finished_session", "open_gaps"],
+        "outputs": ["training_gap_ticket"],
+        "constraints": ["training/product-learning only", "no live dispatch", "no reward label"],
+    },
+    {
+        "id": "staff_training.shadow_eval",
+        "owner_agent": "shadow_evaluator",
+        "allowed": True,
+        "inputs": ["scenario", "employee_message", "deterministic_score"],
+        "outputs": ["alignment_comment"],
+        "constraints": ["no score authority"],
+    },
+]
+
+STAFF_TRAINING_BLOCKED_TOOLS = [
+    "live_dispatch.execute",
+    "refund.approve",
+    "medical.diagnose",
+    "ride_control.override",
+    "reward_model.write_label",
+    "model_registry.promote",
+]
 
 DEMO_TRAINEES = [
     {
@@ -401,6 +494,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _iso_timestamp(value: Any) -> float:
+    try:
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
 def _session_log_path() -> str:
     return os.getenv("PARKPULSE_STAFF_TRAINING_LOG_PATH", "/tmp/parkpulse/staff_training_sessions.jsonl")
 
@@ -436,6 +539,136 @@ def _read_training_events(limit: int = 2000) -> list[dict[str, Any]]:
     return _read_jsonl(limit=max(1, min(5000, int(limit or 2000))))
 
 
+def _persist_staff_training_session(session: dict[str, Any]) -> None:
+    session_id = str(session.get("id") or "").strip()
+    if not session_id:
+        return
+    try:
+        from mongo_memory import _clean_for_bson, _ensure_memory_initialized, _memory
+
+        _ensure_memory_initialized()
+        collection = _memory._collection(_STAFF_TRAINING_SESSION_COLLECTION)
+        document = {
+            "_id": session_id,
+            "id": session_id,
+            "mode": "staff_roleplay_session",
+            "session": session,
+            "session_response": _session_response(session),
+            "scenario_id": session.get("scenario_id"),
+            "trainee_name": session.get("trainee_name"),
+            "status": session.get("status"),
+            "turn_count": session.get("turn_count"),
+            "createdAt": session.get("started_at") or _now_iso(),
+            "updatedAt": session.get("updated_at") or _now_iso(),
+        }
+        if collection is not None:
+            collection.replace_one({"_id": session_id}, _clean_for_bson(document), upsert=True)
+            return
+        _memory._fallback[_STAFF_TRAINING_SESSION_COLLECTION] = [
+            row for row in _memory._fallback.get(_STAFF_TRAINING_SESSION_COLLECTION, []) if row.get("_id") != session_id
+        ]
+        _memory._fallback[_STAFF_TRAINING_SESSION_COLLECTION].insert(0, document)
+        _memory._fallback[_STAFF_TRAINING_SESSION_COLLECTION] = _memory._fallback[_STAFF_TRAINING_SESSION_COLLECTION][:200]
+    except Exception:
+        return
+
+
+def _normalize_staff_training_session(session: dict[str, Any]) -> dict[str, Any]:
+    scenario_id = str(session.get("scenario_id") or (session.get("scenario") or {}).get("id") or "lost_child_report")
+    scenario = SCENARIOS.get(scenario_id) or SCENARIOS["lost_child_report"]
+    active_learning_versions = session.get("active_learning_versions") if isinstance(session.get("active_learning_versions"), list) else []
+    normalized = dict(session)
+    normalized["id"] = str(normalized.get("id") or "")
+    normalized["mode"] = normalized.get("mode") or "staff_roleplay_session"
+    normalized["scenario_id"] = scenario["id"]
+    normalized["scenario"] = normalized.get("scenario") if isinstance(normalized.get("scenario"), dict) else _public_scenario(scenario, active_learning_versions)
+    normalized["status"] = normalized.get("status") or "active"
+    normalized["trainee_name"] = str(normalized.get("trainee_name") or "Seasonal staff trainee")[:80]
+    normalized["started_at"] = normalized.get("started_at") or normalized.get("createdAt") or _now_iso()
+    normalized["updated_at"] = normalized.get("updated_at") or normalized.get("updatedAt") or normalized["started_at"]
+    normalized["turn_count"] = int(normalized.get("turn_count") or 0)
+    if not isinstance(normalized.get("transcript"), list) or not normalized["transcript"]:
+        normalized["transcript"] = [{"speaker": "guest", "message": scenario["opening_message"], "at": normalized["started_at"]}]
+    if not isinstance(normalized.get("scores"), list):
+        normalized["scores"] = []
+    normalized["scorecard"] = normalized.get("scorecard") if isinstance(normalized.get("scorecard"), dict) else _empty_scorecard()
+    normalized["mastery_tracker"] = normalized.get("mastery_tracker") if isinstance(normalized.get("mastery_tracker"), dict) else _empty_mastery_tracker()
+    normalized["completed_objectives"] = normalized.get("completed_objectives") if isinstance(normalized.get("completed_objectives"), list) else []
+    normalized["missing_objectives"] = normalized.get("missing_objectives") if isinstance(normalized.get("missing_objectives"), list) else list(scenario["objectives"])
+    normalized["critical_miss"] = bool(normalized.get("critical_miss"))
+    normalized["guest_simulator"] = normalized.get("guest_simulator") if isinstance(normalized.get("guest_simulator"), dict) else {
+        "mode": "deterministic_guest",
+        "llm_requested": False,
+        "llm_controls_score": False,
+        "fallback": "deterministic_guest_reply",
+    }
+    normalized["boundary"] = normalized.get("boundary") or "Training simulator only; no live dispatch, guest PII, reward labels, or policy promotion authority."
+    return normalized
+
+
+def _load_persisted_staff_training_session(session_id: str) -> dict[str, Any] | None:
+    safe_id = str(session_id or "").strip()
+    if not safe_id:
+        return None
+    try:
+        from mongo_memory import get_memory_document
+
+        document = get_memory_document(_STAFF_TRAINING_SESSION_COLLECTION, safe_id)
+    except Exception:
+        document = None
+    if isinstance(document, dict):
+        session = document.get("session") if isinstance(document.get("session"), dict) else document.get("session_response")
+        if isinstance(session, dict):
+            loaded = _normalize_staff_training_session(session)
+            if loaded.get("id"):
+                _SESSIONS[str(loaded["id"])] = loaded
+                return loaded
+    for row in reversed(_read_training_events(5000)):
+        row_id = str(row.get("id") or row.get("session_id") or "")
+        if row_id != safe_id:
+            continue
+        scenario_id = str(row.get("scenario_id") or "lost_child_report")
+        scenario = SCENARIOS.get(scenario_id) or SCENARIOS["lost_child_report"]
+        loaded = _normalize_staff_training_session(
+            {
+                "id": safe_id,
+                "scenario_id": scenario["id"],
+                "scenario": _public_scenario(scenario, row.get("active_learning_versions") if isinstance(row.get("active_learning_versions"), list) else []),
+                "trainee_name": row.get("trainee_name"),
+                "assignment_id": row.get("assignment_id"),
+                "retry_of_session_id": row.get("retry_of_session_id"),
+                "status": row.get("status"),
+                "turn_count": row.get("turn_count"),
+                "scorecard": row.get("scorecard"),
+                "critical_miss": row.get("critical_miss"),
+                "mastery_tracker": row.get("mastery_tracker"),
+                "active_learning_versions": row.get("active_learning_versions"),
+                "active_learning_version_ids": row.get("active_learning_version_ids"),
+                "learning_version_guidance": row.get("learning_version_guidance"),
+                "retrieved_training_context": row.get("retrieved_training_context"),
+                "agent_contract": row.get("agent_contract"),
+                "agent_tool_manifest": row.get("agent_tool_manifest"),
+                "tool_trace": row.get("tool_trace"),
+                "completed_objectives": row.get("completed_objectives"),
+                "missing_objectives": row.get("missing_objectives"),
+                "started_at": row.get("created_at"),
+                "updated_at": row.get("created_at"),
+                "transcript": row.get("transcript"),
+                "scores": row.get("scores"),
+            }
+        )
+        _SESSIONS[safe_id] = loaded
+        return loaded
+    return None
+
+
+def _get_staff_training_session(session_id: str) -> dict[str, Any] | None:
+    safe_id = str(session_id or "").strip()
+    if not safe_id:
+        return None
+    return _SESSIONS.get(safe_id) or _load_persisted_staff_training_session(safe_id)
+
+
 def _public_scenario(scenario: dict[str, Any], active_learning_versions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     public = {
         "id": scenario["id"],
@@ -465,6 +698,45 @@ def _active_learning_versions_for_scenario(scenario_id: str) -> list[dict[str, A
         return []
 
 
+def _guest_triage_training_memory(scenario_id: str) -> dict[str, Any]:
+    try:
+        from product_learning_loop import guest_triage_training_memory
+
+        memory = guest_triage_training_memory(scenario_id, limit=80)
+        return memory if isinstance(memory, dict) else {"status": "empty", "patterns": [], "recent_examples": []}
+    except Exception as error:
+        return {"status": "error", "patterns": [], "recent_examples": [], "readiness_issues": [str(error)[:180]]}
+
+
+def _guest_triage_assignment_recommendations(role: str, limit: int = 6) -> list[dict[str, Any]]:
+    try:
+        from product_learning_loop import recommended_training_scenarios_from_guest_triage
+
+        recommendation_limit = max(12, min(20, int(limit or 6) * 4))
+        recommendations = recommended_training_scenarios_from_guest_triage(limit=recommendation_limit)
+    except Exception:
+        return []
+    allowed = set(STAFF_ROLE_ASSIGNMENT_SCENARIOS.get(role) or [])
+    role_priority = {scenario_id: index for index, scenario_id in enumerate(STAFF_ROLE_ASSIGNMENT_SCENARIOS.get(role) or [])}
+    rows: list[dict[str, Any]] = []
+    for item in recommendations:
+        if not isinstance(item, dict):
+            continue
+        scenario_id = str(item.get("scenario_id") or "")
+        if scenario_id in SCENARIOS and (not allowed or scenario_id in allowed):
+            rows.append(item)
+    rows.sort(
+        key=lambda item: (
+            0 if TRAINING_SEVERITY_RANK.get(str(item.get("highest_severity") or ""), 0) >= TRAINING_SEVERITY_RANK["critical"] else 1,
+            -_iso_timestamp(item.get("latest_created_at")),
+            -TRAINING_SEVERITY_RANK.get(str(item.get("highest_severity") or ""), 0),
+            -int(item.get("evidence_count") or 0),
+            role_priority.get(str(item.get("scenario_id") or ""), 999),
+        )
+    )
+    return rows[: max(1, min(12, int(limit or 6)))]
+
+
 def _learning_version_guidance(active_learning_versions: list[dict[str, Any]]) -> list[str]:
     guidance: list[str] = []
     for version in active_learning_versions[:3]:
@@ -472,6 +744,361 @@ def _learning_version_guidance(active_learning_versions: list[dict[str, Any]]) -
         if summary:
             guidance.append(summary[:500])
     return guidance
+
+
+def _staff_training_agent_contract() -> dict[str, Any]:
+    return {
+        "mode": "staff_training_agent_contract",
+        "roles": STAFF_TRAINING_AGENT_ROLES,
+        "tool_manifest": STAFF_TRAINING_TOOL_MANIFEST,
+        "blocked_tools": STAFF_TRAINING_BLOCKED_TOOLS,
+        "rag_contract": {
+            "retrieval_method": "scenario_and_trainee_lexical_jsonl_plus_product_learning_versions",
+            "retrieves": ["active staff-training learning versions", "prior session outcomes", "training gap tickets", "scenario policy refs"],
+            "llm_controls_retrieval": False,
+            "llm_controls_score": False,
+        },
+        "boundaries": [
+            "LLM guest generation can use retrieved context but cannot score turns.",
+            "Training memory can create product-learning tickets only after debrief.",
+            "No training agent can dispatch live actions, approve refunds, diagnose guests, write reward labels, or promote models.",
+        ],
+    }
+
+
+def _scenario_policy_refs(scenario: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = [
+        {"id": f"scenario:{scenario.get('id')}", "label": str(scenario.get("title") or ""), "type": "scenario"},
+        {"id": "rubric:staff_training_v1", "label": "Deterministic staff-training rubric", "type": "rubric"},
+    ]
+    if scenario.get("difficulty") == "critical":
+        refs.append({"id": "policy:safety_escalation_required", "label": "Critical scenarios require explicit safety escalation.", "type": "policy"})
+    category = str(scenario.get("category") or "").lower()
+    if "access" in category:
+        refs.append({"id": "policy:accessibility_privacy", "label": "Respect privacy and avoid medical probing.", "type": "policy"})
+    if "safety" in category or "ride" in category:
+        refs.append({"id": "policy:ride_safety_no_override", "label": "Never override safety requirements during training.", "type": "policy"})
+    return refs
+
+
+def _text_tokens(value: Any) -> set[str]:
+    raw = str(value or "").lower()
+    token = ""
+    tokens: set[str] = set()
+    for char in raw:
+        if char.isalnum() or char == "_":
+            token += char
+        elif token:
+            if len(token) >= 3:
+                tokens.add(token)
+            token = ""
+    if token and len(token) >= 3:
+        tokens.add(token)
+    return tokens
+
+
+def _compact_session_memory(row: dict[str, Any], query_tokens: set[str], scenario_id: str, trainee_key: str) -> dict[str, Any] | None:
+    row_scenario = str(row.get("scenario_id") or "")
+    scorecard = row.get("scorecard", {}) if isinstance(row.get("scorecard"), dict) else {}
+    mastery = row.get("mastery_tracker", {}) if isinstance(row.get("mastery_tracker"), dict) else {}
+    debrief = row.get("debrief", {}) if isinstance(row.get("debrief"), dict) else {}
+    trainee = str(row.get("trainee_name") or "")
+    row_tokens = _text_tokens(
+        " ".join(
+            [
+                row_scenario,
+                trainee,
+                str(debrief.get("summary") or ""),
+                " ".join(str(item.get("label") or "") for item in (mastery.get("open_gaps", []) if isinstance(mastery.get("open_gaps"), list) else []) if isinstance(item, dict)),
+            ]
+        )
+    )
+    score = len(query_tokens & row_tokens)
+    if row_scenario == scenario_id:
+        score += 6
+    if trainee_key and trainee.strip().lower() == trainee_key:
+        score += 4
+    if row.get("critical_miss"):
+        score += 1
+    if score <= 0:
+        return None
+    return {
+        "session_id": row.get("id") or row.get("session_id"),
+        "scenario_id": row_scenario,
+        "trainee_name": trainee,
+        "overall": scorecard.get("overall"),
+        "critical_miss": bool(row.get("critical_miss")),
+        "mastery_level": mastery.get("mastery_level"),
+        "open_gaps": [str(item.get("label") or item.get("type") or "") for item in (mastery.get("open_gaps", []) if isinstance(mastery.get("open_gaps"), list) else []) if isinstance(item, dict)][:5],
+        "repaired_gaps": [str(item.get("label") or item.get("type") or "") for item in (mastery.get("repaired_gaps", []) if isinstance(mastery.get("repaired_gaps"), list) else []) if isinstance(item, dict)][:5],
+        "debrief_result": debrief.get("result"),
+        "summary": str(debrief.get("summary") or "")[:240],
+        "finished_at": row.get("finished_at") or row.get("created_at"),
+        "retrieval_score": score,
+    }
+
+
+def _product_learning_gap_patterns(scenario_id: str, limit: int = 500) -> list[dict[str, Any]]:
+    try:
+        from product_learning_loop import _read_events
+
+        events = _read_events(limit)
+    except Exception:
+        events = []
+    patterns: dict[str, dict[str, Any]] = {}
+    for row in events:
+        if row.get("event") != "training_gap_ticket_created" or str(row.get("scenario_id") or "") != scenario_id:
+            continue
+        gap_type = str(row.get("gap_type") or "unknown")
+        pattern = patterns.setdefault(
+            gap_type,
+            {
+                "gap_type": gap_type,
+                "count": 0,
+                "highest_severity": "low",
+                "latest_summary": "",
+            },
+        )
+        pattern["count"] = int(pattern.get("count") or 0) + 1
+        severity = str(row.get("severity") or "low")
+        if {"low": 1, "coaching": 2, "medium": 2, "high": 3, "critical_training_gap": 4, "critical": 4}.get(severity, 1) > {"low": 1, "coaching": 2, "medium": 2, "high": 3, "critical_training_gap": 4, "critical": 4}.get(str(pattern.get("highest_severity") or "low"), 1):
+            pattern["highest_severity"] = severity
+        evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+        summary = str(evidence.get("summary") or evidence.get("transcript_excerpt") or row.get("summary") or "").strip()
+        if summary:
+            pattern["latest_summary"] = summary[:240]
+    return sorted(patterns.values(), key=lambda item: int(item.get("count") or 0), reverse=True)[:6]
+
+
+def _policy_book_snippets(scenario: dict[str, Any], limit: int = 5) -> list[dict[str, Any]]:
+    query = " ".join(
+        [
+            str(scenario.get("id") or ""),
+            str(scenario.get("title") or ""),
+            str(scenario.get("category") or ""),
+            str(scenario.get("context") or ""),
+            " ".join(str(item) for item in scenario.get("objectives", []) or []),
+        ]
+    )
+    try:
+        from policy_loader import retrieve_operational_doctrine
+
+        doctrine = retrieve_operational_doctrine(query, {"scenario": scenario.get("id"), "active_policy": scenario.get("category")}, limit=limit)
+    except Exception:
+        return []
+    snippets: list[dict[str, Any]] = []
+    for item in doctrine.get("matches", []) if isinstance(doctrine.get("matches"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        snippets.append(
+            {
+                "id": item.get("id"),
+                "title": item.get("title"),
+                "book_id": item.get("book_id"),
+                "kind": item.get("kind"),
+                "summary": str(item.get("summary") or "")[:360],
+                "policy_refs": [str(ref) for ref in item.get("policy_refs", []) if ref][:8],
+                "blocked_actions": [str(action) for action in item.get("blocked_actions", []) if action][:5],
+                "matched_terms": [str(term) for term in item.get("matched_terms", []) if term][:8],
+                "retrieval_score": item.get("score"),
+            }
+        )
+    return snippets[:limit]
+
+
+def _manager_review_memory(events: list[dict[str, Any]], scenario_id: str, trainee_key: str) -> list[dict[str, Any]]:
+    finished_by_session = {
+        str(row.get("id") or row.get("session_id") or ""): row
+        for row in events
+        if row.get("event") == "session_finished"
+    }
+    reviews: list[dict[str, Any]] = []
+    for row in events:
+        if row.get("event") != "receipt_reviewed":
+            continue
+        session_id = str(row.get("session_id") or "")
+        finished = finished_by_session.get(session_id, {})
+        row_scenario = str(row.get("scenario_id") or finished.get("scenario_id") or "")
+        trainee = str(row.get("trainee_name") or finished.get("trainee_name") or "")
+        if row_scenario != scenario_id and (not trainee_key or trainee.strip().lower() != trainee_key):
+            continue
+        reviews.append(
+            {
+                "review_id": row.get("review_id") or row.get("id"),
+                "session_id": session_id,
+                "scenario_id": row_scenario,
+                "trainee_name": trainee,
+                "decision": row.get("decision"),
+                "reviewer": row.get("reviewer"),
+                "notes": str(row.get("notes") or "")[:360],
+                "created_at": row.get("created_at"),
+                "boundary": "Manager review memory guides simulated coaching only.",
+            }
+        )
+    reviews.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return reviews[:8]
+
+
+def _trainee_profile_from_memory(prior_sessions: list[dict[str, Any]], manager_reviews: list[dict[str, Any]], trainee_name: str | None) -> dict[str, Any]:
+    scores = [float(item.get("overall") or 0) for item in prior_sessions if isinstance(item.get("overall"), (int, float))]
+    open_gap_counts: dict[str, int] = {}
+    for item in prior_sessions:
+        for gap in item.get("open_gaps", []) if isinstance(item.get("open_gaps"), list) else []:
+            key = str(gap or "").strip() or "unknown"
+            open_gap_counts[key] = open_gap_counts.get(key, 0) + 1
+    review_counts: dict[str, int] = {}
+    for review in manager_reviews:
+        decision = str(review.get("decision") or "unknown")
+        review_counts[decision] = review_counts.get(decision, 0) + 1
+        note = str(review.get("notes") or "")
+        if note:
+            for token in sorted(_text_tokens(note))[:12]:
+                if token in {"escalation", "safety", "policy", "clarity", "empathy"}:
+                    open_gap_counts[token] = open_gap_counts.get(token, 0) + 1
+    recurring = [
+        {"label": label, "count": count}
+        for label, count in sorted(open_gap_counts.items(), key=lambda item: item[1], reverse=True)
+    ][:6]
+    return {
+        "status": "ready" if prior_sessions or manager_reviews else "empty",
+        "trainee_name": str(trainee_name or "")[:80],
+        "session_count": len(prior_sessions),
+        "average_score": round(sum(scores) / len(scores), 1) if scores else None,
+        "critical_miss_count": sum(1 for item in prior_sessions if item.get("critical_miss")),
+        "manager_review_count": len(manager_reviews),
+        "manager_review_decisions": review_counts,
+        "recurring_gaps": recurring,
+        "coaching_priority": recurring[0]["label"] if recurring else None,
+        "boundary": "Longitudinal trainee profile is simulated-training memory only.",
+    }
+
+
+def _staff_training_tool_trace(session: dict[str, Any], phase: str, score: dict[str, Any] | None = None, guest_generation: dict[str, Any] | None = None, shadow_eval: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    context = session.get("retrieved_training_context") if isinstance(session.get("retrieved_training_context"), dict) else {}
+    counts = context.get("counts") if isinstance(context.get("counts"), dict) else {}
+    trace = [
+        {
+            "tool": "staff_training.retrieve_context",
+            "agent": "context_retriever",
+            "status": "complete",
+            "output": counts,
+            "live_ops_authority": False,
+        }
+    ]
+    if phase == "start":
+        return trace
+    trace.append(
+        {
+            "tool": "staff_training.score_turn",
+            "agent": "deterministic_scorer",
+            "status": "complete",
+            "output": {"overall": (score or {}).get("overall"), "critical_miss": bool((score or {}).get("critical_miss"))},
+            "score_authority": True,
+            "live_ops_authority": False,
+        }
+    )
+    trace.append(
+        {
+            "tool": "staff_training.update_mastery_memory",
+            "agent": "mastery_tracker",
+            "status": "complete",
+            "output": {
+                "mastery_level": (session.get("mastery_tracker") or {}).get("mastery_level") if isinstance(session.get("mastery_tracker"), dict) else None,
+                "open_gap_count": len((session.get("mastery_tracker") or {}).get("open_gaps", [])) if isinstance(session.get("mastery_tracker"), dict) else 0,
+            },
+            "live_ops_authority": False,
+        }
+    )
+    trace.append(
+        {
+            "tool": "staff_training.generate_guest_turn",
+            "agent": "guest_simulator",
+            "status": (guest_generation or {}).get("status") or "complete",
+            "output": {"source": (guest_generation or {}).get("source"), "llm_controls_score": False},
+            "score_authority": False,
+            "live_ops_authority": False,
+        }
+    )
+    if shadow_eval:
+        trace.append(
+            {
+                "tool": "staff_training.shadow_eval",
+                "agent": "shadow_evaluator",
+                "status": shadow_eval.get("status"),
+                "output": {"alignment": shadow_eval.get("alignment"), "score_authority": False},
+                "score_authority": False,
+                "live_ops_authority": False,
+            }
+        )
+    return trace
+
+
+def retrieve_staff_training_context(
+    scenario_id: str | None = None,
+    trainee_name: str | None = None,
+    assignment_id: str | None = None,
+    *,
+    limit: int = 6,
+) -> dict[str, Any]:
+    scenario = SCENARIOS.get(str(scenario_id or "").strip()) or SCENARIOS["lost_child_report"]
+    scenario_key = str(scenario.get("id") or "")
+    trainee_key = str(trainee_name or "").strip().lower()
+    query_tokens = _text_tokens(" ".join([scenario_key, str(scenario.get("title") or ""), str(scenario.get("context") or ""), str(trainee_name or ""), str(assignment_id or "")]))
+    session_rows = [row for row in _read_training_events(1200) if row.get("event") == "session_finished"]
+    all_training_events = _read_training_events(1600)
+    compact_rows = [
+        item
+        for item in (_compact_session_memory(row, query_tokens, scenario_key, trainee_key) for row in session_rows)
+        if item is not None
+    ]
+    compact_rows.sort(key=lambda item: (int(item.get("retrieval_score") or 0), str(item.get("finished_at") or "")), reverse=True)
+    active_versions = _active_learning_versions_for_scenario(scenario_key)
+    manager_reviews = _manager_review_memory(all_training_events, scenario_key, trainee_key)
+    trainee_profile = _trainee_profile_from_memory(compact_rows, manager_reviews, trainee_name)
+    policy_snippets = _policy_book_snippets(scenario)
+    training_gap_patterns = _product_learning_gap_patterns(scenario_key)
+    guest_triage_memory = _guest_triage_training_memory(scenario_key)
+    guest_triage_patterns = guest_triage_memory.get("patterns") if isinstance(guest_triage_memory.get("patterns"), list) else []
+    guest_triage_examples = guest_triage_memory.get("recent_examples") if isinstance(guest_triage_memory.get("recent_examples"), list) else []
+    historical_ticket_frequency = guest_triage_memory.get("scenario_frequencies") if isinstance(guest_triage_memory.get("scenario_frequencies"), list) else []
+    context = {
+        "status": "ready",
+        "mode": "staff_training_rag_context",
+        "scenario_id": scenario_key,
+        "trainee_name": str(trainee_name or "")[:80],
+        "assignment_id": str(assignment_id or "")[:80] or None,
+        "retrieval_method": "scenario_and_trainee_lexical_jsonl_plus_product_learning_versions_plus_guest_triage_mongodb",
+        "retrieved": {
+            "policy_refs": _scenario_policy_refs(scenario),
+            "policy_snippets": policy_snippets,
+            "active_learning_versions": active_versions[:3],
+            "active_learning_guidance": _learning_version_guidance(active_versions),
+            "prior_sessions": compact_rows[: max(1, min(12, int(limit or 6)))],
+            "training_gap_patterns": training_gap_patterns,
+            "guest_triage_patterns": guest_triage_patterns[:6],
+            "guest_triage_examples": guest_triage_examples[:5],
+            "historical_ticket_frequency": historical_ticket_frequency[:6],
+            "scenario_recommendation": guest_triage_memory.get("assignment_recommendation"),
+            "manager_reviews": manager_reviews,
+            "trainee_profile": trainee_profile,
+        },
+        "counts": {
+            "policy_refs": len(_scenario_policy_refs(scenario)),
+            "policy_snippets": len(policy_snippets),
+            "active_learning_versions": len(active_versions),
+            "prior_sessions": len(compact_rows),
+            "training_gap_patterns": len(training_gap_patterns),
+            "guest_triage_patterns": len(guest_triage_patterns),
+            "guest_triage_examples": len(guest_triage_examples),
+            "historical_ticket_frequency": len(historical_ticket_frequency),
+            "manager_reviews": len(manager_reviews),
+        },
+        "tool_manifest_ids": [str(item.get("id") or "") for item in STAFF_TRAINING_TOOL_MANIFEST],
+        "blocked_tools": STAFF_TRAINING_BLOCKED_TOOLS,
+        "memory_scope": "staff_training_sessions_jsonl+product_learning_events+guest_messages_mongodb",
+        "boundary": "Retrieved context can guide simulated training only. It cannot authorize live operations, reward labels, refunds, diagnoses, or model promotion.",
+    }
+    return context
 
 
 def _llm_guest_provider_status() -> dict[str, Any]:
@@ -527,6 +1154,7 @@ def list_staff_training_scenarios() -> dict[str, Any]:
 
 def staff_training_policy_pack() -> dict[str, Any]:
     scenarios = [_public_scenario(item) for item in SCENARIOS.values()]
+    agent_contract = _staff_training_agent_contract()
     return {
         "status": "ready",
         "mode": "staff_roleplay_policy_pack",
@@ -577,6 +1205,10 @@ def staff_training_policy_pack() -> dict[str, Any]:
             ],
             "minimum_live_shadowing_gate": "No critical miss and overall score at least 75.",
         },
+        "agent_contract": agent_contract,
+        "tool_manifest": agent_contract["tool_manifest"],
+        "rag_contract": agent_contract["rag_contract"],
+        "blocked_tools": STAFF_TRAINING_BLOCKED_TOOLS,
     }
 
 
@@ -589,7 +1221,10 @@ def create_staff_training_assignment(
     role = _normalize_staff_role(staff_role)
     requested = [str(item or "").strip() for item in (scenario_ids or [])]
     valid_requested = [item for item in requested if item in SCENARIOS]
-    assigned_scenarios = valid_requested or list(STAFF_ROLE_ASSIGNMENT_SCENARIOS.get(role) or STAFF_ROLE_ASSIGNMENT_SCENARIOS["guest_services"])
+    default_scenarios = list(STAFF_ROLE_ASSIGNMENT_SCENARIOS.get(role) or STAFF_ROLE_ASSIGNMENT_SCENARIOS["guest_services"])
+    recommended = _guest_triage_assignment_recommendations(role, limit=len(default_scenarios))
+    recommended_ids = [str(item.get("scenario_id") or "") for item in recommended if str(item.get("scenario_id") or "") in default_scenarios]
+    assigned_scenarios = valid_requested or [*recommended_ids, *[item for item in default_scenarios if item not in set(recommended_ids)]]
     assignment_id = "staff-assign-" + hashlib.sha1(f"{trainee_name or ''}:{role}:{','.join(assigned_scenarios)}:{time.time()}".encode("utf-8")).hexdigest()[:14]
     assignment = {
         "event": "assignment_created",
@@ -601,6 +1236,8 @@ def create_staff_training_assignment(
         "assigned_by": str(assigned_by or "ParkPulse manager")[:80],
         "status": "assigned",
         "created_at": _now_iso(),
+        "source": "explicit_manager_selection" if valid_requested else "guest_triage_memory_prioritized" if recommended_ids else "role_default",
+        "source_signals": recommended[:4] if not valid_requested else [],
         "boundary": "Training assignment only; does not dispatch live work or create actual reward labels.",
     }
     _write_jsonl(assignment)
@@ -831,6 +1468,12 @@ def start_staff_training_session(
     llm_guest_enabled = _llm_guest_requested(use_llm_guest)
     active_learning_versions = _active_learning_versions_for_scenario(scenario["id"])
     public_scenario = _public_scenario(scenario, active_learning_versions=active_learning_versions)
+    retrieved_context = retrieve_staff_training_context(
+        scenario["id"],
+        trainee_name=trainee_name,
+        assignment_id=assignment_id,
+    )
+    agent_contract = _staff_training_agent_contract()
     session = {
         "id": session_id,
         "status": "active",
@@ -840,6 +1483,10 @@ def start_staff_training_session(
         "active_learning_versions": active_learning_versions,
         "active_learning_version_ids": [str(item.get("version_id") or "") for item in active_learning_versions if item.get("version_id")],
         "learning_version_guidance": _learning_version_guidance(active_learning_versions),
+        "retrieved_training_context": retrieved_context,
+        "agent_contract": agent_contract,
+        "agent_tool_manifest": agent_contract["tool_manifest"],
+        "tool_trace": [],
         "trainee_name": str(trainee_name or "Seasonal staff trainee")[:80],
         "assignment_id": str(assignment_id or "")[:80] or None,
         "retry_of_session_id": str(retry_of_session_id or "")[:80] or None,
@@ -861,13 +1508,15 @@ def start_staff_training_session(
         "missing_objectives": list(scenario["objectives"]),
         "boundary": "Training simulator only; no live dispatch, guest PII, reward labels, or policy promotion authority.",
     }
+    session["tool_trace"] = _staff_training_tool_trace(session, "start")
     _SESSIONS[session_id] = session
+    _persist_staff_training_session(session)
     _write_jsonl({"event": "session_started", **_session_event_snapshot(session)})
     return _session_response(session)
 
 
 def advance_staff_training_turn(session_id: str, employee_message: str, use_llm_guest: bool | None = None, use_shadow_eval: bool | None = None) -> dict[str, Any]:
-    session = _SESSIONS.get(str(session_id or ""))
+    session = _get_staff_training_session(str(session_id or ""))
     if not session:
         return {"status": "not_found", "mode": "staff_roleplay_turn", "readiness_issues": ["Training session was not found or has expired. Start a new session."]}
     if session.get("status") != "active":
@@ -912,6 +1561,8 @@ def advance_staff_training_turn(session_id: str, employee_message: str, use_llm_
     if session["turn_count"] >= 4 or (not missing and not session["critical_miss"]):
         session["status"] = "ready_to_finish"
     shadow_eval = _generate_shadow_evaluator(scenario, session, message, score) if use_shadow_eval else {"status": "not_requested", "score_authority": False}
+    tool_trace = _staff_training_tool_trace(session, "turn", score=score, guest_generation=guest_generation, shadow_eval=shadow_eval if use_shadow_eval else None)
+    session["tool_trace"] = tool_trace
 
     payload = {
         "status": "complete",
@@ -925,13 +1576,16 @@ def advance_staff_training_turn(session_id: str, employee_message: str, use_llm_
         "llm_guest": {key: value for key, value in guest_generation.items() if key != "reply"},
         "mastery_tracker": session.get("mastery_tracker"),
         "shadow_evaluator": shadow_eval,
+        "tool_trace": tool_trace,
     }
+    _SESSIONS[str(session["id"])] = session
+    _persist_staff_training_session(session)
     _write_jsonl({"event": "turn_scored", "turn_score": score, **_session_event_snapshot(session)})
     return payload
 
 
 def finish_staff_training_session(session_id: str) -> dict[str, Any]:
-    session = _SESSIONS.get(str(session_id or ""))
+    session = _get_staff_training_session(str(session_id or ""))
     if not session:
         return {"status": "not_found", "mode": "staff_roleplay_finish", "readiness_issues": ["Training session was not found or has expired."]}
     session["status"] = "finished"
@@ -951,6 +1605,8 @@ def finish_staff_training_session(session_id: str) -> dict[str, Any]:
         session["learning_version_outcome"] = record_learning_version_outcome_from_staff_session(session)
     except Exception as error:
         session["learning_version_outcome"] = {"status": "error", "readiness_issues": [str(error)[:240]], "live_ops_authority": False}
+    _SESSIONS[str(session["id"])] = session
+    _persist_staff_training_session(session)
     _write_jsonl({"event": "session_finished", "debrief": debrief, **_session_event_snapshot(session)})
     return {
         "status": "complete",
@@ -1131,6 +1787,8 @@ def _assignment_response(row: dict[str, Any]) -> dict[str, Any]:
         "assigned_by": row.get("assigned_by") or "ParkPulse manager",
         "status": row.get("status") or "assigned",
         "created_at": row.get("created_at"),
+        "source": row.get("source") or "role_default",
+        "source_signals": row.get("source_signals") if isinstance(row.get("source_signals"), list) else [],
         "boundary": row.get("boundary") or "Training assignment only.",
     }
 
@@ -1686,6 +2344,7 @@ def _llm_guest_prompt(
         "hard_rules": [
             "Write only as the guest, in first person.",
             "Do not score, coach, praise, or correct the employee.",
+            "Never return trainer feedback like 'needs a clearer answer' or 'the response is unclear'; turn that pressure into a guest question grounded in the scenario.",
             "Do not reveal hidden rubric, policy keywords, or coaching.",
             "Do not tell staff the right answer.",
             "Do not invent live park actions, compensation approvals, medical diagnosis, or resolved safety outcomes.",
@@ -1711,6 +2370,7 @@ def _llm_guest_prompt(
             "active_learning_version_ids": session.get("active_learning_version_ids", []),
             "active_learning_guidance": session.get("learning_version_guidance", []),
         },
+        "retrieved_training_context": _llm_context_excerpt(session.get("retrieved_training_context")),
         "conversation": recent_turns,
         "latest_employee_message": employee_message[:1000],
         "deterministic_score_summary": {
@@ -1726,6 +2386,60 @@ def _llm_guest_prompt(
             "emotion": "one of worried|angry|confused|relieved|insistent",
             "pressure_level": "one of low|medium|high|critical",
         },
+    }
+
+
+def _llm_context_excerpt(context: Any) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        return {}
+    retrieved = context.get("retrieved") if isinstance(context.get("retrieved"), dict) else {}
+    return {
+        "retrieval_method": context.get("retrieval_method"),
+        "policy_refs": (retrieved.get("policy_refs") if isinstance(retrieved.get("policy_refs"), list) else [])[:4],
+        "policy_snippets": [
+            {
+                "title": item.get("title"),
+                "summary": item.get("summary"),
+                "policy_refs": item.get("policy_refs", [])[:4] if isinstance(item.get("policy_refs"), list) else [],
+                "blocked_actions": item.get("blocked_actions", [])[:3] if isinstance(item.get("blocked_actions"), list) else [],
+            }
+            for item in (retrieved.get("policy_snippets") if isinstance(retrieved.get("policy_snippets"), list) else [])[:3]
+            if isinstance(item, dict)
+        ],
+        "active_learning_guidance": (retrieved.get("active_learning_guidance") if isinstance(retrieved.get("active_learning_guidance"), list) else [])[:3],
+        "prior_session_summaries": [
+            {
+                "overall": item.get("overall"),
+                "critical_miss": item.get("critical_miss"),
+                "open_gaps": item.get("open_gaps", [])[:3] if isinstance(item.get("open_gaps"), list) else [],
+                "summary": item.get("summary"),
+            }
+            for item in (retrieved.get("prior_sessions") if isinstance(retrieved.get("prior_sessions"), list) else [])[:3]
+            if isinstance(item, dict)
+        ],
+        "training_gap_patterns": (retrieved.get("training_gap_patterns") if isinstance(retrieved.get("training_gap_patterns"), list) else [])[:4],
+        "guest_triage_patterns": (retrieved.get("guest_triage_patterns") if isinstance(retrieved.get("guest_triage_patterns"), list) else [])[:4],
+        "historical_ticket_frequency": [
+            {
+                "scenario_id": item.get("scenario_id"),
+                "ticket_count": item.get("ticket_count"),
+                "highest_severity": item.get("highest_severity"),
+                "frequency_label": item.get("frequency_label"),
+                "latest_summary": item.get("latest_summary"),
+                "sources": item.get("sources") if isinstance(item.get("sources"), dict) else {},
+                "issue_types": item.get("issue_types") if isinstance(item.get("issue_types"), dict) else {},
+            }
+            for item in (retrieved.get("historical_ticket_frequency") if isinstance(retrieved.get("historical_ticket_frequency"), list) else [])[:4]
+            if isinstance(item, dict)
+        ],
+        "scenario_recommendation": retrieved.get("scenario_recommendation") if isinstance(retrieved.get("scenario_recommendation"), dict) else None,
+        "manager_reviews": [
+            {"decision": item.get("decision"), "notes": item.get("notes")}
+            for item in (retrieved.get("manager_reviews") if isinstance(retrieved.get("manager_reviews"), list) else [])[:3]
+            if isinstance(item, dict)
+        ],
+        "trainee_profile": retrieved.get("trainee_profile") if isinstance(retrieved.get("trainee_profile"), dict) else {},
+        "blocked_tools": (context.get("blocked_tools") if isinstance(context.get("blocked_tools"), list) else [])[:8],
     }
 
 
@@ -1760,6 +2474,19 @@ def _sanitize_llm_guest_reply(value: Any, fallback_reply: str) -> str:
         "as an ai",
         "you should",
         "the correct answer",
+        "needs clearer answer",
+        "need clearer answer",
+        "needs a clearer answer",
+        "need a clearer answer",
+        "clearer answer",
+        "unclear answer",
+        "not clear enough",
+        "response needs",
+        "employee response",
+        "staff response",
+        "trainer",
+        "trainee",
+        "coaching",
         "i approve",
         "refund approved",
         "ride is now safe",
@@ -1784,6 +2511,8 @@ def _generate_gemini_json_sync_hard_timeout(
         "temperature": temperature,
         "timeout_seconds": timeout_seconds,
     }
+    env = os.environ.copy()
+    env.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
     try:
         completed = subprocess.run(
             [sys.executable, str(worker_path)],
@@ -1791,8 +2520,8 @@ def _generate_gemini_json_sync_hard_timeout(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            cwd=str(worker_path.parent),
-            env=os.environ.copy(),
+            env=env,
+            close_fds=False,
             timeout=max(0.5, timeout_seconds) + 0.5,
             check=False,
         )
@@ -2015,14 +2744,24 @@ def _session_event_snapshot(session: dict[str, Any]) -> dict[str, Any]:
         "scenario_id": session.get("scenario_id"),
         "status": session.get("status"),
         "turn_count": session.get("turn_count"),
+        "started_at": session.get("started_at"),
+        "updated_at": session.get("updated_at"),
+        "finished_at": session.get("finished_at"),
+        "transcript": session.get("transcript", []),
+        "scores": session.get("scores", []),
         "scorecard": session.get("scorecard"),
         "critical_miss": session.get("critical_miss"),
+        "guest_simulator": session.get("guest_simulator"),
         "mastery_tracker": session.get("mastery_tracker"),
         "training_gap_ticket": session.get("training_gap_ticket"),
         "learning_version_outcome": session.get("learning_version_outcome"),
         "active_learning_version_ids": session.get("active_learning_version_ids", []),
         "active_learning_versions": session.get("active_learning_versions", []),
         "learning_version_guidance": session.get("learning_version_guidance", []),
+        "retrieved_training_context": session.get("retrieved_training_context"),
+        "agent_contract": session.get("agent_contract"),
+        "agent_tool_manifest": session.get("agent_tool_manifest", []),
+        "tool_trace": session.get("tool_trace", []),
         "completed_objectives": session.get("completed_objectives", []),
         "missing_objectives": session.get("missing_objectives", []),
         "created_at": _now_iso(),
@@ -2036,6 +2775,7 @@ def _session_response(session: dict[str, Any]) -> dict[str, Any]:
         "retry_of_session_id": session.get("retry_of_session_id"),
         "status": session.get("status"),
         "mode": session.get("mode"),
+        "scenario_id": session.get("scenario_id"),
         "scenario": session.get("scenario"),
         "trainee_name": session.get("trainee_name"),
         "started_at": session.get("started_at"),
@@ -2054,6 +2794,10 @@ def _session_response(session: dict[str, Any]) -> dict[str, Any]:
         "active_learning_version_ids": session.get("active_learning_version_ids", []),
         "active_learning_versions": session.get("active_learning_versions", []),
         "learning_version_guidance": session.get("learning_version_guidance", []),
+        "retrieved_training_context": session.get("retrieved_training_context"),
+        "agent_contract": session.get("agent_contract"),
+        "agent_tool_manifest": session.get("agent_tool_manifest", []),
+        "tool_trace": session.get("tool_trace", []),
         "guest_simulator": session.get("guest_simulator"),
         "boundary": session.get("boundary"),
         "uses_generated_data": True,

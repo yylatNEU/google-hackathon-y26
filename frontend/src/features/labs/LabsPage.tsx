@@ -25,7 +25,7 @@ export default function LabsPage() {
           ))}
         </div>
         <div className="mt-6 flex flex-wrap gap-2">
-          <a href="/" className="inline-flex rounded border border-cyan-300 bg-cyan-300 px-4 py-2 text-sm font-black text-slate-950">
+          <a href="/ops" className="inline-flex rounded border border-cyan-300 bg-cyan-300 px-4 py-2 text-sm font-black text-slate-950">
             Command center
           </a>
           <a href="/venue-profile" className="inline-flex rounded border border-lime-300 bg-lime-300 px-4 py-2 text-sm font-black text-slate-950">

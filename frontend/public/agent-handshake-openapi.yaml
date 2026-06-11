@@ -8,7 +8,7 @@ info:
     declare permission scope, negotiate a park visit plan, invoke internal park
     agents, and receive deterministic judge scorecards for conformance.
 servers:
-  - url: http://127.0.0.1:8001
+  - url: http://127.0.0.1:8000
     description: Local ParkPulse backend
 paths:
   /api/park/agent-contract:

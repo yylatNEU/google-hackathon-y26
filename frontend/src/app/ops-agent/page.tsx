@@ -7,7 +7,7 @@ import { useParkPulseState } from "@/hooks/useParkPulseState";
 
 type ChatRole = "user" | "assistant";
 type TurnMode = "auto" | "answer" | "propose" | "apply";
-type AgentMode = "auto" | "scan" | "react" | "proact";
+type AgentMode = "auto" | "scan" | "react" | "proact" | "customer" | "qa";
 
 type ChatMessage = {
   role: ChatRole;
@@ -17,6 +17,7 @@ type ChatMessage = {
 type CopilotReceipt = {
   status?: string;
   mode?: string;
+  selected_role?: string;
   message?: string;
   answer?: string;
   conversation_response?: {
@@ -123,6 +124,8 @@ const agentModes: Array<{ id: AgentMode; label: string }> = [
   { id: "scan", label: "Scan" },
   { id: "react", label: "React" },
   { id: "proact", label: "Proact" },
+  { id: "customer", label: "Customer" },
+  { id: "qa", label: "QA" },
 ];
 
 const copilotCacheTtlMs = 45_000;
@@ -321,7 +324,7 @@ export default function OpsAgentPage() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <a href="/" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
+              <a href="/ops" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
                 Command Center
               </a>
               <a href="/human" className="rounded border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-cyan-400 hover:text-cyan-100">
@@ -337,10 +340,10 @@ export default function OpsAgentPage() {
         <section className="grid gap-2 md:grid-cols-5">
           {[
             ["Connection", isConnected ? "live" : "offline"],
+            ["Agent", latestReceipt?.selected_role ?? latestReceipt?.recommended_action?.role],
             ["Intent", latestReceipt?.chat_brain?.intent ?? latestReceipt?.conversation_memory?.conversation_intent],
             ["Mode", latestReceipt?.mode ?? "--"],
             ["Gate", latestReceipt?.recommended_action?.gate ?? latestReceipt?.object_action_plan?.overall_gate],
-            ["Mutation", latestReceipt?.turn_contract?.state_mutation ? "yes" : "no"],
           ].map(([label, value]) => (
             <div key={label} className="rounded border border-slate-800 bg-slate-900 p-3">
               <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</div>
@@ -363,13 +366,13 @@ export default function OpsAgentPage() {
                   <div className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Conversation</div>
                   <h2 className="mt-1 text-xl font-black text-slate-100">Operator turn</h2>
                 </div>
-                <div className="flex rounded border border-slate-800 bg-slate-950 p-1">
+                <div className="grid w-full grid-cols-3 gap-1 rounded border border-slate-800 bg-slate-950 p-1 sm:w-auto sm:grid-cols-6">
                   {agentModes.map((mode) => (
                     <button
                       key={mode.id}
                       type="button"
                       onClick={() => setAgentMode(mode.id)}
-                      className={`rounded px-3 py-1.5 text-xs font-black uppercase transition ${
+                      className={`rounded px-2 py-1.5 text-xs font-black uppercase transition sm:px-3 ${
                         agentMode === mode.id ? "bg-cyan-300 text-slate-950" : "text-slate-400 hover:text-cyan-100"
                       }`}
                     >

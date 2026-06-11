@@ -101,6 +101,14 @@ public class ProductLearningService {
         List<Map<String, Object>> signals = productLearningSignals(signalEvents);
         List<Map<String, Object>> shadowReady = signals.stream().filter(row -> !Boolean.TRUE.equals(row.get("requires_review"))).map(this::autoCandidate).toList();
         List<Map<String, Object>> humanExceptions = signals.stream().filter(row -> Boolean.TRUE.equals(row.get("requires_review"))).map(this::exceptionCandidate).toList();
+        List<Map<String, Object>> reviewResolutions = events.stream()
+            .filter(row -> "review_place_resolved".equals(String.valueOf(row.get("event"))))
+            .toList();
+        List<Map<String, Object>> reviewQueues = reviewPlaceQueues(parkTickets, reviewResolutions);
+        List<Map<String, Object>> registry = learningVersionRegistry(shadowReady, events);
+        List<Map<String, Object>> activeVersions = registry.stream().filter(row -> Boolean.TRUE.equals(row.get("active")) && !Boolean.TRUE.equals(row.get("rolled_back"))).toList();
+        List<Map<String, Object>> rolledBackVersions = registry.stream().filter(row -> Boolean.TRUE.equals(row.get("rolled_back"))).toList();
+        List<Map<String, Object>> promotionQueue = registry.stream().filter(row -> "ready".equals(String.valueOf(row.get("promotion_status"))) && !Boolean.TRUE.equals(row.get("active")) && !Boolean.TRUE.equals(row.get("rolled_back"))).map(this::promotionQueueItem).toList();
 
         Map<String, Object> payload = orderedMap();
         payload.put("status", "ready");
@@ -116,13 +124,34 @@ public class ProductLearningService {
         payload.put("auto_learning_candidate_count", shadowReady.size());
         payload.put("shadow_ready_candidate_count", shadowReady.size());
         payload.put("human_exception_candidate_count", humanExceptions.size());
+        payload.put("deduped_park_issue_ticket_count", parkTickets.size());
+        payload.put("review_place_queue_count", reviewQueues.size());
+        payload.put("auto_draft_count", shadowReady.size());
+        payload.put("promotion_ready_count", promotionQueue.size());
+        payload.put("rollback_watch_count", activeVersions.size());
+        payload.put("learning_version_count", registry.size());
+        payload.put("active_learning_version_count", activeVersions.size());
+        payload.put("active_ops_checklist_version_count", activeVersions.size());
+        payload.put("rolled_back_learning_version_count", rolledBackVersions.size());
         payload.put("park_issue_tickets", parkTickets.stream().limit(80).toList());
+        payload.put("ticket_lifecycle", ticketLifecycle(parkTickets));
+        payload.put("deduped_park_issue_tickets", ticketLifecycle(parkTickets));
+        payload.put("review_place_queues", reviewQueues);
         payload.put("training_gap_tickets", trainingGaps.stream().limit(80).toList());
         payload.put("product_learning_signals", signals.stream().limit(120).toList());
         payload.put("auto_learning_governance", Map.of("auto_candidate_count", shadowReady.size(), "shadow_ready_count", shadowReady.size(), "human_exception_count", humanExceptions.size()));
         payload.put("auto_learning_candidates", shadowReady);
         payload.put("shadow_deployment_candidates", shadowReady);
         payload.put("human_exception_queue", humanExceptions);
+        payload.put("auto_draft_registry", registry);
+        payload.put("learning_version_registry", registry);
+        payload.put("active_learning_versions", activeVersions);
+        payload.put("active_ops_checklist_versions", activeVersions);
+        payload.put("active_ops_checklist_guidance", activeVersions.stream().map(this::activeChecklistGuidance).toList());
+        payload.put("human_review_resolutions", reviewResolutions);
+        payload.put("event_store", eventStore(events));
+        payload.put("shadow_metrics", registry.stream().map(this::shadowMetric).toList());
+        payload.put("promotion_queue", promotionQueue);
         payload.put("place_risk_graph", Map.of("mode", "spring_projection", "places", List.of(Map.of("id", "covered-plaza", "risk", "queue_density_watch"))));
         payload.put("ticket_generation_traces", dynamicTickets.stream().map(row -> row.get("ticket_generation_trace")).filter(item -> item instanceof Map<?, ?>).toList());
         payload.put("loop_contract", Map.of(
@@ -137,6 +166,70 @@ public class ProductLearningService {
         payload.put("ledger", ledgerStatus());
         payload.put("boundary", "Separates live operational tickets from simulated training gaps; both can produce reviewed product-learning signals.");
         return payload;
+    }
+
+    public Map<String, Object> promoteLearningVersion(Map<String, Object> body) {
+        Map<String, Object> request = body == null ? orderedMap() : mutableMap(body);
+        String versionId = firstString(request.get("version_id"), request.get("versionId"), "");
+        if (versionId.isBlank()) {
+            return Map.of("status", "invalid", "mode", "learning_version_promotion_spring", "runtime", "java_spring", "readiness_issues", List.of("versionId is required."));
+        }
+        Map<String, Object> version = versionRecord(versionId);
+        version.put("event", "learning_version_promoted");
+        version.put("registry_status", "active");
+        version.put("promotion_status", "promoted");
+        version.put("active", true);
+        version.put("rolled_back", false);
+        version.put("promoted_by", firstString(request.get("promoted_by"), request.get("promotedBy"), "ops_team"));
+        version.put("activated_at", now());
+        version.put("runtime", "java_spring");
+        appendEvent(version);
+        return Map.of("status", "promoted", "mode", "learning_version_promotion_spring", "runtime", "java_spring", "version", version, "ledger", ledgerStatus(), "readiness_issues", List.of());
+    }
+
+    public Map<String, Object> rollbackLearningVersion(Map<String, Object> body) {
+        Map<String, Object> request = body == null ? orderedMap() : mutableMap(body);
+        String versionId = firstString(request.get("version_id"), request.get("versionId"), "");
+        if (versionId.isBlank()) {
+            return Map.of("status", "invalid", "mode", "learning_version_rollback_spring", "runtime", "java_spring", "readiness_issues", List.of("versionId is required."));
+        }
+        Map<String, Object> version = versionRecord(versionId);
+        version.put("event", "learning_version_rolled_back");
+        version.put("registry_status", "rolled_back");
+        version.put("promotion_status", "rolled_back");
+        version.put("active", false);
+        version.put("rolled_back", true);
+        version.put("rollback_reason", firstString(request.get("reason"), "Manager rollback."));
+        version.put("rolled_back_by", firstString(request.get("rolled_back_by"), request.get("rolledBackBy"), "ops_team"));
+        version.put("rolled_back_at", now());
+        version.put("runtime", "java_spring");
+        appendEvent(version);
+        return Map.of("status", "rolled_back", "mode", "learning_version_rollback_spring", "runtime", "java_spring", "version", version, "ledger", ledgerStatus(), "readiness_issues", List.of());
+    }
+
+    public Map<String, Object> resolveReviewPlace(Map<String, Object> body) {
+        Map<String, Object> request = body == null ? orderedMap() : mutableMap(body);
+        String reviewPlace = firstString(request.get("review_place"), request.get("reviewPlace"), "");
+        if (reviewPlace.isBlank()) {
+            return Map.of("status", "invalid", "mode", "review_place_resolution_spring", "runtime", "java_spring", "readiness_issues", List.of("reviewPlace is required."));
+        }
+        String decision = normalizeKey(firstString(request.get("decision"), "hold"));
+        if (!List.of("approve", "reject", "hold").contains(decision)) {
+            decision = "hold";
+        }
+        Map<String, Object> resolution = orderedMap();
+        resolution.put("event", "review_place_resolved");
+        resolution.put("id", "review-place-" + sha1(reviewPlace + ":" + decision, 12));
+        resolution.put("review_place", reviewPlace);
+        resolution.put("decision", decision);
+        resolution.put("reviewer", firstString(request.get("reviewer"), "ops_team"));
+        resolution.put("notes", firstString(request.get("notes"), ""));
+        resolution.put("issue_types", request.get("issue_types") instanceof List<?> list ? list : request.get("issueTypes") instanceof List<?> camelList ? camelList : List.of());
+        resolution.put("created_at", now());
+        resolution.put("runtime", "java_spring");
+        resolution.put("boundary", "Review-place resolution affects product-learning activation only; it does not dispatch live ops actions.");
+        appendEvent(resolution);
+        return Map.of("status", "resolved", "mode", "review_place_resolution_spring", "runtime", "java_spring", "resolution", resolution, "ledger", ledgerStatus(), "readiness_issues", List.of());
     }
 
     private List<Map<String, Object>> productLearningSignals(List<Map<String, Object>> events) {
@@ -183,6 +276,188 @@ public class ProductLearningService {
             "confidence", 0.58,
             "exception_reasons", List.of("requires_human_review", String.valueOf(signal.get("status")))
         );
+    }
+
+    private List<Map<String, Object>> ticketLifecycle(List<Map<String, Object>> parkTickets) {
+        return parkTickets.stream().map(ticket -> {
+            Map<String, Object> row = orderedMap();
+            row.put("dedupe_key", firstString(ticket.get("issue_type"), "issue") + ":" + firstString(ticket.get("location"), "park"));
+            row.put("lifecycle_status", "open");
+            row.put("learning_state", Boolean.TRUE.equals(ticket.get("requires_human_ack")) ? "human_review" : "shadow_candidate");
+            row.put("representative_ticket_id", ticket.get("id"));
+            row.put("issue_type", ticket.get("issue_type"));
+            row.put("source", ticket.get("source"));
+            row.put("sources", List.of(firstString(ticket.get("source"), "spring")));
+            row.put("summary", ticket.get("summary"));
+            row.put("highest_severity", ticket.get("severity"));
+            row.put("human_review_place", reviewPlaceForTicket(ticket));
+            row.put("human_review_required", ticket.get("requires_human_ack"));
+            row.put("auto_evolve_allowed", !Boolean.TRUE.equals(ticket.get("requires_human_ack")));
+            row.put("open_ticket_count", 1);
+            row.put("dedupe_window_minutes", 90);
+            return row;
+        }).toList();
+    }
+
+    private List<Map<String, Object>> reviewPlaceQueues(List<Map<String, Object>> parkTickets, List<Map<String, Object>> resolutions) {
+        Map<String, Map<String, Object>> latestResolution = new LinkedHashMap<>();
+        for (Map<String, Object> resolution : resolutions) {
+            latestResolution.put(String.valueOf(resolution.get("review_place")), resolution);
+        }
+        Map<String, Map<String, Object>> queues = new LinkedHashMap<>();
+        for (Map<String, Object> ticket : parkTickets) {
+            if (!Boolean.TRUE.equals(ticket.get("requires_human_ack"))) {
+                continue;
+            }
+            String place = reviewPlaceForTicket(ticket);
+            Map<String, Object> queue = queues.computeIfAbsent(place, key -> {
+                Map<String, Object> row = orderedMap();
+                row.put("review_place", key);
+                row.put("queue_status", "open");
+                row.put("queue_count", 0);
+                row.put("issue_types", new ArrayList<String>());
+                row.put("highest_severity", ticket.get("severity"));
+                row.put("required_action", "Manager review before product-learning activation.");
+                row.put("auto_evolve_blocked", true);
+                row.put("review_resolution", latestResolution.get(key));
+                return row;
+            });
+            queue.put("queue_count", ((Number) queue.get("queue_count")).intValue() + 1);
+            @SuppressWarnings("unchecked")
+            List<String> issueTypes = (List<String>) queue.get("issue_types");
+            String issueType = firstString(ticket.get("issue_type"), "issue");
+            if (!issueTypes.contains(issueType)) {
+                issueTypes.add(issueType);
+            }
+        }
+        return new ArrayList<>(queues.values());
+    }
+
+    private List<Map<String, Object>> learningVersionRegistry(List<Map<String, Object>> shadowReady, List<Map<String, Object>> events) {
+        Map<String, Map<String, Object>> registry = new LinkedHashMap<>();
+        List<String> appliedVersionEvents = new ArrayList<>();
+        for (Map<String, Object> candidate : shadowReady) {
+            String versionId = firstString(candidate.get("id"), "auto-spring-candidate").replace("auto-pls-", "version-");
+            registry.put(versionId, versionFromCandidate(versionId, candidate));
+        }
+        for (Map<String, Object> event : events) {
+            String eventType = String.valueOf(event.get("event"));
+            if (!List.of("learning_version_promoted", "learning_version_rolled_back").contains(eventType)) {
+                continue;
+            }
+            String versionId = firstString(event.get("version_id"), event.get("versionId"), event.get("id"), "");
+            if (versionId.isBlank()) {
+                continue;
+            }
+            if (appliedVersionEvents.contains(versionId)) {
+                continue;
+            }
+            appliedVersionEvents.add(versionId);
+            Map<String, Object> version = registry.computeIfAbsent(versionId, this::versionRecord);
+            version.putAll(event);
+            version.put("version_id", versionId);
+            if ("learning_version_promoted".equals(eventType)) {
+                version.put("active", true);
+                version.put("rolled_back", false);
+                version.put("promotion_status", "promoted");
+                version.put("registry_status", "active");
+            }
+            if ("learning_version_rolled_back".equals(eventType)) {
+                version.put("active", false);
+                version.put("rolled_back", true);
+                version.put("promotion_status", "rolled_back");
+                version.put("registry_status", "rolled_back");
+            }
+        }
+        return new ArrayList<>(registry.values());
+    }
+
+    private Map<String, Object> versionFromCandidate(String versionId, Map<String, Object> candidate) {
+        Map<String, Object> draft = candidate.get("draft") instanceof Map<?, ?> map ? mutableMap(map) : Map.of();
+        Map<String, Object> version = versionRecord(versionId);
+        version.put("scenario_id", firstString(candidate.get("scenario_id"), "angry_parent"));
+        version.put("draft_title", firstString(draft.get("title"), "Shadow product-learning update"));
+        version.put("content_summary", firstString(draft.get("content_summary"), "Spring product-learning candidate."));
+        version.put("registry_status", "shadow");
+        version.put("promotion_status", "ready");
+        version.put("active", false);
+        version.put("rolled_back", false);
+        version.put("can_promote_live_ops", false);
+        version.put("outcome_metrics", Map.of(
+            "measurement_status", "shadow_ready",
+            "monitor_window_days", 7,
+            "session_count", 1,
+            "average_overall", 84,
+            "staff_score_delta", 3,
+            "critical_miss_rate", 0,
+            "training_gap_rate", 0.12
+        ));
+        return version;
+    }
+
+    private Map<String, Object> versionRecord(String versionId) {
+        String normalized = versionId.isBlank() ? "version-" + sha1(now(), 10) : versionId;
+        Map<String, Object> version = orderedMap();
+        version.put("version_id", normalized);
+        version.put("scenario_id", normalized.contains("queue") ? "queue_pressure" : "angry_parent");
+        version.put("target_surface", "ops_checklist");
+        version.put("draft_title", "Spring learning version " + normalized);
+        version.put("content_summary", "Reviewed checklist/prompt update controlled by Spring product-learning governance.");
+        version.put("registry_status", "shadow");
+        version.put("promotion_status", "ready");
+        version.put("active", false);
+        version.put("rolled_back", false);
+        version.put("can_promote_live_ops", false);
+        return version;
+    }
+
+    private Map<String, Object> promotionQueueItem(Map<String, Object> version) {
+        Map<String, Object> item = orderedMap();
+        item.put("version_id", version.get("version_id"));
+        item.put("scenario_id", version.get("scenario_id"));
+        item.put("target_surface", version.get("target_surface"));
+        item.put("promotion_status", version.get("promotion_status"));
+        item.put("worker_action", "Manager can promote to active checklist after review.");
+        item.put("can_promote_live_ops", false);
+        return item;
+    }
+
+    private Map<String, Object> activeChecklistGuidance(Map<String, Object> version) {
+        return Map.of(
+            "issue_id", "spring-guidance-" + version.get("version_id"),
+            "issue_type", version.get("scenario_id"),
+            "version_ids", List.of(String.valueOf(version.get("version_id"))),
+            "guidance", List.of("Use the active Spring-reviewed checklist.", "Keep live dispatch separate from training signal promotion.")
+        );
+    }
+
+    private Map<String, Object> shadowMetric(Map<String, Object> version) {
+        return Map.of(
+            "version_id", version.get("version_id"),
+            "scenario_id", version.get("scenario_id"),
+            "metric_status", Boolean.TRUE.equals(version.get("active")) ? "active_monitoring" : "shadow_ready",
+            "promotion_eligible", !Boolean.TRUE.equals(version.get("active")) && !Boolean.TRUE.equals(version.get("rolled_back")),
+            "evidence_count", 1,
+            "confidence", 0.82
+        );
+    }
+
+    private Map<String, Object> eventStore(List<Map<String, Object>> events) {
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (Map<String, Object> event : events) {
+            String type = firstString(event.get("event"), "unknown");
+            counts.put(type, counts.getOrDefault(type, 0) + 1);
+        }
+        return Map.of(
+            "mode", "spring_product_learning_jsonl_event_store",
+            "sqlite_event_count", events.size(),
+            "indexes", List.of("event", "id", "created_at"),
+            "event_type_counts", counts
+        );
+    }
+
+    private String reviewPlaceForTicket(Map<String, Object> ticket) {
+        return firstString(ticket.get("location"), "manager_review").toLowerCase().replace(' ', '_');
     }
 
     private List<Map<String, Object>> dynamicParkTickets() {

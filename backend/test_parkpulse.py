@@ -31,6 +31,10 @@ def disable_hosted_eval(monkeypatch):
         "PARKPULSE_ENABLE_HOSTED_EVAL_TRIGGER",
         "ENABLE_VERTEX_CONTINUOUS_EVAL",
         "ENABLE_GCP_CLOUD_TRACE_EXPORT",
+        "ENABLE_BIGQUERY_ANALYTICS",
+        "PARKPULSE_ENABLE_OTEL_SPANS",
+        "PARKPULSE_MONGO_MODEL_EMBEDDINGS",
+        "PARKPULSE_COPILOT_SEMANTIC_MEMORY",
     ):
         monkeypatch.setenv(name, "false")
     for name in ("VERTEX_GENAI_EVALUATOR_ID", "ARIZE_HOSTED_EVALUATOR_ID", "VERTEX_EVAL_ACCESS_TOKEN"):
@@ -79,7 +83,30 @@ def test_day_in_life_operating_clock_changes_park_pressure():
     assert night_show["operatingClock"]["phase"]["id"] == "night_show"
     assert closing["operatingClock"]["phase"]["id"] == "closing_exit"
     assert midnight["operatingClock"]["heartbeat"]["isOvernight"] is True
-    assert sum(zone["currentGuests"] for zone in midnight["guestFlow"]["zones"]) < sum(zone["currentGuests"] for zone in morning["guestFlow"]["zones"])
+    assert sum(zone["currentGuests"] for zone in midnight["guestFlow"]["zones"]) == 0
+    assert sum(path["currentGuests"] for path in midnight["guestFlow"]["paths"]) == 0
+    assert sum(queue["guests"] for queue in midnight["physicalMap"]["queues"]) == 0
+    assert sum(group["count"] for group in midnight["physicalMap"]["guestGroups"]) == 0
+    assert sum(segment["count"] for segment in midnight["guestSegments"]) == 0
+    sim.hour = 8
+    sim.minute = 30
+    pre_open = asyncio.run(sim.get_state())
+    sim.hour = 23
+    sim.minute = 15
+    post_close = asyncio.run(sim.get_state())
+    assert pre_open["operatingClock"]["phase"]["isOpenToGuests"] is False
+    assert post_close["operatingClock"]["phase"]["isOpenToGuests"] is False
+    assert sum(zone["currentGuests"] for zone in pre_open["guestFlow"]["zones"]) == 0
+    assert sum(zone["currentGuests"] for zone in post_close["guestFlow"]["zones"]) == 0
+    assert post_close["operatingClock"]["guestIntent"]["exitSeekingPct"] == 0
+    assert morning["operatingClock"]["phase"]["trafficWaveMultiplier"] < lunch["operatingClock"]["phase"]["trafficWaveMultiplier"] < night_show["operatingClock"]["phase"]["trafficWaveMultiplier"]
+    for sample in (midnight, pre_open, morning, lunch, night_show, closing, post_close):
+        represented = sample["guestFlow"]["representedGuests"]
+        assert represented == sum(zone["currentGuests"] for zone in sample["guestFlow"]["zones"])
+        assert sum(ride["queueGuests"] for ride in sample["guestFlow"]["rides"]) <= represented
+        assert sum(path["currentGuests"] for path in sample["guestFlow"]["paths"]) <= represented
+        assert sum(queue["guests"] for queue in sample["physicalMap"]["queues"]) <= represented
+        assert sum(group["count"] for group in sample["physicalMap"]["guestGroups"]) <= represented
     assert max(ride["waitMins"] for ride in midnight["guestFlow"]["rides"]) == 0
     midnight_coaster = next(zone for zone in midnight["guestFlow"]["zones"] if zone["id"] == "coasterPlaza")
     midnight_coaster_paths = [
@@ -90,9 +117,9 @@ def test_day_in_life_operating_clock_changes_park_pressure():
         queue for queue in midnight["physicalMap"]["queues"]
         if queue.get("rideId") == "dragonCoaster"
     ]
-    assert midnight_coaster["currentGuests"] < 30
-    assert midnight_coaster["density"] < 5
-    assert max(path["congestionLevel"] for path in midnight_coaster_paths) < 10
+    assert midnight_coaster["currentGuests"] == 0
+    assert midnight_coaster["density"] == 0
+    assert max(path["congestionLevel"] for path in midnight_coaster_paths) == 0
     assert all(queue["guests"] == 0 for queue in midnight_dragon_queues)
     assert all("coaster" not in group.get("destination", "").lower() for group in midnight["physicalMap"]["guestGroups"])
     assert lunch["operatingClock"]["foodRetailLifecycle"]["prepPressurePct"] > morning["operatingClock"]["foodRetailLifecycle"]["prepPressurePct"]
@@ -492,6 +519,30 @@ def test_digital_twin_calibration_ledger_resolves_compact_rows(monkeypatch, tmp_
     assert resolved["latestResolved"][0]["accuracyScore"] >= 0
     assert resolved["latestResolved"][0]["closestBranch"] in {"withoutAudit", "withAudit"}
     assert "overflowMeters" in resolved["latestResolved"][0]["error"]
+
+
+def test_digital_twin_scenario_calibration_fixtures_and_sensitivity():
+    sim = ParkSimulation()
+    state = asyncio.run(sim.get_state())
+
+    catalog = digital_twin_calibration.list_scenario_calibration_fixtures()
+    result = digital_twin_calibration.run_scenario_calibration(
+        state,
+        fixtures=digital_twin_calibration.SCENARIO_CALIBRATION_FIXTURES[:1],
+    )
+
+    assert catalog["mode"] == "digital_twin_scenario_calibration_fixture_catalog"
+    assert catalog["fixture_count"] >= 4
+    assert result["mode"] == "digital_twin_scenario_calibration"
+    assert result["status"] == "passed"
+    assert result["fixtureCount"] == 1
+    assert result["passedFixtureCount"] == result["fixtureCount"]
+    assert result["sensitivity"]["status"] == "passed"
+    assert result["sensitivity"]["sweepCount"] == 2
+    assert result["sensitivity"]["passedSweepCount"] == result["sensitivity"]["sweepCount"]
+    assert all(row["scorecard"]["overall"] <= 90 for row in result["fixtures"])
+    assert any(row["scorecard"]["safety"] < 100 for row in result["fixtures"])
+    assert result["suggestedTuning"][0]["issue"] == "none"
 
 
 def test_mission_replay_connects_signal_forecast_execution_and_learning(monkeypatch, tmp_path):

@@ -186,6 +186,30 @@ public class RoleAuthService {
         if ("create_training_gap_ticket".equals(capability) || "read_product_learning".equals(capability)) {
             return "ops_team".equals(role) || "ml_ops_admin".equals(role);
         }
+        if ("manage_product_learning".equals(capability)) {
+            return "ops_team".equals(role) || "ml_ops_admin".equals(role);
+        }
+        if ("read_experience_studio".equals(capability) || "use_experience_studio".equals(capability) || "review_experience_studio".equals(capability)) {
+            return "ops_team".equals(role) || "ml_ops_admin".equals(role);
+        }
+        if ("read_venue_profile".equals(capability)) {
+            return "ops_team".equals(role) || "ml_ops_admin".equals(role);
+        }
+        if ("manage_venue_profile".equals(capability)) {
+            return "ml_ops_admin".equals(role);
+        }
+        if ("use_accessibility_journey".equals(capability)) {
+            return "customer".equals(role) || "onsite_worker".equals(role) || "ops_team".equals(role) || "ml_ops_admin".equals(role);
+        }
+        if ("read_review_label_pipeline".equals(capability) || "record_review_label".equals(capability)) {
+            return "ops_team".equals(role) || "ml_ops_admin".equals(role);
+        }
+        if ("read_simulation_evidence".equals(capability) || "mutate_simulation_state".equals(capability) || "run_simulation_exercise".equals(capability)) {
+            return "ops_team".equals(role) || "ml_ops_admin".equals(role);
+        }
+        if ("run_agent_orchestration".equals(capability) || "use_ops_chat".equals(capability)) {
+            return "ops_team".equals(role) || "ml_ops_admin".equals(role);
+        }
         if ("dispatch_live_action".equals(capability)) {
             return "ops_team".equals(role);
         }

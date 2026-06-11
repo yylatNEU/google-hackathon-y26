@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+import os
+from copy import deepcopy
+
+os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
+os.environ.setdefault("ENABLE_BIGQUERY_ANALYTICS", "false")
+os.environ.setdefault("PARKPULSE_ENABLE_OTEL_SPANS", "false")
+os.environ.setdefault("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
+
 from digital_twin_tools import build_digital_twin_tool_trace, list_digital_twin_tools, run_digital_twin_tool
 from park_simulation import ParkSimulation
 
 
+_CACHED_STATE = None
+
+
 def _state():
-    simulation = ParkSimulation()
+    global _CACHED_STATE
     import asyncio
 
-    return asyncio.run(simulation.get_state())
+    if _CACHED_STATE is None:
+        _CACHED_STATE = asyncio.run(ParkSimulation().get_state())
+    return deepcopy(_CACHED_STATE)
 
 
 def test_tool_registry_exposes_mcp_style_digital_twin_tools():
@@ -39,6 +52,26 @@ def test_simulate_action_projects_state_movement():
     assert result["output"]["projected_impact"]["guestSatisfactionDelta"] > 0
     assert result["output"]["checkpoints"]
     assert result["output"]["uncertainty"]["drivers"]
+
+
+def test_simulate_action_handles_malformed_action_payload_without_crashing():
+    import asyncio
+
+    state = _state()
+
+    tool_result = run_digital_twin_tool("simulate_action", state, {"action_plan": "reroute now"})
+    direct_result = asyncio.run(ParkSimulation().simulate_action([{"target": "ride", "action": "reroute"}], 5))
+    policy_result = run_digital_twin_tool("validate_policy", state, {"park_action": []})
+    quality_result = run_digital_twin_tool("score_decision_quality", state, {"decision": {"selected_action": {"park_action": []}}})
+    memory_result = run_digital_twin_tool("retrieve_similar_incidents", state, {}, {"retrieved": []})
+
+    assert tool_result["output"]["status"] == "ok"
+    assert tool_result["output"]["outcome"]["action"]["action"] == "natural"
+    assert direct_result["status"] == "ok"
+    assert direct_result["outcome"]["action"]["action"] == "natural"
+    assert policy_result["output"]["status"] == "ok"
+    assert quality_result["output"]["status"] == "ok"
+    assert memory_result["output"]["status"] == "ok"
 
 
 def test_noisy_observation_hides_perfect_ground_truth():

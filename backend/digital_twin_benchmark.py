@@ -517,7 +517,7 @@ def _run_episode(base_state: dict[str, Any], scenario: dict[str, Any], seed: str
     baseline = score_outcome(stressed, baseline_state, {"target": "none", "action": "natural"})
     candidates = [_evaluate_candidate(stressed, candidate, seed, horizon_minutes) for candidate in scenario["candidates"]]
     selected = _select_candidate(candidates)
-    final_state = transition_state(
+    final_state = selected.get("_projected_state") or transition_state(
         stressed,
         selected["action"],
         minutes=horizon_minutes,
@@ -609,7 +609,7 @@ async def _run_agent_episode(
     candidates = [_evaluate_candidate(stressed, candidate, seed, horizon_minutes) for candidate in scenario["candidates"]]
     benchmark_selected = _select_candidate(candidates)
     selected = _agent_selection(plan, optimization, stressed, seed, horizon_minutes)
-    final_state = transition_state(
+    final_state = selected.get("_projected_state") or transition_state(
         stressed,
         selected["action"],
         minutes=horizon_minutes,
@@ -760,6 +760,7 @@ def _evaluate_candidate(state: dict[str, Any], candidate: dict[str, Any], seed: 
         "label": candidate.get("label", candidate["id"]),
         "action": action,
         "simulation": {key: value for key, value in simulation.items() if key != "projected_state"},
+        "_projected_state": simulation.get("projected_state"),
         "policy": policy,
         "policy_gate": policy["gate_status"],
         "selection_score": selection_score,
@@ -808,6 +809,7 @@ def _agent_selection(
         "label": action.get("label") or selected_action.get("label") or "ParkPulse selected action",
         "action": action,
         "simulation": {key: value for key, value in simulation.items() if key != "projected_state"},
+        "_projected_state": simulation.get("projected_state"),
         "policy": policy,
         "policy_gate": policy["gate_status"],
         "selection_score": selection_score,

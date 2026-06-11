@@ -44,8 +44,16 @@ public class StaffTrainingService {
             "runtime", "java_spring",
             "policy_refs", List.of("PARK-SAFE-001", "PARK-CARE-001"),
             "golden_eval_route", "/api/park/staff-training/golden-eval",
+            "agent_contract", agentContract(),
+            "tool_manifest", toolManifest(),
+            "rag_contract", ragContract(),
+            "blocked_tools", blockedTools(),
             "boundary", "Spring roleplay scoring is deterministic; LLM guest generation can be restored behind a later provider adapter."
         );
+    }
+
+    public Map<String, Object> agentContext(String scenarioId, String traineeName, String assignmentId) {
+        return trainingContext(firstString(scenarioId, "angry_parent"), traineeName, assignmentId);
     }
 
     public Map<String, Object> createAssignment(Map<String, Object> body) {
@@ -167,6 +175,10 @@ public class StaffTrainingService {
         session.put("missing_objectives", scenario.get("objectives"));
         session.put("guest_simulator", guestSimulator(Boolean.TRUE.equals(request.get("useLlmGuest"))));
         session.put("mastery_tracker", masteryTracker(false, 0));
+        session.put("retrieved_training_context", trainingContext(scenarioId, String.valueOf(session.get("trainee_name")), String.valueOf(session.get("assignment_id"))));
+        session.put("agent_contract", agentContract());
+        session.put("agent_tool_manifest", toolManifest());
+        session.put("tool_trace", toolTrace(session, "start", null, null));
         sessions.put(sessionId, session);
         return session;
     }
@@ -181,7 +193,7 @@ public class StaffTrainingService {
         Map<String, Object> turnScore = turnScore(strong, nextTurn);
         List<Object> transcript = new ArrayList<>(listValue(session.get("transcript")));
         transcript.add(Map.of("speaker", "employee", "message", message, "source", "employee"));
-        transcript.add(Map.of("speaker", "guest", "message", strong ? "Thanks for explaining the next step." : "I still need a clearer answer.", "source", "deterministic_guest"));
+        transcript.add(Map.of("speaker", "guest", "message", guestReply(session, strong), "source", "deterministic_guest"));
         session.put("transcript", transcript);
         session.put("turn_count", nextTurn);
         session.put("scorecard", scorecard(intValue(turnScore.get("overall")), !strong));
@@ -189,6 +201,7 @@ public class StaffTrainingService {
         session.put("completed_objectives", strong ? listValue(mapValue(session.get("scenario")).get("objectives")) : List.of());
         session.put("missing_objectives", strong ? List.of() : mapValue(session.get("scenario")).get("objectives"));
         session.put("mastery_tracker", masteryTracker(strong, nextTurn));
+        session.put("tool_trace", toolTrace(session, "turn", turnScore, strong));
         sessions.put(String.valueOf(session.get("id")), session);
         Map<String, Object> payload = orderedMap();
         payload.put("status", "scored");
@@ -198,6 +211,7 @@ public class StaffTrainingService {
         payload.put("turn_score", turnScore);
         payload.put("coaching_notes", turnScore.get("coaching_notes"));
         payload.put("shadow_evaluator", shadowEvaluator(Boolean.TRUE.equals(request.get("useShadowEval")), strong));
+        payload.put("tool_trace", session.get("tool_trace"));
         payload.put("readiness_issues", List.of());
         return payload;
     }
@@ -267,6 +281,10 @@ public class StaffTrainingService {
 
     private List<Map<String, Object>> receiptRows(int limit) {
         return recentRows(limit).stream().filter(row -> "staff_training_receipt_created".equals(String.valueOf(row.get("event")))).toList();
+    }
+
+    private List<Map<String, Object>> reviewRows(int limit) {
+        return recentRows(limit).stream().filter(row -> "staff_training_receipt_reviewed".equals(String.valueOf(row.get("event")))).toList();
     }
 
     private Map<String, Object> defaultAssignment() {
@@ -363,6 +381,115 @@ public class StaffTrainingService {
 
     private Map<String, Object> shadowEvaluator(boolean requested, boolean strong) {
         return Map.of("status", requested ? "complete" : "not_requested", "alignment", strong ? "aligned" : "needs_review", "summary", requested ? "Spring deterministic shadow evaluator completed." : "Shadow evaluator was not requested.", "coaching_focus", strong ? List.of("reinforce concise policy explanation") : List.of("repair escalation decision"), "suggested_human_review", !strong, "score_authority", false, "provider", "spring_deterministic", "llm_controls_score", false);
+    }
+
+    private Map<String, Object> agentContract() {
+        return Map.of(
+            "mode", "staff_training_agent_contract_spring",
+            "roles", List.of("context_retriever", "guest_simulator", "deterministic_scorer", "mastery_tracker", "shadow_evaluator"),
+            "tool_manifest", toolManifest(),
+            "blocked_tools", blockedTools(),
+            "rag_contract", ragContract(),
+            "boundary", "Spring staff-training agents retrieve memory and score deterministically; no live operations authority."
+        );
+    }
+
+    private Map<String, Object> ragContract() {
+        return Map.of(
+            "retrieval_method", "scenario_and_trainee_jsonl_receipt_memory",
+            "retrieves", List.of("policy refs", "prior receipts", "training gap patterns"),
+            "llm_controls_retrieval", false,
+            "llm_controls_score", false
+        );
+    }
+
+    private List<Map<String, Object>> toolManifest() {
+        return List.of(
+            Map.of("id", "staff_training.retrieve_context", "owner_agent", "context_retriever", "allowed", true),
+            Map.of("id", "staff_training.generate_guest_turn", "owner_agent", "guest_simulator", "allowed", true, "constraints", List.of("guest voice only", "no score authority")),
+            Map.of("id", "staff_training.score_turn", "owner_agent", "deterministic_scorer", "allowed", true, "authority", "official_training_score"),
+            Map.of("id", "staff_training.update_mastery_memory", "owner_agent", "mastery_tracker", "allowed", true),
+            Map.of("id", "product_learning.create_training_gap_ticket", "owner_agent", "mastery_tracker", "allowed", true)
+        );
+    }
+
+    private List<String> blockedTools() {
+        return List.of("live_dispatch.execute", "refund.approve", "medical.diagnose", "ride_control.override", "reward_model.write_label", "model_registry.promote");
+    }
+
+    private Map<String, Object> trainingContext(String scenarioId, String traineeName, String assignmentId) {
+        String normalizedScenario = firstString(scenarioId, "angry_parent");
+        List<Map<String, Object>> priorSessions = receiptRows(80).stream()
+            .filter(row -> normalizedScenario.equals(String.valueOf(row.get("scenario_id"))))
+            .limit(6)
+            .map(row -> Map.of(
+                "session_id", row.getOrDefault("session_id", ""),
+                "scenario_id", row.getOrDefault("scenario_id", ""),
+                "trainee_name", row.getOrDefault("trainee_name", ""),
+                "overall", row.getOrDefault("overall", 0),
+                "critical_miss", row.getOrDefault("critical_miss", false),
+                "summary", row.getOrDefault("summary", "")
+            ))
+            .toList();
+        Map<String, Object> retrieved = orderedMap();
+        retrieved.put("policy_refs", List.of(Map.of("id", "PARK-SAFE-001", "label", "Safety escalation"), Map.of("id", "PARK-CARE-001", "label", "Guest recovery")));
+        retrieved.put("policy_snippets", List.of(
+            Map.of("id", "PARK-SAFE-001", "title", "Safety escalation", "book_id", "spring_policy_refs", "summary", "Safety-sensitive training requires explicit escalation and no live action authority.", "policy_refs", List.of("PARK-SAFE-001"), "blocked_actions", List.of("override safety rule")),
+            Map.of("id", "PARK-CARE-001", "title", "Guest recovery", "book_id", "spring_policy_refs", "summary", "Guest recovery training should acknowledge impact and route approval decisions to a manager.", "policy_refs", List.of("PARK-CARE-001"), "blocked_actions", List.of("promise refund"))
+        ));
+        retrieved.put("active_learning_guidance", List.of());
+        retrieved.put("prior_sessions", priorSessions);
+        retrieved.put("training_gap_patterns", List.of());
+        retrieved.put("manager_reviews", reviewRows(80).stream().limit(4).toList());
+        retrieved.put("trainee_profile", Map.of("status", priorSessions.isEmpty() ? "empty" : "ready", "session_count", priorSessions.size(), "manager_review_count", reviewRows(80).size(), "coaching_priority", priorSessions.isEmpty() ? "" : "policy_correctness"));
+        Map<String, Object> counts = orderedMap();
+        counts.put("policy_refs", 2);
+        counts.put("policy_snippets", 2);
+        counts.put("active_learning_versions", 0);
+        counts.put("prior_sessions", priorSessions.size());
+        counts.put("training_gap_patterns", 0);
+        counts.put("manager_reviews", reviewRows(80).size());
+        Map<String, Object> context = orderedMap();
+        context.put("status", "ready");
+        context.put("mode", "staff_training_rag_context_spring");
+        context.put("runtime", "java_spring");
+        context.put("scenario_id", normalizedScenario);
+        context.put("trainee_name", firstString(traineeName, ""));
+        context.put("assignment_id", firstString(assignmentId, ""));
+        context.put("retrieval_method", "scenario_and_trainee_jsonl_receipt_memory");
+        context.put("retrieved", retrieved);
+        context.put("counts", counts);
+        context.put("tool_manifest_ids", toolManifest().stream().map(row -> String.valueOf(row.get("id"))).toList());
+        context.put("blocked_tools", blockedTools());
+        context.put("boundary", "Retrieved context guides simulated training only; no live dispatch, reward labels, refunds, diagnoses, or model promotion.");
+        return context;
+    }
+
+    private List<Map<String, Object>> toolTrace(Map<String, Object> session, String phase, Map<String, Object> score, Boolean strong) {
+        Map<String, Object> context = mapValue(session.get("retrieved_training_context"));
+        List<Map<String, Object>> trace = new ArrayList<>();
+        trace.add(Map.of("tool", "staff_training.retrieve_context", "agent", "context_retriever", "status", "complete", "output", mapValue(context.get("counts")), "live_ops_authority", false));
+        if (!"turn".equals(phase)) {
+            return trace;
+        }
+        trace.add(Map.of("tool", "staff_training.score_turn", "agent", "deterministic_scorer", "status", "complete", "output", Map.of("overall", mapValue(score).getOrDefault("overall", 0), "critical_miss", !Boolean.TRUE.equals(strong)), "score_authority", true, "live_ops_authority", false));
+        trace.add(Map.of("tool", "staff_training.update_mastery_memory", "agent", "mastery_tracker", "status", "complete", "score_authority", false, "live_ops_authority", false));
+        trace.add(Map.of("tool", "staff_training.generate_guest_turn", "agent", "guest_simulator", "status", "complete", "output", Map.of("source", "deterministic_guest", "llm_controls_score", false), "score_authority", false, "live_ops_authority", false));
+        return trace;
+    }
+
+    private String guestReply(Map<String, Object> session, boolean strong) {
+        String scenarioId = String.valueOf(mapValue(session.get("scenario")).getOrDefault("id", ""));
+        if (strong) {
+            return switch (scenarioId) {
+                case "lost_child" -> "Okay. Stay with me while Security starts looking, and I can give you her clothing details now.";
+                default -> "Thanks for explaining the next step. Please stay with us while you bring the manager into the policy review.";
+            };
+        }
+        return switch (scenarioId) {
+            case "lost_child" -> "Please do not leave me with a vague answer. Are you notifying Security now, and should I stay here with you?";
+            default -> "What are you actually going to do next for my family, and who can review this with us?";
+        };
     }
 
     private Map<String, Object> scenarioById(String id) {

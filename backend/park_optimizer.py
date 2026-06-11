@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from park_twin_engine import simulate_action_plan
+
 
 def _bounded(value: float, low: float = 0, high: float = 100) -> float:
     return max(low, min(high, value))
@@ -667,6 +669,111 @@ def _rejection_reasons(overloaded_targets: list[str], staff_burden: float, overc
     return reasons or ["Feasible, but lower total score than selected plan."]
 
 
+def _nontrivial_secondary_risks(risks: list[Any]) -> list[str]:
+    return [
+        str(risk)
+        for risk in risks
+        if isinstance(risk, str) and "No secondary bottleneck" not in risk and "No secondary" not in risk
+    ]
+
+
+def _candidate_expected_take_rate(candidate: dict[str, Any], original_scorecard: dict[str, Any]) -> int:
+    reroute = (
+        candidate.get("action_mix", {}).get("guest_reroute", {})
+        if isinstance(candidate.get("action_mix"), dict) and isinstance(candidate.get("action_mix", {}).get("guest_reroute"), dict)
+        else {}
+    )
+    if reroute.get("expectedTakeRate") is not None:
+        return round(_bounded(_as_float(reroute.get("expectedTakeRate")) * 100, 0, 100))
+    return round(_bounded(_as_float(original_scorecard.get("take_rate_likelihood"), 0), 0, 100))
+
+
+def _rescore_candidate_with_twin(
+    candidate: dict[str, Any],
+    state: dict[str, Any],
+    scenario_key: str,
+    index: int,
+    horizon_minutes: int = 30,
+) -> dict[str, Any]:
+    item = deepcopy(candidate)
+    original_scorecard = deepcopy(item.get("scorecard", {}) if isinstance(item.get("scorecard"), dict) else {})
+    original_projected_impact = deepcopy(item.get("projected_impact", {}) if isinstance(item.get("projected_impact"), dict) else {})
+    original_rejected_reasons = deepcopy(item.get("rejected_reasons", []) if isinstance(item.get("rejected_reasons"), list) else [])
+    seed = f"optimizer:{scenario_key}:{index}:{item.get('id') or item.get('name') or 'candidate'}"
+
+    try:
+        projection = simulate_action_plan(state, item, horizon_minutes=horizon_minutes, seed=seed)
+    except Exception as error:
+        scorecard = deepcopy(original_scorecard)
+        scorecard["score_source"] = "heuristic_estimate_fallback"
+        scorecard["score_source_error"] = str(error)[:180]
+        item["scorecard"] = scorecard
+        item["optimizer_estimate"] = {
+            "scorecard": original_scorecard,
+            "projected_impact": original_projected_impact,
+            "rejected_reasons": original_rejected_reasons,
+        }
+        return item
+
+    twin_scorecard = projection.get("scorecard", {}) if isinstance(projection.get("scorecard"), dict) else {}
+    twin_overall = _as_float(twin_scorecard.get("overall"), _as_float(original_scorecard.get("overall"), 0))
+    learning_adjustment = _bounded(_as_float(original_scorecard.get("learning_adjustment"), 0), -8, 8)
+    role_adjustment = _bounded(
+        _as_float(original_scorecard.get("role_alignment_bonus"), 0)
+        + _as_float(original_scorecard.get("role_memory_prior_adjustment"), 0),
+        -8,
+        8,
+    )
+    secondary_risks = _nontrivial_secondary_risks(projection.get("secondary_risks", []) if isinstance(projection.get("secondary_risks"), list) else [])
+    secondary_penalty = min(10, len(secondary_risks) * 4)
+    context_adjustment = _bounded(learning_adjustment + role_adjustment, -10, 10)
+    overall = round(_bounded(twin_overall + context_adjustment - secondary_penalty))
+
+    scorecard = {
+        **original_scorecard,
+        **twin_scorecard,
+        "overall": overall,
+        "physics_overall": round(_bounded(twin_overall)),
+        "take_rate_likelihood": _candidate_expected_take_rate(item, original_scorecard),
+        "learning_adjustment": round(learning_adjustment),
+        "context_adjustment": round(context_adjustment),
+        "secondary_bottleneck_penalty": secondary_penalty,
+        "score_source": "digital_twin_simulation",
+    }
+    item["scorecard"] = scorecard
+    item["projected_impact"] = deepcopy(projection.get("projected_impact", original_projected_impact))
+    item["optimizer_estimate"] = {
+        "scorecard": original_scorecard,
+        "projected_impact": original_projected_impact,
+        "rejected_reasons": original_rejected_reasons,
+    }
+    item["digital_twin_projection"] = {
+        "source": projection.get("source"),
+        "seed": seed,
+        "horizon_minutes": projection.get("horizon_minutes"),
+        "projected_impact": deepcopy(projection.get("projected_impact", {})),
+        "scorecard": deepcopy(twin_scorecard),
+        "uncertainty": deepcopy(projection.get("uncertainty", {})),
+        "secondary_risks": deepcopy(projection.get("secondary_risks", [])),
+    }
+    if secondary_risks:
+        item["rejected_reasons"] = secondary_risks + original_rejected_reasons[:2]
+    return item
+
+
+def _rescore_candidates_with_twin(
+    candidates: list[dict[str, Any]],
+    state: dict[str, Any],
+    scenario_key: str,
+    horizon_minutes: int = 30,
+) -> list[dict[str, Any]]:
+    return [
+        _rescore_candidate_with_twin(candidate, state, scenario_key, index, horizon_minutes=horizon_minutes)
+        for index, candidate in enumerate(candidates)
+        if isinstance(candidate, dict)
+    ]
+
+
 def _normalized_selected_action(
     selected: dict[str, Any],
     scenario_key: str,
@@ -867,6 +974,10 @@ def optimize_park_response(
 
     learning = _learning_summary(_learning_rules(context, scenario_key))
     candidates = _apply_learning_to_candidates(candidates, learning)
+    for candidate in candidates:
+        if isinstance(candidate, dict) and not isinstance(candidate.get("selected_action"), dict):
+            candidate["selected_action"] = _normalized_selected_action(candidate, scenario_key, failed_ride)
+    candidates = _rescore_candidates_with_twin(candidates, state, scenario_key)
 
     selected = max(candidates, key=lambda item: item["scorecard"]["overall"])
     ranked = sorted(candidates, key=lambda item: item["scorecard"]["overall"], reverse=True)

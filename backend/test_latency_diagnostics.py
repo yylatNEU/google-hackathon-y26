@@ -226,6 +226,20 @@ def test_latency_probe_import_and_persist_edge_cases(monkeypatch):
     monkeypatch.setattr(latency_diagnostics.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("spawn failed")))
     assert latency_diagnostics._run_import_profile("bad_module")["status"] == "failed"
 
+    captured_run = {}
+
+    def successful_run(*args, **kwargs):
+        captured_run["args"] = args
+        captured_run["kwargs"] = kwargs
+        return type("Completed", (), {"returncode": 0, "stderr": "import time: 1 | 2 | json"})()
+
+    monkeypatch.setattr(latency_diagnostics.subprocess, "run", successful_run)
+    profiled = latency_diagnostics._run_import_profile("json")
+    assert profiled["status"] == "ok"
+    assert captured_run["kwargs"]["close_fds"] is False
+    assert "cwd" not in captured_run["kwargs"]
+    assert captured_run["kwargs"]["env"]["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] == "YES"
+
     monkeypatch.setattr(latency_diagnostics, "_IMPORT_PROFILE_FUTURE", None)
     monkeypatch.setattr(latency_diagnostics, "_IMPORT_PROFILE_CACHE", {"status": "ok", "finished_epoch": latency_diagnostics.time.time()})
     assert latency_diagnostics.trigger_import_profile(force=False)["skipped"] == "fresh"

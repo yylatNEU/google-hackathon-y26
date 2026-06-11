@@ -632,6 +632,9 @@ export type RunTraceContract = {
     why?: string;
     gate_status?: string;
     allowed?: boolean;
+    status?: string;
+    approval_owner?: string | null;
+    conflict_count?: number;
     dispatch_count?: number;
     mode?: string;
     connected?: boolean;
@@ -660,6 +663,8 @@ export type RunTraceContract = {
     customer_care_case?: unknown;
     ledger_entry?: unknown;
   };
+  policy_regulation_judgment?: PolicyRegulationJudgment;
+  negotiation_trace?: NegotiationTrace;
   dispatches?: Array<{
     dispatch_id?: string;
     channel?: string;
@@ -694,6 +699,50 @@ export type RunTraceContract = {
     dispatches?: number;
     take_rate?: number;
     outcome_id?: string;
+  };
+};
+
+export type PolicyRegulationJudgment = {
+  status?: "allowed" | "review_required" | "blocked" | string;
+  source?: string;
+  hard_gate_status?: string;
+  allowed_by_legacy_gate?: boolean;
+  human_review_required?: boolean;
+  approval_owner?: string | null;
+  policy_refs?: string[];
+  findings?: string[];
+  human_review_reasons?: string[];
+  required_evidence?: string[];
+  blocked_authorities?: string[];
+  interpreted_policy?: {
+    status?: string;
+    primary_case_id?: string | null;
+    primary_case_title?: string | null;
+    approval_required?: boolean;
+    conflict_analysis?: Record<string, unknown>;
+  };
+  alignment_rule?: string;
+};
+
+export type NegotiationTrace = {
+  mode?: string;
+  source?: string;
+  scenario_key?: string;
+  proposal_count?: number;
+  active_roles?: string[];
+  rounds?: Array<Record<string, unknown>>;
+  turns?: Array<Record<string, unknown>>;
+  conflicts?: Array<Record<string, unknown>>;
+  tradeoff_matrix?: Array<Record<string, unknown>>;
+  executive_tradeoff?: Record<string, unknown>;
+  selected_action?: { label?: string; target?: string; action?: string; owner?: string; expected_effect?: string };
+  accepted_role_proposal?: Record<string, unknown>;
+  selected_plan_id?: string;
+  policy_regulation_judgment?: PolicyRegulationJudgment;
+  final_executive_decision?: {
+    status?: string;
+    approval_owner?: string | null;
+    reason?: string;
   };
 };
 
@@ -1912,6 +1961,8 @@ export type RunTelemetry = {
     confidence_score?: number;
   };
   role_agent_proposals?: RoleAgentProposalArtifact;
+  negotiation_trace?: NegotiationTrace;
+  policy_regulation_judgment?: PolicyRegulationJudgment;
   role_outcome_attribution?: RoleOutcomeAttribution;
   role_proposal_memory?: { mode?: string; status?: string; stored_count?: number; connected?: boolean; error?: string };
   execution?: { status?: string; message?: string };
@@ -2498,6 +2549,8 @@ export type ProactiveRunTelemetry = {
   agent_findings?: RuntimeAgentFinding[];
   orchestration?: AgentTopology;
   role_agent_proposals?: RoleAgentProposalArtifact;
+  negotiation_trace?: NegotiationTrace;
+  policy_regulation_judgment?: PolicyRegulationJudgment;
   role_outcome_attribution?: RoleOutcomeAttribution;
   planner?: RunTelemetry["planner"];
   governance?: RunTelemetry["governance"];
@@ -2611,6 +2664,8 @@ export type UnifiedOperatingReceipt = {
   tools?: string[];
   selected_action?: { label?: string; target?: string; action?: string; owner?: string; expected_effect?: string };
   policy_result?: { allowed?: boolean; gate_status?: string; findings?: string[] };
+  policy_regulation_judgment?: PolicyRegulationJudgment;
+  negotiation_trace?: NegotiationTrace;
   dispatches?: { count?: number; channels?: string[]; ids?: string[] };
   state_impact?: ClosedLoopOutcome["state_impact"];
   learning_update?: Record<string, unknown>;

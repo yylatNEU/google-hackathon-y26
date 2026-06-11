@@ -163,7 +163,7 @@ def _simulated_stakeholder_review(draft: dict[str, Any], section_revision: dict[
         ],
         "findings": findings,
         "recommendedDemoStory": [
-            "Designer asks for rainy-day family journey.",
+            f"Designer asks for {draft.get('intent') or draft.get('title') or 'an Experience Studio package'}.",
             "Planner shows profile-backed recommendation and open questions.",
             "Studio generates final package with variants.",
             "Internal Codex simulated stakeholder challenges the package.",
@@ -253,26 +253,31 @@ def _product_readiness_model(
     package = draft.get("creativePackage") if isinstance(draft.get("creativePackage"), dict) else {}
     qa = package.get("studioQualityEval") if isinstance(package.get("studioQualityEval"), dict) else {}
     reviewer_panel = qa.get("reviewerPanel") if isinstance(qa.get("reviewerPanel"), dict) else {}
+    venue_reflection = qa.get("venueReflection") if isinstance(qa.get("venueReflection"), dict) else {}
     craft_samples = ((package.get("craftArtifacts") or {}).get("samples") or []) if isinstance(package.get("craftArtifacts"), dict) else []
     qa_gate_summary = qa.get("gateSummary") if isinstance(qa.get("gateSummary"), dict) else {}
     gate_score = max(0, 100 - int(qa_gate_summary.get("blocked") or 0) * 22 - int(qa_gate_summary.get("review") or 0) * 8)
     craft_rule_score = 100 if one_learning_loop.get("nextGenerationEvidence", {}).get("usesCraftRule") else 60 if one_learning_loop.get("nextGenerationEvidence", {}).get("usesApprovedRules") else 35
     reviewer_score = float(reviewer_panel.get("consensusScore") or qa.get("scores", {}).get("reviewerConsensus") or 0)
+    venue_reflection_score = float(venue_reflection.get("score") or qa.get("scores", {}).get("venueReflection") or 0)
     risk_pass_count = sum(1 for item in demo_risk_assessment.get("risks", []) if item.get("status") == "pass")
     risk_count = len(demo_risk_assessment.get("risks", [])) or 1
     score = round(
-        0.20 * float(qa.get("demoScore") or qa.get("score") or 0)
-        + 0.12 * float(qa.get("productionScore") or 0)
-        + 0.14 * (100 if demo_risk_assessment.get("status") == "demo_ready" else 65)
-        + 0.14 * craft_rule_score
-        + 0.11 * gate_score
-        + 0.12 * reviewer_score
-        + 0.08 * min(100, len(craft_samples) * 34)
-        + 0.08 * (100 if conversation_refinement.get("status") == "refined" else 55)
-        + 0.05 * round((risk_pass_count / risk_count) * 100),
+        0.18 * float(qa.get("demoScore") or qa.get("score") or 0)
+        + 0.11 * float(qa.get("productionScore") or 0)
+        + 0.12 * (100 if demo_risk_assessment.get("status") == "demo_ready" else 65)
+        + 0.12 * craft_rule_score
+        + 0.10 * gate_score
+        + 0.11 * reviewer_score
+        + 0.12 * venue_reflection_score
+        + 0.07 * min(100, len(craft_samples) * 34)
+        + 0.07 * (100 if conversation_refinement.get("status") == "refined" else 55)
+        + 0.04 * round((risk_pass_count / risk_count) * 100),
         1,
     )
     production_status = demo_risk_assessment.get("productionPublishStatus")
+    if production_status == "blocked_until_real_venue_imports":
+        score = min(score, 94.0)
     return {
         "status": "product_ready_demo_model" if score >= 85 and demo_risk_assessment.get("status") == "demo_ready" else "not_product_ready",
         "score": score,
@@ -285,15 +290,19 @@ def _product_readiness_model(
             "gateScore": gate_score,
             "reviewerConsensus": reviewer_score,
             "reviewerPanelStatus": reviewer_panel.get("status"),
+            "venueReflection": venue_reflection_score,
+            "venueReflectionStatus": venue_reflection.get("status"),
             "craftRuleScore": craft_rule_score,
             "riskPassRate": round((risk_pass_count / risk_count) * 100),
             "conversationRefined": conversation_refinement.get("status") == "refined",
         },
         "qaGateSummary": qa_gate_summary,
         "reviewerPanel": reviewer_panel,
+        "venueReflection": venue_reflection,
         "passes": [
             "Independent simulated stakeholder review is separate from the app Review Agent.",
             "Backend reviewer panel critiques creative, accessibility, claims, channel, and memory quality.",
+            "Venue reflection scores spatial, attraction, dining, care, segment, operations, weather, channel, brand, and learning-feed coverage.",
             "One conversational refinement turn changes the generator input before generation.",
             "Creative lead samples are visible in generated output.",
             "One bounded learning loop promotes package and craft rules and proves next-generation use.",
@@ -320,8 +329,9 @@ def _demo_run_rail(
 ) -> list[dict[str, Any]]:
     answered = conversation_refinement.get("answeredQuestionIds") or []
     delta = conversation_refinement.get("payloadDelta") or []
+    template_label = ((conversation_plan.get("parsedBrief") or {}).get("templateLabel") or (conversation_plan.get("parsedBrief") or {}).get("templateId") or "experience request")
     return [
-        {"step": "designer_prompt", "status": conversation_plan.get("status"), "evidence": "Planner parsed rainy-day family journey request."},
+        {"step": "designer_prompt", "status": conversation_plan.get("status"), "evidence": f"Planner parsed {template_label} request."},
         {"step": "planner_questions", "status": "ready", "evidence": f"{len(conversation_plan.get('clarifyingQuestions') or [])} refinement prompt(s) generated."},
         {"step": "conversation_refinement", "status": conversation_refinement.get("status"), "evidence": f"{len(answered)} answer(s) captured; {len(delta)} payload field(s) changed before generation."},
         {"step": "package_generation", "status": generated.get("status"), "evidence": "Final package, route, channels, QA, variants, and craft samples generated."},
@@ -427,7 +437,24 @@ def _one_learning_loop(
     }
 
 
-def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
+DEFAULT_CNY_SCENARIO_MESSAGE = (
+    "Create a Chinese New Year festival plan that runs for a month with food, craft, "
+    "signage, email, and staff cues."
+)
+
+
+def run(
+    base_url: str,
+    use_llm: bool = False,
+    scenario_message: str = DEFAULT_CNY_SCENARIO_MESSAGE,
+    refinement_input: str = (
+        "Success metric is pre-arrival clarity. Guest commitment is a short optional moment. "
+        "Approved comfort claims are indoor stop, covered path, seating, and step-free access. "
+        "Review owner is CRM. Lead with app, signage, email, and staff cue."
+    ),
+    section_feedback: str = "Make the staff script less operational, more magical, and keep accessibility language plain.",
+    template_id: str = "",
+) -> dict[str, Any]:
     started = time.time()
     readiness = _request(base_url, "GET", "/api/park/experience-studio/readiness", timeout=10)
     before = _memory(base_url)
@@ -436,22 +463,19 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
         "POST",
         "/api/park/experience-studio/conversation-plan",
         {
-            "message": "Create a rainy-day family journey with verified indoor stops, calm guest copy, app, signage, email, and staff cue artifacts.",
+            "message": scenario_message,
+            **({"templateId": template_id} if template_id else {}),
             "useVenueExperienceData": True,
         },
         timeout=12,
-    )
-    refinement_input = (
-        "Success metric is pre-arrival clarity. Guest commitment is a short optional moment. "
-        "Approved comfort claims are indoor stop, covered path, seating, and step-free access. "
-        "Review owner is CRM. Lead with app, signage, email, and staff cue."
     )
     conversation_plan = _request(
         base_url,
         "POST",
         "/api/park/experience-studio/conversation-plan",
         {
-            "message": "Create a rainy-day family journey with verified indoor stops, calm guest copy, app, signage, email, and staff cue artifacts.",
+            "message": scenario_message,
+            **({"templateId": template_id} if template_id else {}),
             "history": [
                 {
                     "role": "assistant",
@@ -467,6 +491,8 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
     plan_payload = (conversation_plan.get("recommendedPlan") or {}).get("payload")
     if not isinstance(plan_payload, dict) or not plan_payload.get("templateId"):
         raise RuntimeError("Conversation plan did not include a generator-ready recommendedPlan.payload")
+    if template_id:
+        plan_payload = {**plan_payload, "templateId": template_id}
     generated = _request(
         base_url,
         "POST",
@@ -487,7 +513,7 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
         {
             "draft": draft,
             "sectionId": "staff_script",
-            "feedback": "Make the staff script less operational, more magical, and keep accessibility language plain.",
+            "feedback": section_feedback,
             "actor": "demo_verifier",
         },
         timeout=20,
@@ -500,7 +526,7 @@ def run(base_url: str, use_llm: bool = False) -> dict[str, Any]:
         "POST",
         "/api/park/experience-studio/drafts",
         {
-            "templateId": "rainy-day",
+            "templateId": plan_payload.get("templateId") or draft.get("templateId") or "experience-studio",
             "draft": draft,
             "actor": "demo_verifier",
             "sourceMode": generated.get("mode"),
@@ -789,6 +815,9 @@ def _render_html(report: dict[str, Any]) -> str:
     .grid3 {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }}
     .grid2 {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }}
     .card {{ border: 1px solid var(--soft); background: var(--panel2); border-radius: 8px; padding: 14px; }}
+    .vertex-hero {{ border-color: rgba(56,189,248,.55); background: linear-gradient(180deg, rgba(8,47,73,.54), rgba(13,17,21,.96)); }}
+    .slot-card {{ border: 1px solid rgba(56,189,248,.24); background: rgba(8,11,13,.72); border-radius: 8px; padding: 12px; }}
+    .slot-card strong {{ display: block; color: white; font-size: 13px; }}
     .metric span, .label {{ display: block; color: var(--dim); font-size: 10px; font-weight: 900; letter-spacing: .1em; text-transform: uppercase; }}
     .metric strong {{ display: block; margin-top: 7px; color: white; font-size: 28px; line-height: 1; }}
     .metric small, .value {{ display: block; margin-top: 7px; color: var(--muted); line-height: 1.45; }}
@@ -828,6 +857,7 @@ def _render_html(report: dict[str, Any]) -> str:
 
   <nav class="tabs" aria-label="Report sections">
     <button class="tab active" data-view="overview">Overview</button>
+    <button class="tab" data-view="vertex">Vertex AI 1-6</button>
     <button class="tab" data-view="demo">Demo Run</button>
     <button class="tab" data-view="product">Product Model</button>
     <button class="tab" data-view="planner">Planner</button>
@@ -846,9 +876,11 @@ def _render_html(report: dict[str, Any]) -> str:
 
   <section id="view-overview" class="view active">
     <h2>Overview</h2>
+    <div id="vertexOverview" class="stack" style="margin-top:14px"></div>
     <div class="grid4" id="metrics" style="margin-top:14px"></div>
     <table><tbody>{summary_rows}</tbody></table>
   </section>
+  <section id="view-vertex" class="view"><h2>Vertex AI Enrichment 1-6</h2><div id="vertex" class="stack" style="margin-top:14px"></div></section>
   <section id="view-demo" class="view"><h2>Demo Run</h2><div id="demoRun" class="stack" style="margin-top:14px"></div></section>
   <section id="view-product" class="view"><h2>Product-Ready Model</h2><div id="productModel" class="stack" style="margin-top:14px"></div></section>
   <section id="view-planner" class="view"><h2>Conversation Planner</h2><div id="planner" class="stack" style="margin-top:14px"></div></section>
@@ -878,7 +910,9 @@ def _render_html(report: dict[str, Any]) -> str:
   const refinement = report.conversationRefinement || {{}};
   const plannerIntel = plan.plannerIntelligence || {{}};
   const pkg = result.creativePackage || {{}};
+  const vertexOrchestration = pkg.vertexModelOrchestration || {{}};
   const reviewerPanel = pkg.studioQualityEval?.reviewerPanel || {{}};
+  const venueReflection = pkg.studioQualityEval?.venueReflection || {{}};
   const creativeSynthesis = result.creativeSynthesis || pkg.creativeSynthesis || {{}};
   const designReasoning = result.experienceReasoning || pkg.designReasoning || {{}};
   const profileIntel = result.profileIntelligence || {{}};
@@ -890,6 +924,22 @@ def _render_html(report: dict[str, Any]) -> str:
   const list = (items) => (Array.isArray(items) && items.length ? `<ul>${{items.map((item) => `<li>${{esc(typeof item === "string" ? item : JSON.stringify(item))}}</li>`).join("")}}</ul>` : "<p>None.</p>");
   const jsonText = (value) => JSON.stringify(value, null, 2);
   const metric = (label, value, detail = "") => `<div class="card metric"><span>${{esc(label)}}</span><strong>${{esc(value)}}</strong><small>${{esc(detail)}}</small></div>`;
+  const vertexSlotCards = () => (vertexOrchestration.slots || []).map((slot, index) => `<div class="slot-card"><span class="label">${{esc(`slot ${{index + 1}} / ${{slot.id || ""}}`)}}</span><strong>${{esc(slot.label || slot.id || "Model slot")}}</strong><div class="value">${{esc(slot.model || "model not set")}} / ${{esc(slot.status || "unknown")}}</div><p>${{esc(slot.purpose || "")}}</p><div class="label">Expected outputs</div>${{list(slot.expectedOutputs || [])}}<div class="label">Guardrails</div>${{list(slot.guardrails || [])}}</div>`).join("") || "<p>No Vertex orchestration slots were returned.</p>";
+  const vertexSummaryCard = (compact = false) => `
+    <div class="card vertex-hero">
+      <div class="eyebrow">New in this report</div>
+      <h3>Vertex AI Model Orchestration is now attached to the final package</h3>
+      <div class="grid4" style="margin-top:12px">
+        ${{metric("Status", vertexOrchestration.status || "unknown", vertexOrchestration.mode || "multi-model enrichment")}}
+        ${{metric("Slots", `${{vertexOrchestration.readyOrPlannedSlotCount ?? "n/a"}} / ${{vertexOrchestration.slotCount ?? "n/a"}}`, "planner, writer, critic, memory, image, video")}}
+        ${{metric("Provider", vertexOrchestration.providerReadiness?.provider || "Vertex AI", vertexOrchestration.providerReadiness?.ready ? "configured" : "not configured")}}
+        ${{metric("Boundary", "draft-only", "Cannot publish or override venue facts")}}
+      </div>
+      <p>${{esc(vertexOrchestration.boundary || "Model orchestration enriches draft artifacts and review prompts only.")}}</p>
+      ${{compact ? `<div class="label">Six slots</div>${{list((vertexOrchestration.slots || []).map((slot) => `${{slot.id}} / ${{slot.model}} / ${{slot.status}}`))}}` : `<div class="grid3" style="margin-top:12px">${{vertexSlotCards()}}</div><div class="grid2" style="margin-top:12px"><div class="card"><h3>Provider readiness</h3><pre>${{esc(jsonText(vertexOrchestration.providerReadiness || {{}}))}}</pre></div><div class="card"><h3>Activation</h3><pre>${{esc(jsonText(vertexOrchestration.activation || {{}}))}}</pre></div></div>`}}
+    </div>`;
+  document.getElementById("vertexOverview").innerHTML = vertexSummaryCard(true);
+  document.getElementById("vertex").innerHTML = vertexSummaryCard(false);
   document.getElementById("metrics").innerHTML = [
     metric("Route stops", (result.route || []).length, result.title),
     metric("Channel artifacts", (result.messages || []).length, "App, signage, email, staff cue"),
@@ -905,7 +955,8 @@ def _render_html(report: dict[str, Any]) -> str:
     metric("Product model", productModel.status || "unknown", `Score ${{productModel.score ?? "n/a"}}`),
     metric("Variants", (pkg.creativePackageVariants || []).length, "Selected plus alternatives"),
     metric("Revision delta", sectionRevision.qaDelta?.delta ?? "n/a", sectionRevision.sectionId || "no targeted revision"),
-    metric("Venue gaps", (pkg.venueDataGapAnalysis?.missingForProduction || []).length, pkg.venueDataGapAnalysis?.productionRealVenueReady ? "production ready" : "review required")
+    metric("Venue gaps", (pkg.venueDataGapAnalysis?.missingForProduction || []).length, pkg.venueDataGapAnalysis?.productionRealVenueReady ? "production ready" : "review required"),
+    metric("Vertex slots", vertexOrchestration.readyOrPlannedSlotCount ?? "n/a", `${{vertexOrchestration.slotCount ?? 0}} planned / ${{vertexOrchestration.status || "unknown"}}`)
   ].join("");
   document.getElementById("demoRun").innerHTML = `
     <div class="card"><h3>Demo risk assessment</h3><p>${{esc(demoRisk.summary || "")}}</p><div class="label">Purpose</div><div class="value">${{esc(demoRisk.purpose || "")}}</div></div>
@@ -968,6 +1019,8 @@ def _render_html(report: dict[str, Any]) -> str:
       <div class="card"><h3>Section Revision Result</h3><div class="grid3"><div><div class="label">Section</div><div class="value">${{esc(sectionRevision.sectionId || "n/a")}}</div></div><div><div class="label">Status</div><div class="value">${{esc(sectionRevision.status || "unknown")}}</div></div><div><div class="label">QA delta</div><div class="value">${{esc(sectionRevision.qaDelta?.delta ?? "n/a")}}</div></div></div><div class="label">Feedback</div><div class="value">${{esc(sectionRevision.feedback || "")}}</div><div class="label">Before</div><pre>${{esc(jsonText(sectionRevision.beforeSection || {{}}))}}</pre><div class="label">After</div><pre>${{esc(jsonText(sectionRevision.afterSection || {{}}))}}</pre></div>
     </div>
     <div class="card"><h3>Internal Reviewer Loop</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(reviewerPanel.status || "unknown")}}</div></div><div><div class="label">Consensus</div><div class="value">${{esc(reviewerPanel.consensusScore ?? "n/a")}}</div></div><div><div class="label">Reviewers</div><div class="value">${{esc(reviewerPanel.reviewerCount ?? ((reviewerPanel.reviewers || []).length || "n/a"))}}</div></div></div><p>${{esc(reviewerPanel.summary || "")}}</p><div class="label">Reviewer critiques</div>${{list((reviewerPanel.reviewers || []).map((item) => `${{item.gateStatus}} / ${{item.role}} / score ${{item.score}} - ${{item.finding}} Revision: ${{item.requiredRevision}}`))}}<div class="label">Revision queue</div>${{list((reviewerPanel.revisionQueue || []).map((item) => `${{item.status}} / ${{item.role}} - ${{item.requiredRevision}}`))}}</div>
+    <div class="card"><h3>Venue Reflection</h3><div class="grid4"><div><div class="label">Status</div><div class="value">${{esc(venueReflection.status || "unknown")}}</div></div><div><div class="label">Score</div><div class="value">${{esc(venueReflection.score ?? "n/a")}}</div></div><div><div class="label">Profile</div><div class="value">${{esc(venueReflection.profileType || "unknown")}}</div></div><div><div class="label">Production</div><div class="value">${{esc(venueReflection.productionBoundary?.status || "unknown")}}</div></div></div><p>${{esc(venueReflection.summary || "")}}</p><div class="label">Venue dimensions</div>${{list((venueReflection.dimensions || []).map((item) => `${{item.score}} / ${{item.label}} - ${{item.evidence}}${{(item.missing || []).length ? " Missing: " + item.missing.join(", ") : ""}}`))}}<div class="label">Route coverage</div><pre>${{esc(jsonText(venueReflection.routeCoverage || {{}}))}}</pre><div class="label">Production boundary</div><pre>${{esc(jsonText(venueReflection.productionBoundary || {{}}))}}</pre></div>
+    <div class="card"><h3>Vertex AI Model Orchestration</h3><div class="grid4"><div><div class="label">Status</div><div class="value">${{esc(vertexOrchestration.status || "unknown")}}</div></div><div><div class="label">Mode</div><div class="value">${{esc(vertexOrchestration.mode || "n/a")}}</div></div><div><div class="label">Slots</div><div class="value">${{esc(`${{vertexOrchestration.readyOrPlannedSlotCount ?? "n/a"}} / ${{vertexOrchestration.slotCount ?? "n/a"}}`)}}</div></div><div><div class="label">Provider</div><div class="value">${{esc(`${{vertexOrchestration.providerReadiness?.provider || "Vertex AI"}} / ${{vertexOrchestration.providerReadiness?.platform || "unknown"}}`)}}</div></div></div><p>${{esc(vertexOrchestration.boundary || "")}}</p><div class="label">Six enrichment slots</div>${{list((vertexOrchestration.slots || []).map((slot) => `${{slot.id}} / ${{slot.model}} / ${{slot.status}} - ${{slot.purpose}} Outputs: ${{(slot.expectedOutputs || []).join(", ")}}`))}}<div class="label">Provider readiness</div><pre>${{esc(jsonText(vertexOrchestration.providerReadiness || {{}}))}}</pre><div class="label">Activation</div><pre>${{esc(jsonText(vertexOrchestration.activation || {{}}))}}</pre></div>
     <div class="card"><h3>Internal Codex Simulated Stakeholder</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(stakeholderReview.status || "unknown")}}</div></div><div><div class="label">Production approval</div><div class="value">${{esc(stakeholderReview.wouldApproveForProduction ? "yes" : "no")}}</div></div><div><div class="label">Score</div><div class="value">${{esc(stakeholderReview.score ?? "n/a")}}</div></div></div><p>${{esc(stakeholderReview.summary || "")}}</p><div class="label">Top objections</div>${{list((stakeholderReview.findings || []).map((item) => `${{item.severity}} - ${{item.title}} ${{item.recommendation}}`))}}</div>
     <div class="card"><h3>Creative Alternatives</h3><div class="grid3">${{(pkg.creativePackageVariants || []).map((variant) => `<div class="card"><h3>${{esc(variant.name || variant.id)}} ${{variant.status === "selected" ? "(selected)" : ""}}</h3><p>${{esc(variant.positioning || "")}}</p><div class="label">Guest promise</div><div class="value">${{esc(variant.guestPromise || "")}}</div><div class="label">When to use</div><div class="value">${{esc(variant.whenToUse || "")}}</div><div class="label">Review risks</div>${{list(variant.reviewRisks || [])}}</div>`).join("") || "<p>No creative alternatives returned.</p>"}}</div></div>
     <div class="grid2">
@@ -978,7 +1031,7 @@ def _render_html(report: dict[str, Any]) -> str:
     </div>
     <div class="grid2">
       <div class="card"><h3>Section-Level Authoring</h3><div class="label">Concept board</div><pre>${{esc(jsonText(pkg.sectionCreativeDetails?.conceptBoard || {{}}))}}</pre><div class="label">Route story cards</div>${{list((pkg.sectionCreativeDetails?.routeStoryCards || []).map((item) => `${{item.order}}. ${{item.stop}} / ${{item.beat}} / ${{item.choiceArchitecture}}`))}}<div class="label">Staff rehearsal</div>${{list(pkg.sectionCreativeDetails?.staffRehearsalNotes || [])}}</div>
-      <div class="card"><h3>Studio QA Eval</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(pkg.studioQualityEval?.status || "unknown")}}</div></div><div><div class="label">Demo score</div><div class="value">${{esc(pkg.studioQualityEval?.demoScore ?? pkg.studioQualityEval?.score ?? "n/a")}}</div></div><div><div class="label">Production score</div><div class="value">${{esc(pkg.studioQualityEval?.productionScore ?? "n/a")}}</div></div></div><div class="label">Weighted scores</div><pre>${{esc(jsonText(pkg.studioQualityEval?.scores || {{}}))}}</pre><div class="label">Gate summary</div><pre>${{esc(jsonText(pkg.studioQualityEval?.gateSummary || {{}}))}}</pre><div class="label">Reviewer loop</div><pre>${{esc(jsonText(pkg.studioQualityEval?.reviewLoop || {{}}))}}</pre><div class="label">Gate results</div>${{list((pkg.studioQualityEval?.gateResults || []).map((item) => `${{item.status}} / ${{item.severity}} / ${{item.id}} - ${{item.evidence}}`))}}<div class="label">Findings</div>${{list(pkg.studioQualityEval?.findings || [])}}<div class="label">Next actions</div>${{list(pkg.studioQualityEval?.recommendedNextActions || [])}}</div>
+      <div class="card"><h3>Studio QA Eval</h3><div class="grid3"><div><div class="label">Status</div><div class="value">${{esc(pkg.studioQualityEval?.status || "unknown")}}</div></div><div><div class="label">Demo score</div><div class="value">${{esc(pkg.studioQualityEval?.demoScore ?? pkg.studioQualityEval?.score ?? "n/a")}}</div></div><div><div class="label">Production score</div><div class="value">${{esc(pkg.studioQualityEval?.productionScore ?? "n/a")}}</div></div></div><div class="label">Weighted scores</div><pre>${{esc(jsonText(pkg.studioQualityEval?.scores || {{}}))}}</pre><div class="label">Gate summary</div><pre>${{esc(jsonText(pkg.studioQualityEval?.gateSummary || {{}}))}}</pre><div class="label">Reviewer loop</div><pre>${{esc(jsonText(pkg.studioQualityEval?.reviewLoop || {{}}))}}</pre><div class="label">Venue reflection</div><pre>${{esc(jsonText(pkg.studioQualityEval?.venueReflection?.gateSummary || {{}}))}}</pre><div class="label">Gate results</div>${{list((pkg.studioQualityEval?.gateResults || []).map((item) => `${{item.status}} / ${{item.severity}} / ${{item.id}} - ${{item.evidence}}`))}}<div class="label">Findings</div>${{list(pkg.studioQualityEval?.findings || [])}}<div class="label">Next actions</div>${{list(pkg.studioQualityEval?.recommendedNextActions || [])}}</div>
     </div>
     <div class="grid2">
       <div class="card"><h3>Production detail</h3><div class="label">Guest choice model</div>${{list(pkg.productionDetail?.guestChoiceModel || [])}}<div class="label">Checklist</div>${{list(pkg.productionDetail?.contentCompletenessChecklist || [])}}<div class="label">Measurement</div>${{list((pkg.productionDetail?.measurementPlan || []).map((item) => `${{item.metric}}: ${{item.signal}} / ${{item.learningUse}}`))}}</div>
@@ -1135,8 +1188,35 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000", help="ParkPulse backend base URL.")
     parser.add_argument("--html-output", default="", help="Optional path for an HTML verification report.")
     parser.add_argument("--use-llm", action="store_true", help="Request live LLM creative polish; deterministic verification remains the default.")
+    parser.add_argument(
+        "--scenario-message",
+        default=DEFAULT_CNY_SCENARIO_MESSAGE,
+        help="Designer request used for the Experience Studio planner.",
+    )
+    parser.add_argument(
+        "--refinement-input",
+        default=(
+            "Success metric is pre-arrival clarity. Guest commitment is a short optional moment. "
+            "Approved comfort claims are indoor stop, covered path, seating, and step-free access. "
+            "Review owner is CRM. Lead with app, signage, email, and staff cue."
+        ),
+        help="Designer follow-up answer used for the planner refinement turn.",
+    )
+    parser.add_argument(
+        "--section-feedback",
+        default="Make the staff script less operational, more magical, and keep accessibility language plain.",
+        help="Reviewer feedback used for the targeted section revision step.",
+    )
+    parser.add_argument("--template-id", default="", help="Optional Experience Studio template override such as halloween-route.")
     args = parser.parse_args()
-    report = run(args.base_url, use_llm=args.use_llm)
+    report = run(
+        args.base_url,
+        use_llm=args.use_llm,
+        scenario_message=args.scenario_message,
+        refinement_input=args.refinement_input,
+        section_feedback=args.section_feedback,
+        template_id=args.template_id,
+    )
     if args.html_output:
         output_path = Path(args.html_output)
         output_path.parent.mkdir(parents=True, exist_ok=True)

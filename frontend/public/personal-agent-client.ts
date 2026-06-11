@@ -1,6 +1,6 @@
 type Json = Record<string, unknown>;
 
-const api = process.env.PARKPULSE_API_URL ?? "http://127.0.0.1:8001";
+const api = process.env.PARKPULSE_API_URL ?? "http://127.0.0.1:8000";
 
 const fullScope = [
   "location",

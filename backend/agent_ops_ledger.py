@@ -11,6 +11,8 @@ from typing import Any
 
 
 MAX_LEDGER_ROWS = 250
+LOW_ATTENDANCE_CROWD_BACKLOG_FLOOR = 500
+MIN_PATH_GUESTS_FOR_CROWD_BACKLOG = 250
 
 
 def _utc_now() -> str:
@@ -42,6 +44,31 @@ def _as_list(value: Any) -> list[Any]:
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _represented_guests(state: dict[str, Any]) -> int:
+    flow = _as_dict(state.get("guestFlow"))
+    explicit = flow.get("representedGuests")
+    if explicit is not None:
+        return int(_number(explicit) or 0)
+    zones = [zone for zone in _as_list(flow.get("zones")) if isinstance(zone, dict)]
+    if zones:
+        return sum(max(0, int(_number(zone.get("currentGuests")) or 0)) for zone in zones)
+    groups = _as_list(_as_dict(state.get("physicalMap")).get("guestGroups"))
+    if groups:
+        return sum(max(0, int(_number(group.get("count") or group.get("guestCount")) or 0)) for group in groups if isinstance(group, dict))
+    return -1
+
+
+def _validated_path_congestion(path: dict[str, Any], represented_guests: int) -> int:
+    congestion = int(_number(path.get("congestionLevel")) or 0)
+    if represented_guests < 0:
+        return congestion
+    raw_current = int(_number(path.get("currentGuests")) or 0)
+    current_guests = min(raw_current, represented_guests)
+    if represented_guests < LOW_ATTENDANCE_CROWD_BACKLOG_FLOOR or current_guests < MIN_PATH_GUESTS_FOR_CROWD_BACKLOG:
+        return 0
+    return congestion
 
 
 _CASE_INFERENCE_STOPWORDS = {
@@ -768,14 +795,18 @@ def build_operational_backlog(state: dict[str, Any] | None = None, *, limit: int
     food_a = _first_location(state, "foodCourt1")
     paths = [path for path in _as_list(guest_flow.get("paths")) if isinstance(path, dict)]
     rides = [ride for ride in _as_list(guest_flow.get("rides")) if isinstance(ride, dict)]
-    max_path_congestion = int(max((_number(path.get("congestionLevel")) or 0 for path in paths), default=0))
+    represented_guests = _represented_guests(state)
+    low_attendance = 0 <= represented_guests < LOW_ATTENDANCE_CROWD_BACKLOG_FLOOR
+    max_path_congestion = int(max((_validated_path_congestion(path, represented_guests) for path in paths), default=0))
     storm_risk = int(_number(weather.get("stormRisk")) or 0)
     grid_load = int(_number(energy.get("gridLoadPercent")) or 0)
     utility_price = int(_number(energy.get("utilityPricePerMwh")) or 0)
-    avg_satisfaction = int(_number(guest_flow.get("avgSatisfaction")) or 0)
+    avg_satisfaction_value = _number(guest_flow.get("avgSatisfaction"))
+    avg_satisfaction = int(avg_satisfaction_value if avg_satisfaction_value is not None else 82)
     complaint_rate = int(_number(guest_care.get("complaintRatePct")) or 0)
     open_care_cases = int(_number(guest_care.get("openCases")) or 0)
-    planning_readiness = int(_number(planning_agent.get("readinessPct")) or 0)
+    planning_readiness_value = _number(planning_agent.get("readinessPct"))
+    planning_readiness = int(planning_readiness_value if planning_readiness_value is not None else 82)
     break_pressure = int(_number(staff_lifecycle.get("breakPressurePct")) or 0)
     open_callouts = int(_number(staffing.get("openCallouts")) or 0)
     throughput_gap = int(sum(_number(ride.get("throughputGap")) or 0 for ride in rides))
@@ -856,7 +887,8 @@ def build_operational_backlog(state: dict[str, Any] | None = None, *, limit: int
             business_impact="Access-lane fairness is a trust and retention risk, not only a queue-balancing problem.",
         )
 
-    traffic_risk = int(_number(event_schedule.get("eventTrafficRiskPct")) or 0)
+    raw_traffic_risk = int(_number(event_schedule.get("eventTrafficRiskPct")) or 0)
+    traffic_risk = 0 if low_attendance else raw_traffic_risk
     active_wave = str(event_schedule.get("activeWave") or "unknown")
     if traffic_risk >= 50:
         append_issue(
@@ -872,6 +904,7 @@ def build_operational_backlog(state: dict[str, Any] | None = None, *, limit: int
                 f"activeWave={active_wave}",
                 f"nextEvent={_as_dict(event_schedule.get('nextEvent')).get('name', '--')}",
                 f"eventTrafficRiskPct={traffic_risk}",
+                f"representedGuests={represented_guests}",
             ],
             executive_domain="planning",
             business_impact="Timed show waves stress tomorrow's planning assumptions because crowd release, staffing, and route capacity are coupled.",
@@ -907,6 +940,7 @@ def build_operational_backlog(state: dict[str, Any] | None = None, *, limit: int
             [
                 f"stormRisk={storm_risk}",
                 f"maxPathCongestion={max_path_congestion}",
+                f"representedGuests={represented_guests}",
                 f"breakPressurePct={break_pressure}",
                 f"medicalTeams={staffing.get('medicalTeams', '--')}",
                 f"securityTeams={staffing.get('securityTeams', '--')}",
@@ -959,6 +993,7 @@ def build_operational_backlog(state: dict[str, Any] | None = None, *, limit: int
                 f"readinessPct={planning_readiness}",
                 f"nextDecisionDeadlineMinutes={_as_dict(planning_agent.get('activePlan')).get('nextDecisionDeadlineMinutes', '--')}",
                 f"eventTrafficRiskPct={traffic_risk}",
+                f"representedGuests={represented_guests}",
             ],
             executive_domain="planning",
             business_impact="Planning risk is the signal that the park is reacting one incident at a time instead of operating the day as a connected system.",

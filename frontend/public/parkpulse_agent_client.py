@@ -41,7 +41,7 @@ class ParkPulseAgentError(RuntimeError):
 class ParkPulseAgentClient:
     """Dependency-free client for the ParkPulse Agent Handshake Protocol."""
 
-    def __init__(self, api_url: str = "http://127.0.0.1:8001", timeout_seconds: int = 60):
+    def __init__(self, api_url: str = "http://127.0.0.1:8000", timeout_seconds: int = 60):
         self.api_url = api_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
 

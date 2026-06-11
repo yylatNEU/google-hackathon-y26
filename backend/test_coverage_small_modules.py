@@ -1,11 +1,17 @@
 import asyncio
 import builtins
 import json
+import sys
+from types import SimpleNamespace
 
+import customer_emergency_scope
 import park_ops_chat_quality
 import park_ops_mcp
+import park_role_access
+import park_role_access_audit
 import training_run_receipts
 import executive_experience_evidence
+import executive_day_brief
 import weather_live_feed
 from executive_experience_intelligence import build_executive_experience_intelligence
 
@@ -84,6 +90,57 @@ def test_training_run_receipt_records_ledger_and_dedupes_readiness(monkeypatch, 
     assert ledger["status"] == "ready"
     assert ledger["summary"]["blocked_count"] == 1
     assert ledger["receipts"][0]["id"] == receipt["id"]
+
+
+def test_customer_emergency_scope_and_role_access_edges(monkeypatch, tmp_path):
+    scope = customer_emergency_scope.build_customer_emergency_scope()
+    assert scope["customer_bot_role"] == "intake_and_guidance_only"
+    assert "diagnose_medical_condition" in scope["prohibited_customer_bot_actions"]
+
+    fire = customer_emergency_scope.classify_customer_scope_text("smoke and gas smell near the arcade")
+    assert fire["primary_category"] == "fire_smoke_hazard"
+    assert fire["severity"] == "life_safety"
+    assert fire["show_911_banner"] is True
+    unknown = customer_emergency_scope.classify_customer_scope_text("I have a general question")
+    assert unknown["primary_category"] == "unknown"
+    assert unknown["requires_human_review"] is False
+
+    monkeypatch.setenv("PARKPULSE_ADMIN_EMAILS", "admin@example.com")
+    monkeypatch.setenv("PARKPULSE_OPS_GROUPS", "park-ops")
+    assert park_role_access._role_from_external_claims("accounts.google.com:admin@example.com", set()) == "ml_ops_admin"
+    assert park_role_access._role_from_external_claims("", {"park-ops"}) == "ops_team"
+    monkeypatch.setenv("PARKPULSE_ALLOW_TRUSTED_ROLE_HEADER", "true")
+    assert park_role_access._role_from_external_claims("", set(), "worker") == "onsite_worker"
+
+    secret = "unit-secret"
+    token = park_role_access.sign_role_session("subject", "unknown", secret, now=10)
+    assert park_role_access.verify_role_session(token, secret, now=11)["status"] == "invalid"
+    expired = park_role_access.sign_role_session("subject", "ops_team", secret, ttl_seconds=1, now=10)
+    assert park_role_access.verify_role_session(expired, secret, now=100)["status"] == "expired"
+    bad_signature = token.rsplit(".", 1)[0] + ".bad!"
+    assert park_role_access.verify_role_session(bad_signature, secret)["reason"].startswith("Role session signature")
+    assert park_role_access.capability_for_mcp_tool("get_bigquery_training_status") == "read_ml_training"
+
+    audit_path = tmp_path / "role-audit.jsonl"
+    monkeypatch.setenv("PARKPULSE_ROLE_ACCESS_AUDIT_LOG", str(audit_path))
+    monkeypatch.setitem(
+        sys.modules,
+        "mongo_memory",
+        SimpleNamespace(
+            record_role_access_audit_event=lambda event: (_ for _ in ()).throw(RuntimeError("mongo down")),
+            get_latest_role_access_audit_events=lambda limit: [],
+        ),
+    )
+    event = park_role_access_audit.record_role_access_audit_event("mutation_denied", role="ops", subject="u1", capability="dispatch")
+    assert event["mongo_status"] == "failed"
+    assert event["write_status"] == "ok"
+    audit_path.write_text("{bad json\n" + json.dumps({"id": "row-1", "event_type": "mutation_denied"}) + "\n", encoding="utf-8")
+    status = park_role_access_audit.role_access_audit_status(limit=5)
+    assert status["storage"] == "jsonl_fallback"
+    assert status["events"][0]["id"] == "row-1"
+
+    monkeypatch.setitem(sys.modules, "mongo_memory", SimpleNamespace(get_latest_role_access_audit_events=lambda limit: [{"id": "mongo"}]))
+    assert park_role_access_audit.role_access_audit_status()["storage"] == "mongodb"
 
 
 def test_training_run_receipt_defaults_and_bad_json_ledger(monkeypatch, tmp_path):
@@ -426,3 +483,150 @@ def test_weather_live_feed_risk_labels_and_safe_parsing():
     assert windy["storm_risk_pct"] == 45
     normal = weather_live_feed._risk_from_weather({"weather_code": 3, "apparent_temperature": 70})
     assert normal["heat_risk"] == "normal"
+
+
+def _executive_day_brief_rich_state():
+    return {
+        "guestFlow": {
+            "representedGuests": 2400,
+            "activeGroups": 620,
+            "avgSatisfaction": 68,
+            "activePolicy": "bounded_reroute",
+            "interventions": [{"kind": "metering"}, {"targetId": "foodCourt1"}],
+            "zones": [
+                {"id": "foodCourt1", "name": "Food Court A", "density": 91, "waitMins": 18},
+                {"id": "arcade", "name": "Arcade Zone", "density": 41, "waitMins": 5},
+            ],
+            "rides": [
+                {"id": "dragonCoaster", "name": "Dragon Coaster", "waitMins": 64},
+                {"id": "theaterB", "name": "Theater B", "waitMins": 8},
+            ],
+            "paths": [
+                {"from": "mainStreet", "fromName": "Main Street", "to": "foodCourt1", "toName": "Food Court A", "congestionLevel": 86},
+                {"from": "arcade", "fromName": "Arcade", "to": "theaterB", "toName": "Theater B", "congestionLevel": 32},
+            ],
+        },
+        "parkOps": {"staffReadyPct": 72},
+        "simTime": {"hour": 16, "minute": 30},
+        "operatingClock": {
+            "heartbeat": {"minuteOfDay": 16 * 60 + 30},
+            "phase": {"minuteOfDay": 16 * 60},
+            "guestIntent": {"dominantIntent": "food and shelter"},
+            "staffLifecycle": {"breakPressurePct": 47},
+            "eventSchedule": {"activeWave": "parade_release", "eventTrafficRiskPct": 82},
+            "accessFairness": {"status": "watch", "publicComplaintRiskPct": 58},
+        },
+        "counterfactualForecast": {
+            "id": "cf-1",
+            "generatedAt": "2026-06-10T18:00:00Z",
+            "focus": {"id": "food-pressure"},
+            "impact": {"guestMinutesSaved": 420, "summary": "Narrow reroute prevents a food court spillback."},
+            "actionExecution": {"finalTakeRatePct": 64},
+        },
+        "learningEvidenceLedger": {
+            "headline": "Prior reroute worked when metered.",
+            "summary": {"memoryBackedDecisions": 3, "ledgerEntries": 7},
+            "recentDecisions": [{"id": "learning-1", "lesson": "Meter demand before broad promotion.", "createdAt": "2026-06-10T17:45:00Z"}],
+        },
+        "digitalTwinCalibration": {"summary": {"accuracyScore": 91, "resolvedRows": 12}},
+    }
+
+
+def test_executive_day_brief_helpers_and_sparse_fallbacks():
+    assert executive_day_brief._as_dict([]) == {}
+    assert executive_day_brief._as_list({"bad": True}) == []
+    assert executive_day_brief._num("bad", 3.5) == 3.5
+    assert executive_day_brief._clamp(140, 0, 100) == 100
+    assert executive_day_brief._severity_rank("critical") > executive_day_brief._severity_rank("watch")
+    assert executive_day_brief._top_by([{"density": 3}, "bad", {"density": 9}], "density")["density"] == 9
+    assert executive_day_brief._issue_id({"sourceId": "src-1"}, 0) == "src-1"
+    assert executive_day_brief._timestamp({"updatedAt": "now"}) == "now"
+    assert executive_day_brief._minute_label(-10) == "00:00"
+    assert executive_day_brief._minute_label(24 * 60 + 5) == "23:59"
+    demand_points = [
+        executive_day_brief._operating_demand(8 * 60),
+        executive_day_brief._operating_demand(9 * 60 + 30),
+        executive_day_brief._operating_demand(11 * 60),
+        executive_day_brief._operating_demand(13 * 60),
+        executive_day_brief._operating_demand(16 * 60),
+        executive_day_brief._operating_demand(19 * 60),
+        executive_day_brief._operating_demand(22 * 60),
+        executive_day_brief._operating_demand(23 * 60 + 10),
+    ]
+    assert demand_points[0] == 0
+    assert demand_points[-1] == 0
+    assert max(demand_points) >= 84
+
+    curve = executive_day_brief._pressure_curve(state=_executive_day_brief_rich_state(), composite=74, ops_effect=20, density=91)
+    assert len(curve) >= 5
+    assert curve[-1]["controlled"] == 74
+
+    sparse = executive_day_brief.build_executive_day_brief(
+        state={"guestFlow": {}, "parkOps": {}, "simTime": {"hour": 8, "minute": 15}},
+        backlog={},
+        incidents={},
+        audit=None,
+        dispatches=None,
+        ledger=None,
+    )
+    assert sparse["status"] == "ready"
+    assert sparse["primaryIssue"]["severity"] == "watch"
+    assert sparse["learningMemory"]["status"] == "thin_memory"
+    assert sparse["productStructure"]["workflowStages"][0]["status"] == "thin"
+    assert sparse["productStructure"]["workflowStages"][1]["status"] == "thin"
+    assert "No material mitigation effect" in sparse["mitigations"]["remainingGap"]
+
+
+def test_executive_day_brief_builds_rich_memory_backed_package():
+    payload = executive_day_brief.build_executive_day_brief(
+        state=_executive_day_brief_rich_state(),
+        backlog={
+            "enterpriseSummary": {
+                "answer": "Food pressure and access lanes are the executive decision focus.",
+                "weakestDomain": {"id": "access", "label": "Access lane risk"},
+            },
+            "issues": [
+                {
+                    "id": "issue-1",
+                    "title": "Food Court access lane crowding",
+                    "severity": "high",
+                    "status": "open",
+                    "summary": "Main Street flow is feeding Food Court A.",
+                    "recommendedNext": "Meter arrivals and protect the access lane.",
+                    "owner": "Crowd lead",
+                    "evidence": ["density=91"],
+                    "createdAt": "2026-06-10T17:40:00Z",
+                }
+            ],
+        },
+        incidents={
+            "summary": {"ticketCount": 2, "humanReviewCount": 1},
+            "tickets": [
+                {
+                    "id": "ticket-1",
+                    "domain": "Safety",
+                    "title": "Access lane spill risk",
+                    "severity": "critical",
+                    "status": "open",
+                    "recommendedHumanCall": "Approve metered reroute only after lane check.",
+                    "owner": "Ops director",
+                    "evidence": ["lane watch"],
+                    "detectedAt": "2026-06-10T17:50:00Z",
+                },
+                {"id": "ticket-2", "domain": "Food", "title": "Pickup delay", "severity": "medium"},
+            ],
+        },
+        audit={"summary": {"earliestReactionMinutes": 9}, "reactionTimeline": [{"id": "audit-1", "at": "17:52"}]},
+        dispatches=[{"id": "dispatch-1", "channel": "guest_app"}],
+        ledger={"items": [{"id": "ledger-1", "lesson": "Keep reroute narrow.", "nextPlanBias": "Meter before promotion.", "createdAt": "2026-06-10T17:55:00Z"}]},
+    )
+
+    assert payload["mode"] == "executive_day_brief"
+    assert payload["headline"] == "Access lane spill risk"
+    assert payload["primaryIssue"]["owner"] == "Ops director"
+    assert payload["recommendedDecision"]["deadlineMinutes"] == 9
+    assert payload["learningMemory"]["status"] == "memory_backed"
+    assert any(row["source"] == "counterfactual" for row in payload["evidence"])
+    assert any(row["source"] == "learning_memory" for row in payload["evidence"])
+    assert payload["charts"]["domainBreakdown"][0]["label"] == "Safety"
+    assert payload["decisionAlternatives"][0]["score"] >= payload["decisionAlternatives"][-1]["score"]

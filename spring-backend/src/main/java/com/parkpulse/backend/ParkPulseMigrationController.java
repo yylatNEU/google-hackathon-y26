@@ -9,6 +9,8 @@ import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -23,6 +25,13 @@ public class ParkPulseMigrationController {
     private final LiveFeedLedgerService liveFeedLedgerService;
     private final ProductLearningService productLearningService;
     private final StaffTrainingService staffTrainingService;
+    private final AgentOrchestrationService agentOrchestrationService;
+    private final ExperienceStudioService experienceStudioService;
+    private final VenueProfileService venueProfileService;
+    private final AccessibilityJourneyService accessibilityJourneyService;
+    private final ReviewLabelPipelineService reviewLabelPipelineService;
+    private final SimulationFacadeService simulationFacadeService;
+    private final ParkStateProjectionService parkStateProjectionService;
     private final Instant startedAt = Instant.now();
 
     public ParkPulseMigrationController(
@@ -33,7 +42,14 @@ public class ParkPulseMigrationController {
         ReliabilityDiagnosticsService reliabilityDiagnosticsService,
         LiveFeedLedgerService liveFeedLedgerService,
         ProductLearningService productLearningService,
-        StaffTrainingService staffTrainingService
+        StaffTrainingService staffTrainingService,
+        AgentOrchestrationService agentOrchestrationService,
+        ExperienceStudioService experienceStudioService,
+        VenueProfileService venueProfileService,
+        AccessibilityJourneyService accessibilityJourneyService,
+        ReviewLabelPipelineService reviewLabelPipelineService,
+        SimulationFacadeService simulationFacadeService,
+        ParkStateProjectionService parkStateProjectionService
     ) {
         this.platformStoreService = platformStoreService;
         this.roleAuthService = roleAuthService;
@@ -43,15 +59,22 @@ public class ParkPulseMigrationController {
         this.liveFeedLedgerService = liveFeedLedgerService;
         this.productLearningService = productLearningService;
         this.staffTrainingService = staffTrainingService;
+        this.agentOrchestrationService = agentOrchestrationService;
+        this.experienceStudioService = experienceStudioService;
+        this.venueProfileService = venueProfileService;
+        this.accessibilityJourneyService = accessibilityJourneyService;
+        this.reviewLabelPipelineService = reviewLabelPipelineService;
+        this.simulationFacadeService = simulationFacadeService;
+        this.parkStateProjectionService = parkStateProjectionService;
     }
 
-    @GetMapping(value = {"/", "/healthz"}, produces = MediaType.APPLICATION_JSON_VALUE)
+    @GetMapping(value = {"/", "/health", "/healthz"}, produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> health() {
         Map<String, Object> payload = orderedMap();
         payload.put("service", "parkpulse-spring-backend");
         payload.put("status", "ok");
         payload.put("entrypoint", "java-spring-migration");
-        payload.put("current_slice", "platform_store_authority");
+        payload.put("current_slice", "spring_backend_gateway_plus_experience_studio_and_venue_profile_control_loop");
         payload.put("uptime_ms", Instant.now().toEpochMilli() - startedAt.toEpochMilli());
         return payload;
     }
@@ -65,17 +88,17 @@ public class ParkPulseMigrationController {
         dependencies.put("python_backend", Map.of(
             "required_for_this_slice", false,
             "status", "not_checked",
-            "ownership", "remaining agent and operations routes stay on Python during migration"
+            "ownership", "deep Gemini/Vertex, Mongo memory, remaining simulation surfaces, and live GCP adapters stay on Python during migration"
         ));
 
         Map<String, Object> payload = orderedMap();
         payload.put("service", "parkpulse-spring-backend");
         payload.put("status", ready ? "ok" : "degraded");
         payload.put("entrypoint", "java-spring-migration");
-        payload.put("current_slice", "platform_store_authority");
+        payload.put("current_slice", "spring_backend_gateway_plus_experience_studio_and_venue_profile_control_loop");
         payload.put("dependency_status", dependencies);
         payload.put("readiness_issues", ready ? List.of() : platform.get("readiness_issues"));
-        payload.put("boundary", "Spring owns only the migrated platform-store authority routes. Python remains authoritative for unmigrated ParkPulse operations routes.");
+        payload.put("boundary", "Spring owns hot state, policy, live-feed ledgers, staff training, agent orchestration, copilot/refinement shell, Venue Profile source-integrity routes, Experience Studio persistence/control-loop routes, runtime warmup status, and platform-store authority routes. Python remains authoritative only for unmigrated deep model, heavy creative generation, simulation, and live adapter routes.");
         return payload;
     }
 
@@ -270,6 +293,86 @@ public class ParkPulseMigrationController {
         return payload;
     }
 
+    @PostMapping(value = "/api/park/signals/intake", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> signalIntake(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "read_ops_evidence");
+        return agentOrchestrationService.signalIntake(body);
+    }
+
+    @PostMapping(value = "/api/park/agent-role-run", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> agentRoleRun(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "run_agent_orchestration");
+        return agentOrchestrationService.agentRoleRun(body);
+    }
+
+    @PostMapping(value = "/api/park/agent-run", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> agentRun(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "run_agent_orchestration");
+        return agentOrchestrationService.agentRun(body);
+    }
+
+    @PostMapping(value = "/api/park/live-feed-agent-run", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> liveFeedAgentRun(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "run_agent_orchestration");
+        return agentOrchestrationService.liveFeedAgentRun(body);
+    }
+
+    @PostMapping(value = "/api/park/operator-command", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> operatorCommand(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        String execute = body == null ? "true" : String.valueOf(body.getOrDefault("execute", "true"));
+        roleAuthService.requireCapability(request, "false".equalsIgnoreCase(execute) ? "read_ops_evidence" : "dispatch_live_action");
+        return agentOrchestrationService.operatorCommand(body);
+    }
+
+    @PostMapping(value = "/api/park/action", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> parkAction(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "dispatch_live_action");
+        return agentOrchestrationService.parkAction(body);
+    }
+
+    @PostMapping(value = "/api/park/ops-chat", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> opsChat(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_ops_chat");
+        return agentOrchestrationService.opsChat(body);
+    }
+
+    @PostMapping(value = "/api/park/copilot-chat", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> copilotChat(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_ops_chat");
+        return agentOrchestrationService.copilotChat(body);
+    }
+
+    @PostMapping(value = "/api/park/agent-role-refine", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> agentRoleRefine(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "run_agent_orchestration");
+        return agentOrchestrationService.agentRoleRefine(body);
+    }
+
+    @GetMapping(value = "/api/park/full-runtime-status", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> fullRuntimeStatus() {
+        return agentOrchestrationService.fullRuntimeStatus();
+    }
+
+    @PostMapping(value = "/api/park/full-runtime-warmup", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> fullRuntimeWarmup(
+        HttpServletRequest request,
+        @RequestParam(required = false) Boolean force
+    ) {
+        roleAuthService.requireCapability(request, "run_agent_orchestration");
+        return agentOrchestrationService.fullRuntimeWarmup(Boolean.TRUE.equals(force));
+    }
+
+    @GetMapping(value = "/api/park/warmup-status", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> warmupStatus() {
+        return agentOrchestrationService.warmupStatus();
+    }
+
+    @GetMapping(value = "/api/park/agent-ops-ledger", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> agentOpsLedger(HttpServletRequest request, @RequestParam(required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_ops_evidence");
+        return agentOrchestrationService.agentOpsReceipts(limit == null ? 40 : limit);
+    }
+
     @GetMapping(value = "/api/park/monitor-evidence", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> monitorEvidence(@RequestParam(name = "case_id", required = false) String caseId) {
         List<Map<String, Object>> graphCases = springMonitorEvidenceCases(caseId);
@@ -413,6 +516,31 @@ public class ParkPulseMigrationController {
         payload.put("ledger", liveFeedLedgerService.liveFeedLedgerStatus());
         payload.put("review_ledger", liveFeedLedgerService.reviewLedgerStatus());
         payload.put("recent_events", liveFeedLedgerService.recentLiveFeedEvents(5));
+        payload.put("readiness_issues", List.of());
+        return payload;
+    }
+
+    @GetMapping(value = "/api/park/live-feed-health/summary", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> liveFeedHealthSummary(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_ops_evidence");
+        List<Map<String, Object>> feeds = springLiveFeedRows();
+        long openReviews = springReviewRows().stream()
+            .filter(item -> "open".equals(String.valueOf(item.get("status"))))
+            .count();
+
+        Map<String, Object> payload = orderedMap();
+        payload.put("status", openReviews == 0 ? "ready" : "review");
+        payload.put("mode", "live_feed_health_summary_spring");
+        payload.put("runtime", "java_spring");
+        payload.put("summary", liveFeedSummary(feeds, (int) openReviews));
+        payload.put("feeds", feeds.stream().limit(limit == null ? feeds.size() : Math.max(1, Math.min(limit, feeds.size()))).toList());
+        payload.put("open_reviews", List.of());
+        payload.put("cache", Map.of(
+            "status", "fresh",
+            "source", "spring_live_feed_summary",
+            "generated_at", Instant.now().toString()
+        ));
+        payload.put("boundary", "Fast summary gates planning readiness while deep feed rows and review evidence refresh separately.");
         payload.put("readiness_issues", List.of());
         return payload;
     }
@@ -562,6 +690,24 @@ public class ParkPulseMigrationController {
         return productLearningService.createTrainingGapTicket(body);
     }
 
+    @PostMapping(value = "/api/park/product-learning/promote-version", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> promoteProductLearningVersion(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "manage_product_learning");
+        return productLearningService.promoteLearningVersion(body);
+    }
+
+    @PostMapping(value = "/api/park/product-learning/rollback-version", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> rollbackProductLearningVersion(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "manage_product_learning");
+        return productLearningService.rollbackLearningVersion(body);
+    }
+
+    @PostMapping(value = "/api/park/product-learning/review-place-resolution", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> resolveProductLearningReviewPlace(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "manage_product_learning");
+        return productLearningService.resolveReviewPlace(body);
+    }
+
     @GetMapping(value = "/api/park/staff-training/scenarios", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> staffTrainingScenarios(HttpServletRequest request) {
         roleAuthService.requireCapability(request, "read_staff_training");
@@ -572,6 +718,24 @@ public class ParkPulseMigrationController {
     public Map<String, Object> staffTrainingPolicyPack(HttpServletRequest request) {
         roleAuthService.requireCapability(request, "read_staff_training_analytics");
         return staffTrainingService.policyPack();
+    }
+
+    @GetMapping(value = "/api/park/staff-training/agent-context", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> staffTrainingAgentContext(
+        HttpServletRequest request,
+        @RequestParam(name = "scenario_id", required = false) String scenarioId,
+        @RequestParam(name = "scenarioId", required = false) String scenarioIdCamel,
+        @RequestParam(name = "trainee_name", required = false) String traineeName,
+        @RequestParam(name = "traineeName", required = false) String traineeNameCamel,
+        @RequestParam(name = "assignment_id", required = false) String assignmentId,
+        @RequestParam(name = "assignmentId", required = false) String assignmentIdCamel
+    ) {
+        roleAuthService.requireCapability(request, "read_staff_training_analytics");
+        return staffTrainingService.agentContext(
+            firstNonBlank(scenarioId, scenarioIdCamel),
+            firstNonBlank(traineeName, traineeNameCamel),
+            firstNonBlank(assignmentId, assignmentIdCamel)
+        );
     }
 
     @GetMapping(value = "/api/park/staff-training/assignments", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -652,12 +816,279 @@ public class ParkPulseMigrationController {
         return staffTrainingService.analytics(limit == null ? 200 : limit);
     }
 
+    @GetMapping(value = "/api/park/experience-studio/memory", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> experienceStudioMemory(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_experience_studio");
+        return experienceStudioService.memory(limit == null ? 20 : limit);
+    }
+
+    @GetMapping(value = "/api/park/venue-profile", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> venueProfile(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_venue_profile");
+        return venueProfileService.profile();
+    }
+
+    @PostMapping(value = "/api/park/venue-profile/validate", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> validateVenueProfile(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "manage_venue_profile");
+        return venueProfileService.validateExport(body);
+    }
+
+    @PostMapping(value = "/api/park/venue-profile/import/preview", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> previewVenueProfileImport(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "manage_venue_profile");
+        return venueProfileService.previewImport(body);
+    }
+
+    @PostMapping(value = "/api/park/venue-profile/import", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> importVenueProfile(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "manage_venue_profile");
+        return venueProfileService.importExport(body);
+    }
+
+    @GetMapping(value = "/api/park/venue-profile/synthetic/export", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> syntheticVenueProfileExport(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "manage_venue_profile");
+        return venueProfileService.syntheticExport();
+    }
+
+    @PostMapping(value = "/api/park/venue-profile/synthetic/activate", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> activateSyntheticVenueProfile(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "manage_venue_profile");
+        return venueProfileService.activateSynthetic(body);
+    }
+
+    @GetMapping(value = "/api/park/accessibility/scope", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> accessibilityScope(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "use_accessibility_journey");
+        return accessibilityJourneyService.scope();
+    }
+
+    @PostMapping(value = "/api/park/accessibility/journey", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> accessibilityJourney(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_accessibility_journey");
+        return accessibilityJourneyService.journey(body);
+    }
+
+    @GetMapping(value = "/api/park/accessibility/memory", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> accessibilityMemory(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "use_accessibility_journey");
+        return accessibilityJourneyService.memory(limit == null ? 20 : limit);
+    }
+
+    @PostMapping(value = "/api/park/accessibility/feedback", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> accessibilityFeedback(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_accessibility_journey");
+        return accessibilityJourneyService.recordFeedback(body);
+    }
+
+    @GetMapping(value = "/api/park/accessibility/tools", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> accessibilityTools(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "use_accessibility_journey");
+        return accessibilityJourneyService.tools();
+    }
+
+    @PostMapping(value = "/api/park/accessibility/tool", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> accessibilityTool(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_accessibility_journey");
+        return accessibilityJourneyService.tool(body);
+    }
+
+    @GetMapping(value = "/api/park/review-label-pipeline", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> reviewLabelPipeline(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_review_label_pipeline");
+        return reviewLabelPipelineService.pipeline(limit == null ? 40 : limit);
+    }
+
+    @PostMapping(value = "/api/park/review-label-pipeline/decision", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> recordReviewLabelDecision(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "record_review_label");
+        return reviewLabelPipelineService.recordDecision(body);
+    }
+
+    @PostMapping(value = "/api/park/review-label-pipeline/auto-label", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> autoLabelReviewLabels(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "record_review_label");
+        return reviewLabelPipelineService.autoLabel(body);
+    }
+
+    @GetMapping(value = "/api/park/review-label-pipeline/decisions", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> reviewLabelDecisionLedger(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_review_label_pipeline");
+        return reviewLabelPipelineService.decisionLedger(limit == null ? 120 : limit);
+    }
+
+    @PostMapping(value = "/api/park/tick", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationTick(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "mutate_simulation_state");
+        return simulationFacadeService.tick(request, body, identity);
+    }
+
+    @PostMapping(value = "/api/park/time", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationTime(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "mutate_simulation_state");
+        return simulationFacadeService.setTime(request, body, identity);
+    }
+
+    @PostMapping(value = "/api/park/causal-impact-demo", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationCausalImpactDemo(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "run_simulation_exercise");
+        return simulationFacadeService.causalImpactDemo(request, body, identity);
+    }
+
+    @GetMapping(value = "/api/park/episode-fitness", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationEpisodeFitness(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "read_simulation_evidence");
+        return simulationFacadeService.episodeFitness(request, limit, identity);
+    }
+
+    @RequestMapping(value = "/api/park/digital-twin-war-room", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> digitalTwinWarRoom(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "run_simulation_exercise");
+        return simulationFacadeService.warRoom(request, "/api/park/digital-twin-war-room", body, identity);
+    }
+
+    @PostMapping(value = "/api/park/digital-twin-war-room/run", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> runDigitalTwinWarRoom(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "run_simulation_exercise");
+        return simulationFacadeService.warRoom(request, "/api/park/digital-twin-war-room/run", body, identity);
+    }
+
+    @PostMapping(value = "/api/park/digital-twin-war-room/remediate", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> remediateDigitalTwinWarRoom(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> identity = roleAuthService.requireCapability(request, "run_simulation_exercise");
+        return simulationFacadeService.warRoom(request, "/api/park/digital-twin-war-room/remediate", body, identity);
+    }
+
+    @GetMapping(value = "/api/park/simulation-facade/ledger", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationFacadeLedger(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_simulation_evidence");
+        return simulationFacadeService.ledger(limit == null ? 50 : limit);
+    }
+
+    @GetMapping(value = "/api/park/simulation-facade/health", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> simulationFacadeHealth(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_simulation_evidence");
+        return simulationFacadeService.health();
+    }
+
+    @PostMapping(value = "/api/park/experience-studio/conversation-plan", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> planExperienceStudioConversation(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_experience_studio");
+        return experienceStudioService.conversationPlan(body);
+    }
+
+    @PostMapping(value = "/api/park/experience-studio/draft", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> createExperienceStudioDraft(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_experience_studio");
+        return experienceStudioService.draft(body);
+    }
+
+    @PostMapping(value = "/api/park/experience-studio/section-revision", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> reviseExperienceStudioSection(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_experience_studio");
+        return experienceStudioService.reviseSection(body);
+    }
+
+    @GetMapping(value = "/api/park/experience-studio/layer-contract", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> experienceStudioLayerContract(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_experience_studio");
+        return Map.of(
+            "status", "ready",
+            "mode", "experience_studio_layer_contract_spring",
+            "runtime", "java_spring",
+            "boundary", Map.of(
+                "experience_studio_can", List.of("draft_artifacts", "review_artifacts", "save_versions", "prepare_handoff"),
+                "experience_studio_cannot", List.of("dispatch_staff", "change_queue", "publish_guest_message", "override_safety_policy", "alter_live_operations"),
+                "handoff_rule", "Anything that changes live operations or guest-facing production systems must go through Command Center review."
+            )
+        );
+    }
+
+    @GetMapping(value = "/api/park/experience-studio/readiness", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> experienceStudioReadiness(HttpServletRequest request) {
+        roleAuthService.requireCapability(request, "read_experience_studio");
+        return Map.of(
+            "status", "ready",
+            "mode", "experience_studio_production_readiness_spring",
+            "runtime", "java_spring",
+            "memory", experienceStudioService.memory(1).get("memoryConnection"),
+            "contracts", Map.of("noFeedbackLoop", true, "approvedRulePromotion", true, "llmControlAuthority", false, "notOperations", true, "publishingRequiresReview", true)
+        );
+    }
+
+    @GetMapping(value = "/api/park/experience-studio/drafts", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> experienceStudioDrafts(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_experience_studio");
+        return experienceStudioService.drafts(limit == null ? 30 : limit);
+    }
+
+    @PostMapping(value = "/api/park/experience-studio/drafts", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> saveExperienceStudioDraft(HttpServletRequest request, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_experience_studio");
+        return experienceStudioService.saveDraft(body);
+    }
+
+    @GetMapping(value = "/api/park/experience-studio/drafts/{draftId}", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> getExperienceStudioDraft(HttpServletRequest request, @PathVariable String draftId) {
+        roleAuthService.requireCapability(request, "read_experience_studio");
+        return experienceStudioService.getDraft(draftId);
+    }
+
+    @PostMapping(value = "/api/park/experience-studio/drafts/{draftId}", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> updateExperienceStudioDraft(HttpServletRequest request, @PathVariable String draftId, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "use_experience_studio");
+        return experienceStudioService.updateDraftContent(draftId, body);
+    }
+
+    @PostMapping(value = "/api/park/experience-studio/drafts/{draftId}/status", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> updateExperienceStudioDraftStatus(HttpServletRequest request, @PathVariable String draftId, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "review_experience_studio");
+        return experienceStudioService.updateDraftStatus(draftId, body);
+    }
+
+    @GetMapping(value = "/api/park/experience-studio/handoffs", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> experienceStudioHandoffs(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_experience_studio");
+        return experienceStudioService.handoffs(limit == null ? 30 : limit);
+    }
+
+    @PostMapping(value = "/api/park/experience-studio/drafts/{draftId}/handoff", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> createExperienceStudioHandoff(HttpServletRequest request, @PathVariable String draftId, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "review_experience_studio");
+        return experienceStudioService.createHandoff(draftId, body);
+    }
+
+    @GetMapping(value = "/api/park/experience-studio/learning-rules", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> experienceStudioLearningRules(HttpServletRequest request, @RequestParam(name = "limit", required = false) Integer limit) {
+        roleAuthService.requireCapability(request, "read_experience_studio");
+        return experienceStudioService.learningRules(limit == null ? 30 : limit);
+    }
+
+    @PostMapping(value = "/api/park/experience-studio/drafts/{draftId}/promote-rule", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> promoteExperienceStudioLearningRule(HttpServletRequest request, @PathVariable String draftId, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "review_experience_studio");
+        return experienceStudioService.promoteLearningRule(draftId, body);
+    }
+
+    @PostMapping(value = "/api/park/experience-studio/learning-rules/{ruleId}/status", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> updateExperienceStudioLearningRule(HttpServletRequest request, @PathVariable String ruleId, @RequestBody(required = false) Map<String, Object> body) {
+        roleAuthService.requireCapability(request, "review_experience_studio");
+        return experienceStudioService.updateLearningRule(ruleId, body);
+    }
+
     private Map<String, Object> liveFeedSummary(List<Map<String, Object>> feeds, int openReviewCount) {
         long readyCount = feeds.stream().filter(item -> "ready".equals(String.valueOf(item.get("status")))).count();
+        long staleCount = feeds.stream().filter(item -> "stale".equals(String.valueOf(item.get("status")))).count();
+        long lowConfidenceCount = feeds.stream()
+            .filter(item -> item.get("confidence") instanceof Number number && number.doubleValue() < 0.7)
+            .count();
         Map<String, Object> payload = orderedMap();
         payload.put("required_feed_count", feeds.size());
         payload.put("ready_feed_count", readyCount);
         payload.put("missing_or_weak_feed_count", feeds.size() - readyCount);
+        payload.put("stale_feed_count", staleCount);
+        payload.put("low_confidence_feed_count", lowConfidenceCount);
         payload.put("open_review_count", openReviewCount);
         return payload;
     }
@@ -981,57 +1412,7 @@ public class ParkPulseMigrationController {
     }
 
     private Map<String, Object> springState(String auditMode) {
-        Map<String, Object> guestFlow = orderedMap();
-        guestFlow.put("activePolicy", "spring-hot-path");
-        guestFlow.put("activeScenario", Map.of(
-            "key", "spring_gateway_state_lite",
-            "name", "Spring Gateway Operating State",
-            "description", "Compact operating state served by Java Spring while heavier simulation routes continue migrating.",
-            "condition", "normal"
-        ));
-        guestFlow.put("interventions", List.of());
-        guestFlow.put("representedGuests", 12480);
-        guestFlow.put("avgSatisfaction", 86);
-        guestFlow.put("activeGroups", 3120);
-        guestFlow.put("zones", List.of(
-            Map.of("id", "covered-plaza", "name", "Covered Plaza", "density", 72, "waitMins", 12, "status", "watch"),
-            Map.of("id", "east-midway", "name", "East Midway", "density", 58, "waitMins", 8, "status", "normal")
-        ));
-        guestFlow.put("paths", List.of(
-            Map.of("id", "main-loop", "from", "front-gate", "to", "covered-plaza", "congestion", 44, "status", "normal"),
-            Map.of("id", "east-cutover", "from", "east-midway", "to", "family-zone", "congestion", 39, "status", "normal")
-        ));
-        guestFlow.put("rides", List.of(
-            Map.of("id", "dragon-coaster", "name", "Dragon Coaster", "status", "operating", "waitMins", 42, "queueGuests", 680, "throughputGap", 12),
-            Map.of("id", "river-run", "name", "River Run", "status", "operating", "waitMins", 18, "queueGuests", 220, "throughputGap", 4)
-        ));
-
-        Map<String, Object> payload = orderedMap();
-        payload.put("product", Map.of(
-            "name", "ParkPulse",
-            "domain", "amusement_park_operations",
-            "one_liner", "Real-time park operating state and supervised action routing.",
-            "primary_collections", List.of("guestFlow", "weather", "staffing", "parkOps")
-        ));
-        payload.put("simTime", Map.of("hour", 14, "minute", 15, "day", 1, "seasonIndex", 2));
-        payload.put("weather", Map.of("condition", "partly_cloudy", "temperatureF", 82, "heatIndexF", 86, "humidity", 61, "windMph", 8, "stormRisk", 18));
-        payload.put("energy", Map.of("gridLoadPercent", 63, "disruptionLoadMw", 0, "demandChargeRisk", "normal", "utilityPricePerMwh", 92, "carbonIntensity", 310));
-        payload.put("staffing", Map.of("scheduled", 140, "checkedIn", 128, "openCallouts", 4, "medicalTeams", 4, "securityTeams", 5));
-        payload.put("parkOps", Map.of("mode", "spring_hot_path", "outdoorCapacityCutPct", 0, "rideConflictCount", 1, "atRiskRides", 1, "guestRecoveryPressure", 28, "staffReadyPct", 91));
-        payload.put("guestFlow", guestFlow);
-        payload.put("alerts", List.of(Map.of("id", "spring-state-lite", "severity", "info", "message", "Spring is serving the hot state-lite route without Python fallback.")));
-        payload.put("operationsAudit", Map.of(
-            "ready", true,
-            "mode", auditMode,
-            "findings", List.of(),
-            "policy_refs", List.of("PARK-SAFE-001", "PARK-OPS-001", "PARK-CARE-001")
-        ));
-        payload.put("heartbeatController", Map.of("status", "ready", "runtime", "java_spring"));
-        payload.put("heartbeatExplanation", Map.of("status", "ready", "summary", "Compact Spring state is available for UI polling."));
-        payload.put("runtime", "java_spring");
-        payload.put("source_of_truth", "spring_hot_path_sqlite_authority");
-        payload.put("updated_at", Instant.now().toString());
-        return payload;
+        return parkStateProjectionService.state(auditMode);
     }
 
     private static Map<String, Object> highestWaitRow(List<Object> rows) {

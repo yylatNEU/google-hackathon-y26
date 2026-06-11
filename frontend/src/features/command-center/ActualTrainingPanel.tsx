@@ -80,10 +80,10 @@ export function ActualTrainingPanel({
     <section className="rounded-lg border border-slate-800 bg-slate-950 p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
-          <div className="text-[10px] font-black uppercase tracking-widest text-emerald-300">Actual training</div>
-          <h2 className="mt-1 text-xl font-black text-slate-100">Observed outcome reward model</h2>
+          <div className="text-[10px] font-black uppercase tracking-widest text-emerald-300">Outcome learning</div>
+          <h2 className="mt-1 text-xl font-black text-slate-100">Observed outcome learning model</h2>
           <p className="mt-2 max-w-4xl text-sm leading-relaxed text-slate-400">
-            Training reads outcome, eval, and dispatch rows produced by the operating loop. It does not create generated cases in the app path.
+            Outcome learning reads eval, dispatch, and observed result rows produced by the operating loop. It does not create generated cases in the app path.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -93,7 +93,7 @@ export function ActualTrainingPanel({
             disabled={isLoading}
             className="w-fit rounded border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-black text-slate-200 transition hover:border-emerald-300 hover:text-emerald-100 disabled:opacity-50"
           >
-            {isLoading && !isStartingGcpTraining ? "Refreshing" : "Refresh training"}
+            {isLoading && !isStartingGcpTraining ? "Refreshing" : "Refresh learning"}
           </button>
           <button
             type="button"
@@ -107,7 +107,7 @@ export function ActualTrainingPanel({
       </div>
       {!canStartTraining && (
         <div className="mt-3 rounded border border-slate-700 bg-slate-900 p-3 text-xs font-bold text-slate-300">
-          Signed ML / Ops Admin role is required to start offline training jobs.
+          Signed ML / Ops Admin role is required to start offline learning jobs.
         </div>
       )}
 

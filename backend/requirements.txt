@@ -13,6 +13,7 @@ pandas>=2.2,<3
 pymongo==4.10.1
 certifi>=2026.5.20
 cryptography>=45
+reportlab>=4.2
 opentelemetry-api>=1.28
 opentelemetry-sdk>=1.28
 opentelemetry-exporter-otlp-proto-http>=1.28

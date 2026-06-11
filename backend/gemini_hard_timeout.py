@@ -212,14 +212,16 @@ async def generate_gemini_json_hard_timeout(
         "temperature": temperature,
         "timeout_seconds": timeout_seconds,
     }
+    env = os.environ.copy()
+    env.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         str(worker_path),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=str(worker_path.parent),
-        env=os.environ.copy(),
+        env=env,
+        close_fds=False,
     )
     try:
         stdout, stderr = await asyncio.wait_for(

@@ -50,7 +50,7 @@ else
   if [[ -n "$EXPECTED_REVISION" ]]; then
     echo "Verifying Cloud Run traffic targets ${EXPECTED_REVISION}..."
   else
-    echo "Verifying Cloud Run traffic targets latest ready revision..."
+    echo "Verifying Cloud Run traffic targets one production revision at 100%..."
   fi
   gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format=json > "$TMP_DIR/service.json"
   python3 - "$TMP_DIR/service.json" "$EXPECTED_REVISION" <<'PY'
@@ -62,24 +62,39 @@ expected_revision = sys.argv[2].strip()
 status = payload.get("status") or {}
 spec = payload.get("spec") or {}
 latest_ready = status.get("latestReadyRevisionName")
+latest_created = status.get("latestCreatedRevisionName")
 traffic = status.get("traffic") or []
 spec_traffic = spec.get("traffic") or []
+traffic_targets = [
+    {"percent": int(row.get("percent") or 0), "revisionName": row.get("revisionName"), "latestRevision": bool(row.get("latestRevision"))}
+    for row in traffic
+    if row.get("percent") is not None
+]
+spec_targets = [
+    {"percent": int(row.get("percent") or 0), "revisionName": row.get("revisionName"), "latestRevision": bool(row.get("latestRevision"))}
+    for row in spec_traffic
+    if row.get("percent") is not None
+]
 if not latest_ready:
     raise SystemExit("Cloud Run has no latest ready revision.")
 if expected_revision:
-    expected_status = [{"percent": 100, "revisionName": expected_revision}]
-    expected_spec = [{"percent": 100, "revisionName": expected_revision}]
-    if traffic != expected_status:
+    expected_status = [{"percent": 100, "revisionName": expected_revision, "latestRevision": False}]
+    if traffic_targets != expected_status:
         raise SystemExit(f"Cloud Run traffic is not 100% expected revision: expected={expected_revision}, traffic={traffic}")
-    if spec_traffic != expected_spec:
+    if spec_targets != expected_status:
         raise SystemExit(f"Cloud Run spec is not pinned to expected revision: expected={expected_revision}, spec={spec_traffic}")
     print(f"Traffic: 100% {expected_revision}")
     raise SystemExit(0)
-if traffic != [{"latestRevision": True, "percent": 100, "revisionName": latest_ready}]:
-    raise SystemExit(f"Cloud Run traffic is not 100% latest ready revision: latest={latest_ready}, traffic={traffic}")
-if spec_traffic != [{"latestRevision": True, "percent": 100}]:
-    raise SystemExit(f"Cloud Run spec is not configured to track latest revision: {spec_traffic}")
-print(f"Traffic: 100% latest ({latest_ready})")
+if len(traffic_targets) != 1 or traffic_targets[0]["percent"] != 100 or not traffic_targets[0].get("revisionName"):
+    raise SystemExit(f"Cloud Run traffic is not pinned to exactly one 100% production revision: traffic={traffic}")
+production_revision = traffic_targets[0]["revisionName"]
+expected_status = [{"percent": 100, "revisionName": production_revision, "latestRevision": False}]
+if spec_targets != expected_status:
+    raise SystemExit(f"Cloud Run spec is not pinned to the observed production revision: production={production_revision}, spec={spec_traffic}")
+if latest_ready != production_revision:
+    print(f"Traffic: 100% {production_revision} (latest ready/template revision is {latest_ready}; latest created is {latest_created})")
+else:
+    print(f"Traffic: 100% {production_revision}")
 PY
 fi
 

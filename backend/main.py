@@ -20,6 +20,7 @@ from agent_role_skills import build_agent_role_product_readiness_report, build_d
 from agent_role_trace_samples import build_adversarial_sampled_role_trace_eval_report, record_agent_role_trace_sample
 from agent_handshake import (
     agent_contract,
+    agent_handshake_memory_context,
     agent_handshake_scenario_catalog,
     agent_handshake_live_state_feed,
     agent_handshake_protocol_docs,
@@ -62,7 +63,7 @@ from agent_handshake import (
 )
 from accessibility_journey import build_accessibility_journey, build_accessibility_scope
 from customer_park_knowledge import build_customer_public_data_feed, customer_venue_export_template, validate_customer_venue_export
-from experience_studio import build_experience_studio_conversation_plan, build_experience_studio_payload, create_experience_studio_handoff, experience_studio_readiness, get_experience_studio_draft, list_experience_studio_drafts, list_experience_studio_handoffs, list_experience_studio_learning_rules, list_experience_studio_memory, promote_experience_studio_learning_rule, revise_experience_studio_section, save_experience_studio_draft, studio_layer_contract, update_experience_studio_draft_content, update_experience_studio_draft_status, update_experience_studio_handoff_status, update_experience_studio_learning_rule
+from experience_studio import build_experience_studio_conversation_plan, build_experience_studio_payload, create_experience_studio_handoff, experience_studio_readiness, generate_experience_studio_event_team_pdf, generate_experience_studio_visual_assets, get_experience_studio_draft, inject_experience_studio_synthetic_memory, list_experience_studio_drafts, list_experience_studio_handoffs, list_experience_studio_learning_rules, list_experience_studio_memory, promote_experience_studio_learning_rule, revise_experience_studio_design, revise_experience_studio_section, save_experience_studio_draft, studio_layer_contract, update_experience_studio_draft_content, update_experience_studio_draft_status, update_experience_studio_handoff_status, update_experience_studio_learning_rule
 from venue_experience_data import activate_synthetic_venue_export, build_venue_experience_data, import_venue_experience_export, validate_venue_experience_export
 from venue_profile import activate_synthetic_venue_profile, approved_synthetic_venue_profile_export, build_venue_profile, import_venue_profile_export, preview_venue_profile_import, validate_venue_profile_export
 from park_ops_mcp import (
@@ -82,6 +83,7 @@ from park_staff_roleplay import (
     finish_staff_training_session,
     list_staff_training_assignments,
     list_staff_training_scenarios,
+    retrieve_staff_training_context,
     seed_staff_training_demo_data,
     staff_training_analytics,
     staff_training_certification_packet,
@@ -101,6 +103,7 @@ from product_learning_loop import (
     promote_learning_version,
     resolve_review_place_queue,
     rollback_learning_version,
+    triage_guest_message,
 )
 from live_feedback_loop import (
     apply_live_food_ops_to_state,
@@ -112,6 +115,7 @@ from live_feedback_loop import (
     ingest_live_feed_event,
     ingest_live_feed_events,
     live_feed_health,
+    live_feed_health_summary,
     live_food_ops_policy_gate,
     live_food_ops_state_evidence,
     live_food_ops_training_gate,
@@ -178,6 +182,8 @@ _load_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_nam
 _load_task: concurrent.futures.Future[Any] | None = None
 _refinement_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="parkpulse-refinement")
 _role_auth_audit_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-role-auth-audit")
+_fast_state_sync_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-fast-state-sync")
+_semantic_role_cache_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="parkpulse-semantic-role-cache")
 _load_started_at: float | None = None
 _load_completed_at: float | None = None
 _load_duration_ms: int | None = None
@@ -200,6 +206,10 @@ _heartbeat_explanation_cache: dict[str, dict[str, Any]] = {}
 _heartbeat_explanation_lock = threading.Lock()
 _hot_endpoint_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _hot_endpoint_refreshing: set[str] = set()
+_lightweight_semantic_memory_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_lightweight_semantic_memory_lock = threading.Lock()
+_semantic_role_cache_warmups: dict[str, float] = {}
+_semantic_role_cache_warmup_lock = threading.Lock()
 _mongo_hot_status_cache: tuple[float, dict[str, Any]] | None = None
 _evidence_endpoint_cache: dict[str, tuple[float, float, dict[str, Any]]] = {}
 _evidence_endpoint_refreshing: set[str] = set()
@@ -226,6 +236,14 @@ _live_feed_refresh_worker_last_result: dict[str, Any] = {
 _live_feed_refresh_worker_iteration = 0
 _last_fast_park_step_at = 0.0
 _fast_park_step_interval_seconds = 1.5
+_fast_state_sync_lock = threading.Lock()
+_fast_state_sync_inflight = False
+_last_fast_state_sync_at = 0.0
+_fast_state_sync_status: dict[str, Any] = {
+    "status": "not_started",
+    "mode": "fast_state_mongo_sync",
+    "enabled": True,
+}
 _runtime_metrics: dict[str, int] = {
     "full_runtime_load_started": 0,
     "full_runtime_load_succeeded": 0,
@@ -403,6 +421,14 @@ def _sync_full_response_enabled() -> bool:
     return _truthy_env("PARKPULSE_SYNC_FULL_RESPONSE_ENABLED", False)
 
 
+def _fast_state_mongo_sync_enabled() -> bool:
+    return _truthy_env("PARKPULSE_FAST_STATE_MONGO_SYNC_ENABLED", True)
+
+
+def _fast_state_mongo_sync_interval_seconds() -> float:
+    return max(5.0, _float_env("PARKPULSE_FAST_STATE_MONGO_SYNC_INTERVAL_SECONDS", 45.0))
+
+
 def _metric(name: str, amount: int = 1) -> None:
     _runtime_metrics[name] = int(_runtime_metrics.get(name, 0)) + amount
 
@@ -416,7 +442,7 @@ def _api_capability_registry() -> dict[str, Any]:
             {
                 "id": "health_readiness",
                 "mode": "hot_path",
-                "routes": ["/", "/healthz", "/readyz", "/api/park/full-runtime-status", "/api/park/api-capabilities"],
+                "routes": ["/", "/health", "/readyz", "/api/park/full-runtime-status", "/api/park/api-capabilities"],
                 "timeout_tier": "hot_path_seconds",
             },
             {
@@ -444,8 +470,11 @@ def _api_capability_registry() -> dict[str, Any]:
                     "/api/park/accessibility/journey",
                     "/api/park/experience-studio/conversation-plan",
                     "/api/park/experience-studio/draft",
+                    "/api/park/experience-studio/design-iteration",
                     "/api/park/experience-studio/section-revision",
                     "/api/park/experience-studio/layer-contract",
+                    "/api/park/experience-studio/memory",
+                    "/api/park/experience-studio/memory/synthetic-inject",
                     "/api/park/experience-studio/venue-data",
                     "/api/park/experience-studio/venue-data/import",
                     "/api/park/experience-studio/venue-data/validate",
@@ -1088,8 +1117,52 @@ def _live_feed_health_cache_ttl_seconds() -> float:
     return max(0.0, _float_env("PARKPULSE_LIVE_FEED_HEALTH_CACHE_TTL_SECONDS", 3.0))
 
 
+def _live_feed_health_summary_cache_ttl_seconds() -> float:
+    return max(0.0, _float_env("PARKPULSE_LIVE_FEED_HEALTH_SUMMARY_CACHE_TTL_SECONDS", 30.0))
+
+
 def _invalidate_live_feed_health_cache() -> None:
     _live_feed_health_cache.clear()
+
+
+async def _live_feed_health_summary_payload(limit: int = 120) -> dict[str, Any]:
+    bounded_limit = max(20, min(500, int(limit or 120)))
+    cache_key = f"summary:{bounded_limit}"
+    ttl = _live_feed_health_summary_cache_ttl_seconds()
+    now = time.time()
+    cached = _live_feed_health_cache.get(cache_key)
+    if cached and ttl > 0 and now - cached[0] <= ttl:
+        payload = dict(cached[1])
+        payload["cache"] = {"status": "hit", "ttl_seconds": ttl, "source": "live_feed_health_summary"}
+        return payload
+    state = await _fast_park_state_lite()
+    timeout = max(0.5, _float_env("PARKPULSE_LIVE_FEED_HEALTH_SUMMARY_TIMEOUT_SECONDS", 3.0))
+    try:
+        payload = await asyncio.wait_for(asyncio.to_thread(live_feed_health_summary, state, bounded_limit), timeout=timeout)
+    except Exception as error:
+        payload = {
+            "status": "refreshing",
+            "mode": "live_feed_health_summary_refreshing",
+            "created_at": _now_iso(),
+            "summary": {
+                "required_feed_count": 0,
+                "ready_feed_count": 0,
+                "missing_or_weak_feed_count": 0,
+                "stale_feed_count": 0,
+                "low_confidence_feed_count": 0,
+                "open_review_count": 0,
+                "persisted_event_count": 0,
+            },
+            "feeds": [],
+            "open_reviews": [],
+            "readiness_issues": [_issue_text(error, f"Live feed health summary timed out after {timeout:g}s.")],
+            "boundary": "Summary timeout keeps Autopilot waiting for evidence without dispatching or promoting model changes.",
+            "uses_seed_data": False,
+            "llm_control_authority": False,
+        }
+    if ttl > 0 and payload.get("status") != "refreshing":
+        _live_feed_health_cache[cache_key] = (now, payload)
+    return {**payload, "cache": {"status": "miss", "ttl_seconds": ttl, "source": "live_feed_health_summary"}}
 
 
 async def _live_feed_health_payload(limit: int = 120) -> dict[str, Any]:
@@ -1513,7 +1586,98 @@ def _live_feed_refresh_worker_status() -> dict[str, Any]:
         "interval_seconds": _live_feed_refresh_worker_interval_seconds(),
         "refresh_margin_seconds": _live_feed_refresh_worker_margin_seconds(),
         "auto_label_confidence_threshold": _live_feed_auto_label_threshold(),
+        "fast_state_mongo_sync": _fast_state_mongo_sync_status(),
     }
+
+
+def _fast_state_mongo_sync_status() -> dict[str, Any]:
+    with _fast_state_sync_lock:
+        return {
+            **_fast_state_sync_status,
+            "enabled": _fast_state_mongo_sync_enabled(),
+            "inflight": _fast_state_sync_inflight,
+            "interval_seconds": _fast_state_mongo_sync_interval_seconds(),
+        }
+
+
+def _fast_state_sync_done(future: concurrent.futures.Future[Any]) -> None:
+    global _fast_state_sync_inflight, _fast_state_sync_status
+    try:
+        result = future.result()
+        status = {
+            "status": result.get("status", "complete") if isinstance(result, dict) else "complete",
+            "mode": "fast_state_mongo_sync",
+            "completed_at": _now_iso(),
+            "result": result if isinstance(result, dict) else {"value": str(result)[:240]},
+        }
+    except Exception as error:
+        status = {
+            "status": "error",
+            "mode": "fast_state_mongo_sync",
+            "completed_at": _now_iso(),
+            "readiness_issues": [str(error)[:240]],
+        }
+    with _fast_state_sync_lock:
+        _fast_state_sync_inflight = False
+        _fast_state_sync_status = {
+            **status,
+            "enabled": _fast_state_mongo_sync_enabled(),
+            "inflight": False,
+            "interval_seconds": _fast_state_mongo_sync_interval_seconds(),
+        }
+
+
+def _schedule_fast_state_mongo_sync(state: dict[str, Any], *, reason: str = "fast_state", force: bool = False) -> dict[str, Any]:
+    global _fast_state_sync_inflight, _last_fast_state_sync_at, _fast_state_sync_status
+    if not _fast_state_mongo_sync_enabled():
+        return {"status": "disabled", "mode": "fast_state_mongo_sync"}
+    if not isinstance(state, dict) or state.get("status") == "simulation_unavailable":
+        return {"status": "skipped", "mode": "fast_state_mongo_sync", "reason": "state_unavailable"}
+    now = time.monotonic()
+    interval = _fast_state_mongo_sync_interval_seconds()
+    with _fast_state_sync_lock:
+        if _fast_state_sync_inflight and not force:
+            return {"status": "skipped", "mode": "fast_state_mongo_sync", "reason": "sync_inflight"}
+        age = now - _last_fast_state_sync_at if _last_fast_state_sync_at else None
+        if not force and age is not None and age < interval:
+            return {"status": "skipped", "mode": "fast_state_mongo_sync", "reason": "throttled", "age_seconds": round(age, 2)}
+        _fast_state_sync_inflight = True
+        _last_fast_state_sync_at = now
+        _fast_state_sync_status = {
+            "status": "queued",
+            "mode": "fast_state_mongo_sync",
+            "enabled": True,
+            "inflight": True,
+            "queued_at": _now_iso(),
+            "reason": reason,
+            "interval_seconds": interval,
+        }
+    try:
+        state_snapshot = json.loads(json.dumps(state, default=str))
+
+        def operation() -> dict[str, Any]:
+            from mongo_memory import sync_park_state
+
+            result = sync_park_state(state_snapshot)
+            return {
+                **(result if isinstance(result, dict) else {"status": "complete", "result": result}),
+                "sync_reason": reason,
+            }
+
+        future = _fast_state_sync_executor.submit(operation)
+        future.add_done_callback(_fast_state_sync_done)
+        return {"status": "queued", "mode": "fast_state_mongo_sync", "reason": reason}
+    except Exception as error:
+        with _fast_state_sync_lock:
+            _fast_state_sync_inflight = False
+            _fast_state_sync_status = {
+                "status": "error",
+                "mode": "fast_state_mongo_sync",
+                "enabled": True,
+                "inflight": False,
+                "readiness_issues": [str(error)[:240]],
+            }
+        return _fast_state_sync_status
 
 
 def _review_ledger_with_label_decisions(review_ledger: dict[str, Any]) -> dict[str, Any]:
@@ -1925,11 +2089,15 @@ async def _cached_hot_endpoint(cache_key: str, ttl_seconds: float, builder, *, b
     now = time.monotonic()
     cached = _hot_endpoint_cache.get(cache_key)
     if cached and cached[0] > now:
+        if cache_key in {"park_state", "park_state_lite"} and isinstance(cached[1], dict):
+            _schedule_fast_state_mongo_sync(cached[1], reason=f"{cache_key}_cache_hit")
         return cached[1]
     if cached:
         if background_refresh and cache_key not in _hot_endpoint_refreshing:
             _hot_endpoint_refreshing.add(cache_key)
             asyncio.create_task(_refresh_hot_endpoint(cache_key, ttl_seconds, builder))
+        if cache_key in {"park_state", "park_state_lite"} and isinstance(cached[1], dict):
+            _schedule_fast_state_mongo_sync(cached[1], reason=f"{cache_key}_cache_stale")
         return cached[1]
 
     value = await _resolve_hot_builder(builder)
@@ -2132,6 +2300,7 @@ async def _fast_park_state() -> dict[str, Any]:
             "policy_refs": ["PARK-SAFE-001", "PARK-OPS-001", "PARK-CARE-001"],
         },
     )
+    _schedule_fast_state_mongo_sync(state, reason="fast_park_state")
     return state
 
 
@@ -2169,6 +2338,7 @@ async def _fast_park_state_lite() -> dict[str, Any]:
     )
     state["heartbeatController"] = _heartbeat_controller_status(include_logs=False)
     state["heartbeatExplanation"] = _heartbeat_explanation_preview_payload()
+    _schedule_fast_state_mongo_sync(state, reason="fast_park_state_lite")
     return state
 
 
@@ -7038,6 +7208,39 @@ def _heartbeat_controller_status(include_logs: bool = True, limit: int = 20) -> 
     return payload
 
 
+def _park_is_open_to_guests(state: dict[str, Any] | None) -> bool:
+    if not isinstance(state, dict):
+        return True
+    clock = state.get("operatingClock", {}) if isinstance(state.get("operatingClock"), dict) else {}
+    phase = clock.get("phase", {}) if isinstance(clock.get("phase"), dict) else {}
+    if not phase:
+        return True
+    phase_id = str(phase.get("id") or "")
+    if phase_id in {"overnight_maintenance", "pre_open_staffing", "post_close_drain"}:
+        return False
+    return phase.get("isOpenToGuests") is not False
+
+
+def _park_closed_tick_response(state: dict[str, Any], requested_minutes: int) -> dict[str, Any]:
+    clock = state.get("operatingClock", {}) if isinstance(state.get("operatingClock"), dict) else {}
+    phase = clock.get("phase", {}) if isinstance(clock.get("phase"), dict) else {}
+    return {
+        "status": "park_closed",
+        "mode": "live_park_day_tick",
+        "minutes": 0,
+        "requested_minutes": requested_minutes,
+        "simTime": state.get("simTime"),
+        "state": state,
+        "heartbeat_controller": {
+            "status": "not_run",
+            "reason": "Park is closed to guests.",
+            "phase": phase,
+        },
+        "readiness_issues": ["Live park simulation does not advance while the park is closed to guests."],
+        "boundary": "Closed-hour park state may be inspected, but live ticks and heartbeat actions are blocked until an open-to-guests phase.",
+    }
+
+
 async def _maybe_run_heartbeat_controller(advanced_steps: int) -> dict[str, Any] | None:
     global _heartbeat_controller_running, _heartbeat_controller_last_action_at
     if not _heartbeat_controller_enabled() or _fast_park_simulation is None or advanced_steps <= 0:
@@ -7052,6 +7255,8 @@ async def _maybe_run_heartbeat_controller(advanced_steps: int) -> dict[str, Any]
         snapshot = _heartbeat_policy_snapshot_for_tick()
         get_state_lite = getattr(_fast_park_simulation, "get_state_lite", None)
         state = await get_state_lite() if callable(get_state_lite) else await _fast_park_simulation.get_state()
+        if not _park_is_open_to_guests(state):
+            return None
         events = _active_heartbeat_events(state)
         min_events = _int_env("PARKPULSE_HEARTBEAT_MIN_ACTIVE_CHAOS", 1)
         if len(events) < min_events:
@@ -7154,7 +7359,13 @@ def _active_scenario(state: dict[str, Any]) -> dict[str, Any]:
     return scenario
 
 
-def _fast_case_rows(state: dict[str, Any]) -> list[dict[str, Any]]:
+def _case_rows_from_state(
+    state: dict[str, Any],
+    *,
+    action_case_limit: int | None = 8,
+    alert_limit: int = 4,
+    return_limit: int | None = 12,
+) -> list[dict[str, Any]]:
     policy = state.get("policyDoctrine", {}) if isinstance(state.get("policyDoctrine"), dict) else {}
     action_cases = policy.get("action_cases", []) if isinstance(policy.get("action_cases"), list) else []
     scenario = _active_scenario(state)
@@ -7162,7 +7373,8 @@ def _fast_case_rows(state: dict[str, Any]) -> list[dict[str, Any]]:
     highest_queue = _highest_queue(state)
     rows: list[dict[str, Any]] = []
 
-    for index, item in enumerate(action_cases[:8]):
+    selected_action_cases = action_cases if action_case_limit is None else action_cases[:action_case_limit]
+    for index, item in enumerate(selected_action_cases):
         if not isinstance(item, dict):
             continue
         case_id = str(item.get("id") or f"policy_case_{index}")
@@ -7200,7 +7412,7 @@ def _fast_case_rows(state: dict[str, Any]) -> list[dict[str, Any]]:
         )
 
     if not rows:
-        for index, alert in enumerate(alerts[:4]):
+        for index, alert in enumerate(alerts[:alert_limit]):
             if not isinstance(alert, dict):
                 continue
             case_id = str(alert.get("id") or f"live_alert_{index}")
@@ -7220,7 +7432,11 @@ def _fast_case_rows(state: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
 
-    return rows[:12]
+    return rows if return_limit is None else rows[:return_limit]
+
+
+def _fast_case_rows(state: dict[str, Any]) -> list[dict[str, Any]]:
+    return _case_rows_from_state(state, action_case_limit=8, alert_limit=4, return_limit=12)
 
 
 async def _fast_live_summary() -> dict[str, Any]:
@@ -7431,6 +7647,682 @@ def _monitor_unique(values: list[Any], limit: int = 12) -> list[str]:
         if len(rows) >= limit:
             break
     return rows
+
+
+def _monitor_audit_text(value: Any, limit: int = 260) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, default=str, separators=(",", ":"))
+    else:
+        text = str(value)
+    return text.strip()[:limit]
+
+
+def _monitor_audit_strings(values: Any, limit: int = 6, item_limit: int = 220) -> list[str]:
+    return _monitor_unique([_monitor_audit_text(item, item_limit) for item in _monitor_list(values)], limit=limit)
+
+
+def _monitor_audit_ticket_brief(ticket: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ticket_id": _monitor_audit_text(ticket.get("ticketId") or ticket.get("id"), 120),
+        "case_id": _monitor_audit_text(ticket.get("caseId") or ticket.get("case_id"), 160),
+        "title": _monitor_audit_text(ticket.get("title"), 180),
+        "status": _monitor_audit_text(ticket.get("status"), 80),
+        "confidence": _monitor_audit_text(ticket.get("confidence"), 40),
+        "severity": _monitor_audit_text(ticket.get("severity"), 60),
+        "summary": _monitor_audit_text(ticket.get("summary"), 260),
+        "policy_refs": _monitor_audit_strings(ticket.get("policyRefs") or ticket.get("policy_refs"), limit=8),
+        "trace_ids": _monitor_audit_strings(ticket.get("traceIds") or ticket.get("trace_ids"), limit=4),
+        "receipt_ids": _monitor_audit_strings(ticket.get("receiptIds") or ticket.get("receipt_ids"), limit=4),
+        "review_session_ids": _monitor_audit_strings(ticket.get("reviewSessionIds") or ticket.get("review_session_ids"), limit=4),
+        "risk_flags": _monitor_audit_strings(ticket.get("riskFlags") or ticket.get("risk_flags"), limit=8),
+        "trace_count": _safe_int(ticket.get("traceRecordCount"), 0),
+        "review_count": _safe_int(ticket.get("reviewSessionCount"), 0),
+        "policy_count": _safe_int(ticket.get("policyRefCount"), 0),
+        "direct_link_count": _safe_int(ticket.get("directLinkCount"), 0),
+        "inferred_link_count": _safe_int(ticket.get("inferredLinkCount"), 0),
+    }
+
+
+def _monitor_audit_memory_query(packet: dict[str, Any]) -> str:
+    case = _monitor_dict(packet.get("selected_case"))
+    graph = _monitor_dict(packet.get("evidence_graph"))
+    policy = _monitor_dict(packet.get("policy"))
+    return " ".join(
+        [
+            _monitor_audit_text(packet.get("question"), 500),
+            _monitor_audit_text(case.get("id"), 160),
+            _monitor_audit_text(case.get("title"), 180),
+            _monitor_audit_text(_monitor_dict(case.get("priority")).get("rationale"), 260),
+            " ".join(_monitor_audit_strings(graph.get("policy_refs"), limit=10)),
+            " ".join(_monitor_audit_strings(policy.get("policy_refs"), limit=10)),
+            " ".join(_monitor_audit_strings(policy.get("triggers"), limit=8)),
+            " ".join(_monitor_audit_strings(policy.get("blocked_actions"), limit=8)),
+        ]
+    ).strip()
+
+
+def _monitor_audit_memory_analysis(tickets: list[dict[str, Any]]) -> dict[str, Any]:
+    risk_flags: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    for ticket in tickets:
+        status = str(ticket.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        for flag in _monitor_list(ticket.get("risk_flags") or ticket.get("riskFlags")):
+            key = str(flag or "unknown")
+            risk_flags[key] = risk_flags.get(key, 0) + 1
+    return {
+        "case_count": len(tickets),
+        "with_trace_count": sum(1 for ticket in tickets if _safe_int(ticket.get("trace_count") or ticket.get("traceRecordCount"), 0) > 0 or _monitor_list(ticket.get("trace_ids") or ticket.get("traceIds"))),
+        "with_review_count": sum(1 for ticket in tickets if _safe_int(ticket.get("review_count") or ticket.get("reviewSessionCount"), 0) > 0 or _monitor_list(ticket.get("review_session_ids") or ticket.get("reviewSessionIds"))),
+        "with_policy_count": sum(1 for ticket in tickets if _safe_int(ticket.get("policy_count") or ticket.get("policyRefCount"), 0) > 0 or _monitor_list(ticket.get("policy_refs") or ticket.get("policyRefs"))),
+        "missing_trace_count": risk_flags.get("no_trace", 0),
+        "missing_review_count": risk_flags.get("no_review_session", 0),
+        "status_counts": status_counts,
+        "risk_flags": risk_flags,
+    }
+
+
+async def _monitor_audit_memory_context(packet: dict[str, Any]) -> dict[str, Any]:
+    case_id = _monitor_audit_case_id(packet)
+    query = _monitor_audit_memory_query(packet)
+    try:
+        from mongo_memory import get_trace_audit_tickets
+
+        selected_payload = get_trace_audit_tickets(case_id=case_id, limit=1)
+        similar_payload = get_trace_audit_tickets(query=query, limit=10)
+        corpus_payload = get_trace_audit_tickets(limit=100)
+        if not corpus_payload.get("tickets"):
+            await _load_monitor_trace_tickets(limit=200, force_refresh=False)
+            selected_payload = get_trace_audit_tickets(case_id=case_id, limit=1)
+            similar_payload = get_trace_audit_tickets(query=query, limit=10)
+            corpus_payload = get_trace_audit_tickets(limit=100)
+
+        selected_ticket = _monitor_dict(_monitor_list(selected_payload.get("tickets"))[0] if _monitor_list(selected_payload.get("tickets")) else {})
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for ticket in [selected_ticket, *_monitor_list(similar_payload.get("tickets"))]:
+            if not isinstance(ticket, dict):
+                continue
+            ticket_id = str(ticket.get("ticketId") or ticket.get("id") or ticket.get("caseId") or "")
+            if not ticket_id or ticket_id in seen:
+                continue
+            seen.add(ticket_id)
+            merged.append(ticket)
+
+        corpus_tickets = [ticket for ticket in _monitor_list(corpus_payload.get("tickets")) if isinstance(ticket, dict)]
+        corpus_briefs = [_monitor_audit_ticket_brief(ticket) for ticket in corpus_tickets]
+        selected_policy_refs = set(_monitor_list(_monitor_dict(packet.get("evidence_graph")).get("policy_refs")) + _monitor_list(_monitor_dict(packet.get("policy")).get("policy_refs")))
+        policy_neighbors = [
+            brief
+            for brief in corpus_briefs
+            if brief.get("case_id") != case_id and selected_policy_refs.intersection(set(_monitor_list(brief.get("policy_refs"))))
+        ][:6]
+        return {
+            "status": "ready",
+            "mode": "trace_ticket_memory_retrieval",
+            "retrieval_method": similar_payload.get("retrieval_method"),
+            "query": query[:900],
+            "persistence": similar_payload.get("persistence"),
+            "corpus": {
+                "retrieved_count": len(corpus_briefs),
+                **_monitor_audit_memory_analysis(corpus_briefs),
+            },
+            "selected_ticket": _monitor_audit_ticket_brief(selected_ticket) if selected_ticket else {},
+            "similar_cases": [_monitor_audit_ticket_brief(ticket) for ticket in merged if str(ticket.get("caseId") or "") != case_id][:6],
+            "policy_neighbors": policy_neighbors,
+        }
+    except Exception as error:
+        return {
+            "status": "unavailable",
+            "mode": "trace_ticket_memory_retrieval",
+            "query": query[:900],
+            "readiness_issues": [str(error)[:240]],
+            "corpus": {"case_count": 0, "with_trace_count": 0, "with_review_count": 0, "with_policy_count": 0},
+            "selected_ticket": {},
+            "similar_cases": [],
+            "policy_neighbors": [],
+        }
+
+
+def _monitor_audit_packet(payload: dict[str, Any]) -> dict[str, Any]:
+    context = _monitor_dict(payload.get("context"))
+    selected_case = _monitor_dict(context.get("selected_case") or context.get("selectedCase"))
+    selected_evidence = _monitor_dict(context.get("selected_evidence") or context.get("selectedEvidence"))
+    selected_receipt = _monitor_dict(context.get("selected_receipt") or context.get("selectedReceipt"))
+    selected_graph_trace = _monitor_dict(context.get("selected_graph_trace") or context.get("selectedGraphTrace"))
+    selected_policy_case = _monitor_dict(context.get("selected_policy_case") or context.get("selectedPolicyCase"))
+    active_policy_ref_detail = _monitor_dict(context.get("active_policy_ref_detail") or context.get("activePolicyRefDetail"))
+    monitor_cache = _monitor_dict(context.get("monitor_cache") or context.get("monitorCache"))
+    review_sessions = _monitor_list(context.get("review_sessions") or context.get("reviewSessions"))
+    eval_dimensions = _monitor_list(context.get("eval_dimensions") or context.get("evalDimensions"))
+    trace_records = _monitor_list(selected_evidence.get("trace_records"))
+    policy_refs = _monitor_list(selected_evidence.get("policy_refs")) or _monitor_list(selected_policy_case.get("policy_refs"))
+    matches = _monitor_list(active_policy_ref_detail.get("matches"))
+    question = _monitor_audit_text(payload.get("question") or "Can I trust this case?", 500)
+    history = []
+    for item in _monitor_list(payload.get("history"))[-8:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = _monitor_audit_text(item.get("content"), 700)
+        if content:
+            history.append({"role": role, "content": content})
+    return {
+        "question": question,
+        "conversation_history": history,
+        "selected_case": {
+            "id": selected_case.get("id"),
+            "title": selected_case.get("title"),
+            "severity": selected_case.get("severity"),
+            "quality": selected_case.get("quality"),
+            "priority": selected_case.get("priority"),
+            "governance": selected_case.get("governance"),
+            "productionEvidence": selected_case.get("productionEvidence"),
+        },
+        "selected_receipt": {
+            "id": selected_receipt.get("id"),
+            "summary": selected_receipt.get("summary"),
+            "status": selected_receipt.get("status"),
+            "gate": selected_receipt.get("gate"),
+            "evalScore": selected_receipt.get("evalScore"),
+            "traceId": selected_receipt.get("traceId"),
+            "dispatchCount": selected_receipt.get("dispatchCount"),
+            "receiverActions": _monitor_audit_strings(selected_receipt.get("receiverActions"), limit=5),
+            "failureReasons": _monitor_audit_strings(selected_receipt.get("failureReasons"), limit=5),
+            "toolCalls": [
+                {"tool": _monitor_audit_text(_monitor_dict(call).get("tool"), 120), "status": _monitor_audit_text(_monitor_dict(call).get("status"), 80)}
+                for call in _monitor_list(selected_receipt.get("toolCalls"))[:8]
+                if isinstance(call, dict)
+            ],
+        },
+        "evidence_graph": {
+            "case_id": selected_evidence.get("case_id") or selected_evidence.get("caseId"),
+            "trace_ids": _monitor_audit_strings(selected_evidence.get("trace_ids"), limit=6),
+            "receipt_ids": _monitor_audit_strings(selected_evidence.get("receipt_ids"), limit=6),
+            "review_session_ids": _monitor_audit_strings(selected_evidence.get("review_session_ids"), limit=6),
+            "policy_refs": _monitor_audit_strings(policy_refs, limit=8),
+            "trace_record_count": len(trace_records),
+            "review_session_count": len(review_sessions) or len(_monitor_list(selected_evidence.get("review_sessions"))),
+            "relationship_contract": selected_evidence.get("relationship_contract"),
+            "cache": monitor_cache,
+            "selected_graph_trace": {
+                "receipt_id": selected_graph_trace.get("receipt_id"),
+                "gate": selected_graph_trace.get("gate"),
+                "eval_score": selected_graph_trace.get("eval_score"),
+                "relation_type": selected_graph_trace.get("relation_type"),
+                "relation_confidence": selected_graph_trace.get("relation_confidence"),
+                "case_link_source": selected_graph_trace.get("case_link_source"),
+                "policy_refs": _monitor_audit_strings(selected_graph_trace.get("policy_refs"), limit=6),
+            },
+        },
+        "eval_dimensions": [
+            {
+                "label": _monitor_audit_text(_monitor_dict(item).get("label") or _monitor_dict(item).get("id"), 120),
+                "score": _monitor_dict(item).get("score"),
+                "status": _monitor_audit_text(_monitor_dict(item).get("status"), 80),
+                "detail": _monitor_audit_text(_monitor_dict(item).get("detail"), 220),
+            }
+            for item in eval_dimensions[:8]
+            if isinstance(item, dict)
+        ],
+        "review_sessions": [
+            {
+                "id": item.get("id") or item.get("review_session_id"),
+                "status": item.get("status"),
+                "priority": item.get("priority"),
+                "owner": item.get("owner"),
+                "reason": _monitor_audit_text(item.get("reason"), 220),
+            }
+            for item in review_sessions[:8]
+            if isinstance(item, dict)
+        ],
+        "policy": {
+            "case_id": selected_policy_case.get("id"),
+            "title": selected_policy_case.get("title"),
+            "triggers": _monitor_audit_strings(selected_policy_case.get("triggers"), limit=5),
+            "policy_refs": _monitor_audit_strings(selected_policy_case.get("policy_refs"), limit=8),
+            "action_plan": _monitor_audit_strings(selected_policy_case.get("action_plan"), limit=6),
+            "blocked_actions": _monitor_audit_strings(selected_policy_case.get("blocked_actions"), limit=6),
+            "success_metric": selected_policy_case.get("success_metric"),
+            "active_policy_ref": active_policy_ref_detail.get("policy_ref"),
+            "rule_matches": [
+                {
+                    "title": _monitor_audit_text(_monitor_dict(item).get("title") or _monitor_dict(item).get("kind"), 140),
+                    "condition": _monitor_audit_text(_monitor_dict(item).get("condition"), 220),
+                    "allowed_action": _monitor_audit_text(_monitor_dict(item).get("allowed_action"), 180),
+                    "blocked_action": _monitor_audit_text(_monitor_dict(item).get("blocked_action"), 180),
+                    "required_evidence": _monitor_audit_strings(_monitor_dict(item).get("required_evidence"), limit=5),
+                    "human_review_if": _monitor_audit_strings(_monitor_dict(item).get("human_review_if"), limit=4),
+                }
+                for item in matches[:4]
+                if isinstance(item, dict)
+            ],
+        },
+    }
+
+
+def _monitor_audit_local_answer(packet: dict[str, Any], llm_issue: str | None = None) -> dict[str, Any]:
+    case = _monitor_dict(packet.get("selected_case"))
+    graph = _monitor_dict(packet.get("evidence_graph"))
+    receipt = _monitor_dict(packet.get("selected_receipt"))
+    policy = _monitor_dict(packet.get("policy"))
+    memory = _monitor_dict(packet.get("memory"))
+    selected_ticket = _monitor_dict(memory.get("selected_ticket"))
+    corpus = _monitor_dict(memory.get("corpus"))
+    similar_cases = [row for row in _monitor_list(memory.get("similar_cases")) if isinstance(row, dict)]
+    policy_neighbors = [row for row in _monitor_list(memory.get("policy_neighbors")) if isinstance(row, dict)]
+    quality = _monitor_dict(case.get("quality"))
+    relationship = _monitor_dict(graph.get("relationship_contract"))
+    eval_score = _safe_float(quality.get("score"), -1)
+    trace_count = max(_safe_int(graph.get("trace_record_count"), 0), _safe_int(selected_ticket.get("trace_count"), 0))
+    review_count = max(_safe_int(graph.get("review_session_count"), 0), _safe_int(selected_ticket.get("review_count"), 0))
+    policy_refs = _monitor_list(graph.get("policy_refs"))
+    direct_links = _safe_int(relationship.get("explicit_receipt_links"), 0) + _safe_int(relationship.get("explicit_review_links"), 0)
+    inferred_links = _safe_int(relationship.get("inferred_receipt_links"), 0) + _safe_int(relationship.get("inferred_review_links"), 0)
+    memory_policy_refs = _monitor_list(selected_ticket.get("policy_refs"))
+    policy_ref_count = len(policy_refs) or len(memory_policy_refs)
+    direct_ticket_links = _safe_int(selected_ticket.get("direct_link_count"), 0)
+    confidence = (
+        "high"
+        if eval_score >= 0.8 and trace_count and policy_ref_count and (direct_links or direct_ticket_links)
+        else "medium"
+        if trace_count and policy_ref_count
+        else "low"
+    )
+    uncertainty = []
+    cache = _monitor_dict(graph.get("cache"))
+    if cache.get("source_current") is False:
+        uncertainty.append("Monitor evidence source is stale.")
+    if not direct_links and inferred_links:
+        uncertainty.append("Some evidence links are inferred rather than direct case or review IDs.")
+    if not trace_count:
+        uncertainty.append("No trace records are linked to this case.")
+    if not policy_refs:
+        uncertainty.append("No policy references are linked to this case.")
+    if not _monitor_list(packet.get("eval_dimensions")):
+        uncertainty.append("No dimension-level eval rows are attached.")
+    if memory.get("status") != "ready":
+        uncertainty.append("Trace-ticket memory retrieval is unavailable.")
+    if _safe_int(corpus.get("missing_trace_count"), 0):
+        uncertainty.append(f"{_safe_int(corpus.get('missing_trace_count'), 0)} remembered cases still lack trace proof.")
+    if llm_issue:
+        uncertainty.append(f"LLM unavailable: {llm_issue}")
+    selected_risk_flags = _monitor_list(selected_ticket.get("risk_flags"))
+    memory_comparison = [
+        f"Memory corpus: {_safe_int(corpus.get('case_count'), 0)} case tickets; {_safe_int(corpus.get('with_trace_count'), 0)} have trace links and {_safe_int(corpus.get('with_review_count'), 0)} have review links.",
+        f"Selected ticket status: {selected_ticket.get('status') or 'not found'}; risk flags: {', '.join(map(str, selected_risk_flags[:4])) if selected_risk_flags else 'none listed'}.",
+        f"Similar cases retrieved: {len(similar_cases)}; same-policy neighbors: {len(policy_neighbors)}.",
+    ]
+    policy_alignment = [
+        f"Policy refs in scope: {', '.join((policy_refs or memory_policy_refs)[:6]) or 'none'}.",
+        f"Policy case: {policy.get('title') or policy.get('case_id') or 'not linked'}.",
+        f"Blocked actions: {', '.join(_monitor_list(policy.get('blocked_actions'))[:4]) or 'none listed in packet'}.",
+    ]
+    confidence_basis = [
+        f"trace_count={trace_count}",
+        f"review_count={review_count}",
+        f"policy_ref_count={policy_ref_count}",
+        f"direct_link_count={direct_links or direct_ticket_links}",
+        f"memory_case_count={_safe_int(corpus.get('case_count'), 0)}",
+    ]
+    audit_gaps = [
+        gap
+        for gap in [
+            "Add direct trace proof." if not trace_count else "",
+            "Add or cite human review proof." if not review_count else "",
+            "Attach policy references." if not policy_ref_count else "",
+            "Resolve inferred-only evidence links." if not direct_links and inferred_links else "",
+        ]
+        if gap
+    ]
+    return {
+        "status": "fallback" if llm_issue else "ready",
+        "mode": "deterministic_monitor_audit_explainer",
+        "llm_used": False,
+        "confidence": confidence,
+        "conclusion": (
+            "This case is strong enough to explain from loaded monitor evidence."
+            if confidence == "high"
+            else "This case is partially explainable; inspect trace and policy link quality before relying on it."
+            if confidence == "medium"
+            else "This case is not strong audit proof yet because trace or policy evidence is missing."
+        ),
+        "answer": (
+            f"Case {case.get('id') or 'unknown'} has eval {round(eval_score * 100) if eval_score >= 0 else '--'}/100, "
+            f"{trace_count} trace records, {review_count} review sessions, and {policy_ref_count} policy refs. "
+            f"The selected receipt gate is {_monitor_audit_text(receipt.get('gate') or receipt.get('status') or 'unknown', 120)}."
+        ),
+        "evidence": [
+            f"Case: {case.get('id') or '--'} / {case.get('title') or '--'}",
+            f"Eval: {round(eval_score * 100) if eval_score >= 0 else '--'}/100; status {quality.get('status') or '--'}",
+            f"Trace records: {trace_count}; review sessions: {review_count}; policy refs: {len(policy_refs)}",
+            f"Policy case: {policy.get('title') or policy.get('case_id') or '--'}",
+        ],
+        "memory_comparison": memory_comparison,
+        "policy_alignment": policy_alignment,
+        "confidence_basis": confidence_basis,
+        "audit_gaps": audit_gaps or ["No immediate audit gap detected from selected packet and memory."],
+        "uncertainty": uncertainty or ["No material uncertainty detected in the loaded monitor packet."],
+        "next_actions": [
+            "Verify the selected trace/tool calls before treating this as operational proof.",
+            "Open the linked policy rule and compare allowed, blocked, required-evidence, and human-review clauses.",
+            "Use review sessions and direct links as stronger evidence than semantic/inferred links.",
+        ],
+        "citations": [
+            {"label": "case", "id": case.get("id"), "kind": "selected_case"},
+            {"label": "receipt", "id": receipt.get("id"), "kind": "selected_receipt"},
+            {"label": "policy", "id": policy.get("active_policy_ref") or (policy_refs[0] if policy_refs else None), "kind": "policy_ref"},
+            {"label": "memory", "id": selected_ticket.get("ticket_id"), "kind": "trace_ticket"},
+        ],
+        "scope": "Read-only monitor audit agent. It cannot dispatch, close reviews, change labels, promote models, or create training data.",
+    }
+
+
+def _normalize_monitor_audit_llm_answer(raw: dict[str, Any], packet: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+    fallback = _monitor_audit_local_answer(packet)
+    confidence = str(raw.get("confidence") or fallback["confidence"]).lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = fallback["confidence"]
+    answer = {
+        "status": "ready",
+        "mode": "llm_monitor_audit_agent",
+        "llm_used": True,
+        "confidence": confidence,
+        "conclusion": _monitor_audit_text(raw.get("conclusion") or fallback["conclusion"], 360),
+        "answer": _monitor_audit_text(raw.get("answer") or fallback["answer"], 900),
+        "evidence": _monitor_audit_strings(raw.get("evidence"), limit=6, item_limit=260) or fallback["evidence"],
+        "memory_comparison": _monitor_audit_strings(raw.get("memory_comparison") or raw.get("memoryComparison"), limit=5, item_limit=280) or fallback.get("memory_comparison", []),
+        "policy_alignment": _monitor_audit_strings(raw.get("policy_alignment") or raw.get("policyAlignment"), limit=5, item_limit=280) or fallback.get("policy_alignment", []),
+        "confidence_basis": _monitor_audit_strings(raw.get("confidence_basis") or raw.get("confidenceBasis"), limit=6, item_limit=180) or fallback.get("confidence_basis", []),
+        "audit_gaps": _monitor_audit_strings(raw.get("audit_gaps") or raw.get("auditGaps"), limit=6, item_limit=240) or fallback.get("audit_gaps", []),
+        "uncertainty": _monitor_audit_strings(raw.get("uncertainty"), limit=5, item_limit=260) or fallback["uncertainty"],
+        "next_actions": _monitor_audit_strings(raw.get("next_actions") or raw.get("nextActions"), limit=5, item_limit=260) or fallback["next_actions"],
+        "citations": raw.get("citations") if isinstance(raw.get("citations"), list) else fallback["citations"],
+        "scope": _monitor_audit_text(raw.get("scope") or fallback["scope"], 300),
+        "runtime": runtime,
+    }
+    answer["citations"] = [
+        {
+            "label": _monitor_audit_text(_monitor_dict(item).get("label"), 80),
+            "id": _monitor_audit_text(_monitor_dict(item).get("id"), 120),
+            "kind": _monitor_audit_text(_monitor_dict(item).get("kind"), 80),
+        }
+        for item in _monitor_list(answer.get("citations"))[:6]
+        if isinstance(item, dict)
+    ] or fallback["citations"]
+    return answer
+
+
+def _monitor_audit_packet_hash(packet: dict[str, Any]) -> str:
+    return f"tap_{hashlib.sha256(json.dumps(packet, sort_keys=True, default=str, separators=(',', ':')).encode('utf-8')).hexdigest()[:24]}"
+
+
+def _monitor_audit_case_id(packet: dict[str, Any]) -> str:
+    case = _monitor_dict(packet.get("selected_case"))
+    graph = _monitor_dict(packet.get("evidence_graph"))
+    return str(case.get("id") or graph.get("case_id") or "unknown_case")
+
+
+def _monitor_audit_selected_trace_id(packet: dict[str, Any]) -> str | None:
+    graph = _monitor_dict(packet.get("evidence_graph"))
+    selected_trace = _monitor_dict(graph.get("selected_graph_trace"))
+    trace_ids = _monitor_list(graph.get("trace_ids"))
+    return str(selected_trace.get("trace_id") or selected_trace.get("receipt_id") or (trace_ids[0] if trace_ids else "") or "") or None
+
+
+def _monitor_audit_selected_receipt_id(packet: dict[str, Any]) -> str | None:
+    receipt = _monitor_dict(packet.get("selected_receipt"))
+    graph = _monitor_dict(packet.get("evidence_graph"))
+    receipt_ids = _monitor_list(graph.get("receipt_ids"))
+    return str(receipt.get("id") or (receipt_ids[0] if receipt_ids else "") or "") or None
+
+
+def _monitor_audit_frontend_message(row: dict[str, Any]) -> dict[str, Any]:
+    answer = row.get("answer") if isinstance(row.get("answer"), dict) else None
+    created_at = row.get("createdAt") or row.get("created_at") or _now_iso()
+    return {
+        "id": str(row.get("id") or row.get("_id") or f"audit_message_{hashlib.sha1(_monitor_audit_text(row, 1000).encode('utf-8')).hexdigest()[:12]}"),
+        "role": row.get("role") if row.get("role") in {"user", "assistant", "system"} else "assistant",
+        "content": _monitor_audit_text(row.get("content") or (answer or {}).get("answer") or (answer or {}).get("conclusion"), 1200),
+        "answer": answer,
+        "createdAt": created_at,
+        "evidencePacketHash": row.get("evidencePacketHash") or row.get("evidence_packet_hash"),
+        "sessionId": row.get("sessionId") or row.get("session_id"),
+    }
+
+
+def _monitor_audit_get_durable_session(case_id: str | None = None, session_id: str | None = None, limit: int = 20) -> dict[str, Any]:
+    try:
+        from mongo_memory import get_memory_connection_status, get_trace_audit_session
+
+        session = get_trace_audit_session(case_id=case_id, session_id=session_id, limit=limit)
+        mongo_status = get_memory_connection_status()
+        if not session:
+            return {
+                "status": "empty",
+                "mode": "trace_audit_mongo_session",
+                "session": None,
+                "messages": [],
+                "persistence": {
+                    "primary": "mongodb" if mongo_status.get("connected") else "memory_fallback",
+                    "connected": bool(mongo_status.get("connected")),
+                    "mode": mongo_status.get("mode"),
+                },
+            }
+        messages = [_monitor_audit_frontend_message(row) for row in _monitor_list(session.get("messages")) if isinstance(row, dict)]
+        return {
+            "status": "ready",
+            "mode": "trace_audit_mongo_session",
+            "session": {
+                "session_id": session.get("sessionId") or session.get("id"),
+                "case_id": session.get("caseId"),
+                "selected_trace_id": session.get("selectedTraceId"),
+                "selected_receipt_id": session.get("selectedReceiptId"),
+                "updated_at": session.get("updatedAt"),
+            },
+            "messages": messages,
+            "message_count": len(messages),
+            "persistence": {
+                "primary": "mongodb" if mongo_status.get("connected") else "memory_fallback",
+                "connected": bool(mongo_status.get("connected")),
+                "mode": mongo_status.get("mode"),
+            },
+        }
+    except Exception as error:
+        return {
+            "status": "unavailable",
+            "mode": "trace_audit_mongo_session",
+            "session": None,
+            "messages": [],
+            "persistence": {"primary": "unavailable", "connected": False, "reason": str(error)[:180]},
+        }
+
+
+def _monitor_audit_persist_turn(
+    packet: dict[str, Any],
+    answer: dict[str, Any],
+    *,
+    session_id: str | None,
+    evidence_packet_hash: str,
+    user_message_id: str,
+    assistant_message_id: str,
+) -> dict[str, Any]:
+    try:
+        from mongo_memory import (
+            get_memory_connection_status,
+            record_trace_audit_evidence_packet,
+            record_trace_audit_message,
+            record_trace_audit_session,
+        )
+
+        case_id = _monitor_audit_case_id(packet)
+        selected_trace_id = _monitor_audit_selected_trace_id(packet)
+        selected_receipt_id = _monitor_audit_selected_receipt_id(packet)
+        resolved_session_id = session_id or f"tas_{case_id}_{hashlib.sha1(str(time.time()).encode('utf-8')).hexdigest()[:12]}"
+        now = _now_iso()
+        packet_result = record_trace_audit_evidence_packet(
+            {
+                "evidencePacketHash": evidence_packet_hash,
+                "caseId": case_id,
+                "packet": packet,
+                "createdAt": now,
+            }
+        )
+        record_trace_audit_session(
+            {
+                "sessionId": resolved_session_id,
+                "caseId": case_id,
+                "selectedTraceId": selected_trace_id,
+                "selectedReceiptId": selected_receipt_id,
+                "operatorRole": "ops_team",
+                "status": "active",
+                "updatedAt": now,
+            }
+        )
+        user_id = record_trace_audit_message(
+            {
+                "id": user_message_id,
+                "sessionId": resolved_session_id,
+                "caseId": case_id,
+                "role": "user",
+                "turnIndex": 0,
+                "content": packet.get("question") or "",
+                "evidencePacketHash": evidence_packet_hash,
+                "selectedTraceId": selected_trace_id,
+                "selectedReceiptId": selected_receipt_id,
+                "operatorRole": "ops_team",
+                "createdAt": now,
+            }
+        )
+        assistant_id = record_trace_audit_message(
+            {
+                "id": assistant_message_id,
+                "sessionId": resolved_session_id,
+                "caseId": case_id,
+                "role": "assistant",
+                "turnIndex": 1,
+                "content": answer.get("answer") or answer.get("conclusion") or "",
+                "answer": answer,
+                "evidencePacketHash": evidence_packet_hash,
+                "selectedTraceId": selected_trace_id,
+                "selectedReceiptId": selected_receipt_id,
+                "operatorRole": "ops_team",
+                "createdAt": _now_iso(),
+            }
+        )
+        mongo_status = get_memory_connection_status()
+        return {
+            "status": "stored",
+            "primary": "mongodb" if mongo_status.get("connected") else "memory_fallback",
+            "connected": bool(mongo_status.get("connected")),
+            "mode": mongo_status.get("mode"),
+            "session_id": resolved_session_id,
+            "evidence_packet_hash": packet_result.get("evidencePacketHash") or evidence_packet_hash,
+            "user_message_id": user_id,
+            "assistant_message_id": assistant_id,
+        }
+    except Exception as error:
+        return {
+            "status": "skipped",
+            "primary": "unavailable",
+            "connected": False,
+            "session_id": session_id,
+            "evidence_packet_hash": evidence_packet_hash,
+            "reason": str(error)[:180],
+        }
+
+
+async def _monitor_audit_agent_response(payload: dict[str, Any]) -> dict[str, Any]:
+    packet = _monitor_audit_packet(payload)
+    packet["memory"] = await _monitor_audit_memory_context(packet)
+    requested_session_id = _monitor_audit_text(payload.get("session_id") or payload.get("sessionId"), 160) or None
+    if not requested_session_id:
+        existing = _monitor_audit_get_durable_session(case_id=_monitor_audit_case_id(packet), limit=1)
+        requested_session_id = _monitor_dict(existing.get("session")).get("session_id") or None
+    evidence_packet_hash = _monitor_audit_packet_hash(packet)
+    user_message_id = _monitor_audit_text(payload.get("user_message_id") or payload.get("userMessageId"), 160) or f"tam_user_{hashlib.sha1((evidence_packet_hash + ':user').encode('utf-8')).hexdigest()[:16]}"
+    assistant_message_id = f"tam_assistant_{hashlib.sha1((evidence_packet_hash + ':assistant').encode('utf-8')).hexdigest()[:16]}"
+    prompt = {
+        "role": "ParkPulse monitor audit agent",
+        "task": "Act as a conversational audit agent for an operations user. Answer the latest user question about the selected monitor case using only the supplied evidence packet, retrieved memory, and recent conversation history. Be direct, natural, operational, and explicit about uncertainty.",
+        "question": packet["question"],
+        "conversation_history": packet.get("conversation_history", []),
+        "evidence_packet": packet,
+        "rules": [
+            "Do not invent facts, cases, traces, policies, review sessions, guests, outcomes, or model state.",
+            "Treat conversation history as dialogue context only; the evidence packet remains the source of truth.",
+            "Use memory.selected_ticket, memory.similar_cases, memory.policy_neighbors, and memory.corpus to compare this case against remembered cases.",
+            "Separate selected-case proof from memory comparison. Do not imply a similar case proves the selected case; use memory to calibrate confidence and find gaps.",
+            "Explain policy alignment as negotiation between safety, operations, action selection, rollback, review, and evidence requirements.",
+            "Return strict compact JSON only. Use at most 3 strings per list field and keep each string under 180 characters.",
+            "Answer the latest user turn conversationally, as if speaking to the operator, while keeping the structured JSON fields useful for the UI.",
+            "If the user challenges a prior conclusion, compare the challenge against the evidence packet and state whether the conclusion should change.",
+            "Separate conclusion from evidence and uncertainty.",
+            "If evidence is inferred or stale, say so clearly.",
+            "Do not reveal hidden chain-of-thought. Provide concise rationale only.",
+            "Do not dispatch, approve, close reviews, change labels, promote models, or imply control authority.",
+        ],
+        "required_json": {
+            "conclusion": "one sentence direct answer",
+            "answer": "short user-facing explanation, 2-5 sentences",
+            "confidence": "high|medium|low",
+            "evidence": ["specific evidence used"],
+            "memory_comparison": ["how this case compares to selected ticket, similar cases, policy neighbors, and corpus gaps"],
+            "policy_alignment": ["which policy refs align, conflict, require evidence, or require review"],
+            "confidence_basis": ["observable factors that determine confidence"],
+            "audit_gaps": ["missing proof or fragile links that must be fixed"],
+            "uncertainty": ["missing, stale, inferred, or weak evidence"],
+            "next_actions": ["operator or auditor next checks"],
+            "citations": [{"label": "short label", "id": "case/trace/review/policy/ticket id", "kind": "case|trace|review|policy|eval|memory"}],
+            "scope": "read-only boundary sentence",
+        },
+    }
+    try:
+        from gemini_hard_timeout import generate_gemini_json_hard_timeout
+
+        started = time.time()
+        result = await generate_gemini_json_hard_timeout(
+            prompt,
+            timeout_seconds=_float_env("PARKPULSE_MONITOR_AUDIT_AGENT_TIMEOUT_SECONDS", 8.0),
+            max_output_tokens=_safe_int(os.getenv("PARKPULSE_MONITOR_AUDIT_AGENT_MAX_TOKENS"), 1800),
+            temperature=0.1,
+        )
+        parsed = _parse_gemini_json_text(str(result.get("text") or "{}"))
+        answer = _normalize_monitor_audit_llm_answer(
+            parsed,
+            packet,
+            {
+                "provider": result.get("transport", "gemini"),
+                "elapsed_ms": int((time.time() - started) * 1000),
+                "finish_reason": result.get("finish_reason"),
+                "usage_metadata": result.get("usage_metadata", {}),
+            },
+        )
+        answer["audit_session"] = _monitor_audit_persist_turn(
+            packet,
+            answer,
+            session_id=requested_session_id,
+            evidence_packet_hash=evidence_packet_hash,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+        )
+        return answer
+    except Exception as error:
+        fallback = _monitor_audit_local_answer(packet, llm_issue=str(error)[:240])
+        fallback["runtime"] = {"provider": "deterministic_fallback", "readiness_issues": [str(error)[:240]]}
+        fallback["audit_session"] = _monitor_audit_persist_turn(
+            packet,
+            fallback,
+            session_id=requested_session_id,
+            evidence_packet_hash=evidence_packet_hash,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+        )
+        return fallback
 
 
 def _monitor_trace_url(trace_id: Any) -> str | None:
@@ -7938,12 +8830,22 @@ def _monitor_evidence_mongo_client_ref() -> Any | None:
             if not _ensure_mongo_driver() or mongo_memory.MongoClient is None:
                 return None
             timeout_ms = max(250, _int_env("PARKPULSE_MONITOR_EVIDENCE_MONGO_TIMEOUT_MS", _int_env("MONGODB_OPERATION_TIMEOUT_MS", 1500)))
+            client_options = {
+                "serverSelectionTimeoutMS": timeout_ms,
+                "connectTimeoutMS": timeout_ms,
+                "socketTimeoutMS": timeout_ms,
+                "retryWrites": True,
+            }
+            try:
+                import certifi
+
+                client_options["tlsCAFile"] = os.getenv("MONGODB_TLS_CA_FILE") or certifi.where()
+            except Exception:
+                if os.getenv("MONGODB_TLS_CA_FILE"):
+                    client_options["tlsCAFile"] = os.getenv("MONGODB_TLS_CA_FILE")
             _monitor_evidence_mongo_client = mongo_memory.MongoClient(
                 _normalized_mongodb_uri(uri),
-                serverSelectionTimeoutMS=timeout_ms,
-                connectTimeoutMS=timeout_ms,
-                socketTimeoutMS=timeout_ms,
-                retryWrites=True,
+                **client_options,
             )
             return _monitor_evidence_mongo_client
         except Exception:
@@ -8022,6 +8924,293 @@ def _monitor_evidence_summary(cases: list[dict[str, Any]], base_summary: dict[st
         }
     )
     return summary
+
+
+async def _monitor_trace_ticket_case_rows(case_id: str | None = None) -> list[dict[str, Any]]:
+    state = await _fast_park_state_lite()
+    rows = _case_rows_from_state(state, action_case_limit=None, alert_limit=8, return_limit=None)
+    if case_id:
+        rows = [row for row in rows if isinstance(row, dict) and str(row.get("id") or "") == case_id]
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _monitor_policy_ref_evidence_rows(policy_ref_ids: list[str], policy_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    source_by_ref = {str(row.get("policy_ref") or ""): row for row in policy_refs if isinstance(row, dict)}
+    for ref_id in policy_ref_ids[:12]:
+        detail = _policy_ref_detail(ref_id)
+        first_match = _monitor_dict(_monitor_list(detail.get("matches"))[0] if _monitor_list(detail.get("matches")) else {})
+        source = source_by_ref.get(ref_id, {})
+        rows.append(
+            {
+                **source,
+                "policy_ref": ref_id,
+                "title": first_match.get("title") or source.get("title") or ref_id,
+                "summary": first_match.get("allowed_action") or first_match.get("condition") or source.get("summary"),
+                "detail": detail,
+            }
+        )
+    return rows
+
+
+def _monitor_policy_only_case_evidence(
+    case_row: dict[str, Any],
+    policy_case: dict[str, Any],
+    policy_refs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    case_id = str(case_row.get("id") or policy_case.get("id") or "")
+    policy_ref_ids = _monitor_unique(_monitor_list(policy_case.get("policy_refs")), limit=20)
+    return {
+        "case_id": case_id,
+        "caseId": case_id,
+        "policy_case_id": policy_case.get("id") or case_id,
+        "policy_refs": policy_ref_ids,
+        "policy_ref_rows": _monitor_policy_ref_evidence_rows(policy_ref_ids, policy_refs),
+        "receipt_ids": [],
+        "trace_ids": [],
+        "review_session_ids": [],
+        "trace_records": [],
+        "review_sessions": [],
+        "eval_dimensions": _monitor_eval_dimensions(case_row, [], [], policy_case),
+        "outcome_evidence": {
+            "status": "missing_outcome",
+            "dispatch_count": 0,
+            "receiver_actions": [],
+            "latest": {},
+            "source": "policy_doctrine_only",
+        },
+        "relationship_contract": {
+            "case_id": case_id,
+            "trace_id_source": "receipt.traceId or receipt.signature",
+            "review_session_id_source": "review_training_ledger.id",
+            "policy_ref_source": "operational_doctrine_index.policy_refs",
+            "explicit_receipt_links": 0,
+            "explicit_review_links": 0,
+            "inferred_receipt_links": 0,
+            "inferred_review_links": 0,
+            "candidate_receipt_links": 0,
+            "candidate_review_links": 0,
+            "semantic_threshold": "policy-only ticket; trace and review evidence still need durable links",
+        },
+    }
+
+
+def _monitor_trace_ticket_document(case_evidence: dict[str, Any], case_row: dict[str, Any], graph: dict[str, Any]) -> dict[str, Any]:
+    case_id = str(case_evidence.get("case_id") or case_evidence.get("caseId") or case_row.get("id") or "")
+    trace_records = [row for row in _monitor_list(case_evidence.get("trace_records")) if isinstance(row, dict)]
+    review_sessions = [row for row in _monitor_list(case_evidence.get("review_sessions")) if isinstance(row, dict)]
+    eval_dimensions = [row for row in _monitor_list(case_evidence.get("eval_dimensions")) if isinstance(row, dict)]
+    relationship = _monitor_dict(case_evidence.get("relationship_contract"))
+    cache = _monitor_dict(graph.get("evidence_cache"))
+    quality = _monitor_dict(case_row.get("quality"))
+    priority = _monitor_dict(case_row.get("priority"))
+    policy_refs = _monitor_audit_strings(case_evidence.get("policy_refs"), limit=20)
+    trace_ids = _monitor_audit_strings(case_evidence.get("trace_ids"), limit=20)
+    receipt_ids = _monitor_audit_strings(case_evidence.get("receipt_ids"), limit=20)
+    review_session_ids = _monitor_audit_strings(case_evidence.get("review_session_ids"), limit=20)
+    direct_links = _safe_int(relationship.get("explicit_receipt_links"), 0) + _safe_int(relationship.get("explicit_review_links"), 0)
+    inferred_links = _safe_int(relationship.get("inferred_receipt_links"), 0) + _safe_int(relationship.get("inferred_review_links"), 0)
+    trace_count = len(trace_records) or len(trace_ids)
+    policy_count = len(policy_refs)
+    review_count = len(review_sessions) or len(review_session_ids)
+    eval_score = _safe_float(quality.get("score"), -1)
+    stale = cache.get("source_current") is False
+    risk_flags = [
+        "no_trace" if not trace_count else None,
+        "no_policy_ref" if not policy_count else None,
+        "no_review_session" if not review_count else None,
+        "source_stale" if stale else None,
+        "inferred_links_present" if inferred_links else None,
+    ]
+    risk_flags = [flag for flag in risk_flags if flag]
+    status = "ready_for_audit" if trace_count and policy_count and direct_links and not stale else "needs_review" if trace_count or policy_count else "missing_trace_evidence"
+    confidence = "high" if status == "ready_for_audit" and eval_score >= 0.8 else "medium" if trace_count and policy_count else "low"
+    trace_summaries = _monitor_audit_strings([row.get("summary") for row in trace_records], limit=5, item_limit=220)
+    policy_titles = _monitor_audit_strings(
+        [
+            _monitor_dict(row).get("title") or _monitor_dict(row).get("policy_ref")
+            for row in _monitor_list(case_evidence.get("policy_ref_rows"))
+            if isinstance(row, dict)
+        ],
+        limit=6,
+        item_limit=160,
+    )
+    eval_summary = _monitor_audit_strings(
+        [
+            f"{_monitor_dict(row).get('label') or _monitor_dict(row).get('id')}: {score_value}"
+            for row in eval_dimensions
+            for score_value in [row.get("score")]
+        ],
+        limit=6,
+        item_limit=120,
+    )
+    title = str(case_row.get("title") or case_id or "Trace audit ticket")
+    summary = (
+        f"{title}: {trace_count} trace link(s), {review_count} review session(s), "
+        f"{policy_count} policy ref(s), {direct_links} direct link(s), {inferred_links} inferred link(s)."
+    )
+    evidence_text = "\n".join(
+        [
+            title,
+            summary,
+            f"case {case_id}",
+            " ".join(trace_ids),
+            " ".join(receipt_ids),
+            " ".join(policy_refs),
+            " ".join(policy_titles),
+            " ".join(trace_summaries),
+            " ".join(eval_summary),
+            str(priority.get("rationale") or ""),
+        ]
+    )
+    return {
+        "id": f"trace_ticket_{hashlib.sha1(case_id.encode('utf-8')).hexdigest()[:16]}",
+        "ticketId": f"trace_ticket_{hashlib.sha1(case_id.encode('utf-8')).hexdigest()[:16]}",
+        "caseId": case_id,
+        "title": title,
+        "summary": summary,
+        "severity": case_row.get("severity") or "review",
+        "status": status,
+        "confidence": confidence,
+        "domain": case_row.get("domain") or "park_operations",
+        "priorityScore": priority.get("score"),
+        "priorityRank": priority.get("rank"),
+        "evalScore": eval_score if eval_score >= 0 else None,
+        "traceIds": trace_ids,
+        "receiptIds": receipt_ids,
+        "policyRefs": policy_refs,
+        "reviewSessionIds": review_session_ids,
+        "traceRecordCount": trace_count,
+        "reviewSessionCount": review_count,
+        "policyRefCount": policy_count,
+        "directLinkCount": direct_links,
+        "inferredLinkCount": inferred_links,
+        "riskFlags": risk_flags,
+        "evidenceFreshness": {
+            "state": cache.get("state"),
+            "sourceCurrent": cache.get("source_current"),
+            "ageSeconds": cache.get("age_seconds"),
+            "mode": cache.get("mode"),
+        },
+        "relationshipContract": relationship,
+        "evalDimensions": eval_dimensions[:8],
+        "topTraceRecords": trace_records[:5],
+        "reviewSessions": review_sessions[:5],
+        "policyEvidence": _monitor_list(case_evidence.get("policy_ref_rows"))[:8],
+        "outcomeEvidence": case_evidence.get("outcome_evidence"),
+        "evidenceText": evidence_text[:5000],
+        "recommendedAnalysis": [
+            "Verify direct trace links before using this as audit proof." if not direct_links else "Direct trace/review links are present; inspect cited receipts.",
+            "Review policy refs for allowed, blocked, required-evidence, and human-review clauses." if policy_count else "Attach policy refs before relying on this ticket.",
+            "Resolve stale source state before downstream decisions." if stale else "Source freshness is currently acceptable for review.",
+        ],
+        "sourceWatermark": graph.get("source_watermark"),
+        "sourceStatus": graph.get("source_status"),
+    }
+
+
+async def _load_monitor_trace_tickets(case_id: str | None = None, *, limit: int = 40, force_refresh: bool = True) -> dict[str, Any]:
+    graph = await _monitor_evidence_graph_cached(case_id=case_id, limit=limit, force_refresh=force_refresh)
+    all_case_rows = await _monitor_trace_ticket_case_rows(case_id=case_id)
+    if not all_case_rows and case_id:
+        index = await _fast_case_index()
+        all_case_rows = [
+            row
+            for row in _monitor_list(index.get("rows"))
+            if isinstance(row, dict) and str(row.get("id") or "") == case_id
+        ]
+    case_rows_by_id = {
+        str(row.get("id") or ""): row
+        for row in all_case_rows
+        if isinstance(row, dict)
+    }
+    rich_evidence_by_case_id = {
+        str(row.get("case_id") or row.get("caseId") or ""): row
+        for row in _monitor_list(graph.get("cases"))
+        if isinstance(row, dict)
+    }
+    policy = _fast_operational_doctrine_index() if _fast_operational_doctrine_index is not None else {}
+    policy_cases = [row for row in _monitor_list(policy.get("action_cases")) if isinstance(row, dict)]
+    policy_cases_by_id = {str(row.get("id") or ""): row for row in policy_cases}
+    policy_refs = [
+        row if isinstance(row, dict) else {"policy_ref": str(row)}
+        for row in _monitor_list(policy.get("policy_refs"))
+        if isinstance(row, dict) or str(row or "").strip()
+    ]
+    tickets = []
+    for case_row in all_case_rows:
+        evidence_case_id = str(case_row.get("id") or "")
+        case_evidence = rich_evidence_by_case_id.get(evidence_case_id)
+        if not case_evidence:
+            terms = _monitor_evidence_terms(
+                case_row.get("id"),
+                case_row.get("title"),
+                case_row.get("domain"),
+                case_row.get("severity"),
+                _monitor_dict(case_row.get("priority")).get("rationale"),
+            )
+            policy_case = policy_cases_by_id.get(evidence_case_id) or _monitor_policy_case_for(case_row, policy_cases, terms)
+            case_evidence = _monitor_policy_only_case_evidence(case_row, policy_case, policy_refs)
+        tickets.append(_monitor_trace_ticket_document(case_evidence, case_row, graph))
+    if not tickets:
+        for case_evidence in _monitor_list(graph.get("cases")):
+            if not isinstance(case_evidence, dict):
+                continue
+            evidence_case_id = str(case_evidence.get("case_id") or case_evidence.get("caseId") or "")
+            case_row = case_rows_by_id.get(evidence_case_id, {"id": evidence_case_id, "title": evidence_case_id})
+            tickets.append(_monitor_trace_ticket_document(case_evidence, case_row, graph))
+    try:
+        from mongo_memory import get_memory_connection_status, record_trace_audit_tickets
+
+        persistence = record_trace_audit_tickets(tickets, source="monitor_evidence_graph_full_case_corpus")
+        mongo_status = get_memory_connection_status()
+    except Exception as error:
+        persistence = {"status": "skipped", "collection": "trace_audit_tickets", "count": 0, "reason": str(error)[:180]}
+        mongo_status = {"connected": False, "mode": "unavailable"}
+    return {
+        "status": "loaded" if persistence.get("status") == "stored" else "degraded",
+        "mode": "monitor_trace_ticket_mongo_load",
+        "ticket_count": len(tickets),
+        "case_corpus": {
+            "source": "policy_doctrine_full_case_corpus",
+            "case_count": len(all_case_rows),
+            "rich_evidence_case_count": len(rich_evidence_by_case_id),
+            "policy_only_case_count": max(0, len(tickets) - len([ticket for ticket in tickets if ticket.get("traceIds") or ticket.get("reviewSessionIds")])),
+            "case_id_filter": case_id,
+        },
+        "tickets": tickets[: min(len(tickets), 12)],
+        "persistence": {
+            **persistence,
+            "primary": "mongodb" if mongo_status.get("connected") else "memory_fallback",
+            "connected": bool(mongo_status.get("connected")),
+            "mode": mongo_status.get("mode"),
+        },
+        "analysis": {
+            "bySeverity": _count_monitor_values(tickets, "severity"),
+            "byStatus": _count_monitor_values(tickets, "status"),
+            "withTraceCount": sum(1 for row in tickets if row.get("traceIds")),
+            "withPolicyCount": sum(1 for row in tickets if row.get("policyRefs")),
+            "withReviewCount": sum(1 for row in tickets if row.get("reviewSessionIds")),
+            "riskFlags": _count_monitor_flags(tickets, "riskFlags"),
+        },
+    }
+
+
+def _count_monitor_values(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(field) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _count_monitor_flags(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        for value in _monitor_list(row.get(field)):
+            key = str(value or "unknown")
+            counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def _monitor_evidence_filter_case(payload: dict[str, Any], case_id: str | None) -> dict[str, Any]:
@@ -8401,6 +9590,11 @@ async def _advance_fast_park_from_wall_clock() -> int:
         return 0
     steps = min(5, int((now - _last_fast_park_step_at) // _fast_park_step_interval_seconds))
     if steps <= 0:
+        return 0
+    get_state_lite = getattr(_fast_park_simulation, "get_state_lite", None)
+    state = await get_state_lite() if callable(get_state_lite) else await _fast_park_simulation.get_state()
+    if not _park_is_open_to_guests(state):
+        _last_fast_park_step_at = now
         return 0
     for _ in range(steps):
         await _fast_park_simulation.step()
@@ -8897,6 +10091,286 @@ def _lightweight_copilot_options(recommendation: dict[str, Any], route: dict[str
     ]
 
 
+def _lightweight_copilot_semantic_enabled() -> bool:
+    return _truthy_env("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY", True) and (
+        _truthy_env("PARKPULSE_COPILOT_SEMANTIC_MEMORY", False)
+        or _truthy_env("PARKPULSE_MONGO_MODEL_EMBEDDINGS", False)
+    )
+
+
+def _lightweight_copilot_memory_doc_summary(document: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: document.get(key)
+        for key in (
+            "_id",
+            "title",
+            "summary",
+            "incidentType",
+            "scenarioKey",
+            "lesson",
+            "rule",
+            "recommendedAction",
+            "score",
+        )
+        if document.get(key) is not None
+    }
+
+
+def _lightweight_semantic_scenario_key(state: dict[str, Any], memory: dict[str, Any] | None = None) -> str:
+    if isinstance(memory, dict) and memory.get("scenario_key"):
+        candidate = str(memory.get("scenario_key") or "").strip()
+        if candidate and candidate != "unknown":
+            return candidate
+    guest_flow = state.get("guestFlow") if isinstance(state.get("guestFlow"), dict) else {}
+    active = guest_flow.get("activeScenario") if isinstance(guest_flow.get("activeScenario"), dict) else {}
+    candidate = str(active.get("key") or "").strip()
+    return candidate if candidate and candidate != "unknown" else "ride_down"
+
+
+def _schedule_lightweight_role_cache_warmup(message: str, state: dict[str, Any], selected_role: str, scenario_key: str) -> dict[str, Any]:
+    interval = max(1.0, _float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_ROLE_CACHE_WARMUP_INTERVAL_SECONDS", 30.0))
+    role = str(selected_role or "scan")
+    key = f"{scenario_key}:{role}"
+    now = time.monotonic()
+    with _semantic_role_cache_warmup_lock:
+        last = _semantic_role_cache_warmups.get(key, 0.0)
+        if now - last < interval:
+            return {"status": "throttled", "scenario_key": scenario_key, "role": role}
+        _semantic_role_cache_warmups[key] = now
+
+    def operation() -> None:
+        try:
+            from mongo_memory import get_operational_intelligence
+
+            get_operational_intelligence(message, scenario_key, role)
+        except Exception:
+            return
+
+    _semantic_role_cache_executor.submit(operation)
+    return {"status": "queued", "scenario_key": scenario_key, "role": role}
+
+
+def _lightweight_scan_cache_miss_fallback(
+    *,
+    message: str,
+    state: dict[str, Any],
+    state_summary: dict[str, Any],
+    memory: dict[str, Any],
+    started: float,
+    timeout: float,
+) -> dict[str, Any]:
+    scenario_key = _lightweight_semantic_scenario_key(state, memory)
+    warmup = _schedule_lightweight_role_cache_warmup(message, state, "scan", scenario_key)
+    top_ride = state_summary.get("top_ride") if isinstance(state_summary.get("top_ride"), dict) else {}
+    top_zone = state_summary.get("top_zone") if isinstance(state_summary.get("top_zone"), dict) else {}
+    top_path = state_summary.get("top_path") if isinstance(state_summary.get("top_path"), dict) else {}
+    ride_name = top_ride.get("name") or top_ride.get("id") or "top ride"
+    zone_name = top_zone.get("name") or top_zone.get("id") or "highest-density zone"
+    return {
+        "status": "ready",
+        "source": "mongo_operational_memory_lightweight",
+        "query": memory.get("query") or message,
+        "scenario_key": scenario_key,
+        "agent_role": "scan_agent",
+        "cache_policy": memory.get("cache_policy") or "role_cache_only",
+        "retrieval_method": "role_context_cache_static_fallback",
+        "summary": "Scan role cache was cold; served deterministic weak-signal context and queued Mongo role-cache warmup.",
+        "model_api": (memory.get("status") or {}).get("modelApi") if isinstance(memory.get("status"), dict) else {},
+        "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
+        "readiness_issues": [],
+        "fallback_reason": "role_context_cache_miss",
+        "warmup": warmup,
+        "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+        "timeout_ms": round(timeout * 1000, 2),
+        "cache_status": "static_fallback",
+        "counts": {"playbooks": 1, "incidents": 1, "learnings": 1},
+        "retrieved": {
+            "playbooks": [
+                {
+                    "_id": f"scan_static_playbook_{scenario_key}",
+                    "title": "Scan weak-signal triage",
+                    "summary": f"Watch {ride_name}, {zone_name}, path congestion, weather, and guest-care notes before recommending action.",
+                    "scenarioKey": scenario_key,
+                    "recommendedAction": "Surface uncertainty, name the signal, and request operator confirmation before mutation.",
+                }
+            ],
+            "incidents": [
+                {
+                    "_id": f"scan_static_incident_{scenario_key}",
+                    "summary": f"Cold role-cache fallback for {scenario_key}; compare live ride, zone, and path pressure before escalation.",
+                    "scenarioKey": scenario_key,
+                }
+            ],
+            "learnings": [
+                {
+                    "_id": f"scan_static_learning_{scenario_key}",
+                    "lesson": "Scan answers should observe and explain weak signals, not dispatch or mutate park operations.",
+                    "scenarioKey": scenario_key,
+                }
+            ],
+        },
+        "state_focus": {
+            "top_ride": top_ride,
+            "top_zone": top_zone,
+            "top_path": top_path,
+        },
+    }
+
+
+def _compact_lightweight_copilot_semantic_memory(memory: dict[str, Any]) -> dict[str, Any]:
+    status = memory.get("status") if isinstance(memory.get("status"), dict) else {}
+    retrieved = memory.get("retrieved") if isinstance(memory.get("retrieved"), dict) else {}
+    playbooks = retrieved.get("playbooks") if isinstance(retrieved.get("playbooks"), list) else []
+    incidents = retrieved.get("incidents") if isinstance(retrieved.get("incidents"), list) else []
+    learnings = retrieved.get("learnings") if isinstance(retrieved.get("learnings"), list) else []
+    retrieval_method = str(retrieved.get("method") or "")
+    model_api = status.get("modelApi") if isinstance(status.get("modelApi"), dict) else {}
+    model_api_enabled = bool(model_api.get("enabled"))
+    counts = {"playbooks": len(playbooks), "incidents": len(incidents), "learnings": len(learnings)}
+    total_count = sum(counts.values())
+    degraded_reasons: list[str] = []
+    if not retrieval_method or retrieval_method in {"degraded_empty", "role_context_cache_miss"}:
+        degraded_reasons.append("Semantic memory returned no usable hot-path context.")
+    if model_api_enabled and not retrieval_method.startswith("mongodb_vector_search") and not retrieval_method.startswith("role_context_cache"):
+        degraded_reasons.append(f"Model API is enabled but retrieval used {retrieval_method or 'unknown'} instead of vector search.")
+    if total_count <= 0:
+        degraded_reasons.append("No playbooks, incidents, or learnings were retrieved.")
+    return {
+        "status": "ready" if not degraded_reasons else "degraded",
+        "source": "mongo_operational_memory_lightweight",
+        "query": memory.get("query"),
+        "scenario_key": memory.get("scenario_key"),
+        "agent_role": memory.get("agent_role"),
+        "cache_policy": memory.get("cache_policy"),
+        "retrieval_method": retrieval_method,
+        "summary": memory.get("summary"),
+        "model_api": model_api,
+        "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
+        "readiness_issues": degraded_reasons,
+        "counts": counts,
+        "retrieved": {
+            "playbooks": [_lightweight_copilot_memory_doc_summary(row) for row in playbooks[:3] if isinstance(row, dict)],
+            "incidents": [_lightweight_copilot_memory_doc_summary(row) for row in incidents[:3] if isinstance(row, dict)],
+            "learnings": [_lightweight_copilot_memory_doc_summary(row) for row in learnings[:3] if isinstance(row, dict)],
+        },
+    }
+
+
+def _lightweight_retrieve_operational_context(
+    query: str,
+    state: dict[str, Any],
+    limit: int,
+    agent_role: str | None,
+    cache_policy: str,
+) -> dict[str, Any]:
+    from mongo_memory import retrieve_operational_context
+
+    return retrieve_operational_context(query, state, limit, agent_role, cache_policy, False)
+
+
+async def _lightweight_copilot_semantic_memory_context(
+    message: str,
+    state: dict[str, Any],
+    state_summary: dict[str, Any],
+    route: dict[str, Any],
+) -> dict[str, Any]:
+    if not _lightweight_copilot_semantic_enabled():
+        return {"status": "not_requested", "reason": "Lightweight semantic memory is disabled."}
+    started = time.monotonic()
+    selected_role = str(route.get("selected_role") or "scan")
+    cache_policy = os.getenv("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY_CACHE_POLICY", "").strip()
+    if not cache_policy:
+        cache_policy = "fresh_retrieval" if _truthy_env("PARKPULSE_MONGO_MODEL_EMBEDDINGS", False) else os.getenv(
+            "PARKPULSE_COPILOT_SEMANTIC_MEMORY_CACHE_POLICY",
+            "role_cache_only",
+        )
+    if selected_role == "scan" and cache_policy == "fresh_retrieval":
+        cache_policy = os.getenv("PARKPULSE_COPILOT_LIGHTWEIGHT_SCAN_SEMANTIC_MEMORY_CACHE_POLICY", "normal")
+    cache_key = json.dumps(
+        {
+            "message": message,
+            "role": selected_role,
+            "cache_policy": cache_policy,
+            "state": {
+                "top_ride": state_summary.get("top_ride"),
+                "top_zone": state_summary.get("top_zone"),
+                "top_path": state_summary.get("top_path"),
+                "weather": state_summary.get("weather"),
+            },
+            "model": os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite"),
+            "path": os.getenv("MONGODB_MODEL_EMBEDDING_PATH", "modelEmbedding"),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    ttl = max(0.0, _float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY_CACHE_TTL_SECONDS", 45.0))
+    now = time.monotonic()
+    if ttl > 0:
+        with _lightweight_semantic_memory_lock:
+            cached = _lightweight_semantic_memory_cache.get(cache_key)
+            if cached and cached[0] > now:
+                payload = dict(cached[1])
+                payload["cache_status"] = "hit"
+                payload["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+                return payload
+    try:
+        timeout = max(0.2, _float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY_TIMEOUT_SECONDS", _float_env("PARKPULSE_COPILOT_SEMANTIC_MEMORY_TIMEOUT_SECONDS", 2.0)))
+        memory = await asyncio.wait_for(
+            asyncio.to_thread(
+                _lightweight_retrieve_operational_context,
+                message,
+                state if isinstance(state, dict) else {},
+                3,
+                selected_role,
+                cache_policy,
+            ),
+            timeout=timeout,
+        )
+        payload = _compact_lightweight_copilot_semantic_memory(memory if isinstance(memory, dict) else {})
+        if (
+            selected_role == "scan"
+            and payload.get("status") == "degraded"
+            and payload.get("retrieval_method") == "role_context_cache_miss"
+        ):
+            payload = _lightweight_scan_cache_miss_fallback(
+                message=message,
+                state=state if isinstance(state, dict) else {},
+                state_summary=state_summary if isinstance(state_summary, dict) else {},
+                memory=memory if isinstance(memory, dict) else {},
+                started=started,
+                timeout=timeout,
+            )
+        payload["elapsed_ms"] = round((time.monotonic() - started) * 1000, 2)
+        payload["timeout_ms"] = round(timeout * 1000, 2)
+        payload.setdefault("cache_status", "miss")
+        if ttl > 0:
+            with _lightweight_semantic_memory_lock:
+                if len(_lightweight_semantic_memory_cache) >= 128:
+                    oldest_key = min(_lightweight_semantic_memory_cache, key=lambda key: _lightweight_semantic_memory_cache[key][0])
+                    _lightweight_semantic_memory_cache.pop(oldest_key, None)
+                _lightweight_semantic_memory_cache[cache_key] = (now + ttl, dict(payload))
+        return payload
+    except Exception as error:
+        timeout = max(0.2, _float_env("PARKPULSE_COPILOT_LIGHTWEIGHT_SEMANTIC_MEMORY_TIMEOUT_SECONDS", _float_env("PARKPULSE_COPILOT_SEMANTIC_MEMORY_TIMEOUT_SECONDS", 2.0)))
+        if selected_role == "scan" and isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+            return _lightweight_scan_cache_miss_fallback(
+                message=message,
+                state=state if isinstance(state, dict) else {},
+                state_summary=state_summary if isinstance(state_summary, dict) else {},
+                memory={"query": message, "cache_policy": cache_policy, "scenario_key": None},
+                started=started,
+                timeout=timeout,
+            )
+        return {
+            "status": "timeout" if isinstance(error, (asyncio.TimeoutError, TimeoutError)) else "error",
+            "source": "mongo_operational_memory_lightweight",
+            "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
+            "cache_policy": cache_policy,
+            "readiness_issues": [_issue_text(error, "Lightweight semantic memory exceeded the hot-path timeout.")],
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
+        }
+
+
 async def _lightweight_copilot_model_response(
     *,
     message: str,
@@ -8905,6 +10379,7 @@ async def _lightweight_copilot_model_response(
     state_summary: dict[str, Any],
     recommendation: dict[str, Any],
     options: list[dict[str, Any]],
+    semantic_memory_context: dict[str, Any],
 ) -> dict[str, Any]:
     prompt = {
         "task": (
@@ -8918,6 +10393,14 @@ async def _lightweight_copilot_model_response(
         "route_reason": route.get("why"),
         "policy_gates": route.get("policy_gates", []),
         "state_summary": state_summary,
+        "semantic_memory": {
+            "status": semantic_memory_context.get("status"),
+            "retrieval_method": semantic_memory_context.get("retrieval_method"),
+            "summary": semantic_memory_context.get("summary"),
+            "counts": semantic_memory_context.get("counts"),
+            "retrieved": semantic_memory_context.get("retrieved"),
+            "readiness_issues": semantic_memory_context.get("readiness_issues"),
+        },
         "recommended_action": recommendation,
         "options_considered": options,
         "required_json": {
@@ -8950,11 +10433,7 @@ async def _lightweight_copilot_model_response(
             else [],
             "operator_next": str(parsed.get("operator_next") or "").strip(),
             "confidence": parsed.get("confidence", 0.74),
-            "semantic_memory": {
-                "status": "configured_deferred" if os.getenv("MONGODB_MODEL_API_KEY") else "not_configured",
-                "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
-                "reason": "MongoDB model API retrieval is kept off this hot path until the lightweight retriever is split from pymongo/full runtime imports.",
-            },
+            "semantic_memory": semantic_memory_context,
         }
     except Exception as error:
         evidence = recommendation.get("primary_evidence", {}) if isinstance(recommendation.get("primary_evidence"), dict) else {}
@@ -8978,10 +10457,7 @@ async def _lightweight_copilot_model_response(
             ],
             "operator_next": "Approve a full policy-gated action or ask a narrower follow-up.",
             "confidence": 0.68,
-            "semantic_memory": {
-                "status": "configured_deferred" if os.getenv("MONGODB_MODEL_API_KEY") else "not_configured",
-                "model_api_key_configured": bool(os.getenv("MONGODB_MODEL_API_KEY")),
-            },
+            "semantic_memory": semantic_memory_context,
         }
 
 
@@ -9025,12 +10501,21 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
                 "guestFlow": {"rides": [], "zones": [], "paths": []},
             }
             mark("state_fallback")
+    if isinstance(state, dict):
+        _schedule_fast_state_mongo_sync(state, reason="lightweight_copilot_state")
     route = route_agent_role(message, mode)
     mark("route")
     state_summary = _lightweight_copilot_state_summary(state if isinstance(state, dict) else {})
     recommendation = _lightweight_copilot_recommendation(message, route, state_summary)
     options = _lightweight_copilot_options(recommendation, route)
     mark("recommendation")
+    semantic_memory_context = await _lightweight_copilot_semantic_memory_context(
+        message,
+        state if isinstance(state, dict) else {},
+        state_summary,
+        route,
+    )
+    mark("semantic_memory")
     conversation_response = await _lightweight_copilot_model_response(
         message=message,
         messages=messages,
@@ -9038,6 +10523,7 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
         state_summary=state_summary,
         recommendation=recommendation,
         options=options,
+        semantic_memory_context=semantic_memory_context,
     )
     mark("conversation_response")
     answer = conversation_response.get("answer") or str(recommendation.get("action") or "")
@@ -9050,7 +10536,18 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
         if requested_turn_mode == "answer" or not any(term in message.lower() for term in ("do", "fix", "reroute", "send", "move", "open", "close", "queue", "stuck"))
         else "propose"
     )
-    semantic_memory_context = conversation_response.get("semantic_memory") if isinstance(conversation_response.get("semantic_memory"), dict) else {}
+    semantic_memory_context = conversation_response.get("semantic_memory") if isinstance(conversation_response.get("semantic_memory"), dict) else semantic_memory_context
+    semantic_memory_tool = (
+        {
+            "id": "semantic_memory",
+            "tool": "memory.retrieve_semantic_context",
+            "label": "Retrieve semantic memory",
+            "status": semantic_memory_context.get("status"),
+            "output": semantic_memory_context.get("retrieval_method") or semantic_memory_context.get("source"),
+        }
+        if isinstance(semantic_memory_context, dict) and semantic_memory_context.get("status") != "not_requested"
+        else None
+    )
     return {
         "status": "complete",
         "mode": response_mode,
@@ -9084,6 +10581,7 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
             "tool_calls": [
                 {"tool": "get_park_state_lite", "status": state_summary.get("status"), "capability": "read", "output": "lightweight state summary"},
                 {"tool": "route_agent_role", "status": "complete", "capability": "reason", "output": route.get("selected_role")},
+                *([{"tool": "memory.retrieve_semantic_context", "status": semantic_memory_context.get("status"), "capability": "read", "output": semantic_memory_context.get("retrieval_method")}] if semantic_memory_tool else []),
                 {"tool": "copilot.respond", "status": "complete", "capability": "reason", "output": conversation_response.get("source")},
             ],
             "summary": {"policy_gate": "propose_only", "state_mutation": False},
@@ -9091,6 +10589,7 @@ async def _build_lightweight_copilot_payload(request_payload: dict[str, Any]) ->
         "tool_call_timeline": [
             {"id": "state", "tool": "get_park_state_lite", "label": "Read fast park state", "status": state_summary.get("status")},
             {"id": "route", "tool": "route_agent_role", "label": "Select department agent", "status": "complete", "output": route.get("selected_role")},
+            *([semantic_memory_tool] if semantic_memory_tool else []),
             {"id": "answer", "tool": "copilot.respond", "label": "Answer operator", "status": "complete", "output": conversation_response.get("source")},
         ],
         "turn_contract": {
@@ -9776,13 +11275,13 @@ def _fast_role_state_impact(scenario_key: str, dispatches: list[dict[str, Any]])
         "ride_down": {
             "domain": "ride",
             "headline": "Ride downtime response paused dead-queue growth and split guest demand.",
-            "before_after_line": "Queue intake held while guest traffic is redirected to alternate capacity.",
+            "before_after_line": "Ride queue intake held while guest traffic is redirected to alternate capacity.",
             "queue_guest_delta": -120,
         },
         "staff_shortage": {
             "domain": "staff",
             "headline": "Staff tasks moved only role-compatible workers to the pressure zone.",
-            "before_after_line": "Worker notifications sent without violating break or certification boundaries.",
+            "before_after_line": "Callouts covered with worker notifications that preserve break and certification boundaries.",
             "staff_pressure_delta": -2,
         },
         "medical_response": {
@@ -9800,7 +11299,7 @@ def _fast_role_state_impact(scenario_key: str, dispatches: list[dict[str, Any]])
         "crowd_safety": {
             "domain": "crowd",
             "headline": "Crowd pressure softened with calm routing and staff presence.",
-            "before_after_line": "Guest flow split across safer paths while emergency access stays protected.",
+            "before_after_line": "Path congestion reduced by splitting guest flow across safer routes while emergency access stays protected.",
             "congestion_delta": -8,
         },
         "family_care": {
@@ -9812,7 +11311,7 @@ def _fast_role_state_impact(scenario_key: str, dispatches: list[dict[str, Any]])
         "storm_response": {
             "domain": "energy",
             "headline": "Comfort controls adjusted within bounded non-safety-critical limits.",
-            "before_after_line": "Indoor comfort protected while noncritical load is reduced.",
+            "before_after_line": "Grid load reduced while indoor comfort stays protected within noncritical control limits.",
             "comfort_delta": 12,
         },
     }
@@ -9907,7 +11406,16 @@ def _role_learning_update(scenario_key: str, response: dict[str, Any], role: str
     }
 
 
-def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str, Any], scenario_key: str) -> dict[str, Any]:
+def _persist_role_receipt(
+    payload: dict[str, Any],
+    *,
+    role: str,
+    route: dict[str, Any],
+    scenario_key: str,
+    sync_persist: bool | None = None,
+    sync_memory: bool | None = None,
+    sync_analytics: bool | None = None,
+) -> dict[str, Any]:
     telemetry = payload.setdefault("run_telemetry", {})
     delivery = telemetry.get("delivery") if isinstance(telemetry.get("delivery"), dict) else payload.get("delivery", {})
     delivery = delivery if isinstance(delivery, dict) else {}
@@ -9918,6 +11426,16 @@ def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str
         eval_result = {"scorecard": eval_result}
     selected_action = telemetry.get("planner", {}).get("selected_action", {}) if isinstance(telemetry.get("planner"), dict) else {}
     decision_id = telemetry.get("decision_id") or payload.get("decision_id") or f"role_{role}_{int(time.time() * 1000)}"
+    persist_enabled = sync_persist if sync_persist is not None else _truthy_env("PARKPULSE_FAST_ROLE_SYNC_PERSIST", False)
+    memory_enabled = persist_enabled if sync_memory is None else bool(sync_memory)
+    analytics_enabled = persist_enabled if sync_analytics is None else bool(sync_analytics)
+    persistence_mode = "sync" if memory_enabled and analytics_enabled else ("sync_analytics" if analytics_enabled else ("sync_memory" if memory_enabled else "deferred"))
+    persist_started = time.time()
+    persistence_timing: dict[str, Any] = {
+        "mode": persistence_mode,
+        "mongo_ms": 0,
+        "analytics_ms": 0,
+    }
     existing_outcome = payload.get("outcome", {}) if isinstance(payload.get("outcome"), dict) else {}
     existing_telemetry_outcome = telemetry.get("outcome", {}) if isinstance(telemetry.get("outcome"), dict) else {}
     existing_state_impact = existing_telemetry_outcome.get("state_impact") or existing_outcome.get("state_impact")
@@ -9935,7 +11453,7 @@ def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str
     }
     if existing_telemetry_outcome.get("application") or existing_outcome.get("application"):
         outcome["application"] = existing_telemetry_outcome.get("application") or existing_outcome.get("application")
-    if str(os.getenv("PARKPULSE_FAST_ROLE_SYNC_PERSIST", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+    if not memory_enabled:
         outcome_id = f"fast_outcome_{hashlib.sha1(f'{decision_id}:{scenario_key}'.encode('utf-8')).hexdigest()[:12]}"
         memory = {
             "mode": "fast_role_deferred",
@@ -9944,12 +11462,8 @@ def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str
             "connected": False,
             "deferred": True,
         }
-        analytics = {
-            "status": "deferred",
-            "mode": "fast_role_deferred",
-            "row_counts": {"outcome_events": 0, "action_dispatches": len(dispatches), "eval_results": 0},
-        }
     else:
+        mongo_started = time.time()
         try:
             from mongo_memory import record_agent_decision, record_agent_learning_document, record_outcome_event
 
@@ -9981,7 +11495,17 @@ def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str
         except Exception as error:
             outcome_id = f"skipped_outcome_error_{int(time.time() * 1000)}"
             memory = {"mode": "memory_error", "decision_id": decision_id, "outcome_id": outcome_id, "connected": False, "error": str(error)[:300]}
+        finally:
+            persistence_timing["mongo_ms"] = int((time.time() - mongo_started) * 1000)
 
+    if not analytics_enabled:
+        analytics = {
+            "status": "deferred",
+            "mode": "fast_role_deferred",
+            "row_counts": {"outcome_events": 0, "action_dispatches": len(dispatches), "eval_results": 0},
+        }
+    else:
+        analytics_started = time.time()
         try:
             from bigquery_analytics import build_analytics_rows, export_analytics_rows
 
@@ -9997,18 +11521,23 @@ def _persist_role_receipt(payload: dict[str, Any], *, role: str, route: dict[str
             analytics = export_analytics_rows(analytics_rows)
         except Exception as error:
             analytics = {"status": "error", "mode": "analytics_error", "row_counts": {}, "readiness_issues": [str(error)[:300]]}
+        finally:
+            persistence_timing["analytics_ms"] = int((time.time() - analytics_started) * 1000)
+    persistence_timing["total_ms"] = int((time.time() - persist_started) * 1000)
 
     telemetry["decision_id"] = decision_id
     telemetry["outcome_id"] = outcome_id
     telemetry["delivery"] = {"summary": delivery.get("summary", {}), "response": response, "dispatches": dispatches}
     telemetry["outcome"] = outcome
     telemetry["analytics"] = analytics
+    telemetry["persistence_timing"] = persistence_timing
     telemetry["memory"] = {"retrieved_learnings": [outcome["learning"]], "write": memory}
     payload["decision_id"] = decision_id
     payload["outcome_id"] = outcome_id
     payload["outcome"] = {**payload.get("outcome", {}), **outcome}
     payload["memory"] = {**(payload.get("memory") if isinstance(payload.get("memory"), dict) else {}), **memory}
     payload["analytics"] = analytics
+    payload["persistence_timing"] = persistence_timing
     payload["learning_proof"] = {
         **(payload.get("learning_proof") if isinstance(payload.get("learning_proof"), dict) else {}),
         "mode": "observed_response_learning",
@@ -10211,7 +11740,7 @@ async def _react_role_payload(message: str, mode: str, route: dict[str, Any]) ->
         }
         payload.setdefault("outcome", {})["state_impact"] = state_impact
         payload.setdefault("outcome", {})["application"] = run_telemetry["outcome"]["application"]
-    await _attach_fast_role_collaboration(payload, route, scenario_key)
+    _attach_fast_role_collaboration(payload, route, scenario_key)
     payload = _persist_role_receipt(payload, role="react", route=route, scenario_key=scenario_key)
     trace = _role_tool_trace(route, selected_role="react", scenario_key=scenario_key, outputs=_role_tool_outputs_from_payload(payload, role="react", scenario_key=scenario_key))
     run_telemetry["digital_twin_tools"] = trace
@@ -10220,7 +11749,7 @@ async def _react_role_payload(message: str, mode: str, route: dict[str, Any]) ->
     return payload
 
 
-async def _attach_fast_role_collaboration(payload: dict[str, Any], route: dict[str, Any], scenario_key: str) -> None:
+def _attach_fast_role_collaboration(payload: dict[str, Any], route: dict[str, Any], scenario_key: str) -> None:
     run_telemetry = payload.setdefault("run_telemetry", {})
     constraints = run_telemetry.get("operator_constraints", {}) if isinstance(run_telemetry.get("operator_constraints"), dict) else {}
     selected_action = run_telemetry.get("planner", {}).get("selected_action", {}) if isinstance(run_telemetry.get("planner"), dict) else {}
@@ -10258,7 +11787,7 @@ async def _attach_fast_role_collaboration(payload: dict[str, Any], route: dict[s
             "Coordinate medical/accessibility support with privacy-safe instructions.",
             ["get_zone_density", "get_staff_constraints", "validate_policy"],
             ["dispatch support staff", "protect access lanes"],
-            ["diagnose medical condition", "broadcast sensitive guest details"],
+            ["infer medical condition", "broadcast sensitive guest details"],
             "human_supervised_guest_care",
         ),
         "equipment_safety": (
@@ -10471,6 +12000,110 @@ async def _attach_fast_role_collaboration(payload: dict[str, Any], route: dict[s
         "conflicts": role_artifact.get("conflicts", []) if isinstance(role_artifact, dict) else [],
         "summary": "Fast React Agent surfaced specialist proposals, then Decision Bridge selected the receiver-safe action path without waiting for the full Gemini tournament.",
     }
+    governance = run_telemetry.get("governance", {}) if isinstance(run_telemetry.get("governance"), dict) else {}
+    gate_status = str(governance.get("gate_status") or "allowed")
+    policy_status = "review_required" if bool(route.get("requires_human_review")) or gate_status in {"review", "human_review"} else "blocked" if gate_status == "blocked" else "allowed"
+    policy_regulation_judgment = {
+        "status": policy_status,
+        "source": "fast_agent_run_receipt",
+        "hard_gate_status": gate_status,
+        "allowed_by_legacy_gate": bool(governance.get("allowed", True)),
+        "human_review_required": policy_status == "review_required",
+        "approval_owner": "park_operations_executive" if policy_status == "review_required" else None,
+        "policy_refs": sorted({ref for proposal in proposals if isinstance(proposal, dict) for ref in proposal.get("policy_refs", []) if ref})[:8] or ["PARK-OPS-001", "PARK-SAFE-001"],
+        "findings": [
+            "Fast receipt follows the policybook boundary: bounded receiver-safe actions only; full Gemini tournament refines the receipt asynchronously.",
+            *(governance.get("findings", [])[:2] if isinstance(governance.get("findings"), list) else []),
+        ],
+        "human_review_reasons": ["Operator route or policy gate requires review before mutation."] if policy_status == "review_required" else [],
+        "required_evidence": ["accepted role proposal", "selected receiver-safe action", "policy gate status", "rejected candidate ledger"],
+        "blocked_authorities": ["ride_reopening_or_maintenance_clearance", "medical_diagnosis_or_emergency_command", "security_detention_or_enforcement"],
+        "interpreted_policy": {
+            "status": policy_status,
+            "primary_case_id": "FAST-OPS-BOUNDED-ACTION",
+            "primary_case_title": "Fast operating receipt bounded by policybook authority",
+            "approval_required": policy_status == "review_required",
+            "conflict_analysis": {"accepted_candidate": resolution["selected_candidate_id"], "rejected_count": len(rejected)},
+        },
+        "alignment_rule": "The fast path may explain and prepare bounded receiver payloads, but it cannot expand authority beyond policybook limits or full-runtime refinement.",
+    }
+    executive_adjudication = {
+        "model_version": "v2_compromise_mediator_fast_receipt",
+        "decision_policy": "score_and_conflict_compromise",
+        "status": "fast_role_challenger_selected" if accepted else "fast_operator_action_selected",
+        "reason": resolution["summary"],
+        "initial_candidate_id": "fast_operator_action",
+        "final_candidate_id": resolution["selected_candidate_id"],
+        "score_gap_vs_initial": 0,
+        "conflict_count": len(resolution["conflicts"]),
+        "challenger_ledgers": [
+            {
+                "candidate_id": f"fast_role_{proposal.get('agent_id')}",
+                "source": "fast_role_proposal",
+                "score": round(float(proposal.get("confidence", 0.7) or 0.7) * 100),
+                "agent_id": proposal.get("agent_id"),
+                "role": proposal.get("role"),
+                "recommendation": proposal.get("recommendation"),
+            }
+            for proposal in scored[:6]
+            if isinstance(proposal, dict)
+        ],
+        "rejected_candidates": rejected,
+    }
+    negotiation_trace = {
+        "mode": "backend_multi_agent_negotiation_policy_alignment_v1_fast_receipt",
+        "source": "fast_agent_run_receipt",
+        "scenario_key": scenario_key,
+        "proposal_count": len(proposals),
+        "active_roles": role_artifact.get("active_roles", []),
+        "rounds": [
+            {
+                "round": 1,
+                "name": "fast_specialist_positions",
+                "claims": [
+                    {
+                        "agent": proposal.get("agent_id"),
+                        "department": proposal.get("role"),
+                        "wants": proposal.get("recommendation"),
+                    }
+                    for proposal in proposals[:6]
+                    if isinstance(proposal, dict)
+                ],
+            },
+            {"round": 2, "name": "decision_bridge_compromise", "decision": resolution["selected_candidate_id"], "rationale": resolution["summary"]},
+            {"round": 3, "name": "policy_regulation_judgment", "judgment": policy_regulation_judgment},
+        ],
+        "turns": [],
+        "conflicts": resolution["conflicts"],
+        "tradeoff_matrix": [
+            {
+                "department": proposal.get("role"),
+                "agent": proposal.get("agent_id"),
+                "verdict": "accepted" if isinstance(accepted, dict) and proposal.get("agent_id") == accepted.get("agent_id") else "supporting_context",
+                "rationale": proposal.get("recommendation"),
+                "confidence": proposal.get("confidence"),
+            }
+            for proposal in scored[:6]
+            if isinstance(proposal, dict)
+        ],
+        "executive_tradeoff": {"decision": resolution["selected_candidate_id"], "rationale": resolution["summary"]},
+        "selected_action": selected_action,
+        "accepted_role_proposal": accepted,
+        "selected_plan_id": resolution["selected_candidate_id"],
+        "executive_adjudication": executive_adjudication,
+        "policy_regulation_judgment": policy_regulation_judgment,
+        "final_executive_decision": {
+            "status": "approved_for_bounded_execution" if policy_status == "allowed" else policy_status,
+            "approval_owner": policy_regulation_judgment["approval_owner"],
+            "reason": resolution["summary"],
+            "initial_candidate_id": executive_adjudication["initial_candidate_id"],
+            "final_candidate_id": executive_adjudication["final_candidate_id"],
+            "rejected_candidates": rejected,
+        },
+    }
+    run_telemetry["ops_model_version"] = "v2_compromise_mediator_fast_receipt"
+    run_telemetry["policy_regulation_judgment"] = policy_regulation_judgment
+    run_telemetry["negotiation_trace"] = negotiation_trace
     run_telemetry["role_agent_proposals"] = role_artifact
     run_telemetry.setdefault("optimization", {}).update(
         {
@@ -10490,6 +12123,8 @@ async def _attach_fast_role_collaboration(payload: dict[str, Any], route: dict[s
                 },
                 "role_proposal": accepted,
             },
+            "ops_model_version": "v2_compromise_mediator_fast_receipt",
+            "executive_adjudication": executive_adjudication,
             "decision_bridge_resolution": resolution,
             "decision_summary": resolution["summary"],
             "memory_used": {
@@ -10524,6 +12159,8 @@ async def _attach_fast_role_collaboration(payload: dict[str, Any], route: dict[s
         "connected": bool(payload.get("role_receipt", {}).get("mongo", {}).get("connected")),
     }
     payload["role_agent_proposals"] = role_artifact
+    payload["policy_regulation_judgment"] = policy_regulation_judgment
+    payload["negotiation_trace"] = negotiation_trace
 
 
 async def _proact_role_payload(message: str, mode: str, route: dict[str, Any]) -> dict[str, Any]:
@@ -10704,14 +12341,26 @@ def _parse_gemini_json_text(text: str) -> dict[str, Any]:
         cleaned = cleaned.strip("`")
         if cleaned.lower().startswith("json"):
             cleaned = cleaned[4:].strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start >= 0 and end > start:
-            return json.loads(cleaned[start : end + 1])
-        raise
+    candidates = [cleaned]
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(cleaned[start : end + 1])
+    last_error: json.JSONDecodeError | None = None
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as error:
+            last_error = error
+        repaired = re.sub(r",(\s*[}\]])", r"\1", candidate)
+        repaired = re.sub(r'("|\]|\}|true|false|null|-?\d+(?:\.\d+)?)\s*\n\s*("(?=\s*:)|"|\{|\[)', r"\1,\n\2", repaired)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError as error:
+            last_error = error
+    if last_error:
+        raise last_error
+    raise json.JSONDecodeError("No JSON object found", cleaned, 0)
 
 
 async def _agent_role_refinement_payload(message: str, receipt: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -11910,7 +13559,7 @@ def _lazy_operator_route(message: str, mode: str = "auto") -> dict[str, Any]:
     food_down_terms = ("food court is down", "food court a is down", "food court down", "food court a down", "food court closed", "food court unavailable", "kitchen down")
     staff_terms = ("staff", "worker", "workers", "break", "understaffed", "call out", "shortage", "overwhelmed")
     food_terms = ("food", "kitchen", "mobile order", "restaurant", "menu", "inventory")
-    ride_terms = ("ride", "coaster", "attraction", "queue", "breakdown", "downtime")
+    ride_terms = ("ride", "coaster", "attraction", "queue", "breakdown", "downtime", "thunder loop", "dragon coaster")
     hvac_terms = ("hvac", "temperature", "too cold", "too hot", "overheating", "comfort", "cool", "heat", "load shed")
     equipment_safety_terms = ("smoke", "fire", "sparking", "electrical", "gas", "controller", "missed heartbeat", "fog machine", "fog", "technician")
     strong_staff_terms = ("called out", "call out", "staff break", "certified coverage", "understaffed", "staff shortage", "worker shortage", "labor gap", "shortage")
@@ -11919,6 +13568,9 @@ def _lazy_operator_route(message: str, mode: str = "auto") -> dict[str, Any]:
     has_staff = any(term in lowered for term in staff_terms)
     has_food_down = any(term in lowered for term in food_down_terms)
     has_ride = any(term in lowered for term in ride_terms)
+    has_explicit_ride_outage = any(term in lowered for term in ("ride", "coaster", "attraction", "thunder loop", "dragon coaster")) and any(
+        term in lowered for term in ("down", "goes down", "went down", "broken", "closed", "stopped", "outage", "breakdown", "downtime")
+    )
     has_hvac = any(term in lowered for term in hvac_terms)
     has_equipment_safety = any(term in lowered for term in equipment_safety_terms)
     has_strong_staff = any(term in lowered for term in strong_staff_terms)
@@ -11929,6 +13581,8 @@ def _lazy_operator_route(message: str, mode: str = "auto") -> dict[str, Any]:
         scenario_key = "equipment_safety"
     elif any(term in lowered for term in ("panic", "evac", "evacuate", "fight", "security", "crowd crush", "crowd congestion", "bottleneck")):
         scenario_key = "crowd_safety"
+    elif has_explicit_ride_outage:
+        scenario_key = "ride_down"
     elif has_food_down:
         scenario_key = "food_spike"
     elif has_strong_staff:
@@ -11992,7 +13646,67 @@ def _lazy_operator_intents(message: str) -> dict[str, bool]:
     }
 
 
-def _lazy_operator_payload(message: str, mode: str = "auto", reason: str = "lazy_bounded_response") -> dict[str, Any]:
+def _deferred_live_policy_gate(source: str, status_key: str) -> dict[str, Any]:
+    return {
+        "allowed": True,
+        "gate_status": "deferred_hot_path",
+        status_key: "deferred_hot_path",
+        "findings": [f"Live {source} gate was deferred on the fast first response; no external mutation is executed from this fallback receipt."],
+        "evidence": {
+            "status": "deferred",
+            "source": "fast_first_response",
+            "trusted": False,
+            "reason": "Deep live-feed evidence is checked by the full/refinement path to keep the first response bounded.",
+        },
+    }
+
+
+def _deferred_live_training_gate(source: str, required: list[str]) -> dict[str, Any]:
+    return {
+        "eligible": False,
+        "status": "deferred_hot_path",
+        "reason": f"{source} training admission is deferred until the full live-feed gate checks fresh evidence.",
+        "evidence": {
+            "status": "deferred",
+            "source": "fast_first_response",
+            "trusted": False,
+        },
+        "required_for_training": required,
+    }
+
+
+def _deferred_live_gate_bundle() -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    return (
+        {
+            "live_weather_gate": _deferred_live_policy_gate("weather", "weather_gate_status"),
+            "live_ride_ops_gate": _deferred_live_policy_gate("ride_ops", "ride_ops_gate_status"),
+            "live_guest_flow_gate": _deferred_live_policy_gate("guest_flow", "guest_flow_gate_status"),
+            "live_staffing_gate": _deferred_live_policy_gate("staffing", "staffing_gate_status"),
+            "live_food_ops_gate": _deferred_live_policy_gate("food_ops", "food_ops_gate_status"),
+            "live_operator_signal_gate": _deferred_live_policy_gate("operator_signal", "operator_signal_gate_status"),
+        },
+        {
+            "live_weather": _deferred_live_training_gate("weather", ["fresh live weather or explicit fallback mode", "no open review on weather event", "measured outcome reward"]),
+            "live_ride_ops": _deferred_live_training_gate("ride_ops", ["fresh ride_ops feed", "no open review on ride_ops event", "measured post-action queue/downtime outcome"]),
+            "live_guest_flow": _deferred_live_training_gate("guest_flow", ["fresh guest_flow feed", "no open review on guest_flow event", "measured post-action density/path outcome"]),
+            "live_staffing": _deferred_live_training_gate("staffing", ["fresh staffing feed", "no open review on staffing event", "measured post-action coverage outcome"]),
+            "live_food_ops": _deferred_live_training_gate("food_ops", ["fresh food_ops feed", "no open review on food_ops event", "measured post-action backlog/ETA outcome"]),
+            "live_operator_signal": _deferred_live_training_gate("operator_signal", ["fresh operator_signal feed", "no open review on sensitive report", "measured post-action guest-care outcome"]),
+        },
+    )
+
+
+def _lazy_operator_payload(
+    message: str,
+    mode: str = "auto",
+    reason: str = "lazy_bounded_response",
+    *,
+    sync_persist: bool | None = None,
+    sync_memory: bool | None = None,
+    sync_analytics: bool | None = None,
+    fast_live_gates: bool | None = None,
+) -> dict[str, Any]:
+    payload_started = time.time()
     route = _lazy_operator_route(message, mode)
     scenario_key = route["scenario_key"]
     now_id = int(time.time() * 1000)
@@ -12434,6 +14148,7 @@ def _lazy_operator_payload(message: str, mode: str = "auto", reason: str = "lazy
     for dispatch in dispatches:
         if dispatch["channel"] in summary:
             summary[dispatch["channel"]] += 1
+    dispatch_plan_ms = int((time.time() - payload_started) * 1000)
     run_telemetry = {
         "scenario_key": scenario_key,
         "planner": {"runtime": "bounded_action_engine", "model": "fast_operating_policy", "gemini_ready": False, "attempted_gemini": True, "selected_action": selected, "confidence_score": 0.62, "analysis": f"Returned bounded custom actions from the fast operating policy while Gemini refinement runs asynchronously: {reason}."},
@@ -12443,62 +14158,77 @@ def _lazy_operator_payload(message: str, mode: str = "auto", reason: str = "lazy
         "eval": {"scorecard": {"overall": 78, "policy_guidance_score": 86, "policy_gate_status": "allowed", "policy_violation": False, "needs_human_approval": route["requires_human_review"]}},
         "optimization": {"operator_constraints": constraints, "operator_candidate_frame": {"primary_action": selected, "rejected_options": [{"reason": constraints["rejected_option"]}]}},
     }
-    weather_gate = live_weather_policy_gate(selected)
-    if not weather_gate.get("allowed"):
-        run_telemetry["governance"] = {
-            "allowed": False,
-            "gate_status": weather_gate.get("gate_status") or "review",
-            "findings": [*weather_gate.get("findings", []), "Receiver dispatch remains operator-review-only until weather gate is cleared."],
-            "live_weather_gate": weather_gate,
-        }
-        run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
-        run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
+    gates_started = time.time()
+    use_live_gates = True if fast_live_gates is None else bool(fast_live_gates)
+    if not use_live_gates:
+        deferred_gates, deferred_training = _deferred_live_gate_bundle()
+        run_telemetry["governance"].update(deferred_gates)
+        run_telemetry["governance"]["findings"].append("Deep live-feed gates were deferred on this fast first response; full-runtime refinement remains responsible for fresh live-feed gate proof before promotion or training.")
+        run_telemetry["training_eligibility"] = deferred_training
     else:
-        run_telemetry["governance"]["findings"].extend(weather_gate.get("findings", [])[:1])
-        run_telemetry["governance"]["live_weather_gate"] = weather_gate
-    ride_ops_gate = live_ride_ops_policy_gate(selected)
-    run_telemetry["governance"]["live_ride_ops_gate"] = ride_ops_gate
-    if not ride_ops_gate.get("allowed"):
-        run_telemetry["governance"]["allowed"] = False
-        run_telemetry["governance"]["gate_status"] = ride_ops_gate.get("gate_status") or "review"
-        run_telemetry["governance"]["findings"].extend(ride_ops_gate.get("findings", []))
-        run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
-        run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
-    else:
-        run_telemetry["governance"]["findings"].extend(ride_ops_gate.get("findings", [])[:1])
-    guest_flow_gate = live_guest_flow_policy_gate(selected)
-    run_telemetry["governance"]["live_guest_flow_gate"] = guest_flow_gate
-    if not guest_flow_gate.get("allowed"):
-        run_telemetry["governance"]["allowed"] = False
-        run_telemetry["governance"]["gate_status"] = guest_flow_gate.get("gate_status") or "review"
-        run_telemetry["governance"]["findings"].extend(guest_flow_gate.get("findings", []))
-        run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
-        run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
-    else:
-        run_telemetry["governance"]["findings"].extend(guest_flow_gate.get("findings", [])[:1])
-    remaining_gates = {
-        "live_staffing_gate": live_staffing_policy_gate(selected),
-        "live_food_ops_gate": live_food_ops_policy_gate(selected),
-        "live_operator_signal_gate": live_operator_signal_policy_gate(selected),
-    }
-    for gate_name, gate in remaining_gates.items():
-        run_telemetry["governance"][gate_name] = gate
-        if not gate.get("allowed"):
-            run_telemetry["governance"]["allowed"] = False
-            run_telemetry["governance"]["gate_status"] = gate.get("gate_status") or "review"
-            run_telemetry["governance"]["findings"].extend(gate.get("findings", []))
+        weather_gate = live_weather_policy_gate(selected)
+        if not weather_gate.get("allowed"):
+            run_telemetry["governance"] = {
+                "allowed": False,
+                "gate_status": weather_gate.get("gate_status") or "review",
+                "findings": [*weather_gate.get("findings", []), "Receiver dispatch remains operator-review-only until weather gate is cleared."],
+                "live_weather_gate": weather_gate,
+            }
             run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
             run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
         else:
-            run_telemetry["governance"]["findings"].extend(gate.get("findings", [])[:1])
-    run_telemetry["training_eligibility"] = {
-        "live_weather": live_weather_training_gate(),
-        "live_ride_ops": live_ride_ops_training_gate(),
-        "live_guest_flow": live_guest_flow_training_gate(),
-        "live_staffing": live_staffing_training_gate(),
-        "live_food_ops": live_food_ops_training_gate(),
-        "live_operator_signal": live_operator_signal_training_gate(),
+            run_telemetry["governance"]["findings"].extend(weather_gate.get("findings", [])[:1])
+            run_telemetry["governance"]["live_weather_gate"] = weather_gate
+        ride_ops_gate = live_ride_ops_policy_gate(selected)
+        run_telemetry["governance"]["live_ride_ops_gate"] = ride_ops_gate
+        if not ride_ops_gate.get("allowed"):
+            run_telemetry["governance"]["allowed"] = False
+            run_telemetry["governance"]["gate_status"] = ride_ops_gate.get("gate_status") or "review"
+            run_telemetry["governance"]["findings"].extend(ride_ops_gate.get("findings", []))
+            run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
+            run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
+        else:
+            run_telemetry["governance"]["findings"].extend(ride_ops_gate.get("findings", [])[:1])
+        guest_flow_gate = live_guest_flow_policy_gate(selected)
+        run_telemetry["governance"]["live_guest_flow_gate"] = guest_flow_gate
+        if not guest_flow_gate.get("allowed"):
+            run_telemetry["governance"]["allowed"] = False
+            run_telemetry["governance"]["gate_status"] = guest_flow_gate.get("gate_status") or "review"
+            run_telemetry["governance"]["findings"].extend(guest_flow_gate.get("findings", []))
+            run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
+            run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
+        else:
+            run_telemetry["governance"]["findings"].extend(guest_flow_gate.get("findings", [])[:1])
+        remaining_gates = {
+            "live_staffing_gate": live_staffing_policy_gate(selected),
+            "live_food_ops_gate": live_food_ops_policy_gate(selected),
+            "live_operator_signal_gate": live_operator_signal_policy_gate(selected),
+        }
+        for gate_name, gate in remaining_gates.items():
+            run_telemetry["governance"][gate_name] = gate
+            if not gate.get("allowed"):
+                run_telemetry["governance"]["allowed"] = False
+                run_telemetry["governance"]["gate_status"] = gate.get("gate_status") or "review"
+                run_telemetry["governance"]["findings"].extend(gate.get("findings", []))
+                run_telemetry["eval"]["scorecard"]["policy_gate_status"] = run_telemetry["governance"]["gate_status"]
+                run_telemetry["eval"]["scorecard"]["needs_human_approval"] = True
+            else:
+                run_telemetry["governance"]["findings"].extend(gate.get("findings", [])[:1])
+        run_telemetry["training_eligibility"] = {
+            "live_weather": live_weather_training_gate(),
+            "live_ride_ops": live_ride_ops_training_gate(),
+            "live_guest_flow": live_guest_flow_training_gate(),
+            "live_staffing": live_staffing_training_gate(),
+            "live_food_ops": live_food_ops_training_gate(),
+            "live_operator_signal": live_operator_signal_training_gate(),
+        }
+    fast_path_timing = {
+        "mode": "lazy_operator_payload",
+        "dispatch_plan_ms": dispatch_plan_ms,
+        "policy_and_training_gates_ms": int((time.time() - gates_started) * 1000),
+        "pre_persist_ms": int((time.time() - payload_started) * 1000),
     }
+    run_telemetry["fast_path_timing"] = fast_path_timing
     payload = {
         "status": "complete",
         "command": message,
@@ -12509,7 +14239,21 @@ def _lazy_operator_payload(message: str, mode: str = "auto", reason: str = "lazy
         "operator_response": {"headline": selected["label"], "summary": run_telemetry["planner"]["analysis"], "next_step": "Receiver payloads are visible on the map; rerun the full Gemini path when ready."},
         "run_telemetry": run_telemetry,
     }
-    return _persist_role_receipt(payload, role=str(route.get("selected_role") or "react"), route=route, scenario_key=scenario_key)
+    _attach_fast_role_collaboration(payload, route, scenario_key)
+    result = _persist_role_receipt(
+        payload,
+        role=str(route.get("selected_role") or "react"),
+        route=route,
+        scenario_key=scenario_key,
+        sync_persist=sync_persist,
+        sync_memory=sync_memory,
+        sync_analytics=sync_analytics,
+    )
+    timing = result.setdefault("run_telemetry", {}).setdefault("fast_path_timing", fast_path_timing)
+    if isinstance(timing, dict):
+        timing["total_before_receipt_ms"] = int((time.time() - payload_started) * 1000)
+        result["fast_path_timing"] = timing
+    return result
 
 
 async def _get_full_module(timeout: float | None = None):
@@ -12740,29 +14484,39 @@ def _attach_live_weather_gate_to_payload(payload: dict[str, Any]) -> dict[str, A
 
 async def _build_operator_payload_with_runtime(message: str, mode: str, execute: bool, reason: str) -> dict[str, Any]:
     tiers = _timeout_tiers()
+    operator_fast_live_gates = _truthy_env("PARKPULSE_OPERATOR_FAST_LIVE_GATES", False)
     if _parkpulse_app is not None and not _sync_full_response_enabled():
         _metric("operator_command_fallback")
-        fallback = _lazy_operator_payload(message, mode, "fast_first_response: full runtime refinement scheduled outside the request path")
+        fallback = _lazy_operator_payload(
+            message,
+            mode,
+            "fast_first_response: full runtime refinement scheduled outside the request path",
+            sync_persist=_truthy_env("PARKPULSE_OPERATOR_FAST_SYNC_PERSIST", False),
+            sync_memory=_truthy_env("PARKPULSE_OPERATOR_FAST_SYNC_MONGO", False),
+            sync_analytics=_truthy_env("PARKPULSE_OPERATOR_FAST_SYNC_ANALYTICS", False),
+            fast_live_gates=operator_fast_live_gates,
+        )
         fallback["status"] = "bounded_fallback"
         fallback.setdefault("runtime_proof", {})["fallback_reason"] = "Full runtime is loaded; running refinement outside the first response."
         fallback["runtime_proof"]["full_runtime"] = _full_runtime_status()
-        fallback.setdefault("live_feed_evidence", {})["weather"] = live_weather_state_evidence()
-        fallback.setdefault("live_feed_evidence", {})["ride_ops"] = live_ride_ops_state_evidence()
-        fallback.setdefault("live_feed_evidence", {})["guest_flow"] = live_guest_flow_state_evidence()
-        fallback.setdefault("live_feed_evidence", {})["staffing"] = live_staffing_state_evidence()
-        fallback.setdefault("live_feed_evidence", {})["food_ops"] = live_food_ops_state_evidence()
-        fallback.setdefault("live_feed_evidence", {})["operator_signal"] = live_operator_signal_state_evidence()
-        fallback.setdefault("training_eligibility", {})["live_weather"] = live_weather_training_gate()
-        fallback.setdefault("training_eligibility", {})["live_ride_ops"] = live_ride_ops_training_gate()
-        fallback.setdefault("training_eligibility", {})["live_guest_flow"] = live_guest_flow_training_gate()
-        fallback.setdefault("training_eligibility", {})["live_staffing"] = live_staffing_training_gate()
-        fallback.setdefault("training_eligibility", {})["live_food_ops"] = live_food_ops_training_gate()
-        fallback.setdefault("training_eligibility", {})["live_operator_signal"] = live_operator_signal_training_gate()
-        _attach_live_weather_gate_to_payload(fallback)
+        if operator_fast_live_gates:
+            fallback.setdefault("live_feed_evidence", {})["weather"] = live_weather_state_evidence()
+            fallback.setdefault("live_feed_evidence", {})["ride_ops"] = live_ride_ops_state_evidence()
+            fallback.setdefault("live_feed_evidence", {})["guest_flow"] = live_guest_flow_state_evidence()
+            fallback.setdefault("live_feed_evidence", {})["staffing"] = live_staffing_state_evidence()
+            fallback.setdefault("live_feed_evidence", {})["food_ops"] = live_food_ops_state_evidence()
+            fallback.setdefault("live_feed_evidence", {})["operator_signal"] = live_operator_signal_state_evidence()
+            fallback.setdefault("training_eligibility", {})["live_weather"] = live_weather_training_gate()
+            fallback.setdefault("training_eligibility", {})["live_ride_ops"] = live_ride_ops_training_gate()
+            fallback.setdefault("training_eligibility", {})["live_guest_flow"] = live_guest_flow_training_gate()
+            fallback.setdefault("training_eligibility", {})["live_staffing"] = live_staffing_training_gate()
+            fallback.setdefault("training_eligibility", {})["live_food_ops"] = live_food_ops_training_gate()
+            fallback.setdefault("training_eligibility", {})["live_operator_signal"] = live_operator_signal_training_gate()
+            _attach_live_weather_gate_to_payload(fallback)
         fallback["runtime_proof"]["timeout_tiers"] = tiers
         fallback["runtime_proof"]["receipt_upgrade_status"] = "pending"
         fallback["operator_response"]["next_step"] = "Bounded receiver payloads are available now; full-runtime refinement is tracked on the receipt."
-        stored = _store_run_receipt(fallback, message=message, mode=mode, kind="operator_command", upgrade_status="pending")
+        stored = _store_run_receipt(fallback, message=message, mode=mode, kind="operator_command", upgrade_status="pending", agent_ops_inline=False)
         receipt_id = stored.get("run_receipt", {}).get("id")
         if receipt_id:
             _schedule_operator_command_refinement(message, mode, execute, receipt_id)
@@ -12781,14 +14535,22 @@ async def _build_operator_payload_with_runtime(message: str, mode: str, execute:
     except Exception as error:
         _metric("operator_command_fallback")
         error_detail = str(error) or type(error).__name__
-        fallback = _lazy_operator_payload(message, mode, f"{reason}: {type(error).__name__}: {error_detail}")
+        fallback = _lazy_operator_payload(
+            message,
+            mode,
+            f"{reason}: {type(error).__name__}: {error_detail}",
+            sync_persist=_truthy_env("PARKPULSE_OPERATOR_FAST_SYNC_PERSIST", False),
+            sync_memory=_truthy_env("PARKPULSE_OPERATOR_FAST_SYNC_MONGO", False),
+            sync_analytics=_truthy_env("PARKPULSE_OPERATOR_FAST_SYNC_ANALYTICS", False),
+            fast_live_gates=operator_fast_live_gates,
+        )
         fallback["status"] = "bounded_fallback"
         fallback.setdefault("runtime_proof", {})["fallback_reason"] = error_detail
         fallback["runtime_proof"]["full_runtime"] = _full_runtime_status()
         fallback["runtime_proof"]["timeout_tiers"] = tiers
         fallback["runtime_proof"]["receipt_upgrade_status"] = "pending"
         fallback["operator_response"]["next_step"] = "Bounded receiver payloads were emitted because the full Gemini path was not available before the UI timeout."
-        stored = _store_run_receipt(fallback, message=message, mode=mode, kind="operator_command", upgrade_status="pending")
+        stored = _store_run_receipt(fallback, message=message, mode=mode, kind="operator_command", upgrade_status="pending", agent_ops_inline=False)
         receipt_id = stored.get("run_receipt", {}).get("id")
         if receipt_id:
             _schedule_operator_command_refinement(message, mode, execute, receipt_id)
@@ -12802,23 +14564,46 @@ async def _build_agent_run_payload_with_runtime(request_payload: dict[str, Any],
     tiers = _timeout_tiers()
     load_timeout = float(tiers["agent_run_full_load_seconds"])
     run_timeout = float(tiers["agent_run_seconds"])
-    if _parkpulse_app is not None and not _sync_full_response_enabled():
+
+    def fast_fallback(reason_text: str, fallback_reason: str, next_step: str) -> dict[str, Any]:
         _metric("agent_run_fallback")
-        fallback = _lazy_operator_payload(message, "auto", "fast_first_response: full runtime refinement scheduled outside the request path")
+        fallback = _lazy_operator_payload(
+            message,
+            "auto",
+            reason_text,
+            sync_persist=_truthy_env("PARKPULSE_AGENT_RUN_FAST_SYNC_PERSIST", False),
+            sync_memory=_truthy_env("PARKPULSE_AGENT_RUN_FAST_SYNC_MONGO", False),
+            sync_analytics=_truthy_env("PARKPULSE_AGENT_RUN_FAST_SYNC_ANALYTICS", False),
+            fast_live_gates=_truthy_env("PARKPULSE_AGENT_RUN_FAST_LIVE_GATES", False),
+        )
         fallback["status"] = "bounded_fallback"
         if scenario_key:
             fallback["scenario_key"] = scenario_key
             fallback.setdefault("run_telemetry", {})["requested_scenario_key"] = scenario_key
-        fallback.setdefault("runtime_proof", {})["fallback_reason"] = "Full runtime is loaded; running refinement outside the first response."
+        fallback.setdefault("runtime_proof", {})["fallback_reason"] = fallback_reason
         fallback["runtime_proof"]["full_runtime"] = _full_runtime_status()
         fallback["runtime_proof"]["timeout_tiers"] = tiers
         fallback["runtime_proof"]["receipt_upgrade_status"] = "pending"
-        fallback["operator_response"]["next_step"] = "Fast hybrid receiver payloads are available now; full-runtime refinement is tracked on the receipt."
-        stored = _store_run_receipt(fallback, message=message, mode=scenario_key or "agent_run", kind="agent_run", upgrade_status="pending")
+        fallback["operator_response"]["next_step"] = next_step
+        stored = _store_run_receipt(
+            fallback,
+            message=message,
+            mode=scenario_key or "agent_run",
+            kind="agent_run",
+            upgrade_status="pending",
+            agent_ops_inline=False,
+        )
         receipt_id = stored.get("run_receipt", {}).get("id")
         if receipt_id:
             _schedule_agent_run_refinement(request_payload, receipt_id, message=message, mode=scenario_key or "agent_run")
         return stored
+
+    if not _sync_full_response_enabled():
+        return fast_fallback(
+            "fast_first_response: full runtime refinement scheduled outside the request path",
+            "Synchronous full agent run is disabled for the first response.",
+            "Fast hybrid receiver payloads are available now; full-runtime refinement is tracked on the receipt.",
+        )
     try:
         module = await _get_full_module_for_first_response(load_timeout)
         request = _build_full_agent_run_request(module, fields)
@@ -12842,15 +14627,13 @@ async def _build_agent_run_payload_with_runtime(request_payload: dict[str, Any],
             return _store_run_receipt(payload, message=message, mode=scenario_key or "agent_run", kind="agent_run")
         return payload
     except Exception as error:
-        _metric("agent_run_fallback")
         error_detail = str(error) or type(error).__name__
-        fallback = _lazy_operator_payload(message, "auto", f"{reason}: {type(error).__name__}: {error_detail}")
-        fallback["status"] = "bounded_fallback"
-        if scenario_key:
-            fallback["scenario_key"] = scenario_key
-            fallback.setdefault("run_telemetry", {})["requested_scenario_key"] = scenario_key
-        fallback.setdefault("runtime_proof", {})["fallback_reason"] = error_detail
-        fallback["runtime_proof"]["full_runtime"] = _full_runtime_status()
+        stored = fast_fallback(
+            f"{reason}: {type(error).__name__}: {error_detail}",
+            error_detail,
+            "Fast hybrid receiver payloads were emitted because the full agent-run path did not finish before the API budget.",
+        )
+        fallback = stored
         fallback.setdefault("live_feed_evidence", {})["weather"] = live_weather_state_evidence()
         fallback.setdefault("live_feed_evidence", {})["ride_ops"] = live_ride_ops_state_evidence()
         fallback.setdefault("live_feed_evidence", {})["guest_flow"] = live_guest_flow_state_evidence()
@@ -12864,14 +14647,7 @@ async def _build_agent_run_payload_with_runtime(request_payload: dict[str, Any],
         fallback.setdefault("training_eligibility", {})["live_food_ops"] = live_food_ops_training_gate()
         fallback.setdefault("training_eligibility", {})["live_operator_signal"] = live_operator_signal_training_gate()
         _attach_live_weather_gate_to_payload(fallback)
-        fallback["runtime_proof"]["timeout_tiers"] = tiers
-        fallback["runtime_proof"]["receipt_upgrade_status"] = "pending"
-        fallback["operator_response"]["next_step"] = "Fast hybrid receiver payloads were emitted because the full agent-run path did not finish before the API budget."
-        stored = _store_run_receipt(fallback, message=message, mode=scenario_key or "agent_run", kind="agent_run", upgrade_status="pending")
-        receipt_id = stored.get("run_receipt", {}).get("id")
-        if receipt_id:
-            _schedule_agent_run_refinement(request_payload, receipt_id, message=message, mode=scenario_key or "agent_run")
-        return stored
+        return fallback
 
 
 def _schedule_operator_command_refinement(message: str, mode: str, execute: bool, receipt_id: str) -> None:
@@ -13329,11 +15105,12 @@ async def app(scope, receive, send):
         await send({"type": "http.response.body", "body": b""})
         return
 
-    if path in {"/", "/healthz", "/readyz"}:
+    if path in {"/", "/health", "/healthz", "/readyz"}:
         payload = (
             {
                 "service": "parkpulse-api",
                 "status": "ok",
+                "mode": "health_fast",
                 "entrypoint": "lazy-main",
                 "build_id": LAZY_ROUTER_BUILD_ID,
                 "uptime_ms": int((time.time() - _started_at) * 1000),
@@ -13341,7 +15118,7 @@ async def app(scope, receive, send):
                 "full_runtime": _full_runtime_status(),
                 "load_error": _load_error,
             }
-            if path in {"/", "/healthz"}
+            if path in {"/", "/health", "/healthz"}
             else (
                 await _cached_hot_endpoint("readyz", _hot_endpoint_ttls()["readyz"], _readiness_payload_bounded)
                 if _truthy_env("PARKPULSE_READYZ_DEEP", False)
@@ -13485,6 +15262,16 @@ async def app(scope, receive, send):
         await _send_json(send, 200, staff_training_policy_pack())
         return
 
+    if method == "GET" and path == "/api/park/staff-training/agent-context":
+        if not await _authorize_or_send(send, scope, "read_staff_training_analytics", "staff_training_agent_context", None, default_role="ops_team"):
+            return
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        scenario_id = (query.get("scenario_id") or query.get("scenarioId") or [None])[0]
+        trainee_name = (query.get("trainee_name") or query.get("traineeName") or [None])[0]
+        assignment_id = (query.get("assignment_id") or query.get("assignmentId") or [None])[0]
+        await _send_json(send, 200, retrieve_staff_training_context(scenario_id=scenario_id, trainee_name=trainee_name, assignment_id=assignment_id))
+        return
+
     if method == "GET" and path == "/api/park/staff-training/assignments":
         if not await _authorize_or_send(send, scope, "read_staff_training_analytics", "staff_training_assignments", None, default_role="ops_team"):
             return
@@ -13625,6 +15412,27 @@ async def app(scope, receive, send):
             await _send_json(send, 200, {"status": "error", "mode": "staff_roleplay_analytics", "readiness_issues": [str(error)[:240]]})
         return
 
+    if method == "POST" and path == "/api/park/guest-message-triage":
+        try:
+            request_payload = await _read_json_body(receive)
+            if not await _authorize_or_send(send, scope, "create_park_issue_ticket", "guest_message_triage", request_payload, default_role="onsite_worker"):
+                return
+            create_ticket_raw = request_payload.get("create_ticket") if "create_ticket" in request_payload else request_payload.get("createTicket")
+            await _send_json(
+                send,
+                200,
+                triage_guest_message(
+                    message=request_payload.get("message"),
+                    guest_name=request_payload.get("guest_name") or request_payload.get("guestName"),
+                    location=request_payload.get("location"),
+                    channel=request_payload.get("channel"),
+                    create_ticket=_truthy(None if create_ticket_raw is None else str(create_ticket_raw), True),
+                ),
+            )
+        except Exception as error:
+            await _send_json(send, 200, {"status": "error", "mode": "guest_message_triage", "readiness_issues": [str(error)[:240]]})
+        return
+
     if method == "POST" and path == "/api/park/product-learning/issue-ticket":
         try:
             request_payload = await _read_json_body(receive)
@@ -13642,6 +15450,10 @@ async def app(scope, receive, send):
                     reporter_role=request_payload.get("reporter_role") or request_payload.get("reporterRole"),
                     required_action=request_payload.get("required_action") or request_payload.get("requiredAction"),
                     assigned_team=request_payload.get("assigned_team") or request_payload.get("assignedTeam"),
+                    source_batch_id=request_payload.get("source_batch_id") or request_payload.get("sourceBatchId"),
+                    historical_window=request_payload.get("historical_window") or request_payload.get("historicalWindow"),
+                    observed_at=request_payload.get("observed_at") or request_payload.get("observedAt"),
+                    stable_key=request_payload.get("stable_key") or request_payload.get("stableKey"),
                 ),
             )
         except Exception as error:
@@ -13896,6 +15708,17 @@ async def app(scope, receive, send):
             await _send_json(send, 200, {"status": "error", "mode": "live_feed_health_and_review_contract", "readiness_issues": [str(error)[:240]]})
         return
 
+    if method == "GET" and path == "/api/park/live-feed-health/summary":
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        limit_raw = (query.get("limit") or [None])[0]
+        if not await _authorize_or_send(send, scope, "read_ops_evidence", "live_feed_health_summary", None, default_role="ops_team"):
+            return
+        try:
+            await _send_json(send, 200, await _live_feed_health_summary_payload(limit=int(limit_raw) if limit_raw else 120))
+        except Exception as error:
+            await _send_json(send, 200, {"status": "refreshing", "mode": "live_feed_health_summary_refreshing", "readiness_issues": [str(error)[:240]]})
+        return
+
     if method == "POST" and path == "/api/park/live-feeds/refresh-stale":
         request_payload = await _read_json_body(receive)
         if not await _authorize_or_send(send, scope, "run_live_outcome_cycle", "live_feed_refresh_supervisor", request_payload, default_role="ops_team"):
@@ -14068,6 +15891,11 @@ async def app(scope, receive, send):
         await _send_json(send, 200, agent_handshake_live_state_feed(request_payload))
         return
 
+    if method in {"GET", "POST"} and path == "/api/park/agent-handshake/memory-context":
+        request_payload = await _read_json_body(receive) if method == "POST" else {}
+        await _send_json(send, 200, agent_handshake_memory_context(request_payload))
+        return
+
     if method == "POST" and path == "/api/park/agent-handshake/consent-grant":
         request_payload = await _read_json_body(receive)
         await _send_json(send, 200, issue_agent_consent_grant(request_payload))
@@ -14122,6 +15950,8 @@ async def app(scope, receive, send):
         return
 
     if method == "GET" and path == "/api/park/agent-trust/status":
+        if not await _authorize_or_send(send, scope, "manage_agent_trust", "agent_trust_status", None, default_role="ml_ops_admin"):
+            return
         await _send_json(send, 200, {**agent_trust_registry_status(), "auth_boundary": _identity_readiness_payload()})
         return
 
@@ -14177,6 +16007,8 @@ async def app(scope, receive, send):
                 return
             if method == "POST" and agent_id and action == "certify":
                 request_payload = await _read_json_body(receive)
+                if not await _authorize_or_send(send, scope, "manage_agent_trust", "agent_onboarding_certification", request_payload, default_role="ml_ops_admin"):
+                    return
                 try:
                     await _send_json(send, 200, certify_agent_onboarding(agent_id, request_payload, park_state=await _fast_park_state_lite()))
                 except Exception:
@@ -15360,6 +17192,78 @@ async def app(scope, receive, send):
             )
         return
 
+    if method == "GET" and path == "/api/park/executive-day-brief":
+        try:
+            from agent_ops_ledger import build_operational_backlog, read_agent_ops_ledger
+            from executive_day_brief import build_executive_day_brief
+            from incident_analytics import build_incident_analytics
+            from park_audit_agent import build_audit_snapshot
+            from park_delivery import latest_dispatches
+            from park_signal_intake import latest_signals
+            from park_simulation import park_simulation
+
+            state = await park_simulation.get_state()
+
+            def build_brief_payload() -> dict[str, Any]:
+                audit = build_audit_snapshot(state)
+                signals = latest_signals(40)
+                dispatches = latest_dispatches(40)
+                backlog = apply_active_ops_checklist_guidance(build_operational_backlog(state))
+                ledger = read_agent_ops_ledger(limit=40)
+                incidents = build_incident_analytics(
+                    state=state,
+                    audit=audit,
+                    signals=signals,
+                    dispatches=dispatches,
+                    backlog=backlog,
+                    ledger=ledger,
+                )
+                return build_executive_day_brief(
+                    state=state,
+                    backlog=backlog,
+                    incidents=incidents,
+                    audit=audit,
+                    dispatches=dispatches,
+                    ledger=ledger,
+                )
+
+            await _send_json(
+                send,
+                200,
+                await asyncio.wait_for(
+                    asyncio.to_thread(build_brief_payload),
+                    timeout=max(1.0, _float_env("PARKPULSE_EXECUTIVE_DAY_BRIEF_TIMEOUT_SECONDS", 3.0)),
+                ),
+            )
+        except Exception as error:
+            await _send_json(
+                send,
+                200,
+                {
+                    "status": "unavailable",
+                    "mode": "executive_day_brief",
+                    "headline": "Executive day brief unavailable",
+                    "primaryIssue": {
+                        "title": "Executive day brief unavailable",
+                        "severity": "watch",
+                        "rootCause": "The backend could not synthesize the current day brief.",
+                        "businessImpact": str(error)[:240],
+                        "recommendedDecision": "Use incident analytics and backlog until the brief recovers.",
+                        "owner": "Operations lead",
+                        "decisionDeadlineMinutes": 15,
+                        "confidence": 0,
+                    },
+                    "daySummary": {"openedAt": "09:00", "currentTime": "--", "whatChanged": "Unavailable", "unresolvedRisk": str(error)[:240], "watchNext": "--"},
+                    "mitigations": {"attempted": [], "observedEffect": "Unavailable", "remainingGap": str(error)[:240]},
+                    "evidence": [],
+                    "evidenceRollup": [],
+                    "charts": {"pressureCurve": [], "driverBreakdown": [], "domainBreakdown": []},
+                    "priorityQueue": [],
+                    "operatingSignals": {},
+                },
+            )
+        return
+
     if method == "GET" and path == "/api/park/executive-experience-intelligence":
         try:
             if not await _authorize_or_send(send, scope, "read_executive_intelligence", "executive_experience_intelligence", None, default_role="ml_ops_admin"):
@@ -16507,6 +18411,9 @@ async def app(scope, receive, send):
     if path in {"/api/park/digital-twin-war-room", "/api/park/digital-twin-war-room/run", "/api/park/digital-twin-war-room/remediate"}:
         try:
             request_payload = await _read_json_body(receive) if method == "POST" else {}
+            capability = "run_live_outcome_cycle" if method == "POST" else "read_ops_evidence"
+            if not await _authorize_or_send(send, scope, capability, "digital_twin_war_room", request_payload if method == "POST" else None, default_role="ops_team"):
+                return
             from agent_ops_ledger import read_agent_ops_ledger, record_agent_ops_record
             from digital_twin_benchmark import attach_learning_comparison, generate_remediation_playbooks, list_benchmark_scenarios, run_digital_twin_benchmark, run_parkpulse_agent_benchmark
             from mongo_memory import record_agent_learning_document
@@ -17601,6 +19508,8 @@ async def app(scope, receive, send):
 
     if method == "POST" and path == "/api/park/causal-impact-demo":
         payload = await _read_json_body(receive)
+        if not await _authorize_or_send(send, scope, "run_live_outcome_cycle", "causal_impact_demo", payload, default_role="ops_team"):
+            return
         try:
             from park_simulation import park_simulation
 
@@ -17617,12 +19526,18 @@ async def app(scope, receive, send):
     if method == "POST" and path == "/api/park/tick":
         global _heartbeat_controller_last_action_at
         payload = await _read_json_body(receive)
+        if not await _authorize_or_send(send, scope, "run_live_outcome_cycle", "park_tick", payload, default_role="ops_team"):
+            return
         try:
             minutes = max(1, min(30, int(payload.get("minutes") or 1)))
             controller_enabled = str(payload.get("controller", "true")).strip().lower() not in {"0", "false", "no", "off"}
             accelerated_controller = str(payload.get("accelerated_controller", payload.get("acceleratedController", "false"))).strip().lower() in {"1", "true", "yes", "on"}
             from park_simulation import park_simulation
 
+            state = await park_simulation.get_state()
+            if not _park_is_open_to_guests(state):
+                await _send_json(send, 200, _park_closed_tick_response(state, minutes))
+                return
             for _ in range(minutes):
                 await park_simulation.step()
             controller_result = None
@@ -17649,6 +19564,8 @@ async def app(scope, receive, send):
 
     if method == "POST" and path == "/api/park/time":
         payload = await _read_json_body(receive)
+        if not await _authorize_or_send(send, scope, "run_live_outcome_cycle", "park_time", payload, default_role="ops_team"):
+            return
         try:
             from park_simulation import park_simulation
 
@@ -17849,6 +19766,37 @@ async def app(scope, receive, send):
         await _send_json(send, 200 if result.get("status") == "revised" else 400, result)
         return
 
+    if method == "POST" and path == "/api/park/experience-studio/design-iteration":
+        payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "use_experience_studio", "experience_studio_design_iteration", payload):
+            return
+        result = revise_experience_studio_design(payload)
+        await _send_json(send, 200 if result.get("status") == "revised" else 400, result)
+        return
+
+    if method == "POST" and path == "/api/park/experience-studio/visual-assets":
+        payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "use_experience_studio", "experience_studio_visual_assets", payload):
+            return
+        result = await asyncio.to_thread(generate_experience_studio_visual_assets, payload)
+        await _send_json(send, 200 if result.get("status") != "blocked" else 400, result)
+        return
+
+    if method == "POST" and path == "/api/park/experience-studio/event-team-pdf":
+        payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "use_experience_studio", "experience_studio_event_team_pdf", payload):
+            return
+        try:
+            result = await asyncio.to_thread(generate_experience_studio_event_team_pdf, payload)
+        except Exception as error:
+            result = {
+                "status": "failed",
+                "mode": "experience_studio_event_team_pdf",
+                "message": f"Event-team PDF generation failed: {str(error)[:240]}",
+            }
+        await _send_json(send, 200, result)
+        return
+
     if method == "GET" and path == "/api/park/experience-studio/layer-contract":
         if not await _authorize_experience_studio_or_send(send, scope, "read_experience_studio", "experience_studio_layer_contract", None):
             return
@@ -17870,6 +19818,14 @@ async def app(scope, receive, send):
         except (TypeError, ValueError):
             limit = 20
         await _send_json(send, 200, await asyncio.to_thread(list_experience_studio_memory, limit=limit))
+        return
+
+    if method == "POST" and path == "/api/park/experience-studio/memory/synthetic-inject":
+        payload = await _read_json_body(receive)
+        if not await _authorize_experience_studio_or_send(send, scope, "review_experience_studio", "experience_studio_synthetic_memory_inject", payload):
+            return
+        result = await asyncio.to_thread(inject_experience_studio_synthetic_memory, payload)
+        await _send_json(send, 200 if result.get("status") == "injected" else 400, result)
         return
 
     if method == "GET" and path == "/api/park/experience-studio/learning-rules":
@@ -18015,6 +19971,8 @@ async def app(scope, receive, send):
             payload = json.loads(body.decode("utf-8") or "{}")
         except json.JSONDecodeError:
             payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
         message = str(payload.get("message") or payload.get("prompt") or "Production reliability QA review for ParkPulse.").strip()
         result = await _qa_role_payload(message, "qa", route_agent_role(message, "qa"))
         await _send_json(send, 200, _store_run_receipt(result, message=message, mode="qa", kind="reliability_qa"))
@@ -18134,6 +20092,59 @@ async def app(scope, receive, send):
         query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
         force_refresh = str((query.get("refresh") or [""])[0]).strip().lower() in {"1", "true", "yes", "on"}
         await _send_json(send, 200, monitor_evidence_storage_status(force_refresh=force_refresh))
+        return
+
+    if method == "POST" and path == "/api/park/monitor-trace-tickets/load":
+        payload = await _read_json_body(receive)
+        case_id = str(payload.get("case_id") or payload.get("caseId") or "").strip() or None
+        try:
+            limit = int(payload.get("limit") or 40)
+        except (TypeError, ValueError):
+            limit = 40
+        force_refresh = str(payload.get("refresh", "true")).strip().lower() not in {"0", "false", "no", "off"}
+        await _send_json(send, 200, await _load_monitor_trace_tickets(case_id=case_id, limit=limit, force_refresh=force_refresh))
+        return
+
+    if method == "GET" and path == "/api/park/monitor-trace-tickets":
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        search_query = (query.get("q") or query.get("query") or [""])[0].strip()
+        case_id = (query.get("case_id") or query.get("caseId") or [""])[0].strip() or None
+        try:
+            limit = int((query.get("limit") or ["20"])[0])
+        except ValueError:
+            limit = 20
+        try:
+            from mongo_memory import get_trace_audit_tickets
+
+            await _send_json(send, 200, get_trace_audit_tickets(query=search_query, case_id=case_id, limit=limit))
+        except Exception as error:
+            await _send_json(
+                send,
+                200,
+                {
+                    "status": "unavailable",
+                    "mode": "trace_audit_ticket_retrieval",
+                    "tickets": [],
+                    "count": 0,
+                    "persistence": {"primary": "unavailable", "connected": False, "reason": str(error)[:180]},
+                },
+            )
+        return
+
+    if method == "POST" and path == "/api/park/monitor-audit-agent":
+        request_payload = await _read_json_body(receive)
+        await _send_json(send, 200, await _monitor_audit_agent_response(request_payload))
+        return
+
+    if method == "GET" and path == "/api/park/monitor-audit-agent/session":
+        query = parse_qs((scope.get("query_string") or b"").decode("utf-8", errors="replace"))
+        case_id = (query.get("case_id") or query.get("caseId") or [""])[0].strip() or None
+        session_id = (query.get("session_id") or query.get("sessionId") or [""])[0].strip() or None
+        try:
+            limit = int((query.get("limit") or ["20"])[0])
+        except ValueError:
+            limit = 20
+        await _send_json(send, 200, _monitor_audit_get_durable_session(case_id=case_id, session_id=session_id, limit=limit))
         return
 
     if method == "GET" and path.startswith("/api/park/cases/") and path.endswith("/brief"):

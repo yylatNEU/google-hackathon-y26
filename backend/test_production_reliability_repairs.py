@@ -137,6 +137,47 @@ def test_lazy_operator_fallback_receipt_has_observability_and_idempotency(monkey
         assert dispatch["incidentFingerprint"] == payload["run_receipt"]["incident_fingerprint"]
 
 
+def test_loaded_operator_fast_response_defers_deep_live_gates(monkeypatch, tmp_path):
+    monkeypatch.setenv("PARKPULSE_AGENT_OPS_LEDGER", str(tmp_path / "agent-ops.jsonl"))
+    monkeypatch.delenv("PARKPULSE_OPERATOR_FAST_LIVE_GATES", raising=False)
+    monkeypatch.setattr(main, "_parkpulse_app", object())
+    monkeypatch.setattr(main, "_parkpulse_module", object())
+    monkeypatch.setattr(main, "_schedule_operator_command_refinement", lambda *_args, **_kwargs: None)
+
+    def fail_live_gate(*_args, **_kwargs):
+        raise AssertionError("deep live gate should be deferred on operator fast response")
+
+    for name in (
+        "live_weather_policy_gate",
+        "live_ride_ops_policy_gate",
+        "live_guest_flow_policy_gate",
+        "live_staffing_policy_gate",
+        "live_food_ops_policy_gate",
+        "live_operator_signal_policy_gate",
+        "live_weather_training_gate",
+        "live_ride_ops_training_gate",
+        "live_guest_flow_training_gate",
+        "live_staffing_training_gate",
+        "live_food_ops_training_gate",
+        "live_operator_signal_training_gate",
+    ):
+        monkeypatch.setattr(main, name, fail_live_gate)
+
+    payload = asyncio.run(
+        main._build_operator_payload_with_runtime(
+            "Food court is down, redirect mobile orders and protect staff breaks.",
+            "auto",
+            True,
+            "test",
+        )
+    )
+
+    assert payload["status"] == "bounded_fallback"
+    assert payload["run_receipt"]["available"] is True
+    assert payload["agent_ops_ledger"]["status"] == "deferred"
+    assert payload["run_telemetry"]["governance"]["live_weather_gate"]["gate_status"] == "deferred_hot_path"
+
+
 def test_readyz_reports_degraded_dependencies():
     response = main._readiness_payload()
 

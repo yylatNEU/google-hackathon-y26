@@ -273,15 +273,16 @@ def _run_import_profile(module_name: str = "parkpulse_api") -> dict[str, Any]:
     started_ms = _epoch_ms()
     backend_dir = os.path.dirname(os.path.abspath(__file__))
     env = dict(os.environ)
+    env.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = backend_dir if not existing_pythonpath else f"{backend_dir}{os.pathsep}{existing_pythonpath}"
     try:
         result = subprocess.run(
             [sys.executable, "-X", "importtime", "-c", f"import {module_name}"],
-            cwd=backend_dir,
             env=env,
             text=True,
             capture_output=True,
+            close_fds=False,
             timeout=_IMPORT_PROFILE_TIMEOUT_SECONDS,
             check=False,
         )

@@ -6,6 +6,7 @@ os.environ.setdefault("ENABLE_BIGQUERY_ANALYTICS", "false")
 
 def test_cache_accuracy_replay_exercises_cache_modes(monkeypatch, tmp_path):
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
     monkeypatch.setenv("PARKPULSE_RUNTIME_DIR", str(tmp_path))
 
     import cache_accuracy_replay
@@ -40,6 +41,7 @@ def test_cache_accuracy_replay_exercises_cache_modes(monkeypatch, tmp_path):
 
 def test_autodream_run_is_retired_without_cache_replay(monkeypatch, tmp_path):
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
     monkeypatch.setenv("PARKPULSE_RUNTIME_DIR", str(tmp_path))
 
     import mongo_memory
@@ -60,6 +62,7 @@ def test_autodream_run_is_retired_without_cache_replay(monkeypatch, tmp_path):
 
 def test_autodream_promotion_is_retired(monkeypatch, tmp_path):
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
     monkeypatch.setenv("PARKPULSE_RUNTIME_DIR", str(tmp_path))
 
     import mongo_memory
@@ -83,6 +86,7 @@ def test_autodream_promotion_is_retired(monkeypatch, tmp_path):
 
 def test_autodream_review_and_status_are_retired(monkeypatch, tmp_path):
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
     monkeypatch.setenv("PARKPULSE_RUNTIME_DIR", str(tmp_path))
 
     import mongo_memory
@@ -104,6 +108,7 @@ def test_autodream_review_and_status_are_retired(monkeypatch, tmp_path):
 
 def test_retired_autodream_promotions_do_not_enter_live_context(monkeypatch, tmp_path):
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
     monkeypatch.setenv("PARKPULSE_RUNTIME_DIR", str(tmp_path))
 
     import mongo_memory

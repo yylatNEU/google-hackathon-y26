@@ -67,6 +67,21 @@ If `MONGODB_URI` is missing or unreachable, the backend stays demo-safe and repo
 - `MONGODB_MIN_USEFUL_EVAL_SCORE=75`: marks high-scoring decisions as useful. The gate also keeps selected actions, retrieval-grounded decisions, operator actions, and policy/safety review cases.
 - Repeated identical decisions use a deterministic document id and are upserted instead of inserted again.
 
-## Optional Atlas Vector Search
+## Atlas Vector Search
 
-Create a vector search index named `playbook_vector_index` on `playbooks.embedding` with 64 dimensions and cosine similarity. If the index is unavailable, retrieval falls back to MongoDB text search or local keyword similarity.
+Production semantic memory uses provider embeddings when `PARKPULSE_MONGO_MODEL_EMBEDDINGS=true`.
+Create Atlas Vector Search indexes on `modelEmbedding` with 256 dimensions and cosine similarity:
+
+- `playbooks`: `playbook_vector_index`
+- `incidents`: `playbook_vector_index`
+- `agent_learnings`: `agent_learnings_vector`
+
+The expected production retrieval method is `mongodb_vector_search_voyage`. If an index is unavailable, mismatched, or not queryable, retrieval falls back to MongoDB text search or local keyword similarity and the copilot reports degraded semantic memory.
+
+Use the preflight script to verify or repair the setup:
+
+```bash
+PARKPULSE_MONGO_MODEL_EMBEDDINGS=true \
+PARKPULSE_COPILOT_SEMANTIC_MEMORY=true \
+scripts/preflight_mongodb_model_api.py --project crypto-song-496607-d7 --create-indexes --backfill
+```

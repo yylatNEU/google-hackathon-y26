@@ -240,6 +240,17 @@ def chunks(items: list[str], size: int) -> Iterable[list[str]]:
         yield items[index : index + safe_size]
 
 
+def backend_coverage_omit_patterns() -> str:
+    return ",".join(
+        [
+            f"{BACKEND_DIR}/venv/*",
+            f"{BACKEND_DIR}/__pycache__/*",
+            f"{BACKEND_DIR}/db_backups/*",
+            *[f"{BACKEND_DIR}/{name}" for name in BACKEND_COVERAGE_OMITS],
+        ]
+    )
+
+
 def backend_coverage(threshold: float, timeout_seconds: int) -> CoverageResult:
     started = time.monotonic()
     test_files = discover_backend_tests()
@@ -289,6 +300,7 @@ def backend_coverage(threshold: float, timeout_seconds: int) -> CoverageResult:
     run_results: list[CoverageResult] = []
     chunk_commands: list[list[str]] = []
     chunk_results: list[dict] = []
+    coverage_omit = backend_coverage_omit_patterns()
     coverage_base = [
         python,
         "-m",
@@ -298,14 +310,7 @@ def backend_coverage(threshold: float, timeout_seconds: int) -> CoverageResult:
         "--source",
         str(BACKEND_DIR),
         "--omit",
-        ",".join(
-            [
-                f"{BACKEND_DIR}/venv/*",
-                f"{BACKEND_DIR}/__pycache__/*",
-                f"{BACKEND_DIR}/db_backups/*",
-                *[f"{BACKEND_DIR}/{name}" for name in BACKEND_COVERAGE_OMITS],
-            ]
-        ),
+        coverage_omit,
         "-m",
         "pytest",
         "-q",
@@ -367,7 +372,7 @@ def backend_coverage(threshold: float, timeout_seconds: int) -> CoverageResult:
 
     json_result = run_command(
         "Backend coverage JSON",
-        [python, "-m", "coverage", "json", "-o", str(json_path)],
+        [python, "-m", "coverage", "json", "--omit", coverage_omit, "-o", str(json_path)],
         REPO_ROOT,
         timeout_seconds=max(60, timeout_seconds),
         threshold=threshold,

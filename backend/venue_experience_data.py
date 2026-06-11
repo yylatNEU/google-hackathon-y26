@@ -73,7 +73,7 @@ def profile_intelligence_contract() -> dict[str, Any]:
             },
             "experienceRules": {
                 "requiredForRealVenueReady": False,
-                "recommendedFields": ["rainyDayAnchors", "kidFriendlyAnchors", "lowSensoryAnchors", "vipRouteAnchors", "noGoPairings"],
+                "recommendedFields": ["rainyDayAnchors", "kidFriendlyAnchors", "lowSensoryAnchors", "vipRouteAnchors", "routePatterns", "noGoPairings"],
             },
             "brandBible": {
                 "requiredForRealVenueReady": False,
@@ -938,12 +938,143 @@ def _experience_rules(export: dict[str, Any], zones: dict[str, dict[str, Any]], 
         for name, item in details.items()
         if _text(item.get("kind")) in {"show", "family_service", "quiet_or_cooling", "restrooms", "guest_services"} or "family" in _text(item.get("familyFit")).lower()
     ]
+    sheltered_zone_ids = [zone["id"] for zone in zones.values() if zone.get("indoorOrSheltered")]
+    sheltered_stops = [name for name, item in details.items() if item.get("zoneId") in sheltered_zone_ids or item.get("zone_id") in sheltered_zone_ids][:8]
+    food_stops = [name for name, item in details.items() if _text(item.get("kind")) == "food"][:6]
+    photo_stops = [name for name, item in details.items() if _text(item.get("kind")) in {"photo_spots", "attraction", "show"}][:6]
+    quiet_stops = [name for name, item in details.items() if _text(item.get("kind")) in {"quiet_or_cooling", "family_service", "guest_services", "show"}][:6]
+    all_names = list(details.keys())
+
+    def stops(*groups: list[str], fallback: list[str] | None = None) -> list[str]:
+        names: list[str] = []
+        for group in groups:
+            names.extend(group)
+        names.extend(fallback or all_names)
+        return list(dict.fromkeys([name for name in names if name]))[:5]
+
+    route_patterns = {
+        "festival_plan": {
+            "recommendedArc": ["festival month invite", "landmark photo ritual", "lantern discovery", "food or craft pause", "show or finale close"],
+            "preferredStops": stops(photo_stops, food_stops, quiet_stops),
+            "mustInclude": ["cultural review gate", "optional participation mechanic", "current schedule caveat", "no guaranteed reward"],
+            "avoidClaims": ["cultural claims without review", "guaranteed prize", "always-on show or menu availability"],
+        },
+        "seasonal_overlay": {
+            "recommendedArc": ["seasonal arrival signal", "overlay discovery", "photo or decor pause", "flexible activity choice", "seasonal close"],
+            "preferredStops": stops(photo_stops, quiet_stops, food_stops),
+            "mustInclude": ["temporary-install review", "decor placement approval", "weather alternate", "current dates caveat"],
+            "avoidClaims": ["permanent decor", "all-day activation guarantee", "unapproved character or IP references"],
+        },
+        "food_festival": {
+            "recommendedArc": ["taste invitation", "first sample choice", "seated reset", "craft or retail pairing", "flavor finale"],
+            "preferredStops": stops(food_stops, quiet_stops),
+            "mustInclude": ["menu-owner review", "allergy handoff language", "seating caveat", "non-purchase participation option"],
+            "avoidClaims": ["allergen-free assurance", "guaranteed sample availability", "dietary or medical advice"],
+        },
+        "photo_moment_route": {
+            "recommendedArc": ["photo invite", "landmark shot", "scenic transition", "group photo pause", "shareable close"],
+            "preferredStops": stops(photo_stops, quiet_stops),
+            "mustInclude": ["alternate no-photo participation", "accessible viewing check", "crowd-safe pause point", "privacy-respectful language"],
+            "avoidClaims": ["professional photo guarantee", "exclusive photo access", "blocking path for photos"],
+        },
+        "accessibility_family_day": {
+            "recommendedArc": ["plain arrival", "step-free choice", "rest point", "flexible activity", "supported close"],
+            "preferredStops": stops(quiet_stops, food_stops),
+            "mustInclude": ["step-free verification", "restroom or family-room cue", "permission to pause", "staff handoff caveat"],
+            "avoidClaims": ["ADA compliance claim", "equipment availability guarantee", "medical or diagnosis-specific advice"],
+        },
+        "teen_night_out": {
+            "recommendedArc": ["meet-up signal", "photo beat", "food or hangout choice", "thrill or show option", "regroup close"],
+            "preferredStops": stops(photo_stops, food_stops, quiet_stops),
+            "mustInclude": ["caregiver-friendly regroup point", "well-lit close", "current-options caveat", "not childish tone"],
+            "avoidClaims": ["unsupervised safety guarantee", "exclusive teen access", "pressure to ride or purchase"],
+        },
+        "first_time_visitor": {
+            "recommendedArc": ["arrival confidence", "orientation landmark", "first signature choice", "comfort reset", "next-step close"],
+            "preferredStops": stops(photo_stops, food_stops, quiet_stops),
+            "mustInclude": ["map/app orientation cue", "skip-or-switch language", "restroom or support cue", "next best option"],
+            "avoidClaims": ["must-do route", "complete park guarantee", "live wait-time promise"],
+        },
+        "date_night": {
+            "recommendedArc": ["warm evening welcome", "scenic pause", "food or show beat", "quiet choice", "photo close"],
+            "preferredStops": stops(photo_stops, food_stops, quiet_stops),
+            "mustInclude": ["relaxed pacing", "quiet bypass option", "tasteful photo cue", "current food/show caveat"],
+            "avoidClaims": ["romantic guarantee", "priority seating", "private or exclusive access"],
+        },
+        "education_field_trip": {
+            "recommendedArc": ["group arrival", "observation prompt", "learning stop", "lunch or reset", "reflection close"],
+            "preferredStops": stops(kid_friendly, food_stops, quiet_stops),
+            "mustInclude": ["chaperone cue", "headcount pause", "learning prompt", "school-owner review"],
+            "avoidClaims": ["curriculum certification", "student supervision guarantee", "unsafe crowd-control instruction"],
+        },
+        "post_incident_recovery_copy": {
+            "recommendedArc": ["acknowledge concern", "orient to support", "offer current alternate", "staff phrase", "follow-up close"],
+            "preferredStops": stops(quiet_stops, food_stops),
+            "mustInclude": ["empathetic acknowledgement", "current source handoff", "no fault speculation", "owner-approved escalation path"],
+            "avoidClaims": ["incident cause speculation", "compensation promise", "resolved without live confirmation"],
+        },
+        "retail_merch_quest": {
+            "recommendedArc": ["quest invite", "display clue", "shop or story beat", "non-purchase option", "collectible close"],
+            "preferredStops": stops(photo_stops, food_stops, quiet_stops),
+            "mustInclude": ["non-purchase path", "fulfillment review", "display placement approval", "caregiver opt-out"],
+            "avoidClaims": ["purchase requirement", "guaranteed item availability", "limited-edition claim without retail approval"],
+        },
+        "scavenger_hunt": {
+            "recommendedArc": ["map pickup", "visual clue", "landmark solve", "validation pause", "final reveal"],
+            "preferredStops": stops(halloween_locations, kid_friendly, food_stops),
+            "mustInclude": ["visible clue object", "skip option", "non-purchase validation", "path-safe pause"],
+            "avoidClaims": ["guaranteed prize", "blocking paths", "requiring staff to validate every clue"],
+        },
+        "attraction_copy": {
+            "recommendedArc": ["expectation set", "signature detail", "access and comfort cue", "nearby pairing", "current-options handoff"],
+            "preferredStops": stops(photo_stops, quiet_stops, food_stops),
+            "mustInclude": ["height or eligibility review", "accessibility review", "nearby lower-pressure alternate", "current operating caveat"],
+            "avoidClaims": ["no wait", "always open", "safe for every guest", "medical suitability"],
+        },
+        "safety_signage": {
+            "recommendedArc": ["plain instruction", "reason cue", "location context", "staff-support phrase", "app or follow-up reminder"],
+            "preferredStops": stops(quiet_stops, food_stops),
+            "mustInclude": ["one action per sign", "plain language", "readability check", "safety-owner approval"],
+            "avoidClaims": ["new rule without source", "ambiguous direction", "operational instruction beyond approved safety copy"],
+        },
+        "rainy_day": {
+            "recommendedArc": ["dry start", "choice pause", "seated reset", "food or restroom option", "covered close"],
+            "preferredStops": stops(sheltered_stops, food_stops, quiet_stops),
+            "mustInclude": ["one seated reset", "one app-confirmed current-options cue", "one explicit opt-out"],
+            "avoidClaims": ["fully covered route unless every path segment is certified covered", "weather guarantee", "staff availability guarantee"],
+        },
+        "kid_quest": {
+            "recommendedArc": ["mission start", "visual clue", "low-pressure discovery", "caregiver reset", "celebration"],
+            "preferredStops": stops(kid_friendly, photo_stops, food_stops),
+            "mustInclude": ["caregiver bypass language", "non-purchase reward option", "visible clue object"],
+            "avoidClaims": ["guaranteed prize", "age suitability beyond approved attraction rules"],
+        },
+        "low_sensory": {
+            "recommendedArc": ["orient", "quiet move", "reset", "optional delight", "easy return"],
+            "preferredStops": stops(quiet_stops),
+            "mustInclude": ["audio/light expectations", "named bypass", "permission to stop"],
+            "avoidClaims": ["quiet guarantee", "medical or diagnosis-specific advice"],
+        },
+        "vip_tour": {
+            "recommendedArc": ["host welcome", "insider reveal", "signature moment", "relaxed pause", "keepsake close"],
+            "preferredStops": stops(photo_stops, quiet_stops, food_stops),
+            "mustInclude": ["availability caveat", "weather alternate", "host transition script"],
+            "avoidClaims": ["backstage access", "priority access guarantee", "staffing promise"],
+        },
+        "halloween_route": {
+            "recommendedArc": ["soft spooky invite", "glow clue", "creature-free mystery", "treat or photo pause", "lantern finale"],
+            "preferredStops": stops(halloween_locations, food_stops),
+            "mustInclude": ["family-safe scare level", "well-lit exit option", "no jump-scare wording"],
+            "avoidClaims": ["fear pressure", "dark route guarantee", "age-inappropriate threat language"],
+        },
+    }
     return {
         "eventReadyZones": event_ready_zones,
         "halloweenCandidateLocations": halloween_locations[:12],
         "kidFriendlyAnchors": kid_friendly[:12],
         "rainyDayAnchors": [zone["id"] for zone in zones.values() if zone.get("indoorOrSheltered")][:8],
         "vipRouteAnchors": [name for name, item in details.items() if _text(item.get("kind")) in {"attraction", "show", "photo_spots", "guest_services"}][:10],
+        "routePatterns": route_patterns,
         "noGoPairings": [
             {"rule": "Do not pair allergy dining copy with a guarantee of allergen-free food.", "severity": "critical"},
             {"rule": "Do not route low-sensory guests through high-sensory thrill zones without an alternate reset point.", "severity": "high"},

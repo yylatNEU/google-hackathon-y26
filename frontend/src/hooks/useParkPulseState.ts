@@ -7,10 +7,14 @@ import type { GuestFlow, ParkOps, ParkPath, ParkRide, ParkState, ParkZone } from
 type ApiRecord = Record<string, unknown>;
 
 const LIVE_PARK_POLL_MS = 5000;
+const ADVANCING_LIVE_PARK_POLL_MS = 30000;
 const OFFLINE_RETRY_MS = 15000;
 const STALE_RUNTIME_GRACE_MS = 30000;
 const TRANSIENT_FAILURE_LIMIT = 2;
 const PARK_STATE_REQUEST_TIMEOUT_MS = 5000;
+const DEFAULT_LIVE_TICK_MINUTES = 1;
+const MIN_LIVE_POLL_MS = 5000;
+const MAX_LIVE_POLL_MS = 120000;
 
 function asRecord(value: unknown): ApiRecord {
   return value && typeof value === "object" ? (value as ApiRecord) : {};
@@ -137,7 +141,21 @@ export function toParkPulseState(data: ApiRecord): ParkState {
   };
 }
 
-export function useParkPulseState() {
+type ParkPulseStateOptions = {
+  advanceLivePark?: boolean;
+  tickMinutes?: number;
+  pollMs?: number;
+  autoPoll?: boolean;
+};
+
+export function useParkPulseState(options: ParkPulseStateOptions = {}) {
+  const advanceLivePark = options.advanceLivePark === true;
+  const autoPoll = options.autoPoll !== false;
+  const tickMinutes = Math.max(1, Math.min(30, Math.round(options.tickMinutes ?? DEFAULT_LIVE_TICK_MINUTES)));
+  const livePollMs = Math.max(
+    MIN_LIVE_POLL_MS,
+    Math.min(MAX_LIVE_POLL_MS, Math.round(options.pollMs ?? (advanceLivePark ? ADVANCING_LIVE_PARK_POLL_MS : LIVE_PARK_POLL_MS))),
+  );
   const [parkState, setParkState] = useState<ParkState>(emptyParkState);
   const [isConnected, setIsConnected] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -157,15 +175,22 @@ export function useParkPulseState() {
     setConnectionError(null);
     lastSuccessfulRefreshRef.current = refreshedAt;
     consecutiveFailureRef.current = 0;
-    retryDelayRef.current = LIVE_PARK_POLL_MS;
-  }, []);
+    retryDelayRef.current = livePollMs;
+  }, [livePollMs]);
 
   const refreshParkState = useCallback(async () => {
     setIsRefreshing(true);
     try {
-      const res = await fetchParkPulseApi("/api/park/state-lite", { timeoutMs: PARK_STATE_REQUEST_TIMEOUT_MS });
+      const res = advanceLivePark
+        ? await fetchParkPulseApi("/api/park/tick", {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-parkpulse-role": "ops_team" },
+            body: JSON.stringify({ minutes: tickMinutes, controller: false }),
+            timeoutMs: PARK_STATE_REQUEST_TIMEOUT_MS,
+          })
+        : await fetchParkPulseApi("/api/park/state-lite", { timeoutMs: PARK_STATE_REQUEST_TIMEOUT_MS });
       const data = await res.json();
-      applyParkState(data);
+      applyParkState(asRecord(data).state ?? data);
       return data;
     } catch (error) {
       consecutiveFailureRef.current += 1;
@@ -181,13 +206,13 @@ export function useParkPulseState() {
       } else {
         setIsConnected(true);
         setConnectionError(null);
-        retryDelayRef.current = LIVE_PARK_POLL_MS;
+        retryDelayRef.current = livePollMs;
       }
       return null;
     } finally {
       setIsRefreshing(false);
     }
-  }, [applyParkState]);
+  }, [advanceLivePark, applyParkState, livePollMs, tickMinutes]);
 
   useEffect(() => {
     let cancelled = false;
@@ -195,6 +220,7 @@ export function useParkPulseState() {
 
     const poll = async () => {
       await refreshParkState();
+      if (!autoPoll) return;
       if (!cancelled) {
         timeoutId = window.setTimeout(poll, retryDelayRef.current);
       }
@@ -207,7 +233,7 @@ export function useParkPulseState() {
         window.clearTimeout(timeoutId);
       }
     };
-  }, [refreshParkState]);
+  }, [autoPoll, refreshParkState]);
 
   return {
     parkState,
@@ -215,7 +241,7 @@ export function useParkPulseState() {
     isRefreshing,
     lastUpdatedAt,
     liveTick,
-    livePollMs: isConnected ? LIVE_PARK_POLL_MS : OFFLINE_RETRY_MS,
+    livePollMs: isConnected ? livePollMs : OFFLINE_RETRY_MS,
     connectionError,
     refreshParkState,
     applyParkState,

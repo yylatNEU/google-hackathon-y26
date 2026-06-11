@@ -23,6 +23,7 @@ from live_feedback_loop import (
     ingest_live_feed_event,
     ingest_live_feed_events,
     live_feed_health,
+    live_feed_health_summary,
     live_feed_storage_status,
     normalize_live_feed_event,
     record_review_decision,
@@ -481,6 +482,53 @@ def test_full_runtime_live_feed_health_uses_short_ttl_cache(tmp_path, monkeypatc
     assert calls["count"] == 1
 
 
+def test_full_runtime_live_feed_health_summary_uses_fast_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_EVENT_LOG_PATH", str(tmp_path / "feeds.jsonl"))
+    monkeypatch.setenv("PARKPULSE_REVIEW_LEDGER_LOG_PATH", str(tmp_path / "reviews.jsonl"))
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_HEALTH_SUMMARY_CACHE_TTL_SECONDS", "30")
+
+    import parkpulse_api
+
+    calls = {"count": 0}
+
+    class FakeParkSimulation:
+        async def get_state_lite(self):
+            calls["count"] += 1
+            return {"weather": {"heatIndexF": 91, "stormRisk": 0.15}}
+
+    parkpulse_api._live_feed_health_cache.clear()
+    monkeypatch.setattr(parkpulse_api, "park_simulation", FakeParkSimulation())
+
+    first = asyncio.run(parkpulse_api.park_live_feed_health_summary(limit=120))
+    second = asyncio.run(parkpulse_api.park_live_feed_health_summary(limit=120))
+
+    assert first["mode"] == "live_feed_health_summary"
+    assert first["cache"]["status"] == "miss"
+    assert second["cache"]["status"] == "hit"
+    assert second["cache"]["source"] == "live_feed_health_summary"
+    assert calls["count"] == 1
+
+
+def test_live_feed_health_summary_is_compact_but_gateable(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARKPULSE_LIVE_FEED_EVENT_LOG_PATH", str(tmp_path / "feeds.jsonl"))
+    monkeypatch.setenv("PARKPULSE_REVIEW_LEDGER_LOG_PATH", str(tmp_path / "reviews.jsonl"))
+
+    summary = live_feed_health_summary(
+        {
+            "weather": {"heatIndexF": 91, "stormRisk": 0.15},
+            "guestFlow": {"zones": []},
+            "staffing": {},
+            "foodInventory": {},
+        }
+    )
+
+    assert summary["mode"] == "live_feed_health_summary"
+    assert summary["summary"]["required_feed_count"] == 6
+    assert "schema" not in summary
+    assert "storage" not in summary
+    assert len(summary["feeds"]) == 6
+
+
 def test_live_feed_orchestration_enriches_department_tool_proposals():
     import parkpulse_api
 
@@ -780,6 +828,8 @@ def test_actual_training_exports_live_feed_case_bank_reward_vectors(monkeypatch,
     assert row["take_rate"] == 1.0
     assert row["follow_through_rate"] == 0.95
     assert row["promotion_eligible"] is True
+    assert row["promotion_eval_eligible"] is True
+    assert row["training_partition"] == "operational_policy"
     assert row["executed_tools"] == ["pause_launch_promo", "shift_adjustment_recommendation"]
     assert row["reasoning_context"] == "storm_response|controlled_low_risk"
     assert row["risk_lift_label"] == "risk_lift_success"
@@ -789,6 +839,8 @@ def test_actual_training_exports_live_feed_case_bank_reward_vectors(monkeypatch,
     assert risk_row["policy_key"] == "live_feed_risk_lift_approve_lightning_delay"
     assert risk_row["reward"] == 91.0
     assert risk_row["reward_label"] == "risk_lift_success"
+    assert risk_row["promotion_eval_eligible"] is True
+    assert risk_row["training_partition"] == "operational_policy"
     assert risk_row["reasoning_context"] == "storm_response|risk_lift_success"
     assert {"risk_lift_success", "risk_controls_approved", "risk_lift_executed", "impact:applied"} <= set(risk_row["reasoning_feature_tags"])
     assert risk_row["reasoning_feature_source"] == "live_feed_case_bank_llm_trace"
@@ -1111,7 +1163,11 @@ def test_risk_lift_reward_is_separate_from_controlled_reward():
     assert branch_rewards["risk_lift"]["reward"] > 0
     assert branch_rewards["risk_lift"]["executed_count"] == 1
     assert branch_rewards["risk_lift"]["material_state_mutation"] is True
+    assert branch_rewards["hard_decision_activation"]["label"] == "hard_decision_lifted_success"
+    assert branch_rewards["hard_decision_activation"]["reward"] >= 0.7
     assert result["metrics"]["risk_escalation_effect_score"] > 0
+    assert result["metrics"]["hard_decision_required"] is True
+    assert result["hard_decision_activation_label"] == "hard_decision_lifted_success"
     assert branch_rewards["risk_lift"]["reward"] != branch_rewards["controlled_low_risk"]["reward"]
 
 
@@ -1174,7 +1230,10 @@ def test_risk_lift_regression_is_not_promoted_by_process_completion():
 
     assert result["risk_lift_label"] == "risk_lift_regression"
     assert result["risk_lift_reward"] <= 0.45
+    assert result["hard_decision_activation_label"] == "hard_decision_lifted_regression"
+    assert result["hard_decision_activation_reward"] <= 0.45
     assert result["branch_rewards"]["risk_lift"]["label"] == "risk_lift_regression"
+    assert result["branch_rewards"]["hard_decision_activation"]["label"] == "hard_decision_lifted_regression"
     assert "risk_lift_regression_detected" in result["promotion_blockers"]
 
 

@@ -10,6 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
+os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
+os.environ.setdefault("ENABLE_BIGQUERY_ANALYTICS", "false")
+os.environ.setdefault("PARKPULSE_ENABLE_OTEL_SPANS", "false")
+os.environ.setdefault("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
+os.environ.setdefault("PARKPULSE_COPILOT_SEMANTIC_MEMORY", "false")
+
 import main
 
 

@@ -1,12 +1,17 @@
 import asyncio
 import os
 import time
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 os.environ.setdefault("MONGODB_DISABLE_DRIVER_IMPORT", "1")
+os.environ.setdefault("ENABLE_BIGQUERY_ANALYTICS", "false")
+os.environ.setdefault("PARKPULSE_ENABLE_OTEL_SPANS", "false")
+os.environ.setdefault("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
+os.environ.setdefault("PARKPULSE_COPILOT_SEMANTIC_MEMORY", "false")
 
 import digital_twin_tools
 import bigquery_analytics
@@ -28,6 +33,9 @@ import simulation
 from park_simulation import ParkSimulation
 
 
+_CACHED_SAMPLE_STATE = None
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -41,11 +49,15 @@ def fallback_memory():
 
 
 def sample_state():
-    state = run(ParkSimulation().get_state())
-    state["guestFlow"]["zones"].append({"id": "packed", "name": "Packed Zone", "density": 105})
-    state["weather"]["stormRisk"] = 80
-    state["guestCare"] = {"openCases": 4}
-    state["maintenance"] = {"blockedAutomation": ["reopen"]}
+    global _CACHED_SAMPLE_STATE
+    if _CACHED_SAMPLE_STATE is None:
+        state = run(ParkSimulation().get_state())
+        state["guestFlow"]["zones"].append({"id": "packed", "name": "Packed Zone", "density": 105})
+        state["weather"]["stormRisk"] = 80
+        state["guestCare"] = {"openCases": 4}
+        state["maintenance"] = {"blockedAutomation": ["reopen"]}
+        _CACHED_SAMPLE_STATE = state
+    state = deepcopy(_CACHED_SAMPLE_STATE)
     return state
 
 
@@ -271,6 +283,7 @@ def test_gcp_bigquery_autodream_and_wrapper_tail_branches(monkeypatch, capsys):
 
 
 def test_autodream_benchmark_and_mongo_measurement_paths(monkeypatch, capsys):
+    monkeypatch.setenv("PARKPULSE_MONGO_MODEL_EMBEDDINGS", "false")
     state = sample_state()
     benchmark = park_autodream_benchmark.run_autodream_benchmark(state, scenario_key="ride_down", seeds=5)
     assert benchmark["status"] == "retired"

@@ -26,6 +26,7 @@ KNOWN_TRAINING_SCENARIOS = {
     "proactive_watchtower",
     "scan",
 }
+RISK_ESCALATION_QA_VALIDATION_MODES = {"disabled", "missing_controls", "pending_measurement", "impact_regression"}
 
 
 def actual_training_status(min_rows: int = MIN_ACTUAL_TRAINING_ROWS, run_gcp_training: bool | None = None, detail: str = "full") -> dict[str, Any]:
@@ -65,9 +66,14 @@ def actual_training_status(min_rows: int = MIN_ACTUAL_TRAINING_ROWS, run_gcp_tra
     )
     model = _train_contextual_bandit(rows)
     model_version = _model_version(source, model, rows)
-    fitness_curve = _fitness_curve(rows)
-    scenario_fitness = _scenario_balanced_fitness(rows)
-    promotion_gate = _model_promotion_gate(rows, model, fitness_curve, scenario_fitness, source, bq)
+    promotion_rows = _promotion_evaluation_rows(rows)
+    guardrail_validation = _guardrail_validation_summary(rows, promotion_rows)
+    fitness_curve = _fitness_curve(promotion_rows)
+    scenario_fitness = _scenario_balanced_fitness(promotion_rows)
+    promotion_gate = _model_promotion_gate(promotion_rows, model, fitness_curve, scenario_fitness, source, bq)
+    promotion_gate["training_rows"] = len(rows)
+    promotion_gate["promotion_evaluation_rows"] = len(promotion_rows)
+    promotion_gate["guardrail_validation"] = guardrail_validation
     promoted_slice_policy = _promoted_slice_policy_snapshot(model_version, model, promotion_gate, scenario_fitness, source, bq)
     reasoning_feature_audit = _reasoning_feature_audit_summary(reasoning_audits, rows, reasoning_export)
     causal_feature_audit = _causal_feature_audit_summary(causal_memories, rows, causal_export)
@@ -118,6 +124,13 @@ def actual_training_status(min_rows: int = MIN_ACTUAL_TRAINING_ROWS, run_gcp_tra
             "promotion_gate": promotion_gate,
             "fitness_curve": fitness_curve,
             "scenario_fitness": scenario_fitness,
+            "promotion_evaluation": {
+                "training_rows": len(rows),
+                "promotion_evaluation_rows": len(promotion_rows),
+                "excluded_guardrail_rows": guardrail_validation.get("promotion_excluded_count"),
+                "policy": guardrail_validation.get("policy"),
+            },
+            "guardrail_validation": guardrail_validation,
             "promoted_slice_policy": promoted_slice_policy,
             "promoted_slice_policy_log": promoted_slice_policy_log,
             "slice_rollback_ledger": rollback_ledger,
@@ -855,6 +868,9 @@ def _live_feed_case_bank_training_rows(limit: int | None = None) -> list[dict[st
         scenario_key = _case_bank_issue_scenario(case)
         risk_branch = _case_bank_risk_lift_branch(case)
         risk_tags = _case_bank_reasoning_tags(case, risk_branch)
+        validation_mode = str(risk_branch.get("validation_mode") or "normal")
+        risk_training_partition = "qa_guardrail" if validation_mode in RISK_ESCALATION_QA_VALIDATION_MODES else "operational_policy"
+        risk_promotion_eval_eligible = validation_mode not in RISK_ESCALATION_QA_VALIDATION_MODES
         reward_100 = round(reward * 100, 2)
         promotion_eligible = measurement.get("promotion_eligible") is True
         eligible_for_reward = measurement.get("eligible_for_reward") is True
@@ -889,7 +905,9 @@ def _live_feed_case_bank_training_rows(limit: int | None = None) -> list[dict[st
                 "reasoning_feature_source": "live_feed_case_bank_llm_trace",
                 "risk_lift_label": risk_branch.get("label"),
                 "risk_lift_reward": round(_float(risk_branch.get("reward")), 3),
-                "risk_escalation_validation_mode": risk_branch.get("validation_mode"),
+                "risk_escalation_validation_mode": validation_mode,
+                "training_partition": "operational_policy",
+                "promotion_eval_eligible": True,
                 "llm_used_for_reward_or_label": False,
                 "labels_or_reward_changed": False,
             }
@@ -914,6 +932,8 @@ def _live_feed_case_bank_training_rows(limit: int | None = None) -> list[dict[st
                     "original_risk_lift_reward": risk_branch.get("reward"),
                     "case_bank_outcome_id": case.get("outcome_id"),
                     "promotion_eligible": bool(risk_branch.get("label") == "risk_lift_success" and promotion_eligible),
+                    "promotion_eval_eligible": risk_promotion_eval_eligible,
+                    "training_partition": risk_training_partition,
                     "eligible_for_reward": eligible_for_reward,
                     "reward_label": risk_branch.get("label"),
                     "reasoning_context": f"{scenario_key}|{risk_branch.get('label')}",
@@ -928,7 +948,7 @@ def _live_feed_case_bank_training_rows(limit: int | None = None) -> list[dict[st
                     "risk_lift_impact_status": risk_branch.get("impact_status"),
                     "risk_lift_effect_score": risk_branch.get("effect_score"),
                     "risk_lift_material_state_mutation": risk_branch.get("material_state_mutation"),
-                    "risk_escalation_validation_mode": risk_branch.get("validation_mode"),
+                    "risk_escalation_validation_mode": validation_mode,
                     "risk_escalation_validation_fault": risk_branch.get("validation_fault"),
                     "llm_used_for_reward_or_label": False,
                     "labels_or_reward_changed": False,
@@ -1208,6 +1228,61 @@ def _scenario_curve(rows: list[dict[str, Any]], bucket_size: int = 5) -> dict[st
         "latest_average_reward": last,
         "delta": round((last or 0) - (first or 0), 2) if first is not None and last is not None else None,
         "latest_reward": round(rewards[-1], 2) if rewards else None,
+    }
+
+
+def _is_qa_guardrail_training_row(row: dict[str, Any]) -> bool:
+    if row.get("training_partition") == "qa_guardrail":
+        return True
+    if row.get("source") != "live_feed_case_bank_risk_lift_reward_vectors":
+        return False
+    validation_mode = str(row.get("risk_escalation_validation_mode") or "normal")
+    return validation_mode in RISK_ESCALATION_QA_VALIDATION_MODES
+
+
+def _promotion_evaluation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    evaluation_rows = []
+    for row in rows:
+        if row.get("promotion_eval_eligible") is False or _is_qa_guardrail_training_row(row):
+            continue
+        evaluation_rows.append(row)
+    return evaluation_rows
+
+
+def _guardrail_validation_summary(rows: list[dict[str, Any]], promotion_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    promotion_ids = {
+        str(row.get("row_id") or row.get("decision_id") or index)
+        for index, row in enumerate(promotion_rows or [])
+    }
+    guardrail_rows = [row for row in rows if _is_qa_guardrail_training_row(row)]
+    mode_counts: dict[str, int] = defaultdict(int)
+    label_counts: dict[str, int] = defaultdict(int)
+    scenario_counts: dict[str, int] = defaultdict(int)
+    excluded_count = 0
+    for index, row in enumerate(guardrail_rows):
+        row_id = str(row.get("row_id") or row.get("decision_id") or index)
+        mode = str(row.get("risk_escalation_validation_mode") or "normal")
+        label = str(row.get("risk_lift_label") or row.get("reward_label") or "unknown")
+        scenario = str(row.get("scenario_key") or "unknown")
+        mode_counts[mode] += 1
+        label_counts[label] += 1
+        scenario_counts[scenario] += 1
+        if row_id not in promotion_ids:
+            excluded_count += 1
+    blocked_or_held = sum(count for label, count in label_counts.items() if any(token in label for token in ("blocked", "hold", "gate_closed")))
+    return {
+        "status": "active" if guardrail_rows else "none",
+        "guardrail_case_count": len(guardrail_rows),
+        "promotion_excluded_count": excluded_count,
+        "validation_mode_counts": dict(sorted(mode_counts.items())),
+        "risk_lift_label_counts": dict(sorted(label_counts.items())),
+        "scenario_counts": dict(sorted(scenario_counts.items())),
+        "blocked_or_held_count": blocked_or_held,
+        "regression_count": sum(count for label, count in label_counts.items() if "regression" in label),
+        "pending_count": sum(count for label, count in label_counts.items() if "pending" in label),
+        "success_count": label_counts.get("risk_lift_success", 0),
+        "policy": "QA guardrail rows train the challenger and validate risk controls, but they are excluded from operational promotion curves.",
+        "boundary": "Promotion still uses observed reward rows only; this split prevents intentionally failed validation modes from being misread as live operational degradation.",
     }
 
 

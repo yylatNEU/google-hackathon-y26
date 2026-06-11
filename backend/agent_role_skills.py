@@ -480,13 +480,51 @@ def route_agent_role(message: str, mode: str = "auto") -> dict[str, Any]:
         "guest recommendation",
         "send route to phone",
         "where should my family go",
+        "family is asking",
+        "family asking",
+        "a family is asking",
+        "guest is asking",
+        "guest asking",
+        "with a wheelchair",
+        "wheelchair and a long wait",
+        "accessible route",
+        "accessibility route",
+    )
+    scan_terms = (
+        "scan",
+        "read",
+        "watch",
+        "monitor",
+        "observe",
+        "what is happening",
+        "what's happening",
+        "current situation",
+        "current park state",
+        "status right now",
+        "biggest park risk right now",
+    )
+    operational_action_terms = (
+        "what should operations do",
+        "what should we do",
+        "queue is too long",
+        "line is too long",
+        "long queue",
+        "long line",
+        "coaster queue",
+        "near the parade",
+        "families are stuck",
+        "guests are stuck",
     )
     if explicit in {"scan", "react", "proact", "qa", "customer"}:
         selected = explicit
     elif any(term in text for term in qa_terms):
         selected = "qa"
-    elif any(term in text for term in customer_terms) and not any(term in text for term in direct_action_terms):
+    elif any(term in text for term in customer_terms):
         selected = "customer"
+    elif any(term in text for term in scan_terms) and not any(term in text for term in ("prevent", "before", "reroute", "dispatch", "send", "move", "fix")):
+        selected = "scan"
+    elif any(term in text for term in operational_action_terms):
+        selected = "react"
     elif any(term in text for term in ("proact", "prevent", "early", "before", "learn", "take rate", "future")):
         selected = "proact"
     elif any(term in text for term in weak_signal_terms) and not any(term in text for term in direct_action_terms):

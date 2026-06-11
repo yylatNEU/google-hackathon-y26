@@ -56,7 +56,12 @@ public class AgentTrustController {
     }
 
     @PostMapping(value = "/api/park/agent-onboarding/{agentId}/certify", produces = MediaType.APPLICATION_JSON_VALUE)
-    public Map<String, Object> certifyAgentOnboarding(@PathVariable String agentId, @RequestBody(required = false) Map<String, Object> body) {
+    public Map<String, Object> certifyAgentOnboarding(
+        HttpServletRequest request,
+        @PathVariable String agentId,
+        @RequestBody(required = false) Map<String, Object> body
+    ) {
+        roleAuthService.requireCapability(request, "manage_agent_trust");
         try {
             return agentCertificationService.certify(agentId, body == null ? Map.of() : body);
         } catch (NoSuchElementException error) {

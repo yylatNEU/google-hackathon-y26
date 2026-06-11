@@ -56,6 +56,14 @@ def _ensure_mongo_driver() -> bool:
     return True
 
 
+def _count_by(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(field) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
 COLLECTION_PURPOSES = {
     "park_state": "Current ride, restaurant, staff, crowd, weather, and energy state.",
     "rides": "Ride metadata, capacity, downtime status, queue pressure, and staffing needs.",
@@ -73,6 +81,7 @@ COLLECTION_PURPOSES = {
     "operator_briefs": "Digest-based operator summaries that preserve the judgement call, source mix, and ticket links for later review.",
     "outcome_events": "Observed guest, worker, equipment, and park-state outcomes after agent actions are emitted.",
     "agent_learnings": "Operational lessons extracted from outcomes and reused by future agent decisions.",
+    "timelapse_model_examples": "Offline timelapse LLM ranking examples with outcome-aligned labels and reward scores.",
     "dream_runs": "Archived retired AutoDream replay batches.",
     "dream_learnings": "Archived retired AutoDream counterfactual lessons.",
     "autodream_benchmarks": "Archived retired AutoDream paired replay benchmark records.",
@@ -90,6 +99,10 @@ COLLECTION_PURPOSES = {
     "controlled_training_evals": "Latest controlled training eval reports used by resilience gates across Cloud Run instances.",
     "agent_handshake_sessions": "Persisted agent-to-agent handshake sessions, permissions, intent, proposals, commitments, and session lifecycle.",
     "agent_handshake_policy_events": "Append-style policy enforcement decisions for delegated client-agent actions.",
+    "trace_audit_sessions": "Durable monitor trace-audit conversations grouped by case, trace, receipt, and operator session.",
+    "trace_audit_messages": "Append-style user and audit-agent turns with structured answers, runtime, confidence, citations, and packet hashes.",
+    "trace_audit_evidence_packets": "Immutable evidence packets sent to the trace audit LLM, keyed by stable packet hash for replay.",
+    "trace_audit_tickets": "Retrieval-ready case/trace tickets materialized from monitor evidence for audit search, triage, and analysis.",
     "executive_guest_feedback_monthly": "Curated aggregate monthly guest feedback for executive experience intelligence.",
     "executive_event_sentiment": "Curated before/after event sentiment windows for executive experience intelligence.",
     "executive_refund_reason_rollup": "Curated aggregate refund and recovery reason rollups for executive experience intelligence.",
@@ -100,9 +113,12 @@ COLLECTION_PURPOSES = {
     "executive_brief_artifacts": "Generated executive intelligence artifacts with source coverage and human-review status.",
     "experience_studio_generation_runs": "Experience Studio generation receipts, prompts, model status, source receipts, and merge-guard outcomes.",
     "experience_studio_drafts": "Saved Experience Studio draft versions with source integrity, review state, and compact route metadata.",
+    "experience_studio_approved_work": "Human-approved or explicitly synthetic-labeled finished Experience Studio packages usable as bounded retrieval memory.",
     "experience_studio_feedback": "Human reviewer feedback, approval/rejection reasons, and edited-before-approval notes for Experience Studio.",
     "experience_studio_revision_events": "Experience Studio revision diffs, status transitions, handoff events, and reviewer workflow receipts.",
     "experience_studio_learning_rules": "Human-approved Experience Studio learning rules promoted from feedback and measured outcomes.",
+    "experience_studio_venue_snapshots": "Versioned Venue Profile snapshots and source-ledger receipts used to prove which park profile backed a package.",
+    "experience_studio_eval_examples": "Experience Studio prompt, output, critique, score, and final-result examples for offline evaluation and prompt improvement.",
 }
 
 AGENT_ROLE_CONFIGS = {
@@ -172,9 +188,12 @@ EXECUTIVE_EXPERIENCE_COLLECTIONS = {
 EXPERIENCE_STUDIO_MEMORY_COLLECTIONS = {
     "experience_studio_generation_runs",
     "experience_studio_drafts",
+    "experience_studio_approved_work",
     "experience_studio_feedback",
     "experience_studio_revision_events",
     "experience_studio_learning_rules",
+    "experience_studio_venue_snapshots",
+    "experience_studio_eval_examples",
 }
 
 PLAYBOOK_SEEDS = [
@@ -543,10 +562,11 @@ def _mongo_model_api_status() -> dict[str, Any]:
         "provider": "voyage",
         "configured": key_configured,
         "enabled": enabled and key_configured,
-        "model": os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite"),
+        "model": os.getenv("VOYAGE_EMBED_MODEL") or os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite"),
         "endpoint": os.getenv("MONGODB_MODEL_EMBEDDING_ENDPOINT", "https://ai.mongodb.com/v1/embeddings"),
         "dimensions": _model_embedding_dimensions(),
         "vectorPath": os.getenv("MONGODB_MODEL_EMBEDDING_PATH", "modelEmbedding"),
+        "rerankModel": os.getenv("VOYAGE_RERANK_MODEL") or os.getenv("MONGODB_MODEL_RERANK_MODEL", "rerank-2.5-lite"),
         "readinessIssues": [] if key_configured or not enabled else ["PARKPULSE_MONGO_MODEL_EMBEDDINGS=true but no Mongo/Voyage model API key is configured."],
     }
 
@@ -565,7 +585,7 @@ def _voyage_embedding_request(text: str, *, input_type: str, timeout_seconds: fl
     if not api_key:
         raise RuntimeError("Mongo/Voyage model API key is not configured.")
     endpoint = os.getenv("MONGODB_MODEL_EMBEDDING_ENDPOINT", "https://ai.mongodb.com/v1/embeddings").strip()
-    model = os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite").strip() or "voyage-4-lite"
+    model = (os.getenv("VOYAGE_EMBED_MODEL") or os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite")).strip() or "voyage-4-lite"
     payload = {
         "input": text[: int(_int_env("MONGODB_MODEL_EMBEDDING_MAX_CHARS", 12000, minimum=100))],
         "model": model,
@@ -603,7 +623,7 @@ def _voyage_embedding_request(text: str, *, input_type: str, timeout_seconds: fl
 def _model_embedding_metadata(vector: list[float], input_type: str) -> dict[str, Any]:
     return {
         "provider": "voyage",
-        "model": os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite"),
+        "model": os.getenv("VOYAGE_EMBED_MODEL") or os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite"),
         "dimensions": len(vector),
         "inputType": input_type,
         "vectorPath": os.getenv("MONGODB_MODEL_EMBEDDING_PATH", "modelEmbedding"),
@@ -639,7 +659,7 @@ def _query_embedding(search_text: str) -> tuple[list[float], str, dict[str, Any]
             {
                 "text": search_text,
                 "endpoint": os.getenv("MONGODB_MODEL_EMBEDDING_ENDPOINT", "https://ai.mongodb.com/v1/embeddings"),
-                "model": os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite"),
+                "model": os.getenv("VOYAGE_EMBED_MODEL") or os.getenv("MONGODB_MODEL_EMBEDDING_MODEL", "voyage-4-lite"),
                 "dimensions": _model_embedding_dimensions(),
                 "path": os.getenv("MONGODB_MODEL_EMBEDDING_PATH", "modelEmbedding"),
             },
@@ -668,11 +688,77 @@ def _query_embedding(search_text: str) -> tuple[list[float], str, dict[str, Any]
     return _vectorize(search_text, dimensions), "embedding", _embedding_metadata(dimensions)
 
 
+def _voyage_rerank_enabled() -> bool:
+    return _truthy(os.getenv("PARKPULSE_MONGO_VOYAGE_RERANK", "true")) and bool(_mongo_model_api_key())
+
+
+def _voyage_rerank_request(query: str, documents: list[str], *, top_k: int, timeout_seconds: float) -> dict[str, Any]:
+    api_key = _mongo_model_api_key()
+    if not api_key:
+        raise RuntimeError("Voyage rerank API key is not configured.")
+    safe_documents = [str(document or "")[: int(_int_env("MONGODB_MODEL_RERANK_MAX_DOC_CHARS", 12000, minimum=500))] for document in documents if str(document or "").strip()]
+    if not safe_documents:
+        return {"status": "skipped", "results": [], "reason": "no_documents"}
+    endpoint = os.getenv("VOYAGE_RERANK_ENDPOINT", "https://api.voyageai.com/v1/rerank").strip()
+    model = (os.getenv("VOYAGE_RERANK_MODEL") or os.getenv("MONGODB_MODEL_RERANK_MODEL", "rerank-2.5-lite")).strip() or "rerank-2.5-lite"
+    payload = {
+        "query": str(query or "")[: int(_int_env("MONGODB_MODEL_RERANK_MAX_QUERY_CHARS", 8000, minimum=100))],
+        "documents": safe_documents,
+        "model": model,
+        "top_k": max(1, min(top_k, len(safe_documents))),
+        "return_documents": False,
+        "truncation": True,
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        context = ssl.create_default_context()
+        try:
+            import certifi
+
+            context = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            pass
+        with urllib.request.urlopen(request, timeout=timeout_seconds, context=context) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")[:240]
+        raise RuntimeError(f"Voyage rerank request failed: {error.code} {detail}") from error
+    raw = json.loads(body)
+    rows = raw.get("data") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        rows = raw.get("results") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        raise RuntimeError("Voyage rerank response did not include result rows.")
+    return {
+        "status": "ready",
+        "provider": "voyage",
+        "model": model,
+        "endpoint": endpoint,
+        "results": [
+            {
+                "index": int(row.get("index", idx)) if isinstance(row, dict) else idx,
+                "relevanceScore": float(row.get("relevance_score", row.get("relevanceScore", 0.0))) if isinstance(row, dict) else 0.0,
+            }
+            for idx, row in enumerate(rows)
+        ],
+    }
+
+
 def _document_text(document: dict[str, Any]) -> str:
     parts = [
         document.get("title", ""),
         document.get("summary", ""),
         document.get("text", ""),
+        document.get("templateId", ""),
+        document.get("audience", ""),
+        document.get("selectedConceptName", ""),
+        document.get("guestPromise", ""),
+        document.get("prompt", ""),
         document.get("agent_id", ""),
         document.get("department", ""),
         document.get("learning_type", ""),
@@ -688,6 +774,14 @@ def _document_text(document: dict[str, Any]) -> str:
         document.get("recommendedAction", ""),
         document.get("operatorSummary", ""),
     ]
+    for key in ("route", "experienceBeats", "selectedTerms", "reusablePatterns", "expectedTraits", "approvedPhrases"):
+        value = document.get(key)
+        if isinstance(value, list):
+            parts.append(" ".join(str(item) for item in value if item is not None))
+    for key in ("reviewStatuses", "scope", "judgeRubric", "routeFacts"):
+        value = document.get(key)
+        if isinstance(value, dict):
+            parts.append(json.dumps(value, sort_keys=True, default=str))
     return " ".join(str(part) for part in parts if part)
 
 
@@ -1409,6 +1503,7 @@ class OperationalMemory:
         self.vector_index = os.getenv("MONGODB_PLAYBOOK_VECTOR_INDEX", "playbook_vector_index")
         self.incident_vector_index = os.getenv("MONGODB_INCIDENT_VECTOR_INDEX", self.vector_index)
         self.learning_vector_index = os.getenv("MONGODB_LEARNING_VECTOR_INDEX", "agent_learnings_vector")
+        self.experience_studio_vector_index = os.getenv("MONGODB_EXPERIENCE_STUDIO_VECTOR_INDEX", "experience_studio_memory_vector")
         self.append_decisions = not _truthy(os.getenv("MONGODB_DISABLE_DECISION_WRITES"))
         self.operation_timeout_ms = _int_env("MONGODB_OPERATION_TIMEOUT_MS", 5000)
         self.eager_setup = _truthy(os.getenv("MONGODB_EAGER_SETUP", "false"))
@@ -1440,6 +1535,7 @@ class OperationalMemory:
             "operator_briefs": [],
             "outcome_events": [],
             "agent_learnings": [],
+            "timelapse_model_examples": [],
             "dream_runs": [],
             "dream_learnings": [],
             "autodream_benchmarks": [],
@@ -1458,6 +1554,10 @@ class OperationalMemory:
             "evidence_refresh_jobs": [],
             "agent_handshake_sessions": [],
             "agent_handshake_policy_events": [],
+            "trace_audit_sessions": [],
+            "trace_audit_messages": [],
+            "trace_audit_evidence_packets": [],
+            "trace_audit_tickets": [],
             "executive_guest_feedback_monthly": [],
             "executive_event_sentiment": [],
             "executive_refund_reason_rollup": [],
@@ -1468,13 +1568,22 @@ class OperationalMemory:
             "executive_brief_artifacts": [],
             "experience_studio_generation_runs": [],
             "experience_studio_drafts": [],
+            "experience_studio_approved_work": [],
             "experience_studio_feedback": [],
             "experience_studio_revision_events": [],
             "experience_studio_learning_rules": [],
+            "experience_studio_venue_snapshots": [],
+            "experience_studio_eval_examples": [],
         }
 
     def initialize(self) -> dict[str, Any]:
         self._invalidate_dashboard_cache()
+        try:
+            from env_bootstrap import load_backend_env
+
+            load_backend_env()
+        except Exception:
+            pass
         self.errors = []
         direct_uri = os.getenv("MONGODB_DIRECT_URI", "").strip()
         self.uri = direct_uri or _normalized_mongodb_uri(os.getenv("MONGODB_URI", "").strip())
@@ -1544,6 +1653,17 @@ class OperationalMemory:
         self._create_index(self.db.agent_handshake_sessions, [("clientAgentId", ASCENDING), ("representedUserId", ASCENDING), ("updatedAt", DESCENDING)])
         self._create_index(self.db.agent_handshake_policy_events, [("createdAt", DESCENDING), ("sessionId", ASCENDING)])
         self._create_index(self.db.agent_handshake_policy_events, [("action", ASCENDING), ("status", ASCENDING), ("createdAt", DESCENDING)])
+        self._create_index(self.db.trace_audit_sessions, [("caseId", ASCENDING), ("updatedAt", DESCENDING)])
+        self._create_index(self.db.trace_audit_sessions, [("selectedTraceId", ASCENDING), ("updatedAt", DESCENDING)])
+        self._create_index(self.db.trace_audit_messages, [("sessionId", ASCENDING), ("createdAt", ASCENDING)])
+        self._create_index(self.db.trace_audit_messages, [("caseId", ASCENDING), ("createdAt", DESCENDING)])
+        self._create_index(self.db.trace_audit_evidence_packets, [("caseId", ASCENDING), ("createdAt", DESCENDING)])
+        self._create_index(self.db.trace_audit_evidence_packets, [("evidencePacketHash", ASCENDING)])
+        self._create_index(self.db.trace_audit_tickets, [("caseId", ASCENDING), ("updatedAt", DESCENDING)])
+        self._create_index(self.db.trace_audit_tickets, [("traceIds", ASCENDING), ("updatedAt", DESCENDING)])
+        self._create_index(self.db.trace_audit_tickets, [("policyRefs", ASCENDING), ("updatedAt", DESCENDING)])
+        self._create_index(self.db.trace_audit_tickets, [("severity", ASCENDING), ("status", ASCENDING), ("updatedAt", DESCENDING)])
+        self._create_index(self.db.trace_audit_tickets, [("title", TEXT), ("summary", TEXT), ("evidenceText", TEXT), ("policyRefs", TEXT), ("traceIds", TEXT)])
         self._create_index(self.db.guest_messages, [("createdAt", DESCENDING), ("scenarioKey", ASCENDING)])
         self._create_index(self.db.eval_results, [("createdAt", DESCENDING), ("decisionId", ASCENDING)])
         self._create_index(self.db.event_plans, [("createdAt", DESCENDING), ("eventId", ASCENDING)])
@@ -1557,6 +1677,9 @@ class OperationalMemory:
         self._create_index(self.db.outcome_events, [("createdAt", DESCENDING), ("decisionId", ASCENDING)])
         self._create_index(self.db.agent_learnings, [("scenarioKey", ASCENDING), ("updatedAt", DESCENDING)])
         self._create_index(self.db.agent_learnings, [("lesson", TEXT), ("rule", TEXT), ("tags", TEXT), ("scenarioKey", TEXT)])
+        self._create_index(self.db.timelapse_model_examples, [("scenarioKey", ASCENDING), ("split", ASCENDING), ("updatedAt", DESCENDING)])
+        self._create_index(self.db.timelapse_model_examples, [("rewardScore", DESCENDING), ("updatedAt", DESCENDING)])
+        self._create_index(self.db.timelapse_model_examples, [("text", TEXT), ("tags", TEXT), ("scenarioKey", TEXT), ("qualityIssues", TEXT)])
         self._create_index(self.db.dream_runs, [("createdAt", DESCENDING), ("status", ASCENDING)])
         self._create_index(self.db.dream_learnings, [("scenarioKey", ASCENDING), ("createdAt", DESCENDING)])
         self._create_index(self.db.dream_learnings, [("lesson", TEXT), ("rule", TEXT), ("tags", TEXT), ("scenarioKey", TEXT)])
@@ -1642,6 +1765,26 @@ class OperationalMemory:
                 "index": self.learning_vector_index,
                 "filters": ["agent_id", "department", "learning_type", "scope", "scenarioKey", "created_at", "createdAt", "tags"],
                 "cleanup_noncanonical": True,
+            },
+            "experience_studio_approved_work": {
+                "index": self.experience_studio_vector_index,
+                "filters": ["templateId", "approvalStatus", "status", "syntheticMemory", "tags"],
+                "cleanup_noncanonical": False,
+            },
+            "experience_studio_learning_rules": {
+                "index": self.experience_studio_vector_index,
+                "filters": ["templateId", "approvalStatus", "syntheticMemory", "tags"],
+                "cleanup_noncanonical": False,
+            },
+            "experience_studio_venue_snapshots": {
+                "index": self.experience_studio_vector_index,
+                "filters": ["profileType", "syntheticMemory", "templateCoverage"],
+                "cleanup_noncanonical": False,
+            },
+            "experience_studio_eval_examples": {
+                "index": self.experience_studio_vector_index,
+                "filters": ["templateId", "syntheticMemory", "tags"],
+                "cleanup_noncanonical": False,
             },
         }
         results: dict[str, Any] = {}
@@ -1797,6 +1940,7 @@ class OperationalMemory:
                 "fallback": "keyword_similarity",
                 "incidentIndex": self.incident_vector_index,
                 "learningIndex": self.learning_vector_index,
+                "experienceStudioIndex": self.experience_studio_vector_index,
             },
             "modelApi": _mongo_model_api_status(),
             "pipelinePolicy": {
@@ -2240,7 +2384,7 @@ class OperationalMemory:
         self._fallback[collection_name] = self._fallback[collection_name][:limit]
 
     def _scenario_documents(self, collection_name: str, scenario_key: str, limit: int = 5) -> list[dict[str, Any]]:
-        projection = {"embedding": 0, "embeddingText": 0}
+        projection = {"embedding": 0, "modelEmbedding": 0, "embeddingText": 0}
         field_by_collection = {
             "agent_learnings": "scenarioKey",
             "dream_learnings": "scenarioKey",
@@ -3580,6 +3724,311 @@ class OperationalMemory:
             self._fallback["agent_handshake_policy_events"] = self._fallback["agent_handshake_policy_events"][:500]
         return event_id
 
+    def record_trace_audit_evidence_packet(self, packet: dict[str, Any]) -> dict[str, Any]:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        packet_payload = packet.get("packet") if isinstance(packet.get("packet"), dict) else packet
+        packet_hash = str(
+            packet.get("evidence_packet_hash")
+            or packet.get("evidencePacketHash")
+            or f"tap_{hashlib.sha256(_stable_json(packet_payload).encode('utf-8')).hexdigest()[:24]}"
+        )
+        case_id = str(packet.get("case_id") or packet.get("caseId") or packet_payload.get("selected_case", {}).get("id") or "")
+        graph = packet_payload.get("evidence_graph", {}) if isinstance(packet_payload.get("evidence_graph"), dict) else {}
+        document = _clean_for_bson(
+            {
+                "_id": packet_hash,
+                "id": packet_hash,
+                "documentType": "trace_audit_evidence_packet",
+                "evidencePacketHash": packet_hash,
+                "caseId": case_id,
+                "traceIds": graph.get("trace_ids") if isinstance(graph.get("trace_ids"), list) else [],
+                "receiptIds": graph.get("receipt_ids") if isinstance(graph.get("receipt_ids"), list) else [],
+                "policyRefs": graph.get("policy_refs") if isinstance(graph.get("policy_refs"), list) else [],
+                "reviewSessionIds": graph.get("review_session_ids") if isinstance(graph.get("review_session_ids"), list) else [],
+                "packet": packet_payload,
+                "createdAt": packet.get("createdAt") or packet.get("created_at") or now,
+            }
+        )
+        collection = self._collection("trace_audit_evidence_packets")
+        if collection is not None:
+            collection.replace_one({"_id": packet_hash}, document, upsert=True)
+        else:
+            self._fallback["trace_audit_evidence_packets"] = [
+                row for row in self._fallback["trace_audit_evidence_packets"] if row.get("_id") != packet_hash
+            ]
+            self._fallback["trace_audit_evidence_packets"].insert(0, document)
+            self._fallback["trace_audit_evidence_packets"] = self._fallback["trace_audit_evidence_packets"][:250]
+        return {
+            "status": "stored",
+            "mode": self.mode,
+            "collection": "trace_audit_evidence_packets",
+            "id": packet_hash,
+            "evidencePacketHash": packet_hash,
+        }
+
+    def record_trace_audit_session(self, session: dict[str, Any]) -> str:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        session_id = str(session.get("session_id") or session.get("sessionId") or session.get("id") or "")
+        case_id = str(session.get("case_id") or session.get("caseId") or "")
+        if not session_id:
+            session_id = f"tas_{hashlib.sha1(_stable_json({'caseId': case_id, 'createdAt': now}).encode('utf-8')).hexdigest()[:16]}"
+        document = _clean_for_bson(
+            {
+                **session,
+                "_id": session_id,
+                "id": session_id,
+                "sessionId": session_id,
+                "documentType": "trace_audit_session",
+                "caseId": case_id,
+                "selectedTraceId": session.get("selected_trace_id") or session.get("selectedTraceId"),
+                "selectedReceiptId": session.get("selected_receipt_id") or session.get("selectedReceiptId"),
+                "operatorRole": session.get("operator_role") or session.get("operatorRole") or "ops_team",
+                "status": session.get("status") or "active",
+                "createdAt": session.get("created_at") or session.get("createdAt") or now,
+                "updatedAt": session.get("updated_at") or session.get("updatedAt") or now,
+            }
+        )
+        collection = self._collection("trace_audit_sessions")
+        if collection is not None:
+            collection.replace_one({"_id": session_id}, document, upsert=True)
+        else:
+            self._fallback["trace_audit_sessions"] = [
+                row for row in self._fallback["trace_audit_sessions"] if row.get("_id") != session_id
+            ]
+            self._fallback["trace_audit_sessions"].insert(0, document)
+            self._fallback["trace_audit_sessions"] = self._fallback["trace_audit_sessions"][:250]
+        return session_id
+
+    def record_trace_audit_message(self, message: dict[str, Any]) -> str:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        message_id = str(message.get("id") or message.get("_id") or f"tam_{hashlib.sha1(_stable_json(message).encode('utf-8')).hexdigest()[:16]}")
+        session_id = str(message.get("session_id") or message.get("sessionId") or "")
+        case_id = str(message.get("case_id") or message.get("caseId") or "")
+        document = _clean_for_bson(
+            {
+                **message,
+                "_id": message_id,
+                "id": message_id,
+                "documentType": "trace_audit_message",
+                "sessionId": session_id,
+                "caseId": case_id,
+                "role": message.get("role") or "assistant",
+                "content": message.get("content") or "",
+                "evidencePacketHash": message.get("evidence_packet_hash") or message.get("evidencePacketHash"),
+                "createdAt": message.get("created_at") or message.get("createdAt") or now,
+            }
+        )
+        collection = self._collection("trace_audit_messages")
+        if collection is not None:
+            collection.replace_one({"_id": message_id}, document, upsert=True)
+        else:
+            self._fallback["trace_audit_messages"] = [
+                row for row in self._fallback["trace_audit_messages"] if row.get("_id") != message_id
+            ]
+            self._fallback["trace_audit_messages"].insert(0, document)
+            self._fallback["trace_audit_messages"] = self._fallback["trace_audit_messages"][:1000]
+        if session_id:
+            self.record_trace_audit_session(
+                {
+                    "sessionId": session_id,
+                    "caseId": case_id,
+                    "selectedTraceId": message.get("selectedTraceId"),
+                    "selectedReceiptId": message.get("selectedReceiptId"),
+                    "operatorRole": message.get("operatorRole") or "ops_team",
+                    "status": "active",
+                    "updatedAt": document["createdAt"],
+                }
+            )
+        return message_id
+
+    def get_trace_audit_session(self, case_id: str | None = None, session_id: str | None = None, limit: int = 20) -> dict[str, Any] | None:
+        safe_limit = max(1, min(int(limit or 20), 50))
+        safe_case_id = str(case_id or "").strip()
+        safe_session_id = str(session_id or "").strip()
+        projection = {"embedding": 0, "embeddingText": 0}
+        session: dict[str, Any] | None = None
+        sessions_collection = self._collection("trace_audit_sessions")
+        if sessions_collection is not None:
+            if safe_session_id:
+                session = sessions_collection.find_one({"_id": safe_session_id}, projection)
+            elif safe_case_id:
+                session = sessions_collection.find_one({"caseId": safe_case_id}, projection, sort=[("updatedAt", DESCENDING)])
+        else:
+            rows = [
+                deepcopy(row)
+                for row in self._fallback["trace_audit_sessions"]
+                if (not safe_session_id or row.get("_id") == safe_session_id or row.get("sessionId") == safe_session_id)
+                and (not safe_case_id or row.get("caseId") == safe_case_id)
+            ]
+            rows = sorted(rows, key=lambda row: row.get("updatedAt", ""), reverse=True)
+            session = rows[0] if rows else None
+        if not session:
+            return None
+        resolved_session_id = str(session.get("sessionId") or session.get("_id") or "")
+        messages_collection = self._collection("trace_audit_messages")
+        if messages_collection is not None:
+            rows = list(messages_collection.find({"sessionId": resolved_session_id}, projection).sort([("createdAt", DESCENDING), ("turnIndex", DESCENDING)]).limit(safe_limit))
+            rows = sorted(rows, key=lambda row: (str(row.get("createdAt") or ""), int(row.get("turnIndex") or (0 if row.get("role") == "user" else 1))))
+            messages = [_public_doc(row) for row in rows]
+        else:
+            rows = [
+                deepcopy(row)
+                for row in self._fallback["trace_audit_messages"]
+                if row.get("sessionId") == resolved_session_id
+            ]
+            rows = sorted(rows, key=lambda row: (str(row.get("createdAt") or ""), int(row.get("turnIndex") or (0 if row.get("role") == "user" else 1))))[-safe_limit:]
+            messages = [_public_doc(row) for row in rows]
+        result = _public_doc(session)
+        result["messages"] = messages
+        result["messageCount"] = len(messages)
+        result["mode"] = self.mode
+        return result
+
+    def record_trace_audit_tickets(self, tickets: list[dict[str, Any]], source: str = "monitor_evidence_graph") -> dict[str, Any]:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        documents: list[dict[str, Any]] = []
+        for ticket in tickets:
+            if not isinstance(ticket, dict):
+                continue
+            case_id = str(ticket.get("caseId") or ticket.get("case_id") or ticket.get("id") or "")
+            if not case_id:
+                continue
+            ticket_id = str(ticket.get("ticketId") or ticket.get("id") or f"trace_ticket_{hashlib.sha1(case_id.encode('utf-8')).hexdigest()[:16]}")
+            document = _clean_for_bson(
+                {
+                    **ticket,
+                    "_id": ticket_id,
+                    "id": ticket_id,
+                    "ticketId": ticket_id,
+                    "documentType": "trace_audit_ticket",
+                    "caseId": case_id,
+                    "source": source,
+                    "createdAt": ticket.get("createdAt") or ticket.get("created_at") or now,
+                    "updatedAt": ticket.get("updatedAt") or ticket.get("updated_at") or now,
+                }
+            )
+            embedding_text = _document_text(document)
+            document["embeddingText"] = embedding_text
+            document["embedding"] = _vectorize(embedding_text)
+            document["embeddingMetadata"] = _embedding_metadata()
+            documents.append(document)
+
+        collection = self._collection("trace_audit_tickets")
+        if collection is not None:
+            if TEXT is not None:
+                try:
+                    self._create_index(collection, [("title", TEXT), ("summary", TEXT), ("evidenceText", TEXT), ("policyRefs", TEXT), ("traceIds", TEXT)])
+                except Exception:
+                    pass
+            for document in documents:
+                collection.replace_one({"_id": document["_id"]}, document, upsert=True)
+        else:
+            existing = {row.get("_id"): row for row in self._fallback["trace_audit_tickets"]}
+            for document in documents:
+                existing[document["_id"]] = document
+            self._fallback["trace_audit_tickets"] = sorted(
+                existing.values(),
+                key=lambda row: str(row.get("updatedAt") or row.get("createdAt") or ""),
+                reverse=True,
+            )[:500]
+        severity_counts: dict[str, int] = {}
+        status_counts: dict[str, int] = {}
+        for document in documents:
+            severity = str(document.get("severity") or "unknown")
+            status = str(document.get("status") or "unknown")
+            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+            status_counts[status] = status_counts.get(status, 0) + 1
+        return {
+            "status": "stored",
+            "mode": self.mode,
+            "connected": self.connected,
+            "collection": "trace_audit_tickets",
+            "count": len(documents),
+            "ids": [document["_id"] for document in documents],
+            "analysis": {
+                "bySeverity": severity_counts,
+                "byStatus": status_counts,
+                "withTraceCount": sum(1 for document in documents if document.get("traceIds")),
+                "withPolicyCount": sum(1 for document in documents if document.get("policyRefs")),
+                "withReviewCount": sum(1 for document in documents if document.get("reviewSessionIds")),
+            },
+        }
+
+    def get_trace_audit_tickets(self, query: str | None = None, case_id: str | None = None, limit: int = 20) -> dict[str, Any]:
+        safe_limit = max(1, min(int(limit or 20), 100))
+        safe_query = str(query or "").strip()
+        safe_case_id = str(case_id or "").strip()
+        projection = {"embedding": 0, "embeddingText": 0}
+        collection = self._collection("trace_audit_tickets")
+        rows: list[dict[str, Any]] = []
+        retrieval_method = "mongodb_recent" if collection is not None else "fallback_recent"
+        if collection is not None:
+            filter_doc: dict[str, Any] = {}
+            if safe_case_id:
+                filter_doc["caseId"] = safe_case_id
+            if safe_query:
+                filter_doc["$text"] = {"$search": safe_query}
+                retrieval_method = "mongodb_text_search"
+                try:
+                    rows = list(collection.find(filter_doc, {**projection, "score": {"$meta": "textScore"}}).sort([("score", {"$meta": "textScore"})]).limit(safe_limit))
+                except Exception:
+                    filter_doc.pop("$text", None)
+                    retrieval_method = "mongodb_keyword_fallback"
+                    candidates = list(collection.find(filter_doc, projection).sort([("updatedAt", DESCENDING)]).limit(max(safe_limit * 5, 50)))
+                    needle_terms = {term for term in safe_query.lower().replace("_", " ").split() if term}
+
+                    def relevance(row: dict[str, Any]) -> int:
+                        haystack = _document_text(row).lower()
+                        return sum(1 for term in needle_terms if term in haystack)
+
+                    rows = sorted([row for row in candidates if relevance(row) > 0], key=relevance, reverse=True)[:safe_limit]
+            else:
+                rows = list(collection.find(filter_doc, projection).sort([("updatedAt", DESCENDING)]).limit(safe_limit))
+        else:
+            candidates = [deepcopy(row) for row in self._fallback["trace_audit_tickets"]]
+            if safe_case_id:
+                candidates = [row for row in candidates if row.get("caseId") == safe_case_id]
+            if safe_query:
+                needle_terms = {term for term in safe_query.lower().replace("_", " ").split() if term}
+
+                def relevance(row: dict[str, Any]) -> int:
+                    haystack = _document_text(row).lower()
+                    return sum(1 for term in needle_terms if term in haystack)
+
+                candidates = [row for row in candidates if relevance(row) > 0]
+                candidates.sort(key=relevance, reverse=True)
+                retrieval_method = "fallback_keyword"
+            else:
+                candidates.sort(key=lambda row: str(row.get("updatedAt") or row.get("createdAt") or ""), reverse=True)
+            rows = candidates[:safe_limit]
+        public_rows = [_public_doc(row) for row in rows]
+        return {
+            "status": "ready",
+            "mode": "trace_audit_ticket_retrieval",
+            "collection": "trace_audit_tickets",
+            "retrieval_method": retrieval_method,
+            "query": safe_query,
+            "case_id": safe_case_id,
+            "count": len(public_rows),
+            "tickets": public_rows,
+            "analysis": {
+                "bySeverity": _count_by(public_rows, "severity"),
+                "byStatus": _count_by(public_rows, "status"),
+                "withTraceCount": sum(1 for row in public_rows if row.get("traceIds")),
+                "withPolicyCount": sum(1 for row in public_rows if row.get("policyRefs")),
+                "withReviewCount": sum(1 for row in public_rows if row.get("reviewSessionIds")),
+            },
+            "persistence": {
+                "primary": "mongodb" if self.connected else "memory_fallback",
+                "connected": self.connected,
+                "mode": self.mode,
+            },
+        }
+
     def record_incident_analytics(self, analytics: dict[str, Any]) -> dict[str, Any]:
         self._invalidate_dashboard_cache()
         now = _utc_now()
@@ -3744,6 +4193,181 @@ class OperationalMemory:
         if scenario_key != "unknown":
             self._refresh_operational_intelligence(scenario_key)
         return document_id
+
+    def _timelapse_example_text(self, example: dict[str, Any]) -> str:
+        expected = example.get("expected_output", {}) if isinstance(example.get("expected_output"), dict) else {}
+        reward = example.get("reward", {}) if isinstance(example.get("reward"), dict) else {}
+        input_payload = example.get("input_payload", {}) if isinstance(example.get("input_payload"), dict) else {}
+        digest = input_payload.get("state_digest", {}) if isinstance(input_payload.get("state_digest"), dict) else {}
+        candidates = input_payload.get("candidate_summaries", []) if isinstance(input_payload.get("candidate_summaries"), list) else []
+        candidate_text = " ".join(
+            " ".join(
+                str(part)
+                for part in (
+                    candidate.get("id"),
+                    candidate.get("action"),
+                    candidate.get("policy_status"),
+                    candidate.get("score"),
+                    candidate.get("deltas", {}),
+                )
+            )
+            for candidate in candidates[:12]
+            if isinstance(candidate, dict)
+        )
+        return " ".join(
+            str(part)
+            for part in (
+                example.get("scenario"),
+                example.get("split"),
+                expected.get("deterministic_food_severity"),
+                " ".join(expected.get("case_metric_regressions", []) if isinstance(expected.get("case_metric_regressions"), list) else []),
+                expected.get("ideal_candidate_id"),
+                expected.get("ideal_action"),
+                expected.get("final_selected_candidate_id"),
+                expected.get("final_action"),
+                " ".join(reward.get("issues", []) if isinstance(reward.get("issues"), list) else []),
+                digest.get("food_backlog"),
+                digest.get("food_eta_minutes"),
+                (digest.get("slowest_ride", {}) if isinstance(digest.get("slowest_ride"), dict) else {}).get("waitMins"),
+                digest.get("open_callouts"),
+                candidate_text,
+            )
+            if part is not None
+        )
+
+    def record_timelapse_model_examples(self, examples: list[dict[str, Any]], source_manifest: str | None = None) -> dict[str, Any]:
+        self._invalidate_dashboard_cache()
+        now = _utc_now()
+        documents: list[dict[str, Any]] = []
+        for example in examples:
+            if not isinstance(example, dict):
+                continue
+            document_id = str(example.get("id") or f"timelapse_example_{hashlib.sha1(_stable_json(example).encode('utf-8')).hexdigest()[:16]}")
+            expected = example.get("expected_output", {}) if isinstance(example.get("expected_output"), dict) else {}
+            reward = example.get("reward", {}) if isinstance(example.get("reward"), dict) else {}
+            text = self._timelapse_example_text(example)
+            document = _clean_for_bson(
+                {
+                    **example,
+                    "_id": document_id,
+                    "id": document_id,
+                    "documentType": "timelapse_model_example",
+                    "memoryLayer": "timelapse_model_improvement",
+                    "sourceManifest": source_manifest,
+                    "scenarioKey": str(example.get("scenario") or "unknown"),
+                    "scenario_key": str(example.get("scenario") or "unknown"),
+                    "split": str(example.get("split") or "eval"),
+                    "rewardScore": int(reward.get("score") or expected.get("reward_score") or 0),
+                    "qualityIssues": reward.get("issues", []) if isinstance(reward.get("issues"), list) else [],
+                    "idealCandidateId": expected.get("ideal_candidate_id"),
+                    "selectedCandidateId": expected.get("final_selected_candidate_id"),
+                    "foodSeverity": expected.get("deterministic_food_severity"),
+                    "caseMetricRegressions": expected.get("case_metric_regressions", []),
+                    "text": text,
+                    "tags": [
+                        "timelapse_model_example",
+                        str(example.get("scenario") or "unknown"),
+                        str(example.get("split") or "eval"),
+                        str(expected.get("deterministic_food_severity") or "unknown"),
+                        *[
+                            str(item)
+                            for item in (expected.get("case_metric_regressions", []) if isinstance(expected.get("case_metric_regressions"), list) else [])
+                        ],
+                    ],
+                    "createdAt": str(example.get("created_at") or now),
+                    "updatedAt": now,
+                    **_embedding_update(text, input_type="document"),
+                }
+            )
+            documents.append(document)
+        collection = self._collection("timelapse_model_examples")
+        if collection is not None:
+            try:
+                if ASCENDING is not None and DESCENDING is not None and TEXT is not None:
+                    self._create_index(collection, [("scenarioKey", ASCENDING), ("split", ASCENDING), ("updatedAt", DESCENDING)])
+                    self._create_index(collection, [("rewardScore", DESCENDING), ("updatedAt", DESCENDING)])
+                    self._create_index(collection, [("text", TEXT), ("tags", TEXT), ("scenarioKey", TEXT), ("qualityIssues", TEXT)])
+            except Exception as error:
+                self.errors.append(f"Timelapse memory index setup skipped: {error}")
+            for document in documents:
+                collection.replace_one({"_id": document["_id"]}, document, upsert=True)
+        else:
+            existing = {str(row.get("_id")): row for row in self._fallback["timelapse_model_examples"] if isinstance(row, dict)}
+            for document in documents:
+                existing[str(document["_id"])] = document
+            self._fallback["timelapse_model_examples"] = sorted(
+                existing.values(),
+                key=lambda row: str(row.get("updatedAt") or row.get("createdAt") or ""),
+                reverse=True,
+            )[:5000]
+        return {
+            "status": "stored",
+            "mode": self.mode,
+            "connected": self.connected,
+            "collection": "timelapse_model_examples",
+            "storedCount": len(documents),
+            "sourceManifest": source_manifest,
+        }
+
+    def retrieve_timelapse_model_memory(
+        self,
+        query: str,
+        scenario_key: str | None = None,
+        limit: int = 3,
+        exclude_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        search_text = str(query or "").strip()
+        scenario = str(scenario_key or "").strip()
+        excluded = {str(item) for item in (exclude_ids or []) if item}
+        safe_limit = max(1, min(10, int(limit or 3)))
+        projection = {"embedding": 0, "modelEmbedding": 0, "embeddingText": 0}
+        rows: list[dict[str, Any]] = []
+        method = "keyword_similarity"
+        collection = self._collection("timelapse_model_examples")
+        if collection is not None:
+            base_filter: dict[str, Any] = {"_id": {"$nin": list(excluded)}} if excluded else {}
+            if scenario:
+                base_filter["scenarioKey"] = scenario
+            try:
+                text_filter = {"$text": {"$search": search_text}} if search_text else {}
+                rows = list(
+                    collection.find(
+                        {**base_filter, **text_filter},
+                        {**projection, "score": {"$meta": "textScore"}} if text_filter else projection,
+                    )
+                    .sort([("score", {"$meta": "textScore"})] if text_filter else [("rewardScore", DESCENDING), ("updatedAt", DESCENDING)])
+                    .limit(safe_limit * 3)
+                )
+                method = "mongodb_text_search" if text_filter else "mongodb_recent_reward"
+            except Exception as error:
+                self.errors.append(f"Timelapse model memory text search fallback used: {error}")
+                rows = list(collection.find(base_filter, projection).sort([("rewardScore", DESCENDING), ("updatedAt", DESCENDING)]).limit(safe_limit * 3))
+                method = "mongodb_recent_reward_fallback"
+        else:
+            rows = [
+                deepcopy(row)
+                for row in self._fallback.get("timelapse_model_examples", [])
+                if isinstance(row, dict)
+                and str(row.get("_id") or "") not in excluded
+                and (not scenario or str(row.get("scenarioKey") or "") == scenario)
+            ]
+            rows = sorted(
+                rows,
+                key=lambda row: (_keyword_score(row, search_text), _number(row.get("rewardScore")), str(row.get("updatedAt") or "")),
+                reverse=True,
+            )
+        filtered = [_public_doc(row) for row in rows if isinstance(row, dict)][:safe_limit]
+        return {
+            "status": "ready",
+            "mode": self.mode,
+            "connected": self.connected,
+            "collection": "timelapse_model_examples",
+            "method": method,
+            "query": search_text,
+            "scenarioKey": scenario or "all",
+            "count": len(filtered),
+            "examples": filtered,
+        }
 
     def record_agent_decision(
         self,
@@ -4695,7 +5319,7 @@ class OperationalMemory:
             if collection is not None:
                 count = collection.estimated_document_count()
             else:
-                count = len(self._fallback[name])
+                count = len(self._fallback.get(name, []))
             rows.append({"name": name, "purpose": purpose, "count": count})
         return rows
 
@@ -4983,9 +5607,12 @@ class OperationalMemory:
         allowed = {
             "experience_studio_generation_runs",
             "experience_studio_drafts",
+            "experience_studio_approved_work",
             "experience_studio_feedback",
             "experience_studio_revision_events",
             "experience_studio_learning_rules",
+            "experience_studio_venue_snapshots",
+            "experience_studio_eval_examples",
         }
         if collection_name not in allowed:
             return {
@@ -5005,6 +5632,10 @@ class OperationalMemory:
         payload.setdefault("memoryLayer", "experience_studio")
         payload.setdefault("learningEligible", False)
         payload.setdefault("learningSource", "not_promoted")
+        embedding_text = _document_text(payload)
+        if embedding_text.strip():
+            payload.update(_embedding_update(embedding_text, input_type="document"))
+            payload["embeddingUpdatedAt"] = now
         collection = self._collection(collection_name)
         if collection is not None:
             collection.replace_one({"_id": document_id}, _clean_for_bson(payload), upsert=True)
@@ -5025,6 +5656,166 @@ class OperationalMemory:
             "connected": self.connected,
             "collection": collection_name,
             "memoryId": document_id,
+        }
+
+    def retrieve_experience_studio_memory(
+        self,
+        query: str,
+        collection_names: list[str] | None = None,
+        *,
+        template_id: str | None = None,
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        allowed = {
+            "experience_studio_approved_work",
+            "experience_studio_learning_rules",
+            "experience_studio_venue_snapshots",
+            "experience_studio_eval_examples",
+        }
+        selected = [name for name in (collection_names or sorted(allowed)) if name in allowed]
+        safe_limit = max(1, min(int(limit or 8), 25))
+        search_text = str(query or "").strip()
+        if template_id:
+            search_text = f"{search_text} template {template_id}".strip()
+        if not search_text:
+            search_text = "experience studio creative package route channel review memory"
+        projection = {"embedding": 0, "modelEmbedding": 0, "embeddingText": 0}
+        all_candidates: list[dict[str, Any]] = []
+        methods: list[str] = []
+        errors: list[str] = []
+
+        for name in selected:
+            collection = self._collection(name)
+            rows: list[dict[str, Any]] = []
+            method = "keyword_similarity"
+            if collection is not None:
+                try:
+                    query_vector, vector_path, embedding_meta = _query_embedding(search_text)
+                    raw_rows = list(
+                        collection.aggregate(
+                            [
+                                {
+                                    "$vectorSearch": {
+                                        "index": self.experience_studio_vector_index,
+                                        "path": vector_path,
+                                        "queryVector": query_vector,
+                                        "numCandidates": max(50, safe_limit * 12),
+                                        "limit": max(safe_limit * 4, 20),
+                                    }
+                                },
+                                {"$project": {**projection, "score": {"$meta": "vectorSearchScore"}}},
+                            ]
+                        )
+                    )
+                    if raw_rows:
+                        rows = raw_rows
+                        method = f"mongodb_vector_search_{embedding_meta.get('provider') or 'embedding'}"
+                except Exception as error:
+                    errors.append(f"{name} vector fallback used: {str(error)[:180]}")
+                if not rows:
+                    try:
+                        raw_rows = list(
+                            collection.find({}, projection)
+                            .sort("updatedAt", DESCENDING)
+                            .limit(max(100, safe_limit * 12))
+                        )
+                        rows = sorted(
+                            raw_rows,
+                            key=lambda row: (
+                                1 if template_id and str(row.get("templateId") or "") == str(template_id) else 0,
+                                _keyword_score(row, search_text),
+                                str(row.get("updatedAt") or row.get("createdAt") or ""),
+                            ),
+                            reverse=True,
+                        )[: max(safe_limit * 3, 15)]
+                        method = "mongodb_keyword_similarity"
+                    except Exception as error:
+                        errors.append(f"{name} keyword fallback failed: {str(error)[:180]}")
+            else:
+                rows = self._latest_experience_studio_fallback(name, max(100, safe_limit * 12))
+                rows = sorted(
+                    rows,
+                    key=lambda row: (
+                        1 if template_id and str(row.get("templateId") or "") == str(template_id) else 0,
+                        _keyword_score(row, search_text),
+                        str(row.get("updatedAt") or row.get("createdAt") or ""),
+                    ),
+                    reverse=True,
+                )[: max(safe_limit * 3, 15)]
+                method = "file_keyword_similarity"
+
+            methods.append(f"{name}:{method}")
+            for row in rows:
+                if template_id and str(row.get("templateId") or "") and str(row.get("templateId") or "") != str(template_id):
+                    keyword_score = _keyword_score(row, search_text)
+                    if keyword_score < 0.12:
+                        continue
+                public = _public_doc(row) or {}
+                public["_retrieval"] = {
+                    "collection": name,
+                    "method": method,
+                    "score": float(row.get("score") or _keyword_score(row, search_text)),
+                    "templateMatched": bool(template_id and str(row.get("templateId") or "") == str(template_id)),
+                }
+                all_candidates.append(public)
+
+        deduped: dict[str, dict[str, Any]] = {}
+        for row in all_candidates:
+            key = f"{row.get('_retrieval', {}).get('collection')}:{row.get('_id') or row.get('id') or hashlib.sha1(_document_text(row).encode('utf-8')).hexdigest()[:12]}"
+            current = deduped.get(key)
+            if current is None or float(row.get("_retrieval", {}).get("score") or 0) > float(current.get("_retrieval", {}).get("score") or 0):
+                deduped[key] = row
+        candidates = sorted(
+            deduped.values(),
+            key=lambda row: (
+                1 if row.get("_retrieval", {}).get("templateMatched") else 0,
+                float(row.get("_retrieval", {}).get("score") or 0),
+                str(row.get("updatedAt") or row.get("createdAt") or ""),
+            ),
+            reverse=True,
+        )[: max(safe_limit * 4, 20)]
+
+        rerank_receipt: dict[str, Any] = {"status": "not_configured", "provider": "voyage", "model": os.getenv("VOYAGE_RERANK_MODEL") or os.getenv("MONGODB_MODEL_RERANK_MODEL", "rerank-2.5-lite")}
+        if _voyage_rerank_enabled() and candidates:
+            try:
+                timeout = max(0.2, _float_env("MONGODB_MODEL_RERANK_TIMEOUT_SECONDS", 4.0))
+                rerank = _voyage_rerank_request(search_text, [_document_text(row) for row in candidates], top_k=safe_limit, timeout_seconds=timeout)
+                ordered: list[dict[str, Any]] = []
+                for item in rerank.get("results", []):
+                    index = int(item.get("index", -1)) if isinstance(item, dict) else -1
+                    if 0 <= index < len(candidates):
+                        row = dict(candidates[index])
+                        row["_retrieval"] = {
+                            **(row.get("_retrieval") if isinstance(row.get("_retrieval"), dict) else {}),
+                            "rerankScore": item.get("relevanceScore"),
+                            "rerankProvider": "voyage",
+                        }
+                        ordered.append(row)
+                if ordered:
+                    candidates = ordered + [row for row in candidates if str(row.get("_id") or row.get("id")) not in {str(item.get("_id") or item.get("id")) for item in ordered}]
+                rerank_receipt = {key: value for key, value in rerank.items() if key != "results"}
+                rerank_receipt["returned"] = len(rerank.get("results", []))
+            except Exception as error:
+                rerank_receipt = {"status": "fallback", "provider": "voyage", "error": str(error)[:240]}
+
+        rows = candidates[:safe_limit]
+        return {
+            "status": "ready" if rows else "empty",
+            "mode": "experience_studio_semantic_memory_retrieval_v1",
+            "query": {"text": search_text, "templateId": template_id, "collections": selected},
+            "retrieval": {
+                "methods": methods,
+                "candidateCount": len(all_candidates),
+                "dedupedCandidateCount": len(deduped),
+                "returnedCount": len(rows),
+                "vectorIndex": self.experience_studio_vector_index,
+                "modelApi": _mongo_model_api_status(),
+                "rerank": rerank_receipt,
+                "fallback": "latest_documents_keyword_similarity_when_vector_search_or_rerank_is_unavailable",
+            },
+            "rows": rows,
+            "errors": errors[-6:],
+            "boundary": "Voyage retrieval and rerank select memory context only; they do not train the generator, prove venue facts, approve claims, or publish content.",
         }
 
     def record_executive_experience_documents(self, collection_name: str, documents: list[dict[str, Any]]) -> dict[str, Any]:
@@ -5324,7 +6115,7 @@ def _public_doc(document: dict[str, Any] | None) -> dict[str, Any] | None:
     for key, value in document.items():
         if key == "_id":
             public[key] = str(value)
-        elif key not in {"embedding", "embeddingText"}:
+        elif key not in {"embedding", "modelEmbedding", "embeddingText"}:
             public[key] = _clean_for_bson(value)
     return public
 
@@ -5642,6 +6433,78 @@ def record_agent_handshake_policy_event(event: dict[str, Any]) -> str:
     )
 
 
+def record_trace_audit_evidence_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.trace_audit_evidence_packet.record",
+        lambda: _memory.record_trace_audit_evidence_packet(packet),
+        lambda error: {
+            "status": "skipped",
+            "mode": _memory.mode,
+            "collection": "trace_audit_evidence_packets",
+            "reason": str(error)[:160],
+            "evidencePacketHash": str(packet.get("evidence_packet_hash") or packet.get("evidencePacketHash") or ""),
+        },
+    )
+
+
+def record_trace_audit_session(session: dict[str, Any]) -> str:
+    return _safe_memory_call(
+        "mongo.trace_audit_session.record",
+        lambda: _memory.record_trace_audit_session(session),
+        lambda error: str(session.get("session_id") or session.get("sessionId") or f"skipped_trace_audit_session_{hashlib.sha1(str(error).encode('utf-8')).hexdigest()[:12]}"),
+    )
+
+
+def record_trace_audit_message(message: dict[str, Any]) -> str:
+    return _safe_memory_call(
+        "mongo.trace_audit_message.record",
+        lambda: _memory.record_trace_audit_message(message),
+        lambda error: str(message.get("id") or f"skipped_trace_audit_message_{hashlib.sha1(str(error).encode('utf-8')).hexdigest()[:12]}"),
+    )
+
+
+def get_trace_audit_session(case_id: str | None = None, session_id: str | None = None, limit: int = 20) -> dict[str, Any] | None:
+    return _safe_memory_call(
+        "mongo.trace_audit_session.get",
+        lambda: _memory.get_trace_audit_session(case_id=case_id, session_id=session_id, limit=limit),
+        lambda error: None,
+    )
+
+
+def record_trace_audit_tickets(tickets: list[dict[str, Any]], source: str = "monitor_evidence_graph") -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.trace_audit_tickets.record",
+        lambda: _memory.record_trace_audit_tickets(tickets, source),
+        lambda error: {
+            "status": "skipped",
+            "mode": _memory.mode,
+            "connected": _memory.connected,
+            "collection": "trace_audit_tickets",
+            "count": 0,
+            "reason": str(error)[:180],
+        },
+    )
+
+
+def get_trace_audit_tickets(query: str | None = None, case_id: str | None = None, limit: int = 20) -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.trace_audit_tickets.get",
+        lambda: _memory.get_trace_audit_tickets(query=query, case_id=case_id, limit=limit),
+        lambda error: {
+            "status": "unavailable",
+            "mode": "trace_audit_ticket_retrieval",
+            "collection": "trace_audit_tickets",
+            "retrieval_method": "unavailable",
+            "query": query or "",
+            "case_id": case_id or "",
+            "count": 0,
+            "tickets": [],
+            "analysis": {},
+            "persistence": {"primary": "unavailable", "connected": False, "reason": str(error)[:180]},
+        },
+    )
+
+
 def record_incident_analytics(analytics: dict[str, Any]) -> dict[str, Any]:
     return _safe_memory_call(
         "mongo.incident_analytics.record",
@@ -5682,6 +6545,27 @@ def record_agent_learning_document(document: dict[str, Any]) -> str:
         "mongo.agent_learning.record",
         lambda: _memory.record_agent_learning_document(document),
         lambda error: f"skipped_learning_error_{hashlib.sha1(str(error).encode('utf-8')).hexdigest()[:12]}",
+    )
+
+
+def record_timelapse_model_examples(examples: list[dict[str, Any]], source_manifest: str | None = None) -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.timelapse_model_examples.record",
+        lambda: _memory.record_timelapse_model_examples(examples, source_manifest),
+        lambda error: {"status": "skipped", "mode": _memory.mode, "error": str(error)[:300], "storedCount": 0},
+    )
+
+
+def retrieve_timelapse_model_memory(
+    query: str,
+    scenario_key: str | None = None,
+    limit: int = 3,
+    exclude_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.timelapse_model_examples.retrieve",
+        lambda: _memory.retrieve_timelapse_model_memory(query, scenario_key, limit, exclude_ids),
+        lambda error: {"status": "skipped", "mode": _memory.mode, "error": str(error)[:300], "examples": [], "count": 0},
     )
 
 
@@ -5780,6 +6664,27 @@ def record_experience_studio_memory_event(collection_name: str, event: dict[str,
             "memoryId": None,
             "error": str(error)[:300],
             "readinessIssues": list(_memory.errors[-3:]),
+        },
+    )
+
+
+def retrieve_experience_studio_memory(
+    query: str,
+    collection_names: list[str] | None = None,
+    template_id: str | None = None,
+    limit: int = 8,
+) -> dict[str, Any]:
+    return _safe_memory_call(
+        "mongo.experience_studio.retrieve",
+        lambda: _memory.retrieve_experience_studio_memory(query, collection_names, template_id=template_id, limit=limit),
+        lambda error: {
+            "status": "error",
+            "mode": "experience_studio_semantic_memory_retrieval_v1",
+            "query": {"text": query, "templateId": template_id, "collections": collection_names or []},
+            "retrieval": {"returnedCount": 0, "fallback": "unavailable"},
+            "rows": [],
+            "errors": [str(error)[:300]],
+            "boundary": "Memory retrieval failed; generation must continue without claiming memory influence.",
         },
     )
 

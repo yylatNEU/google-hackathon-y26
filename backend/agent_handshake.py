@@ -2388,6 +2388,7 @@ def agent_contract() -> dict[str, Any]:
             "GET /api/park/agent-trust/audit",
             "GET /api/park/agent-handshake/scenarios",
             "GET /api/park/agent-handshake/docs",
+            "POST /api/park/agent-handshake/memory-context",
             "POST /api/park/agent-handshake/consent-grant",
             "POST /api/park/agent-handshake/live-state",
             "POST /api/park/agent-handshake/scenario-eval",
@@ -3495,47 +3496,361 @@ def _external_agent_scope_pack(counterparty: str) -> dict[str, Any]:
     return {"can_share": share, "can_receive": receive, "cannot_do": cannot, "scope": sorted(set(share + receive + ["policy_check", "session_commit"]))}
 
 
-def _external_agent_memory_context(agent_id: str, scenario_mode: str) -> dict[str, Any]:
+def _compact_handshake_memory_document(item: dict[str, Any]) -> dict[str, Any]:
+    client_agent = _as_dict(item.get("client_agent") or item.get("clientAgent"))
+    return {
+        "session_id": item.get("sessionId") or item.get("session_id") or item.get("id"),
+        "client_agent_id": item.get("clientAgentId") or client_agent.get("agent_id"),
+        "represented_subject": item.get("representedUserId") or client_agent.get("represents"),
+        "state": item.get("state"),
+        "scenario_mode": item.get("scenarioMode") or item.get("scenario_mode"),
+        "updated_at": item.get("updatedAt") or item.get("updated_at"),
+        "receipt_id": item.get("receiptId") or item.get("receipt_id"),
+    }
+
+
+def _compact_semantic_memory_document(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("_id") or item.get("id"),
+        "title": item.get("title") or item.get("scenarioKey") or item.get("sourceScenarioId") or item.get("lesson"),
+        "summary": item.get("summary") or item.get("lesson") or item.get("rule") or item.get("description"),
+        "score": item.get("score") or item.get("relevanceScore") or item.get("similarity"),
+        "tags": _as_list(item.get("tags"))[:5],
+    }
+
+
+def _handshake_memory_query(
+    *,
+    agent_id: str,
+    represented_subject: str,
+    scenario_mode: str,
+    counterparty: str,
+    request_text: str = "",
+) -> str:
+    parts = [
+        "agent handshake passport memory",
+        f"agent {agent_id}",
+        f"represented subject {represented_subject}",
+        f"counterparty {counterparty}",
+        f"scenario {scenario_mode}",
+        request_text,
+    ]
+    return " ".join(part for part in parts if part).strip()
+
+
+def _seed_agent_handshake_demo_memory(
+    *,
+    agent_id: str,
+    represented_subject: str,
+    scenario_mode: str,
+    counterparty: str,
+    request_text: str = "",
+) -> dict[str, Any]:
     try:
-        from mongo_memory import get_latest_memory_documents, get_memory_collection_count, init_operational_memory
+        from mongo_memory import record_agent_handshake_policy_event, record_agent_handshake_session, record_agent_learning_document
+
+        now = _now_iso()
+        seed_id = f"seed_{hashlib.sha1(f'{agent_id}:{represented_subject}:{scenario_mode}:{counterparty}'.encode('utf-8')).hexdigest()[:12]}"
+        session_id = f"ahs_{seed_id}"
+        if counterparty == "supplier":
+            accepted_plan = ["Hold unsafe lot", "Approve certified substitute", "Reserve dock slot", "Keep payment gate locked"]
+            blocked = ["bypass_food_safety", "vendor_payment_release", "auto_accept_price_change"]
+            subject_memory = ["approved_substitute_path", "cold_chain_hold_required", "buyer_approval_for_payment"]
+            lesson = "Supplier Passport remembers the safe substitute path and prior payment-block decision for cold-chain incidents."
+        else:
+            accepted_plan = ["Lower walking route", "Alternate ride window", "Food pickup preserved", "Manager review for exception"]
+            blocked = ["priority_access", "auto_compensation", "payment"]
+            subject_memory = ["prefer_low_walking", "preserve_food_pickup", "manager_review_for_compensation"]
+            lesson = "Guest Passport remembers low-walking recovery preference and the blocked priority-access exception."
+        session_document = {
+            "session_id": session_id,
+            "state": "receipt_issued",
+            "created_at": now,
+            "updated_at": now,
+            "client_agent": {"agent_id": agent_id, "represents": represented_subject, "proof": "seeded_verified_passport"},
+            "intent": {"goal": request_text or f"{scenario_mode} remembered negotiation", "scenario_mode": scenario_mode},
+            "proposal": {"plan": accepted_plan, "source": "seeded_agent_passport_memory"},
+            "policy_decisions": [
+                {"action": action, "status": "blocked", "allowed": False, "requires_user_approval": True}
+                for action in blocked
+            ],
+            "receipt_id": f"receipt_{seed_id}",
+            "memorySeed": True,
+            "memorySeedReason": "Demo starts with prior scoped Passport memory already stored in Mongo.",
+        }
+        recorded_session_id = record_agent_handshake_session(session_document)
+        policy_ids = [
+            record_agent_handshake_policy_event(
+                {
+                    "id": f"ahp_policy_{seed_id}_{index}",
+                    "session_id": session_id,
+                    "action": action,
+                    "status": "blocked",
+                    "allowed": False,
+                    "requires_user_approval": True,
+                    "reason": "Seeded prior Passport memory keeps hard gates locked before the next negotiation.",
+                    "created_at": now,
+                }
+            )
+            for index, action in enumerate(blocked, start=1)
+        ]
+        learning_id = record_agent_learning_document(
+            {
+                "sourceScenarioId": f"agent_passport_seed:{represented_subject}:{agent_id}:{scenario_mode}",
+                "scenarioKey": scenario_mode,
+                "learningType": "agent_handshake_seeded_passport",
+                "agent_id": agent_id,
+                "represented_subject": represented_subject,
+                "counterparty": counterparty,
+                "scope": "represented_subject_only",
+                "lesson": lesson,
+                "rule": "Use this memory to reduce repeated negotiation setup; never use it to bypass identity, payment, procurement, health, or safety gates.",
+                "tags": ["agent_handshake", "passport_memory", "seeded_memory", counterparty, scenario_mode],
+                "acceptedPlan": accepted_plan,
+                "approvalGatedActions": blocked,
+                "subjectMemoryWrites": subject_memory,
+            }
+        )
+        return {
+            "status": "stored",
+            "source": "seeded_agent_passport_memory",
+            "session_id": recorded_session_id,
+            "policy_event_ids": policy_ids,
+            "learning_id": learning_id,
+            "subject_memory": subject_memory,
+            "blocked_actions": blocked,
+            "accepted_plan": accepted_plan,
+        }
+    except Exception as error:
+        return {
+            "status": "skipped",
+            "source": "seeded_agent_passport_memory",
+            "readiness_issues": [str(error)[:240]],
+        }
+
+
+def agent_handshake_memory_context(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    scenario_mode = str(payload.get("scenario_mode") or payload.get("scenarioMode") or "visit_planning")
+    counterparty = str(payload.get("counterparty") or ("supplier" if scenario_mode in SUPPLY_CHAIN_PROTOCOL_SCENARIOS else "guest"))
+    agent_id = str(payload.get("agent_id") or payload.get("agentId") or ("unknown_external_agent"))
+    represented_subject = str(
+        payload.get("represents")
+        or payload.get("represented_subject")
+        or payload.get("representedSubject")
+        or ("guest_user_123" if counterparty == "guest" else f"supplier_vendor_{scenario_mode}")
+    )
+    request_text = str(payload.get("request_text") or payload.get("requestText") or payload.get("message") or "")
+    query_text = _handshake_memory_query(
+        agent_id=agent_id,
+        represented_subject=represented_subject,
+        scenario_mode=scenario_mode,
+        counterparty=counterparty,
+        request_text=request_text,
+    )
+    try:
+        from mongo_memory import (
+            get_latest_memory_documents,
+            get_memory_collection_count,
+            init_operational_memory,
+            retrieve_operational_context,
+        )
 
         status = init_operational_memory()
-        recent_sessions = get_latest_memory_documents("agent_handshake_sessions", 3)
-        recent_policy_events = get_latest_memory_documents("agent_handshake_policy_events", 3)
+        seeded_memory = _seed_agent_handshake_demo_memory(
+            agent_id=agent_id,
+            represented_subject=represented_subject,
+            scenario_mode=scenario_mode,
+            counterparty=counterparty,
+            request_text=request_text,
+        )
+        recent_sessions = [
+            _compact_handshake_memory_document(item)
+            for item in get_latest_memory_documents("agent_handshake_sessions", 80)
+            if isinstance(item, dict)
+        ]
+        exact_sessions = [
+            item
+            for item in recent_sessions
+            if item.get("client_agent_id") == agent_id and item.get("represented_subject") == represented_subject
+        ][:5]
+        session_ids = {str(item.get("session_id")) for item in exact_sessions if item.get("session_id")}
+        recent_policy_events = [
+            item
+            for item in get_latest_memory_documents("agent_handshake_policy_events", 120)
+            if isinstance(item, dict)
+        ]
+        exact_policy_events = [
+            {
+                "session_id": item.get("sessionId") or item.get("session_id"),
+                "action": item.get("action"),
+                "status": item.get("status"),
+                "allowed": item.get("allowed"),
+                "created_at": item.get("createdAt") or item.get("created_at"),
+            }
+            for item in recent_policy_events
+            if str(item.get("sessionId") or item.get("session_id") or "") in session_ids
+        ][:8]
+        if seeded_memory.get("status") == "stored" and seeded_memory.get("session_id"):
+            seeded_session_id = str(seeded_memory.get("session_id"))
+            if seeded_session_id not in {str(item.get("session_id")) for item in exact_sessions}:
+                exact_sessions.insert(
+                    0,
+                    {
+                        "session_id": seeded_session_id,
+                        "client_agent_id": agent_id,
+                        "represented_subject": represented_subject,
+                        "state": "receipt_issued",
+                        "scenario_mode": scenario_mode,
+                        "updated_at": _now_iso(),
+                        "receipt_id": f"receipt_{seeded_session_id.replace('ahs_', '')}",
+                        "memory_seed": True,
+                    },
+                )
+                exact_sessions = exact_sessions[:5]
+            if not any(str(item.get("session_id")) == seeded_session_id for item in exact_policy_events):
+                exact_policy_events = [
+                    {
+                        "session_id": seeded_session_id,
+                        "action": action,
+                        "status": "blocked",
+                        "allowed": False,
+                        "created_at": _now_iso(),
+                    }
+                    for action in _as_list(seeded_memory.get("blocked_actions"))[:5]
+                ] + exact_policy_events
+                exact_policy_events = exact_policy_events[:8]
+        semantic_context = retrieve_operational_context(
+            query_text,
+            {
+                "mode": "agent_handshake_memory_context",
+                "scenarioKey": scenario_mode,
+                "counterparty": counterparty,
+                "agentId": agent_id,
+                "representedSubject": represented_subject,
+            },
+            limit=3,
+            agent_role="ops_agent",
+            cache_policy="fresh_retrieval",
+            persist_trace=False,
+        )
+        retrieved = _as_dict(semantic_context.get("retrieved"))
         return {
             "status": status.get("status") or status.get("mode") or "ready",
-            "mode": status.get("mode"),
-            "connected": status.get("connected"),
+            "mode": "agent_handshake_memory_context",
+            "connected": bool(status.get("connected")),
+            "query": {
+                "agent_id": agent_id,
+                "represented_subject": represented_subject,
+                "scenario_mode": scenario_mode,
+                "counterparty": counterparty,
+                "semantic_query": query_text,
+            },
             "collections": {
                 "agent_handshake_sessions": get_memory_collection_count("agent_handshake_sessions"),
                 "agent_handshake_policy_events": get_memory_collection_count("agent_handshake_policy_events"),
+                "agent_learnings": get_memory_collection_count("agent_learnings"),
+                "playbooks": get_memory_collection_count("playbooks"),
+                "incidents": get_memory_collection_count("incidents"),
             },
-            "retrieval": [
-                {
-                    "session_id": item.get("sessionId") or item.get("session_id") or item.get("id"),
-                    "client_agent_id": item.get("clientAgentId"),
-                    "state": item.get("state"),
-                    "updated_at": item.get("updatedAt") or item.get("updated_at"),
-                }
-                for item in recent_sessions
-                if isinstance(item, dict)
-            ],
-            "policy_memory": [
-                {"action": item.get("action"), "status": item.get("status"), "created_at": item.get("createdAt") or item.get("created_at")}
-                for item in recent_policy_events
-                if isinstance(item, dict)
-            ],
-            "query": {"agent_id": agent_id, "scenario_mode": scenario_mode},
-            "memory_role": "Ground the external agent with prior receipt and policy memory without granting new authority.",
+            "exact_identity_memory": {
+                "method": "deterministic_agent_and_represented_subject_match",
+                "used_for": "subject-scoped recall, not identity proof",
+                "sessions": exact_sessions,
+                "policy_events": exact_policy_events,
+            },
+            "seeded_memory": seeded_memory,
+            "semantic_context": {
+                "method": retrieved.get("method") or "unknown",
+                "used_for": "retrieve similar operational lessons, playbooks, and incident patterns after identity is proven",
+                "summary": semantic_context.get("summary"),
+                "playbooks": [_compact_semantic_memory_document(item) for item in _as_list(retrieved.get("playbooks"))[:3] if isinstance(item, dict)],
+                "incidents": [_compact_semantic_memory_document(item) for item in _as_list(retrieved.get("incidents"))[:3] if isinstance(item, dict)],
+                "learnings": [_compact_semantic_memory_document(item) for item in _as_list(retrieved.get("learnings"))[:3] if isinstance(item, dict)],
+            },
+            "memory_role": "Mongo provides scoped prior receipts plus semantic ops context; delegation token and policy gates still decide authority.",
+            "identity_boundary": "Vector search is not used to verify identity. It only speeds recall after deterministic token, agent id, and represented-subject checks.",
         }
     except Exception as error:
         return {
             "status": "demo_fallback",
-            "mode": "in_memory",
+            "mode": "agent_handshake_memory_context",
             "connected": False,
             "readiness_issues": [str(error)[:240]],
-            "query": {"agent_id": agent_id, "scenario_mode": scenario_mode},
+            "query": {
+                "agent_id": agent_id,
+                "represented_subject": represented_subject,
+                "scenario_mode": scenario_mode,
+                "counterparty": counterparty,
+                "semantic_query": query_text,
+            },
             "memory_role": "Fallback memory still records this run in-process for the demo.",
+            "identity_boundary": "Identity remains deterministic even when Mongo memory is unavailable.",
+        }
+
+
+def _external_agent_memory_context(agent_id: str, scenario_mode: str, represented_subject: str = "", counterparty: str = "") -> dict[str, Any]:
+    return agent_handshake_memory_context(
+        {
+            "agent_id": agent_id,
+            "scenario_mode": scenario_mode,
+            "represents": represented_subject,
+            "counterparty": counterparty,
+        }
+    )
+
+
+def _persist_passport_memory(
+    *,
+    agent_id: str,
+    represented_subject: str,
+    counterparty: str,
+    scenario_mode: str,
+    passport_evolution: dict[str, Any],
+    receipt: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        from mongo_memory import record_agent_learning_document
+
+        trace = _as_dict(passport_evolution.get("trace"))
+        evaluation = _as_dict(passport_evolution.get("eval"))
+        memory_update = _as_dict(passport_evolution.get("memory_update"))
+        subject_memory = _as_dict(memory_update.get("subject_memory"))
+        receipt_id = str(receipt.get("receipt_id") or trace.get("receipt_id") or "receipt_pending")
+        source_id = f"agent_passport:{represented_subject}:{agent_id}:{scenario_mode}:{receipt_id}"
+        learning_id = record_agent_learning_document(
+            {
+                "sourceScenarioId": source_id,
+                "scenarioKey": scenario_mode,
+                "learningType": "agent_handshake_passport",
+                "agent_id": agent_id,
+                "represented_subject": represented_subject,
+                "counterparty": counterparty,
+                "scope": "represented_subject_only",
+                "lesson": f"Verified {counterparty} handshake produced a reusable Passport only after receipt {receipt_id} passed integrity checks.",
+                "rule": "Reuse scoped preferences and accepted alternatives; never reuse memory to bypass delegation, payment, refund, procurement, health, or safety gates.",
+                "tags": ["agent_handshake", "passport_memory", counterparty, scenario_mode, agent_id],
+                "receiptId": receipt_id,
+                "score": evaluation.get("score"),
+                "acceptedPlan": trace.get("accepted_plan"),
+                "allowedActions": trace.get("allowed_actions"),
+                "approvalGatedActions": trace.get("approval_gated_actions"),
+                "subjectMemoryWrites": subject_memory.get("write"),
+            }
+        )
+        return {
+            "status": "stored" if not str(learning_id).startswith("skipped_") else "skipped",
+            "collection": "agent_learnings",
+            "memory_id": learning_id,
+            "vector_eligible": True,
+            "source": "agent_passport_evolution",
+        }
+    except Exception as error:
+        return {
+            "status": "skipped",
+            "collection": "agent_learnings",
+            "readiness_issues": [str(error)[:240]],
+            "source": "agent_passport_evolution",
         }
 
 
@@ -3655,6 +3970,7 @@ def agent_handshake_protocol_docs() -> dict[str, Any]:
     routes = [
         {"method": "POST", "path": "/api/park/delegation-token", "purpose": "Issue a scoped delegation token for an external agent."},
         {"method": "POST", "path": "/api/park/agent-handshake/consent-grant", "purpose": "Create a signed user/supplier consent grant with revocation metadata."},
+        {"method": "POST", "path": "/api/park/agent-handshake/memory-context", "purpose": "Load subject-scoped Mongo receipt memory plus semantic ops context before a negotiation run."},
         {"method": "POST", "path": "/api/park/handshake", "purpose": "Start identity handshake and bind represented subject to agent id."},
         {"method": "POST", "path": "/api/park/session/{session_id}/capabilities", "purpose": "Exchange share/receive/cannot-do capabilities."},
         {"method": "POST", "path": "/api/park/session/{session_id}/intent", "purpose": "Declare goal, time window, and constraints."},
@@ -4218,7 +4534,7 @@ def run_external_client_agent_demo(payload: dict[str, Any] | None = None) -> dic
     scope_pack = _external_agent_scope_pack(counterparty)
     agent_id = str(payload.get("agent_id") or payload.get("agentId") or (f"{scenario_mode}_external_agent" if counterparty == "supplier" else "john_personal_agent"))
     represented = str(payload.get("represents") or ("guest_user_123" if counterparty == "guest" else f"supplier_vendor_{scenario_mode}"))
-    memory_context = _external_agent_memory_context(agent_id, scenario_mode)
+    memory_context = _external_agent_memory_context(agent_id, scenario_mode, represented, counterparty)
     trust_context = _external_agent_trust_context(agent_id, represented, counterparty)
     live_state = agent_handshake_live_state_feed({"scenario_mode": scenario_mode})
     protocol_replay: list[dict[str, Any]] = []
@@ -4384,6 +4700,15 @@ def run_external_client_agent_demo(payload: dict[str, Any] | None = None) -> dic
         trust_context=trust_context,
         adversarial_probes=adversarial_probes,
     )
+    result["passport_memory_write"] = _persist_passport_memory(
+        agent_id=agent_id,
+        represented_subject=represented,
+        counterparty=counterparty,
+        scenario_mode=scenario_mode,
+        passport_evolution=result["passport_evolution"],
+        receipt=receipt,
+    )
+    result["passport_evolution"]["memory_update"]["storage_binding"]["passport_memory_write"] = result["passport_memory_write"]
     _attach_external_agent_outputs(result)
     result["judge_report"] = _external_agent_judge(result)
     return result

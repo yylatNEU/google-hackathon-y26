@@ -343,7 +343,10 @@ export function VenueProfilePage() {
     setIsLoadingSyntheticExport(true);
     setMessage(null);
     try {
-      const response = await fetchParkPulseApi("/api/park/venue-profile/synthetic/export", { timeoutMs: 8000 });
+      const response = await fetchParkPulseApi("/api/park/venue-profile/synthetic/export", {
+        headers: { "x-parkpulse-role": "ml_ops_admin" },
+        timeoutMs: 8000,
+      });
       const payload = await response.json() as VenueProfilePayload & { sourceName?: string; export?: Record<string, unknown> };
       if (!payload.export) throw new Error("Synthetic export payload missing.");
       setSourceName(payload.sourceName ?? "parkpulse_synthetic_venue_export.approved.json");
@@ -369,7 +372,7 @@ export function VenueProfilePage() {
     try {
       const response = await fetchParkPulseApi("/api/park/venue-profile/validate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ml_ops_admin" },
         body: JSON.stringify({ sourceName, export: parsedExport }),
         timeoutMs: 8000,
       });
@@ -394,7 +397,7 @@ export function VenueProfilePage() {
     try {
       const response = await fetchParkPulseApi("/api/park/venue-profile/import/preview", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ml_ops_admin" },
         body: JSON.stringify({ sourceName, export: parsedExport }),
         timeoutMs: 10000,
       });
@@ -420,7 +423,7 @@ export function VenueProfilePage() {
     try {
       const response = await fetchParkPulseApi("/api/park/venue-profile/import", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ml_ops_admin" },
         body: JSON.stringify({ sourceName, export: parsedExport, actor: "venue_profile_page", previewAccepted: true }),
         timeoutMs: 10000,
       });
@@ -443,7 +446,7 @@ export function VenueProfilePage() {
     try {
       const response = await fetchParkPulseApi("/api/park/venue-profile/synthetic/activate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-parkpulse-role": "ml_ops_admin" },
         body: JSON.stringify({ actor: "venue_profile_page" }),
         timeoutMs: 9000,
       });
@@ -518,7 +521,7 @@ export function VenueProfilePage() {
               </p>
             </div>
             <nav className="flex flex-wrap gap-2">
-              <a href="/" className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-black text-slate-200 transition hover:border-lime-300">Command Center</a>
+              <a href="/ops" className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-black text-slate-200 transition hover:border-lime-300">Command Center</a>
               <a href="/experience-studio" className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-black text-slate-200 transition hover:border-lime-300">Experience Studio</a>
               <a href="/accessibility-journey" className="rounded border border-slate-700 bg-[#0d1115] px-3 py-2 text-xs font-black text-lime-100 transition hover:border-lime-300">Accessibility Journey</a>
               <button

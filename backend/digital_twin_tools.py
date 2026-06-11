@@ -120,8 +120,8 @@ def run_digital_twin_tool(
     arguments: dict[str, Any] | None = None,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    args = arguments or {}
-    trace_context = context or {}
+    args = arguments if isinstance(arguments, dict) else {}
+    trace_context = context if isinstance(context, dict) else {}
     agent_id = _agent_for_tool(name, args, trace_context)
     capability = _tool_capability(name)
     with traced_span(
@@ -410,9 +410,10 @@ def _get_food_capacity(state: dict[str, Any], location_id: str) -> dict[str, Any
 
 
 def _simulate_action(state: dict[str, Any], action_plan: dict[str, Any]) -> dict[str, Any]:
-    projected = action_plan.get("projected_impact", {}) if isinstance(action_plan.get("projected_impact"), dict) else {}
-    scorecard = action_plan.get("scorecard", {}) if isinstance(action_plan.get("scorecard"), dict) else {}
-    simulation = simulate_action_plan(state, action_plan, horizon_minutes=_as_int(action_plan.get("horizon_minutes"), 30), seed="digital-twin-sim")
+    safe_action_plan = action_plan if isinstance(action_plan, dict) else {}
+    projected = safe_action_plan.get("projected_impact", {}) if isinstance(safe_action_plan.get("projected_impact"), dict) else {}
+    scorecard = safe_action_plan.get("scorecard", {}) if isinstance(safe_action_plan.get("scorecard"), dict) else {}
+    simulation = simulate_action_plan(state, safe_action_plan, horizon_minutes=_as_int(safe_action_plan.get("horizon_minutes"), 30), seed="digital-twin-sim")
     if projected:
         simulation["optimizer_prior"] = {"projected_impact": projected, "scorecard": scorecard}
     return {key: value for key, value in simulation.items() if key != "projected_state"}
@@ -459,8 +460,10 @@ def _compare_action_candidates(candidates: list[dict[str, Any]]) -> dict[str, An
 
 
 def _validate_policy(state: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
-    target = str(action.get("target") or action.get("park_action", {}).get("target") or "")
-    operation = str(action.get("action") or action.get("park_action", {}).get("action") or "")
+    safe_action = action if isinstance(action, dict) else {}
+    park_action = safe_action.get("park_action") if isinstance(safe_action.get("park_action"), dict) else {}
+    target = str(safe_action.get("target") or park_action.get("target") or "")
+    operation = str(safe_action.get("action") or park_action.get("action") or "")
     findings = []
     blocked = False
     review = False
@@ -504,20 +507,23 @@ def _validate_policy(state: dict[str, Any], action: dict[str, Any]) -> dict[str,
 
 
 def _retrieve_similar_incidents(context: dict[str, Any] | None) -> dict[str, Any]:
-    retrieved = (context or {}).get("retrieved", {}) if isinstance(context, dict) else {}
+    safe_context = context if isinstance(context, dict) else {}
+    retrieved = safe_context.get("retrieved", {}) if isinstance(safe_context.get("retrieved"), dict) else {}
     return {
         "status": "ok",
         "playbooks": [item.get("_id") for item in retrieved.get("playbooks", [])[:3] if isinstance(item, dict)],
         "incidents": [item.get("_id") for item in retrieved.get("incidents", [])[:3] if isinstance(item, dict)],
         "learnings": [item.get("_id") for item in retrieved.get("learnings", [])[:4] if isinstance(item, dict)],
-        "memory_mode": (context or {}).get("status", {}).get("mode") if isinstance(context, dict) else None,
+        "memory_mode": safe_context.get("status", {}).get("mode") if isinstance(safe_context.get("status"), dict) else None,
     }
 
 
 def _score_decision_quality(state: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
-    simulation = _simulate_action(state, decision)
-    policy = _validate_policy(state, decision.get("selected_action", {}) if isinstance(decision.get("selected_action"), dict) else decision)
-    scorecard = simulation.get("scorecard", {})
+    safe_decision = decision if isinstance(decision, dict) else {}
+    selected_action = safe_decision.get("selected_action") if isinstance(safe_decision.get("selected_action"), dict) else safe_decision
+    simulation = _simulate_action(state, safe_decision)
+    policy = _validate_policy(state, selected_action)
+    scorecard = simulation.get("scorecard", {}) if isinstance(simulation.get("scorecard"), dict) else {}
     safety = _as_int(scorecard.get("safety"), 92)
     capacity = _as_int(scorecard.get("capacity_fit"), 80)
     actionability = 88 if decision else 72
@@ -542,11 +548,12 @@ def _score_decision_quality(state: dict[str, Any], decision: dict[str, Any]) -> 
 
 
 def _score_outcome_tool(state: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
-    action = args.get("action") if isinstance(args.get("action"), dict) else args
+    safe_args = args if isinstance(args, dict) else {}
+    action = safe_args.get("action") if isinstance(safe_args.get("action"), dict) else safe_args
     projected = transition_state(
         state,
         action,
-        minutes=_as_int(args.get("minutes"), 8),
+        minutes=_as_int(safe_args.get("minutes"), 8),
         seed="digital-twin-score-outcome",
         stochastic=False,
     )
