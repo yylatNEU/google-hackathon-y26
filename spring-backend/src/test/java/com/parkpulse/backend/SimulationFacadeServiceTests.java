@@ -55,6 +55,7 @@ class SimulationFacadeServiceTests {
         server.start();
 
         Path dbPath = Path.of("target/test-parkpulse-runtime/simulation-facade-service-test.db");
+        Files.createDirectories(dbPath.getParent());
         Files.deleteIfExists(dbPath);
         DriverManagerDataSource dataSource = new DriverManagerDataSource("jdbc:sqlite:" + dbPath);
         SimulationFacadeService service = new SimulationFacadeService(
@@ -125,6 +126,7 @@ class SimulationFacadeServiceTests {
         server.start();
 
         Path dbPath = Path.of("target/test-parkpulse-runtime/simulation-facade-idempotency-test.db");
+        Files.createDirectories(dbPath.getParent());
         Files.deleteIfExists(dbPath);
         DriverManagerDataSource dataSource = new DriverManagerDataSource("jdbc:sqlite:" + dbPath);
         SimulationFacadeService service = new SimulationFacadeService(
@@ -196,6 +198,7 @@ class SimulationFacadeServiceTests {
         server.start();
 
         Path dbPath = Path.of("target/test-parkpulse-runtime/simulation-facade-health-test.db");
+        Files.createDirectories(dbPath.getParent());
         Files.deleteIfExists(dbPath);
         DriverManagerDataSource dataSource = new DriverManagerDataSource("jdbc:sqlite:" + dbPath);
         SimulationFacadeService service = new SimulationFacadeService(

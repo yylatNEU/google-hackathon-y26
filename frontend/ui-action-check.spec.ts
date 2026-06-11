@@ -29,7 +29,7 @@ function watchRuntime(page: Page) {
 }
 
 async function openCommandCenter(page: Page) {
-  await page.goto(`${APP_URL}?api=${encodeURIComponent(API_URL)}`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${APP_URL}/ops?api=${encodeURIComponent(API_URL)}`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "Park operating loop" })).toBeVisible({ timeout: 20000 });
   await expect(page.getByRole("heading", { name: "Operational data contract" })).toBeVisible({ timeout: 20000 });
 }
@@ -37,6 +37,7 @@ async function openCommandCenter(page: Page) {
 async function openStaffTraining(page: Page) {
   await page.goto(`${APP_URL}/staff-training?api=${encodeURIComponent(API_URL)}`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "Roleplay Trainer" })).toBeVisible({ timeout: 20000 });
+  await page.getByRole("button", { name: /Lost Child Report/ }).click();
   await expect(page.getByRole("heading", { name: "Lost Child Report" })).toBeVisible({ timeout: 20000 });
 }
 
