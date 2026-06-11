@@ -38,7 +38,7 @@ async function openStaffTraining(page: Page) {
   await page.goto(`${APP_URL}/staff-training?api=${encodeURIComponent(API_URL)}`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "Roleplay Trainer" })).toBeVisible({ timeout: 20000 });
   await page.getByRole("button", { name: /Lost Child Report/ }).click();
-  await expect(page.getByRole("heading", { name: "Lost Child Report" })).toBeVisible({ timeout: 20000 });
+  await expect(page.getByRole("heading", { name: "Lost Child Report" }).first()).toBeVisible({ timeout: 20000 });
 }
 
 async function expectNoAuthOrTransportRegression(page: Page) {
@@ -81,12 +81,14 @@ test("command center exposes the current production operating-loop contract", as
   expect(gcpPayload.ready).toBeTruthy();
 
   await openCommandCenter(page);
-  await expect(page.getByRole("link", { name: "Venue Profile" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Experience Studio" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Staff trainer" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Run operating loop" })).toBeEnabled({ timeout: 20000 });
-  await expect(page.getByRole("heading", { name: "Signals, features, predictors, optimizer, gate, execute or review, learn" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Observed outcome reward model" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Ops Agent" })).toHaveAttribute("href", "/ops-agent");
+  await expect(page.getByRole("link", { name: "Monitor" })).toHaveAttribute("href", "/monitor");
+  await expect(page.getByRole("link", { name: "Runtime proof" })).toHaveAttribute("href", "/operation-proof");
+  await expect(page.getByRole("link", { name: "Executive" })).toHaveAttribute("href", "/executive");
+  await expect(page.getByRole("button", { name: "Run incident review" })).toBeEnabled({ timeout: 20000 });
+  await expect(page.getByRole("button", { name: "Live-feed case" })).toBeEnabled({ timeout: 20000 });
+  await expect(page.getByText("Operating decision")).toBeVisible();
+  await expect(page.getByText("Decision audit receipt")).toBeVisible();
   await expect(page.getByRole("heading", { name: /Bounded dispatch ready|Human approval required/i })).toBeVisible();
   await expect(page.getByTestId("api-targets")).toHaveAttribute("data-api-targets", API_URL);
   const apiTargets = await page.getByTestId("api-targets").getAttribute("data-api-targets");
@@ -97,23 +99,20 @@ test("command center exposes the current production operating-loop contract", as
   expect(failedResponses).toEqual([]);
 });
 
-test("live-feed review and training panels use signed local role sessions", async ({ page }) => {
+test("live-feed review panel uses signed local role sessions", async ({ page }) => {
   test.setTimeout(180000);
   const { runtimeErrors, failedResponses } = watchRuntime(page);
 
   await openCommandCenter(page);
   await expect(page.getByText("Live feeds and review")).toBeVisible();
-  await expect(page.getByText("Training readiness and weak spots")).toBeVisible();
+  await expect(page.getByText("Operational data contract")).toBeVisible();
+  await expect(page.getByText("Systematic growth loop")).toBeVisible();
   await expect(page.getByRole("button", { name: "Refresh feeds" })).toBeEnabled({ timeout: 20000 });
-  await expect(page.getByRole("button", { name: "Refresh training" })).toBeEnabled({ timeout: 20000 });
 
   await refreshFeedsUntilReviewed(page);
   await expect(page.getByText("Ready feeds")).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("Open reviews")).toBeVisible({ timeout: 20000 });
   await expect(page.getByText("Training candidates")).toBeVisible({ timeout: 20000 });
-  await page.getByRole("button", { name: "Refresh training" }).click({ noWaitAfter: true });
-  await expect(page.getByRole("heading", { name: "Observed outcome reward model" })).toBeVisible({ timeout: 20000 });
-  await expect(page.getByText("GCP ML path")).toBeVisible({ timeout: 20000 });
   await expectNoAuthOrTransportRegression(page);
 
   expect(runtimeErrors).toEqual([]);
@@ -194,12 +193,15 @@ test("expanded product entry points stay visible without drifting back to the re
   test.setTimeout(120000);
   const { runtimeErrors, failedResponses } = watchRuntime(page);
 
-  await openCommandCenter(page);
-  await expect(page.getByRole("link", { name: "Staff trainer" })).toHaveAttribute("href", "/staff-training");
-  await expect(page.getByRole("link", { name: "Venue Profile" })).toHaveAttribute("href", "/venue-profile");
-  await expect(page.getByRole("link", { name: "Experience Studio" })).toHaveAttribute("href", "/experience-studio");
-  await expect(page.getByRole("link", { name: "Labs" })).toHaveAttribute("href", "/labs");
-  await expect(page.getByText("Staff roleplay trainer")).toBeVisible({ timeout: 20000 });
+  await page.goto(`${APP_URL}?api=${encodeURIComponent(API_URL)}`, { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "Start with the park, not the prompt." })).toBeVisible({ timeout: 20000 });
+  await expect(page.locator('a[href="/venue-profile"]').first()).toBeVisible();
+  await expect(page.locator('a[href="/experience-studio"]').first()).toBeVisible();
+  await expect(page.locator('a[href="/guest-triage"]').first()).toBeVisible();
+  await expect(page.locator('a[href="/ops"]').first()).toBeVisible();
+  await expect(page.locator('a[href="/staff-training"]').first()).toBeVisible();
+  await expect(page.locator('a[href="/agent-handshake"]').first()).toBeVisible();
+  await expect(page.getByText("Employee Training").first()).toBeVisible({ timeout: 20000 });
   await expect(page.locator("body")).not.toContainText(/Ask the park agent|Inject ride fault|Messy note intake/i);
 
   await page.screenshot({ path: "../output/qa/parkpulse-expanded-platform-entry-points.png", fullPage: true });
