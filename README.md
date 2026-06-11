@@ -164,6 +164,10 @@ make gcp-verify-agent-roles
 
 Deployment scripts expect project-specific GCP configuration and secrets to be supplied by environment variables or Secret Manager. Do not hard-code deployment credentials in this repository.
 
+## License
+
+This project is licensed under the MIT License. See `LICENSE` for details.
+
 ## Latest QA Checkpoint
 
 The pushed checkpoint branch is:
